@@ -2,12 +2,15 @@ numerapi
 pytest
 pytest-cov
 pandas
+polars
 pyarrow
 matplotlib
 lightgbm
 xgboost
 scikit-learn
 scipy
+numpy
+pyyaml
 cloudpickle==3.1.1
 numerai-tools
 ipykernel
