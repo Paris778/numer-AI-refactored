@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import importlib.metadata
 import json
+import platform
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -194,6 +198,8 @@ class DeploymentHarness:
         models: Sequence[EstimatorType | LoadedModelType],
         feature_names: Sequence[str],
         config_metadata: dict[str, Any],
+        *,
+        requirements_path: Path | None = None,
     ) -> Path:
         if not models:
             raise ValueError("models must be non-empty")
@@ -204,16 +210,23 @@ class DeploymentHarness:
         artifact_dir.mkdir(parents=True, exist_ok=False)
         model_library = self._infer_model_library(models)
         model_files: list[str] = []
+        model_hashes: dict[str, str] = {}
 
         for index, model in enumerate(models, start=1):
             model_path = artifact_dir / self._model_filename(model_library, index)
             self._save_native_model(model, model_path, model_library)
             model_files.append(model_path.name)
+            model_hashes[model_path.name] = self._sha256_file(model_path)
 
         manifest = {
+            "manifest_version": 1,
             "model_library": model_library,
             "feature_names": list(feature_names),
             "model_files": model_files,
+            "model_hashes": model_hashes,
+            "environment": self._environment_fingerprint(
+                requirements_path=requirements_path
+            ),
             "config_metadata": config_metadata,
         }
         (artifact_dir / "manifest.json").write_text(
@@ -231,6 +244,7 @@ class DeploymentHarness:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         feature_names = tuple(manifest["feature_names"])
         model_library = str(manifest["model_library"])
+        self._verify_model_hashes(artifact_root, manifest)
         if "id" not in live_df.columns:
             raise KeyError("Live dataframe must include an 'id' column")
         missing_features = sorted(set(feature_names).difference(live_df.columns))
@@ -305,3 +319,64 @@ class DeploymentHarness:
             booster.load_model(str(path))
             return booster
         raise ValueError(f"Unsupported model library: {model_library}")
+
+    @staticmethod
+    def _sha256_file(path: Path) -> str:
+        hasher = hashlib.sha256()
+        with path.open("rb") as file_handle:
+            for chunk in iter(lambda: file_handle.read(1024 * 1024), b""):
+                hasher.update(chunk)
+        return hasher.hexdigest()
+
+    def _verify_model_hashes(
+        self, artifact_root: Path, manifest: dict[str, Any]
+    ) -> None:
+        model_files = manifest.get("model_files")
+        model_hashes = manifest.get("model_hashes")
+        if not isinstance(model_files, list) or not isinstance(model_hashes, dict):
+            raise ValueError("Manifest is missing model_files or model_hashes")
+
+        for model_file in model_files:
+            model_path = artifact_root / model_file
+            if not model_path.exists():
+                raise FileNotFoundError(f"Model file is missing at {model_path}")
+            expected_hash = model_hashes.get(model_file)
+            if not isinstance(expected_hash, str):
+                raise ValueError(
+                    f"Manifest is missing hash entry for model file '{model_file}'"
+                )
+            actual_hash = self._sha256_file(model_path)
+            if actual_hash != expected_hash:
+                raise ValueError(
+                    f"SHA-256 mismatch for model file '{model_file}': expected {expected_hash}, got {actual_hash}"
+                )
+
+    @staticmethod
+    def _environment_fingerprint(
+        *,
+        requirements_path: Path | None,
+    ) -> dict[str, Any]:
+        resolved_requirements = (
+            Path(requirements_path).expanduser().resolve()
+            if requirements_path is not None
+            else (Path.cwd() / "requirements.txt").resolve()
+        )
+        requirements_sha256 = None
+        if resolved_requirements.exists():
+            requirements_sha256 = DeploymentHarness._sha256_file(resolved_requirements)
+
+        critical_packages = ("polars", "numpy", "lightgbm", "xgboost", "scipy")
+        package_versions = {
+            package_name: importlib.metadata.version(package_name)
+            for package_name in critical_packages
+        }
+
+        return {
+            "python_version": sys.version,
+            "platform": platform.platform(),
+            "package_versions": package_versions,
+            "requirements_path": (
+                str(resolved_requirements) if resolved_requirements.exists() else None
+            ),
+            "requirements_sha256": requirements_sha256,
+        }

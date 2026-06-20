@@ -4,7 +4,13 @@ from dataclasses import dataclass
 from typing import Sequence
 
 import numpy as np
+import pandas as pd
 import polars as pl
+from numerai_tools.scoring import feature_neutral_corr as official_feature_neutral_corr
+from numerai_tools.scoring import (
+    max_feature_correlation as official_max_feature_correlation,
+)
+from numerai_tools.scoring import numerai_corr as official_numerai_corr
 from scipy import stats
 
 from src.risk import CachedPseudoInverse, NeutralizationEngine
@@ -46,12 +52,16 @@ class EvaluationEngine:
         target_col: str = "target",
         id_col: str = "id",
         epsilon: float = 1e-12,
+        backend: str = "custom",
     ) -> None:
+        if backend not in {"custom", "official"}:
+            raise ValueError("backend must be 'custom' or 'official'")
         self.era_col = era_col
         self.prediction_col = prediction_col
         self.target_col = target_col
         self.id_col = id_col
         self.epsilon = epsilon
+        self.backend = backend
 
     def evaluate_eras(
         self,
@@ -69,6 +79,32 @@ class EvaluationEngine:
             benchmark_prediction_col=benchmark_prediction_col,
         )
         feature_names = tuple(feature_columns or ())
+        if self.backend == "official":
+            return self._evaluate_eras_official(
+                frame,
+                feature_names=feature_names,
+                benchmark_prediction_col=benchmark_prediction_col,
+            )
+
+        return self._evaluate_eras_custom(
+            frame,
+            feature_names=feature_names,
+            benchmark_prediction_col=benchmark_prediction_col,
+            neutralization_engine=neutralization_engine,
+            neutralization_subset_name=neutralization_subset_name,
+            neutralization_proportion=neutralization_proportion,
+        )
+
+    def _evaluate_eras_custom(
+        self,
+        frame: pl.DataFrame,
+        *,
+        feature_names: tuple[str, ...],
+        benchmark_prediction_col: str | None,
+        neutralization_engine: NeutralizationEngine | None,
+        neutralization_subset_name: str | None,
+        neutralization_proportion: float,
+    ) -> list[EraMetricRow]:
         metrics: list[EraMetricRow] = []
 
         ordered = frame.sort(self.era_col)
@@ -109,6 +145,63 @@ class EvaluationEngine:
                         subset_name=neutralization_subset_name,
                         proportion=neutralization_proportion,
                     )
+
+            metrics.append(
+                EraMetricRow(
+                    era=era,
+                    corr=corr,
+                    fnc=fnc,
+                    benchmark_corr=benchmark_corr,
+                    feature_exposure=feature_exposure,
+                    n_rows=era_frame.height,
+                )
+            )
+
+        return metrics
+
+    def _evaluate_eras_official(
+        self,
+        frame: pl.DataFrame,
+        *,
+        feature_names: tuple[str, ...],
+        benchmark_prediction_col: str | None,
+    ) -> list[EraMetricRow]:
+        metrics: list[EraMetricRow] = []
+
+        ordered = frame.sort(self.era_col)
+        for era_value, era_frame in ordered.group_by(self.era_col, maintain_order=True):
+            era = str(era_value[0] if isinstance(era_value, tuple) else era_value)
+            prediction_frame, target_series, feature_frame, benchmark_series = (
+                self._official_inputs(
+                    era_frame,
+                    feature_names=feature_names,
+                    benchmark_prediction_col=benchmark_prediction_col,
+                )
+            )
+
+            corr = self._sanitize_metric(
+                float(official_numerai_corr(prediction_frame, target_series).iloc[0])
+            )
+
+            benchmark_corr = None
+            if benchmark_series is not None:
+                benchmark_corr = self.prediction_correlation(
+                    prediction_frame[self.prediction_col].to_numpy(),
+                    benchmark_series.to_numpy(),
+                )
+
+            fnc = None
+            feature_exposure = None
+            if feature_frame is not None:
+                fnc = self._official_feature_neutral_corr(
+                    prediction_frame,
+                    feature_frame,
+                    target_series,
+                )
+                feature_exposure = self._official_max_feature_exposure(
+                    prediction_frame[self.prediction_col],
+                    feature_frame,
+                )
 
             metrics.append(
                 EraMetricRow(
@@ -416,6 +509,93 @@ class EvaluationEngine:
             missing_columns = ", ".join(missing)
             raise KeyError(f"Missing required columns: {missing_columns}")
         return df
+
+    def _official_inputs(
+        self,
+        era_frame: pl.DataFrame,
+        *,
+        feature_names: Sequence[str],
+        benchmark_prediction_col: str | None,
+    ) -> tuple[pd.DataFrame, pd.Series, pd.DataFrame | None, pd.Series | None]:
+        id_column = self.id_col if self.id_col in era_frame.columns else None
+        columns = [self.prediction_col, self.target_col, *feature_names]
+        if benchmark_prediction_col is not None:
+            columns.append(benchmark_prediction_col)
+        if id_column is not None:
+            columns.insert(0, id_column)
+
+        ordered = era_frame.select(columns)
+        if id_column is not None:
+            ordered = ordered.sort(id_column)
+            index = ordered.get_column(id_column).to_list()
+        else:
+            index = list(range(ordered.height))
+
+        prediction_frame = pd.DataFrame(
+            {self.prediction_col: ordered.get_column(self.prediction_col).to_numpy()},
+            index=index,
+        )
+        target_series = pd.Series(
+            ordered.get_column(self.target_col).to_numpy(),
+            index=index,
+            name=self.target_col,
+        )
+        feature_frame = None
+        if feature_names:
+            feature_frame = pd.DataFrame(
+                ordered.select(list(feature_names)).to_numpy(),
+                index=index,
+                columns=list(feature_names),
+            )
+        benchmark_series = None
+        if benchmark_prediction_col is not None:
+            benchmark_series = pd.Series(
+                ordered.get_column(benchmark_prediction_col).to_numpy(),
+                index=index,
+                name=benchmark_prediction_col,
+            )
+        return prediction_frame, target_series, feature_frame, benchmark_series
+
+    def _official_feature_neutral_corr(
+        self,
+        prediction_frame: pd.DataFrame,
+        feature_frame: pd.DataFrame,
+        target_series: pd.Series,
+    ) -> float:
+        prediction_values = prediction_frame[self.prediction_col].to_numpy()
+        if np.std(prediction_values) < self.epsilon:
+            return 0.0
+        try:
+            value = float(
+                official_feature_neutral_corr(
+                    prediction_frame,
+                    feature_frame,
+                    target_series,
+                ).iloc[0]
+            )
+        except (AssertionError, ValueError, ZeroDivisionError):
+            return 0.0
+        return self._sanitize_metric(value)
+
+    def _official_max_feature_exposure(
+        self,
+        prediction_series: pd.Series,
+        feature_frame: pd.DataFrame,
+    ) -> float:
+        if float(prediction_series.std()) < self.epsilon:
+            return 0.0
+        try:
+            _, value = official_max_feature_correlation(
+                prediction_series,
+                feature_frame,
+            )
+        except (AssertionError, KeyError, ValueError, ZeroDivisionError):
+            return 0.0
+        return self._sanitize_metric(float(value))
+
+    @staticmethod
+    def _sanitize_metric(value: float) -> float:
+        return 0.0 if not np.isfinite(value) else float(value)
 
     @staticmethod
     def _coerce_vector(values: np.ndarray, *, name: str) -> np.ndarray:

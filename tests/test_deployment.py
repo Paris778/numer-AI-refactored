@@ -132,6 +132,35 @@ def test_predict_live_raises_on_missing_required_feature(
         harness.predict_live(broken, artifact_dir)
 
 
+def test_predict_live_raises_on_hash_mismatch(
+    toy_training_frame: pl.DataFrame,
+    trained_models,
+    tmp_path: Path,
+) -> None:
+    _, feature_names, models = trained_models
+    harness = DeploymentHarness()
+    artifact_dir = harness.serialize_candidate(
+        tmp_path / "bundle_tampered",
+        models,
+        feature_names,
+        {"target_column": "target"},
+    )
+    manifest_path = artifact_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    first_model = manifest["model_files"][0]
+    manifest["model_hashes"][first_model] = "0" * 64
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8"
+    )
+
+    scrambled = toy_training_frame.select(
+        ["id", "feature_gamma", "feature_alpha", "feature_beta"]
+    )
+
+    with pytest.raises(ValueError, match="SHA-256 mismatch"):
+        harness.predict_live(scrambled, artifact_dir)
+
+
 def test_serializer_writes_manifest_and_native_model_files(
     trained_models,
     tmp_path: Path,
@@ -150,6 +179,10 @@ def test_serializer_writes_manifest_and_native_model_files(
 
     assert manifest["feature_names"] == feature_names
     assert manifest["model_library"] == "lightgbm"
+    assert "environment" in manifest
+    assert "model_hashes" in manifest
+    assert manifest["environment"]["requirements_sha256"] is not None
     assert len(manifest["model_files"]) == len(models)
     for model_file in manifest["model_files"]:
         assert (artifact_dir / model_file).exists()
+        assert model_file in manifest["model_hashes"]
