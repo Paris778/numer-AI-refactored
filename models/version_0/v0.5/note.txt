@@ -1,1 +1,0 @@
-ensemble of ridge regression models. Try it. 
