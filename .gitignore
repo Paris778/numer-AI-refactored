@@ -1,0 +1,13 @@
+.venv/
+.env
+data.temp
+data/temp/
+data/**/*.parquet
+.cache/
+onboarding_notebooks/**/**/*.parquet
+data/v5.2/validation_example_preds.csv
+*.pkl
+
+.ipynb_checkpoints/
+__pycache__/
+*.pyc

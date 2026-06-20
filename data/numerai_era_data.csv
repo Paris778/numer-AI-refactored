@@ -1,0 +1,7 @@
+date,dataset,start_era,end_era,round_id
+2026-02-25,train,0001,0574,
+2026-02-25,validation,0575,1208,
+2026-02-25,live,X,X,1211.0
+2026-06-20,train,0001,0574,
+2026-06-20,validation,0575,1208,
+2026-06-20,live,X,X,1294.0

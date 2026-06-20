@@ -1,0 +1,15 @@
+numerapi
+pytest
+pytest-cov
+pandas
+pyarrow
+matplotlib
+lightgbm
+xgboost
+scikit-learn
+scipy
+cloudpickle==3.1.1
+numerai-tools
+ipykernel
+python-dotenv
+tqdm
