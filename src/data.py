@@ -55,6 +55,7 @@ class IngestionAgent:
         )
         self.dataset_files = dict(dataset_files or DEFAULT_DATASET_FILES)
         self._feature_sets = self._load_feature_sets()
+        self._schema_cache: dict[str, dict[str, str]] = {}
 
     @property
     def feature_sets(self) -> dict[str, tuple[str, ...]]:
@@ -92,17 +93,10 @@ class IngestionAgent:
             ) from exc
 
     def get_target_names(self, dataset_name: str = "train") -> tuple[str, ...]:
-        schema = self.get_schema(dataset_name)
-        return tuple(
-            name
-            for name in schema
-            if name.startswith("target") or name.startswith("aux_target")
-        )
+        return self._target_names_from_schema(self.get_schema(dataset_name))
 
     def get_metadata_columns(self, dataset_name: str = "train") -> tuple[str, ...]:
-        schema = self.get_schema(dataset_name)
-        present_columns = [name for name in DEFAULT_METADATA_COLUMNS if name in schema]
-        return tuple(present_columns)
+        return self._metadata_columns_from_schema(self.get_schema(dataset_name))
 
     def available_datasets(self) -> dict[str, bool]:
         return {
@@ -121,21 +115,22 @@ class IngestionAgent:
     ) -> pl.LazyFrame:
         dataset_path = self.dataset_path(dataset_name)
         lazy_frame = pl.scan_parquet(dataset_path)
+        schema = self.get_schema(dataset_name)
 
         selected_columns: list[str] = []
         if include_metadata:
-            selected_columns.extend(self.get_metadata_columns(dataset_name))
+            selected_columns.extend(self._metadata_columns_from_schema(schema))
         if feature_subset is not None:
             selected_columns.extend(self.get_feature_names(feature_subset))
         if include_targets:
-            selected_columns.extend(self.get_target_names(dataset_name))
+            selected_columns.extend(self._target_names_from_schema(schema))
         if extra_columns is not None:
             selected_columns.extend(extra_columns)
 
         if not selected_columns:
             return lazy_frame
 
-        existing_columns = set(self.get_schema(dataset_name))
+        existing_columns = set(schema)
         unique_columns = self._dedupe_columns(selected_columns)
         missing_columns = [
             name for name in unique_columns if name not in existing_columns
@@ -149,8 +144,20 @@ class IngestionAgent:
         return lazy_frame.select(unique_columns)
 
     def get_schema(self, dataset_name: str) -> dict[str, str]:
-        schema = pl.scan_parquet(self.dataset_path(dataset_name)).collect_schema()
-        return {column: str(dtype) for column, dtype in schema.items()}
+        if dataset_name not in self.dataset_files:
+            available = ", ".join(self.dataset_files)
+            raise KeyError(
+                f"Unknown dataset '{dataset_name}'. Available datasets: {available}"
+            )
+
+        if dataset_name not in self._schema_cache:
+            dataset_path = self.dataset_path(dataset_name)
+            schema = pl.scan_parquet(dataset_path).collect_schema()
+            self._schema_cache[dataset_name] = {
+                column: str(dtype) for column, dtype in schema.items()
+            }
+
+        return self._schema_cache[dataset_name]
 
     def count_rows(self, dataset_name: str) -> int:
         return (
@@ -233,6 +240,18 @@ class IngestionAgent:
             feature_sets["all"] = tuple(self._dedupe_columns(ordered_union))
 
         return feature_sets
+
+    @staticmethod
+    def _metadata_columns_from_schema(schema: dict[str, str]) -> tuple[str, ...]:
+        return tuple(name for name in DEFAULT_METADATA_COLUMNS if name in schema)
+
+    @staticmethod
+    def _target_names_from_schema(schema: dict[str, str]) -> tuple[str, ...]:
+        return tuple(
+            name
+            for name in schema
+            if name.startswith("target") or name.startswith("aux_target")
+        )
 
     @staticmethod
     def _dedupe_columns(columns: Iterable[str]) -> list[str]:

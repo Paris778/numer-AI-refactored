@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +20,7 @@ class CachedPseudoInverse:
     path: Path
     feature_names: tuple[str, ...]
     row_ids: tuple[str, ...]
+    add_intercept: bool
     pseudo_inverse: np.ndarray
 
 
@@ -40,15 +42,28 @@ class NeutralizationEngine:
         cache_root: str | Path = Path("artifacts") / "cache",
         *,
         rcond: float = 1e-12,
+        add_intercept: bool = True,
     ) -> None:
         self.cache_root = Path(cache_root).expanduser().resolve()
         self.neutralization_root = self.cache_root / "neutralization"
         self.rcond = rcond
+        self.add_intercept = add_intercept
         self.neutralization_root.mkdir(parents=True, exist_ok=True)
 
-    def compute_era_pseudo_inverse(self, feature_matrix: np.ndarray) -> np.ndarray:
+    def compute_era_pseudo_inverse(
+        self,
+        feature_matrix: np.ndarray,
+        *,
+        add_intercept: bool | None = None,
+    ) -> np.ndarray:
         matrix = self._coerce_feature_matrix(feature_matrix)
-        return np.linalg.pinv(matrix, rcond=self.rcond)
+        design_matrix = self._design_matrix(
+            matrix,
+            add_intercept=(
+                self.add_intercept if add_intercept is None else add_intercept
+            ),
+        )
+        return np.linalg.pinv(design_matrix, rcond=self.rcond)
 
     def neutralize_tensor(
         self,
@@ -57,19 +72,23 @@ class NeutralizationEngine:
         *,
         proportion: float = 1.0,
         pseudo_inverse: np.ndarray | None = None,
+        add_intercept: bool | None = None,
     ) -> np.ndarray:
         matrix = self._coerce_feature_matrix(feature_matrix)
+        use_intercept = self.add_intercept if add_intercept is None else add_intercept
+        design_matrix = self._design_matrix(matrix, add_intercept=use_intercept)
         scores = self._coerce_prediction_vector(
             predictions, expected_rows=matrix.shape[0]
         )
         pinv = (
             self._coerce_pseudo_inverse(
-                pseudo_inverse, expected_shape=(matrix.shape[1], matrix.shape[0])
+                pseudo_inverse,
+                expected_shape=(design_matrix.shape[1], design_matrix.shape[0]),
             )
             if pseudo_inverse is not None
-            else self.compute_era_pseudo_inverse(matrix)
+            else self.compute_era_pseudo_inverse(matrix, add_intercept=use_intercept)
         )
-        return scores - proportion * (matrix @ (pinv @ scores))
+        return scores - proportion * (design_matrix @ (pinv @ scores))
 
     def cache_subsets(
         self,
@@ -95,16 +114,16 @@ class NeutralizationEngine:
             era_frame = self.collect_era_frame(agent, dataset_name, subset_name, era)
             feature_matrix = era_frame.select(list(feature_names)).to_numpy()
             pseudo_inverse = self.compute_era_pseudo_inverse(feature_matrix)
-            row_ids = np.asarray(era_frame.get_column("id").to_list(), dtype=str)
-            cache_path.parent.mkdir(parents=True, exist_ok=True)
-            np.savez_compressed(
+            row_ids = tuple(era_frame.get_column("id").to_list())
+            self._write_cache_artifacts(
                 cache_path,
                 pseudo_inverse=pseudo_inverse,
                 row_ids=row_ids,
-                feature_names=np.asarray(feature_names, dtype=str),
-                era=np.asarray([era], dtype=str),
-                dataset_name=np.asarray([dataset_name], dtype=str),
-                subset_name=np.asarray([subset_name], dtype=str),
+                feature_names=feature_names,
+                era=era,
+                dataset_name=dataset_name,
+                subset_name=subset_name,
+                add_intercept=self.add_intercept,
             )
             written_paths.append(cache_path)
 
@@ -119,17 +138,24 @@ class NeutralizationEngine:
         if not cache_path.exists():
             raise FileNotFoundError(f"Neutralization cache is missing at {cache_path}")
 
-        with np.load(cache_path, allow_pickle=False) as cached_file:
-            return CachedPseudoInverse(
-                era=str(cached_file["era"][0]),
-                subset_name=str(cached_file["subset_name"][0]),
-                path=cache_path,
-                feature_names=tuple(cached_file["feature_names"].tolist()),
-                row_ids=tuple(cached_file["row_ids"].tolist()),
-                pseudo_inverse=np.asarray(
-                    cached_file["pseudo_inverse"], dtype=np.float64
-                ),
+        metadata_path = self._metadata_path(cache_path)
+        if not metadata_path.exists():
+            raise FileNotFoundError(
+                f"Neutralization cache metadata is missing at {metadata_path}"
             )
+
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        return CachedPseudoInverse(
+            era=str(metadata["era"]),
+            subset_name=str(metadata["subset_name"]),
+            path=cache_path,
+            feature_names=tuple(metadata["feature_names"]),
+            row_ids=tuple(metadata["row_ids"]),
+            add_intercept=bool(metadata["add_intercept"]),
+            pseudo_inverse=np.asarray(
+                np.load(cache_path, allow_pickle=False), dtype=np.float64
+            ),
+        )
 
     def neutralize_era(
         self,
@@ -157,6 +183,10 @@ class NeutralizationEngine:
             if cached.row_ids != row_ids:
                 raise ValueError(
                     f"Cached row ids for era '{era}' no longer match dataset '{dataset_name}'"
+                )
+            if cached.add_intercept != self.add_intercept:
+                raise ValueError(
+                    f"Cached intercept setting for era '{era}' does not match engine configuration"
                 )
             pseudo_inverse = cached.pseudo_inverse
         else:
@@ -253,7 +283,51 @@ class NeutralizationEngine:
 
     def cache_path(self, subset_name: str, era: str) -> Path:
         subset_root = self.neutralization_root / subset_name
-        return subset_root / f"{self._normalize_era_label(era)}.npz"
+        return subset_root / f"{self._normalize_era_label(era)}.npy"
+
+    def _write_cache_artifacts(
+        self,
+        cache_path: Path,
+        *,
+        pseudo_inverse: np.ndarray,
+        row_ids: Sequence[str],
+        feature_names: Sequence[str],
+        era: str,
+        dataset_name: str,
+        subset_name: str,
+        add_intercept: bool,
+    ) -> None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        np.save(
+            cache_path, np.asarray(pseudo_inverse, dtype=np.float64), allow_pickle=False
+        )
+        metadata = {
+            "era": era,
+            "dataset_name": dataset_name,
+            "subset_name": subset_name,
+            "feature_names": list(feature_names),
+            "row_ids": list(row_ids),
+            "add_intercept": add_intercept,
+        }
+        self._metadata_path(cache_path).write_text(
+            json.dumps(metadata, separators=(",", ":")),
+            encoding="utf-8",
+        )
+
+    @staticmethod
+    def _metadata_path(cache_path: Path) -> Path:
+        return cache_path.with_suffix(".json")
+
+    @staticmethod
+    def _design_matrix(
+        feature_matrix: np.ndarray,
+        *,
+        add_intercept: bool,
+    ) -> np.ndarray:
+        if not add_intercept:
+            return feature_matrix
+        intercept = np.ones((feature_matrix.shape[0], 1), dtype=np.float64)
+        return np.hstack([feature_matrix, intercept])
 
     @staticmethod
     def _normalize_era_label(era: str) -> str:

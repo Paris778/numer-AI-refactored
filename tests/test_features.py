@@ -89,3 +89,13 @@ def test_real_train_split_has_zero_leakage(agent: IngestionAgent) -> None:
         validation_ordinals = np.asarray(validation_eras, dtype=np.int64)
         distances = np.abs(train_ordinals[:, None] - validation_ordinals[None, :])
         assert np.all(distances > 4)
+
+
+def test_non_numeric_eras_raise_safe_error() -> None:
+    splitter = PurgedEraSplitter(n_splits=2, purge_buffer=1)
+    frame = pl.DataFrame(
+        {"id": ["a", "b", "c", "d"], "era": ["alpha", "alpha", "beta", "beta"]}
+    )
+
+    with pytest.raises(ValueError, match="Non-numeric era format detected"):
+        splitter.split(frame)

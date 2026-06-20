@@ -106,9 +106,13 @@ class PurgedEraSplitter:
     @staticmethod
     def _era_ordinals(eras: np.ndarray) -> np.ndarray:
         parsed_ordinals: list[int] = []
-        for position, era in enumerate(eras):
+        for era in eras:
             digits = re.findall(r"\d+", str(era))
-            parsed_ordinals.append(int(digits[0]) if digits else position)
+            if not digits:
+                raise ValueError(
+                    f"Non-numeric era format detected: {era}. Cannot compute safe temporal purge distance."
+                )
+            parsed_ordinals.append(int(digits[0]))
         return np.asarray(parsed_ordinals, dtype=np.int64)
 
 

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import polars as pl
@@ -72,3 +73,43 @@ def test_available_datasets_reflect_local_files(agent: IngestionAgent) -> None:
 
     assert availability["train"] is True
     assert availability["live_example_preds"] is True
+
+
+def test_schema_cache_is_lazy_and_instantiation_does_not_touch_missing_datasets(
+    tmp_path: Path,
+) -> None:
+    data_root = tmp_path / "data" / "v5.2"
+    data_root.mkdir(parents=True)
+    (data_root / "features.json").write_text(
+        json.dumps({"feature_sets": {"small": ["feature_alpha"]}}),
+        encoding="utf-8",
+    )
+
+    agent = IngestionAgent(
+        data_root,
+        dataset_files={"train": "missing.parquet"},
+    )
+
+    assert agent._schema_cache == {}
+    with pytest.raises(FileNotFoundError, match="missing.parquet"):
+        agent.get_schema("train")
+
+
+def test_schema_cache_memoizes_repeated_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    scan_calls = 0
+    original_scan_parquet = pl.scan_parquet
+
+    def counting_scan_parquet(*args: object, **kwargs: object) -> pl.LazyFrame:
+        nonlocal scan_calls
+        scan_calls += 1
+        return original_scan_parquet(*args, **kwargs)
+
+    monkeypatch.setattr(pl, "scan_parquet", counting_scan_parquet)
+
+    agent = IngestionAgent(Path(__file__).resolve().parents[1] / "data" / "v5.2")
+
+    first_schema = agent.get_schema("train")
+    second_schema = agent.get_schema("train")
+
+    assert first_schema == second_schema
+    assert scan_calls == 1

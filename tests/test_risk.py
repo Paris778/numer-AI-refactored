@@ -36,13 +36,29 @@ def test_neutralize_tensor_matches_explicit_formula() -> None:
         dtype=np.float64,
     )
     predictions = np.array([0.2, 0.4, 0.7, 0.9], dtype=np.float64)
+    design_matrix = np.hstack(
+        [feature_matrix, np.ones((feature_matrix.shape[0], 1), dtype=np.float64)]
+    )
 
-    expected = predictions - feature_matrix @ (
-        np.linalg.pinv(feature_matrix) @ predictions
+    expected = predictions - design_matrix @ (
+        np.linalg.pinv(design_matrix) @ predictions
     )
     actual = engine.neutralize_tensor(predictions, feature_matrix)
 
     np.testing.assert_allclose(actual, expected, rtol=1e-10, atol=1e-10)
+
+
+def test_neutralization_removes_constant_intercept_component() -> None:
+    engine = NeutralizationEngine(cache_root=Path("artifacts") / "cache")
+    feature_matrix = np.array(
+        [[0.0, 1.0], [1.0, 0.0], [2.0, 1.0], [3.0, 0.5]],
+        dtype=np.float64,
+    )
+    predictions = np.full(feature_matrix.shape[0], 3.5, dtype=np.float64)
+
+    actual = engine.neutralize_tensor(predictions, feature_matrix)
+
+    np.testing.assert_allclose(actual, np.zeros_like(predictions), atol=1e-10)
 
 
 def test_cached_matrix_matches_on_the_fly_result(
@@ -103,4 +119,4 @@ def test_cache_path_uses_subset_and_era(engine: NeutralizationEngine) -> None:
     cache_path = engine.cache_path("medium", "572")
 
     assert cache_path.parent.name == "medium"
-    assert cache_path.name == "era_0572.npz"
+    assert cache_path.name == "era_0572.npy"
