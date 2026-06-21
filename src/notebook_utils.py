@@ -29,7 +29,7 @@ def render_promotion_report(result: PromotionRunResult) -> None:
         f"- **Oracle Parity** (Eras: {', '.join(result.parity_eras)}): `PASS`",
         f"- **Stress Test Degradation**: `{result.stress_result.degradation_pct:.2f}%`",
         "#### 3. Deployment Artifact",
-        f"- **Path**: `{result.artifact_dir}`",
+        f"- **Path**: `{result.payload_path}`",
         f"- **Smoke Test**: `{smoke_label}`",
         "---",
         "<details><summary><b>Execution Logs (Expand)</b></summary>",

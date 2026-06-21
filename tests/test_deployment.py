@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import polars as pl
 import pytest
 
@@ -9,6 +10,7 @@ from src.deployment import AdversarialStressTester, DeploymentHarness
 from src.evaluation import EvaluationEngine
 from src.features import PurgedEraSplitter
 from src.models import ModelOrchestrator
+from src.protocols import FeaturePipeline, IdentityTransformer
 
 
 @pytest.fixture(scope="module")
@@ -37,7 +39,7 @@ def trained_models(toy_training_frame: pl.DataFrame):
     feature_names = ["feature_alpha", "feature_beta", "feature_gamma"]
     orchestrator = ModelOrchestrator(
         feature_names=feature_names,
-        target_column="target",
+        target_columns=["target"],
         model_library="lightgbm",
         prefer_gpu=False,
         early_stopping_rounds=10,
@@ -52,7 +54,7 @@ def trained_models(toy_training_frame: pl.DataFrame):
         toy_training_frame,
         PurgedEraSplitter(n_splits=3, purge_buffer=1),
     )
-    return orchestrator, feature_names, cv_result.models
+    return orchestrator, feature_names, cv_result.predictor, cv_result.models
 
 
 @pytest.fixture(scope="module")
@@ -70,7 +72,7 @@ def test_noise_injection_perturbs_predictions_without_crashing(
     trained_models,
     evaluation_engine: EvaluationEngine,
 ) -> None:
-    _, feature_names, models = trained_models
+    _, feature_names, predictor, _ = trained_models
     stress_tester = AdversarialStressTester(
         evaluation_engine,
         degradation_threshold=0.90,
@@ -79,7 +81,7 @@ def test_noise_injection_perturbs_predictions_without_crashing(
 
     result = stress_tester.evaluate_noise_resilience(
         toy_training_frame,
-        models,
+        predictor,
         feature_names,
         noise_std_ratio=0.5,
     )
@@ -94,19 +96,19 @@ def test_predict_live_reorders_scrambled_feature_columns(
     trained_models,
     tmp_path: Path,
 ) -> None:
-    _, feature_names, models = trained_models
+    _, feature_names, predictor, _ = trained_models
     harness = DeploymentHarness()
-    artifact_dir = harness.serialize_candidate(
-        tmp_path / "bundle",
-        models,
-        feature_names,
-        {"target_column": "target"},
+    payload = harness.build_numerai_payload(
+        feature_pipeline=FeaturePipeline([IdentityTransformer()]),
+        predictor_ensemble=predictor,
+        feature_names=feature_names,
     )
+    payload_bundle = harness.serialize_payload(payload, tmp_path / "bundle.pkl")
 
     scrambled = toy_training_frame.select(
         ["id", "feature_gamma", "feature_alpha", "feature_beta"]
     )
-    predictions = harness.predict_live(scrambled, artifact_dir)
+    predictions = harness.predict_live(scrambled, payload_bundle.payload_path)
 
     assert predictions.columns == ["id", "prediction"]
     assert predictions.height == scrambled.height
@@ -118,71 +120,71 @@ def test_predict_live_raises_on_missing_required_feature(
     trained_models,
     tmp_path: Path,
 ) -> None:
-    _, feature_names, models = trained_models
+    _, feature_names, predictor, _ = trained_models
     harness = DeploymentHarness()
-    artifact_dir = harness.serialize_candidate(
-        tmp_path / "bundle_missing",
-        models,
-        feature_names,
-        {"target_column": "target"},
+    payload = harness.build_numerai_payload(
+        feature_pipeline=FeaturePipeline([IdentityTransformer()]),
+        predictor_ensemble=predictor,
+        feature_names=feature_names,
     )
+    payload_bundle = harness.serialize_payload(payload, tmp_path / "bundle_missing.pkl")
     broken = toy_training_frame.select(["id", "feature_alpha", "feature_beta"])
 
     with pytest.raises(KeyError, match="missing required features"):
-        harness.predict_live(broken, artifact_dir)
+        harness.predict_live(broken, payload_bundle.payload_path)
 
 
-def test_predict_live_raises_on_hash_mismatch(
+def test_cloudpickle_payload_reload_matches_pre_serialization_predictions(
     toy_training_frame: pl.DataFrame,
     trained_models,
     tmp_path: Path,
 ) -> None:
-    _, feature_names, models = trained_models
+    _, feature_names, predictor, _ = trained_models
     harness = DeploymentHarness()
-    artifact_dir = harness.serialize_candidate(
-        tmp_path / "bundle_tampered",
-        models,
-        feature_names,
-        {"target_column": "target"},
+    payload = harness.build_numerai_payload(
+        feature_pipeline=FeaturePipeline([IdentityTransformer()]),
+        predictor_ensemble=predictor,
+        feature_names=feature_names,
     )
-    manifest_path = artifact_dir / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    first_model = manifest["model_files"][0]
-    manifest["model_hashes"][first_model] = "0" * 64
-    manifest_path.write_text(
-        json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8"
-    )
+    payload_bundle = harness.serialize_payload(payload, tmp_path / "bundle_reload.pkl")
 
     scrambled = toy_training_frame.select(
         ["id", "feature_gamma", "feature_alpha", "feature_beta"]
     )
+    pre_serialization = payload(scrambled.to_pandas().set_index("id"))[
+        "prediction"
+    ].to_numpy(dtype=np.float64)
+    post_serialization = harness.predict_live(scrambled, payload_bundle.payload_path)
 
-    with pytest.raises(ValueError, match="SHA-256 mismatch"):
-        harness.predict_live(scrambled, artifact_dir)
+    assert np.allclose(
+        post_serialization.get_column("prediction").to_numpy(),
+        pre_serialization,
+    )
 
 
-def test_serializer_writes_manifest_and_native_model_files(
+def test_serializer_writes_cloudpickle_payload(
+    toy_training_frame: pl.DataFrame,
     trained_models,
     tmp_path: Path,
 ) -> None:
-    _, feature_names, models = trained_models
+    _, feature_names, predictor, _ = trained_models
     harness = DeploymentHarness()
-    artifact_dir = harness.serialize_candidate(
-        tmp_path / "bundle_files",
-        models,
-        feature_names,
-        {"target_column": "target", "mode": "cv"},
+    payload = harness.build_numerai_payload(
+        feature_pipeline=FeaturePipeline([IdentityTransformer()]),
+        predictor_ensemble=predictor,
+        feature_names=feature_names,
     )
+    payload_bundle = harness.serialize_payload(payload, tmp_path / "bundle_files.pkl")
 
-    manifest_path = artifact_dir / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-
-    assert manifest["feature_names"] == feature_names
-    assert manifest["model_library"] == "lightgbm"
-    assert "environment" in manifest
-    assert "model_hashes" in manifest
-    assert manifest["environment"]["requirements_sha256"] is not None
-    assert len(manifest["model_files"]) == len(models)
-    for model_file in manifest["model_files"]:
-        assert (artifact_dir / model_file).exists()
-        assert model_file in manifest["model_hashes"]
+    assert payload_bundle.payload_path.exists()
+    reloaded_payload = harness.load_payload(payload_bundle.payload_path)
+    live_features = (
+        toy_training_frame.select(
+            ["id", "feature_alpha", "feature_beta", "feature_gamma"]
+        )
+        .to_pandas()
+        .set_index("id")
+    )
+    result = reloaded_payload(live_features)
+    assert isinstance(result, pd.DataFrame)
+    assert "prediction" in result.columns

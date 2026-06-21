@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-import hashlib
-import importlib.metadata
-import json
-import platform
-import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
+import cloudpickle
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
@@ -16,7 +12,8 @@ import polars as pl
 import xgboost as xgb
 
 from src.evaluation import EvaluationEngine, EvaluationSummary
-from src.models import EstimatorType
+from src.models import EstimatorType, ModelOrchestrator
+from src.protocols import Predictor, Transformer
 
 LoadedModelType = lgb.Booster | xgb.Booster
 
@@ -29,6 +26,12 @@ class StressTestResult:
     passed: bool
     clean_predictions: np.ndarray
     stressed_predictions: np.ndarray
+
+
+@dataclass(frozen=True)
+class NumeraiPayloadBundle:
+    predict: Callable[[pd.DataFrame, pd.DataFrame | None], pd.DataFrame]
+    payload_path: Path
 
 
 class AdversarialStressTester:
@@ -46,7 +49,7 @@ class AdversarialStressTester:
     def evaluate_noise_resilience(
         self,
         df: pl.DataFrame,
-        models: Sequence[EstimatorType | LoadedModelType],
+        models: Sequence[EstimatorType | LoadedModelType] | Predictor,
         feature_names: Sequence[str],
         *,
         noise_std_ratio: float = 0.05,
@@ -141,22 +144,29 @@ class AdversarialStressTester:
     def _predict_ensemble(
         self,
         df: pl.DataFrame,
-        models: Sequence[EstimatorType | LoadedModelType],
+        models: Sequence[EstimatorType | LoadedModelType] | Predictor,
         feature_names: Sequence[str],
     ) -> np.ndarray:
+        if hasattr(models, "predict") and not isinstance(models, Sequence):
+            feature_frame = df.select(list(feature_names)).to_pandas()
+            return np.asarray(models.predict(feature_frame), dtype=np.float64)
         if not models:
             raise ValueError("models must be non-empty")
         feature_frame = df.select(list(feature_names)).to_pandas()
-        predictions = np.vstack(
-            [self._predict_single_model(model, feature_frame) for model in models]
-        )
-        return predictions.mean(axis=0)
+        predictions = [
+            self._predict_single_model(model, feature_frame) for model in models
+        ]
+        return ModelOrchestrator.rank_average_predictions(predictions)
 
     @staticmethod
     def _predict_single_model(
-        model: EstimatorType | LoadedModelType,
+        model: Predictor | EstimatorType | LoadedModelType,
         feature_frame: pd.DataFrame,
     ) -> np.ndarray:
+        if hasattr(model, "predict") and not isinstance(
+            model, (lgb.LGBMRegressor, lgb.Booster, xgb.XGBRegressor, xgb.Booster)
+        ):
+            return np.asarray(model.predict(feature_frame), dtype=np.float64)
         if isinstance(model, lgb.LGBMRegressor):
             return np.asarray(model.predict(feature_frame), dtype=np.float64)
         if isinstance(model, lgb.Booster):
@@ -192,191 +202,98 @@ class AdversarialStressTester:
 
 
 class DeploymentHarness:
-    def serialize_candidate(
+    def build_numerai_payload(
         self,
-        target_dir: Path,
-        models: Sequence[EstimatorType | LoadedModelType],
-        feature_names: Sequence[str],
-        config_metadata: dict[str, Any],
         *,
-        requirements_path: Path | None = None,
-    ) -> Path:
-        if not models:
-            raise ValueError("models must be non-empty")
+        feature_pipeline: Transformer,
+        predictor_ensemble: Predictor,
+        feature_names: Sequence[str],
+    ) -> Callable[[pd.DataFrame, pd.DataFrame | None], pd.DataFrame]:
         if not feature_names:
             raise ValueError("feature_names must be non-empty")
 
-        artifact_dir = Path(target_dir).expanduser().resolve()
-        artifact_dir.mkdir(parents=True, exist_ok=False)
-        model_library = self._infer_model_library(models)
-        model_files: list[str] = []
-        model_hashes: dict[str, str] = {}
+        locked_features = tuple(feature_names)
 
-        for index, model in enumerate(models, start=1):
-            model_path = artifact_dir / self._model_filename(model_library, index)
-            self._save_native_model(model, model_path, model_library)
-            model_files.append(model_path.name)
-            model_hashes[model_path.name] = self._sha256_file(model_path)
+        def predict(
+            live_features: pd.DataFrame,
+            live_benchmark_models: pd.DataFrame | None = None,
+        ) -> pd.DataFrame:
+            if not isinstance(live_features, pd.DataFrame):
+                raise TypeError("live_features must be a pandas DataFrame")
+            missing_features = sorted(
+                set(locked_features).difference(live_features.columns)
+            )
+            if missing_features:
+                raise KeyError(
+                    f"Live dataframe is missing required features: {', '.join(missing_features)}"
+                )
+            ordered_features = live_features.loc[:, locked_features]
+            transformed = feature_pipeline.transform(pl.from_pandas(ordered_features))
+            transformed_pandas = transformed.select(list(locked_features)).to_pandas()
+            if hasattr(predictor_ensemble, "predict_all"):
+                raw_predictions = predictor_ensemble.predict_all(transformed_pandas)
+            else:
+                raw_predictions = {
+                    "model_01": np.asarray(
+                        predictor_ensemble.predict(transformed_pandas),
+                        dtype=np.float64,
+                    )
+                }
+            ranked = pd.DataFrame(raw_predictions, index=ordered_features.index).rank(
+                pct=True,
+                method="average",
+            )
+            final_predictions = ranked.mean(axis=1).rank(pct=True, method="first")
+            return pd.DataFrame(
+                {"prediction": final_predictions.values},
+                index=live_features.index,
+            )
 
-        manifest = {
-            "manifest_version": 1,
-            "model_library": model_library,
-            "feature_names": list(feature_names),
-            "model_files": model_files,
-            "model_hashes": model_hashes,
-            "environment": self._environment_fingerprint(
-                requirements_path=requirements_path
-            ),
-            "config_metadata": config_metadata,
-        }
-        (artifact_dir / "manifest.json").write_text(
-            json.dumps(manifest, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-        return artifact_dir
+        return predict
 
-    def predict_live(self, live_df: pl.DataFrame, artifact_dir: Path) -> pl.DataFrame:
-        artifact_root = Path(artifact_dir).expanduser().resolve()
-        manifest_path = artifact_root / "manifest.json"
-        if not manifest_path.exists():
-            raise FileNotFoundError(f"Manifest is missing at {manifest_path}")
+    def serialize_payload(
+        self,
+        payload: Callable[[pd.DataFrame, pd.DataFrame | None], pd.DataFrame],
+        target_path: Path,
+    ) -> NumeraiPayloadBundle:
+        payload_path = Path(target_path).expanduser().resolve()
+        payload_path.parent.mkdir(parents=True, exist_ok=True)
+        with payload_path.open("wb") as file_handle:
+            cloudpickle.dump(payload, file_handle)
+        return NumeraiPayloadBundle(predict=payload, payload_path=payload_path)
 
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        feature_names = tuple(manifest["feature_names"])
-        model_library = str(manifest["model_library"])
-        self._verify_model_hashes(artifact_root, manifest)
+    def load_payload(
+        self,
+        payload_path: Path,
+    ) -> Callable[[pd.DataFrame, pd.DataFrame | None], pd.DataFrame]:
+        resolved = Path(payload_path).expanduser().resolve()
+        if not resolved.exists():
+            raise FileNotFoundError(f"Payload is missing at {resolved}")
+        with resolved.open("rb") as file_handle:
+            payload = cloudpickle.load(file_handle)
+        if not callable(payload):
+            raise TypeError("Loaded payload is not callable")
+        return payload
+
+    def predict_live(
+        self,
+        live_df: pl.DataFrame,
+        payload_path: Path,
+        *,
+        live_benchmark_models: pd.DataFrame | None = None,
+    ) -> pl.DataFrame:
         if "id" not in live_df.columns:
             raise KeyError("Live dataframe must include an 'id' column")
-        missing_features = sorted(set(feature_names).difference(live_df.columns))
-        if missing_features:
-            raise KeyError(
-                f"Live dataframe is missing required features: {', '.join(missing_features)}"
-            )
-
-        reordered = live_df.select(["id", *feature_names])
-        feature_frame = reordered.select(list(feature_names)).to_pandas()
-        models = [
-            self._load_native_model(artifact_root / model_file, model_library)
-            for model_file in manifest["model_files"]
-        ]
-        predictions = np.vstack(
-            [
-                AdversarialStressTester._predict_single_model(model, feature_frame)
-                for model in models
-            ]
-        ).mean(axis=0)
+        payload = self.load_payload(payload_path)
+        live_pandas = live_df.to_pandas().set_index("id")
+        output = payload(live_pandas, live_benchmark_models)
+        if not isinstance(output, pd.DataFrame):
+            raise TypeError("Payload predict callable must return a pandas DataFrame")
+        if "prediction" not in output.columns:
+            raise KeyError("Payload output must contain a 'prediction' column")
         return pl.DataFrame(
             {
-                "id": reordered.get_column("id").to_list(),
-                "prediction": predictions.astype(np.float64),
+                "id": output.index.to_list(),
+                "prediction": output["prediction"].to_numpy(dtype=np.float64),
             }
         )
-
-    @staticmethod
-    def _infer_model_library(models: Sequence[EstimatorType | LoadedModelType]) -> str:
-        libraries = {DeploymentHarness._single_model_library(model) for model in models}
-        if len(libraries) != 1:
-            raise ValueError("Mixed model libraries are not supported in one artifact")
-        return libraries.pop()
-
-    @staticmethod
-    def _single_model_library(model: EstimatorType | LoadedModelType) -> str:
-        if isinstance(model, (lgb.LGBMRegressor, lgb.Booster)):
-            return "lightgbm"
-        if isinstance(model, (xgb.XGBRegressor, xgb.Booster)):
-            return "xgboost"
-        raise TypeError(f"Unsupported model type: {type(model)!r}")
-
-    @staticmethod
-    def _model_filename(model_library: str, index: int) -> str:
-        suffix = "txt" if model_library == "lightgbm" else "json"
-        return f"model_{index:02d}.{suffix}"
-
-    @staticmethod
-    def _save_native_model(
-        model: EstimatorType | LoadedModelType,
-        path: Path,
-        model_library: str,
-    ) -> None:
-        if model_library == "lightgbm":
-            booster = model.booster_ if isinstance(model, lgb.LGBMRegressor) else model
-            booster.save_model(str(path))
-            return
-        if model_library == "xgboost":
-            booster = (
-                model.get_booster() if isinstance(model, xgb.XGBRegressor) else model
-            )
-            booster.save_model(str(path))
-            return
-        raise ValueError(f"Unsupported model library: {model_library}")
-
-    @staticmethod
-    def _load_native_model(path: Path, model_library: str) -> LoadedModelType:
-        if model_library == "lightgbm":
-            return lgb.Booster(model_file=str(path))
-        if model_library == "xgboost":
-            booster = xgb.Booster()
-            booster.load_model(str(path))
-            return booster
-        raise ValueError(f"Unsupported model library: {model_library}")
-
-    @staticmethod
-    def _sha256_file(path: Path) -> str:
-        hasher = hashlib.sha256()
-        with path.open("rb") as file_handle:
-            for chunk in iter(lambda: file_handle.read(1024 * 1024), b""):
-                hasher.update(chunk)
-        return hasher.hexdigest()
-
-    def _verify_model_hashes(
-        self, artifact_root: Path, manifest: dict[str, Any]
-    ) -> None:
-        model_files = manifest.get("model_files")
-        model_hashes = manifest.get("model_hashes")
-        if not isinstance(model_files, list) or not isinstance(model_hashes, dict):
-            raise ValueError("Manifest is missing model_files or model_hashes")
-
-        for model_file in model_files:
-            model_path = artifact_root / model_file
-            if not model_path.exists():
-                raise FileNotFoundError(f"Model file is missing at {model_path}")
-            expected_hash = model_hashes.get(model_file)
-            if not isinstance(expected_hash, str):
-                raise ValueError(
-                    f"Manifest is missing hash entry for model file '{model_file}'"
-                )
-            actual_hash = self._sha256_file(model_path)
-            if actual_hash != expected_hash:
-                raise ValueError(
-                    f"SHA-256 mismatch for model file '{model_file}': expected {expected_hash}, got {actual_hash}"
-                )
-
-    @staticmethod
-    def _environment_fingerprint(
-        *,
-        requirements_path: Path | None,
-    ) -> dict[str, Any]:
-        resolved_requirements = (
-            Path(requirements_path).expanduser().resolve()
-            if requirements_path is not None
-            else (Path.cwd() / "requirements.txt").resolve()
-        )
-        requirements_sha256 = None
-        if resolved_requirements.exists():
-            requirements_sha256 = DeploymentHarness._sha256_file(resolved_requirements)
-
-        critical_packages = ("polars", "numpy", "lightgbm", "xgboost", "scipy")
-        package_versions = {
-            package_name: importlib.metadata.version(package_name)
-            for package_name in critical_packages
-        }
-
-        return {
-            "python_version": sys.version,
-            "platform": platform.platform(),
-            "package_versions": package_versions,
-            "requirements_path": (
-                str(resolved_requirements) if resolved_requirements.exists() else None
-            ),
-            "requirements_sha256": requirements_sha256,
-        }

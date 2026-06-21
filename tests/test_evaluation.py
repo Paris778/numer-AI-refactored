@@ -208,3 +208,144 @@ def test_summary_and_fast_fail_gate(
     assert summary.mean_benchmark_corr is not None
     assert summary.max_feature_exposure is not None
     assert gate.passed is True
+
+
+def test_evaluate_eras_computes_mmc_when_benchmark_column_is_present(
+    engine: EvaluationEngine,
+    era_frame: pl.DataFrame,
+) -> None:
+    metrics = engine.evaluate_eras(
+        era_frame,
+        feature_columns=("feature_a", "feature_b"),
+        benchmark_mmc_col="benchmark",
+    )
+    summary = engine.summarize(metrics)
+
+    assert len(metrics) == 2
+    assert all(row.mmc is not None for row in metrics)
+    assert summary.mean_mmc is not None
+
+
+def test_optimize_target_weights_returns_normalized_solution(
+    engine: EvaluationEngine,
+) -> None:
+    eras = np.array(["0001"] * 6 + ["0002"] * 6 + ["0003"] * 6 + ["0004"] * 6)
+    targets = np.array(
+        [0.0, 0.2, 0.4, 0.6, 0.8, 1.0] * 4,
+        dtype=np.float64,
+    )
+    target_predictions = {
+        "target_ender_20": np.array(
+            [
+                0.02,
+                0.18,
+                0.43,
+                0.61,
+                0.82,
+                0.98,
+                0.05,
+                0.16,
+                0.35,
+                0.63,
+                0.79,
+                0.96,
+                0.08,
+                0.26,
+                0.33,
+                0.68,
+                0.77,
+                0.91,
+                0.11,
+                0.21,
+                0.49,
+                0.58,
+                0.73,
+                0.94,
+            ],
+            dtype=np.float64,
+        ),
+        "target_xerxes_20": np.array(
+            [
+                0.10,
+                0.24,
+                0.36,
+                0.58,
+                0.71,
+                0.91,
+                0.07,
+                0.30,
+                0.29,
+                0.52,
+                0.76,
+                0.88,
+                0.14,
+                0.19,
+                0.44,
+                0.57,
+                0.83,
+                0.86,
+                0.05,
+                0.27,
+                0.40,
+                0.62,
+                0.69,
+                0.92,
+            ],
+            dtype=np.float64,
+        ),
+        "target_teager2b_20": np.array(
+            [
+                0.14,
+                0.06,
+                0.52,
+                0.49,
+                0.77,
+                0.88,
+                0.18,
+                0.11,
+                0.57,
+                0.43,
+                0.73,
+                0.81,
+                0.09,
+                0.31,
+                0.41,
+                0.71,
+                0.68,
+                0.85,
+                0.20,
+                0.13,
+                0.46,
+                0.54,
+                0.79,
+                0.83,
+            ],
+            dtype=np.float64,
+        ),
+    }
+
+    result = engine.optimize_target_weights(target_predictions, targets, eras)
+
+    assert set(result.target_weights) == set(target_predictions)
+    assert sum(result.target_weights.values()) == pytest.approx(1.0, abs=1e-8)
+    assert all(weight >= 0.0 for weight in result.target_weights.values())
+    assert (
+        result.target_weights["target_ender_20"]
+        >= result.target_weights["target_teager2b_20"]
+    )
+    assert result.prediction_correlation_matrix.shape == (3, 3)
+    assert result.covariance_matrix.shape == (3, 3)
+    assert result.theoretical_mean_corr > 0.0
+    assert result.theoretical_sharpe > 0.0
+
+
+def test_optimize_target_weights_handles_single_target(
+    engine: EvaluationEngine,
+) -> None:
+    eras = np.array(["0001", "0001", "0002", "0002"], dtype=str)
+    targets = np.array([0.0, 0.4, 0.6, 1.0], dtype=np.float64)
+    predictions = {"target_ender_20": np.array([0.1, 0.3, 0.7, 0.9], dtype=np.float64)}
+
+    result = engine.optimize_target_weights(predictions, targets, eras)
+
+    assert result.target_weights == {"target_ender_20": pytest.approx(1.0)}

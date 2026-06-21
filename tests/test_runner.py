@@ -8,6 +8,7 @@ from src.deployment import AdversarialStressTester, DeploymentHarness
 from src.evaluation import EvaluationEngine
 from src.features import PurgedEraSplitter
 from src.models import ModelOrchestrator
+from src.protocols import FeaturePipeline, IdentityTransformer
 from src.risk import NeutralizationEngine
 from src.runner import PromotionRunner
 
@@ -35,6 +36,9 @@ def test_promotion_runner_executes_full_dag(tmp_path: Path) -> None:
     data_root = tmp_path / "data" / "v5.2"
     data_root.mkdir(parents=True)
     toy_frame.write_parquet(data_root / "train.parquet")
+    toy_frame.select(["id", "era"]).with_columns(
+        (0.55 * pl.col("id").cum_count().cast(pl.Float64)).alias("v52_lgbm_ender20")
+    ).write_parquet(data_root / "train_benchmark_models.parquet")
     (data_root / "features.json").write_text(
         json.dumps(
             {
@@ -48,11 +52,17 @@ def test_promotion_runner_executes_full_dag(tmp_path: Path) -> None:
     requirements_path = tmp_path / "requirements.txt"
     requirements_path.write_text("polars\nlightgbm\nnumpy\nscipy\n", encoding="utf-8")
 
-    agent = IngestionAgent(data_root, dataset_files={"train": "train.parquet"})
+    agent = IngestionAgent(
+        data_root,
+        dataset_files={
+            "train": "train.parquet",
+            "train_benchmark_models": "train_benchmark_models.parquet",
+        },
+    )
     splitter = PurgedEraSplitter(n_splits=3, purge_buffer=1)
     orchestrator = ModelOrchestrator(
         feature_names=agent.get_feature_names("small"),
-        target_column="target",
+        target_columns=["target"],
         model_library="lightgbm",
         prefer_gpu=False,
         early_stopping_rounds=10,
@@ -99,12 +109,16 @@ def test_promotion_runner_executes_full_dag(tmp_path: Path) -> None:
         deployment_harness=deployment_harness,
         artifact_dir=tmp_path / "artifacts" / "bundle",
         config_metadata={"target_column": "target", "mode": "cv"},
+        feature_pipeline=FeaturePipeline([IdentityTransformer()]),
         gate_kwargs={
             "min_mean_corr": -1.0,
             "min_sharpe_corr": -10.0,
             "max_drawdown_corr": 10.0,
         },
         requirements_path=requirements_path,
+        benchmark_dataset_name="train_benchmark_models",
+        benchmark_prediction_col="v52_lgbm_ender20",
+        benchmark_mmc_col="v52_lgbm_ender20",
         parity_era_count=5,
         stress_noise_std_ratio=0.05,
     )
@@ -112,7 +126,9 @@ def test_promotion_runner_executes_full_dag(tmp_path: Path) -> None:
     result = runner.run()
 
     assert result.smoke_test_passed is True
-    assert result.artifact_dir.exists()
+    assert result.payload_path.exists()
     assert len(result.parity_eras) == 5
+    assert result.evaluation_summary.mean_mmc is not None
     assert any("Oracle parity passed" in line for line in result.log_lines)
+    assert any("mean_mmc=" in line for line in result.log_lines)
     assert any("Post-reload smoke test passed" in line for line in result.log_lines)

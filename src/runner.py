@@ -13,6 +13,7 @@ from src.deployment import AdversarialStressTester, DeploymentHarness, StressTes
 from src.evaluation import EvaluationEngine, EvaluationSummary, FastFailGateResult
 from src.features import PurgedEraSplitter
 from src.models import CrossValidationResult, ModelOrchestrator
+from src.protocols import FeaturePipeline, Transformer
 from src.risk import NeutralizationEngine
 
 
@@ -24,7 +25,7 @@ class PromotionRunResult:
     parity_custom_summary: EvaluationSummary
     parity_official_summary: EvaluationSummary
     stress_result: StressTestResult
-    artifact_dir: Path
+    payload_path: Path
     smoke_test_passed: bool
     cross_validation_result: CrossValidationResult
     log_lines: tuple[str, ...]
@@ -47,9 +48,13 @@ class PromotionRunner:
         deployment_harness: DeploymentHarness,
         artifact_dir: Path,
         config_metadata: dict[str, Any],
+        feature_pipeline: Transformer | None = None,
         gate_kwargs: dict[str, Any] | None = None,
         requirements_path: Path | None = None,
         era_slice: Sequence[str] | None = None,
+        benchmark_dataset_name: str | None = None,
+        benchmark_prediction_col: str | None = None,
+        benchmark_mmc_col: str | None = None,
         parity_era_count: int = 5,
         stress_noise_std_ratio: float = 0.05,
         random_state: int = 42,
@@ -72,6 +77,7 @@ class PromotionRunner:
         self.neutralization_engine = neutralization_engine
         self.stress_tester = stress_tester
         self.deployment_harness = deployment_harness
+        self.feature_pipeline = feature_pipeline or FeaturePipeline()
         self.artifact_dir = Path(artifact_dir).expanduser().resolve()
         self.config_metadata = dict(config_metadata)
         self.gate_kwargs = dict(gate_kwargs or {})
@@ -81,6 +87,9 @@ class PromotionRunner:
             else None
         )
         self.era_slice = tuple(era_slice) if era_slice is not None else None
+        self.benchmark_dataset_name = benchmark_dataset_name
+        self.benchmark_prediction_col = benchmark_prediction_col
+        self.benchmark_mmc_col = benchmark_mmc_col
         self.parity_era_count = parity_era_count
         self.stress_noise_std_ratio = stress_noise_std_ratio
         self.random_state = random_state
@@ -122,12 +131,19 @@ class PromotionRunner:
             self.custom_evaluation_engine.evaluate_eras(
                 evaluation_frame,
                 feature_columns=feature_names,
+                benchmark_prediction_col=self.benchmark_prediction_col,
+                benchmark_mmc_col=self.benchmark_mmc_col,
                 neutralization_engine=self.neutralization_engine,
                 neutralization_subset_name=self.feature_subset,
             )
         )
         logs.append(
-            f"Custom evaluation mean_corr={evaluation_summary.mean_corr:.6f} mean_fnc={self._format_optional(evaluation_summary.mean_fnc)} max_feature_exposure={self._format_optional(evaluation_summary.max_feature_exposure)}"
+            "Custom evaluation "
+            f"mean_corr={evaluation_summary.mean_corr:.6f} "
+            f"mean_mmc={self._format_optional(evaluation_summary.mean_mmc)} "
+            f"mean_benchmark_corr={self._format_optional(evaluation_summary.mean_benchmark_corr)} "
+            f"mean_fnc={self._format_optional(evaluation_summary.mean_fnc)} "
+            f"max_feature_exposure={self._format_optional(evaluation_summary.max_feature_exposure)}"
         )
 
         logs.append("[4/8] Gate")
@@ -160,6 +176,7 @@ class PromotionRunner:
             cv_result.models,
             feature_names,
             noise_std_ratio=self.stress_noise_std_ratio,
+            benchmark_prediction_col=self.benchmark_prediction_col,
             neutralization_engine=self.neutralization_engine,
             neutralization_subset_name=self.feature_subset,
         )
@@ -172,34 +189,33 @@ class PromotionRunner:
         )
 
         logs.append("[7/8] Serialize")
-        artifact_dir = self.deployment_harness.serialize_candidate(
-            self.artifact_dir,
-            cv_result.models,
-            feature_names,
-            self.config_metadata,
-            requirements_path=self.requirements_path,
+        payload = self.deployment_harness.build_numerai_payload(
+            feature_pipeline=self.feature_pipeline,
+            predictor_ensemble=cv_result.predictor,
+            feature_names=feature_names,
         )
-        manifest = json.loads(
-            (artifact_dir / "manifest.json").read_text(encoding="utf-8")
+        payload_path = self.artifact_dir.with_suffix(".pkl")
+        payload_bundle = self.deployment_harness.serialize_payload(
+            payload,
+            payload_path,
         )
-        logs.append(f"Wrote artifact bundle to {artifact_dir}")
         logs.append(
-            "Recorded SHA-256 hashes for model files: "
-            + ", ".join(
-                f"{file_name}={file_hash}"
-                for file_name, file_hash in sorted(manifest["model_hashes"].items())
-            )
+            f"Wrote Numerai cloudpickle payload to {payload_bundle.payload_path}"
         )
 
         logs.append("[8/8] Smoke Test")
         control_live = working_frame.select([self.id_col, self.era_col, *feature_names])
-        pre_serialization_predictions = self.orchestrator.predict_ensemble(
-            control_live,
-            models=cv_result.models,
+        control_payload_output = payload(
+            control_live.select([self.id_col, *feature_names])
+            .to_pandas()
+            .set_index(self.id_col)
+        )
+        pre_serialization_predictions = control_payload_output["prediction"].to_numpy(
+            dtype=np.float64
         )
         post_serialization = self.deployment_harness.predict_live(
             control_live.select([self.id_col, *feature_names]),
-            artifact_dir,
+            payload_bundle.payload_path,
         )
         post_serialization_predictions = post_serialization.get_column(
             "prediction"
@@ -219,26 +235,38 @@ class PromotionRunner:
             parity_custom_summary=parity_custom_summary,
             parity_official_summary=parity_official_summary,
             stress_result=stress_result,
-            artifact_dir=artifact_dir,
+            payload_path=payload_bundle.payload_path,
             smoke_test_passed=smoke_test_passed,
             cross_validation_result=cv_result,
             log_lines=tuple(logs),
         )
 
     def _load_working_frame(self, feature_names: Sequence[str]) -> pl.DataFrame:
+        extra_target_columns = [
+            target_name
+            for target_name in self.orchestrator.target_columns
+            if target_name != self.target_column
+        ]
         lazy_frame = self.agent.scan_dataset(
             self.dataset_name,
             feature_subset=self.feature_subset,
             include_metadata=True,
             include_targets=False,
-            extra_columns=[self.target_column],
+            extra_columns=[self.target_column, *extra_target_columns],
         )
         if self.era_slice is not None:
             lazy_frame = lazy_frame.filter(pl.col(self.era_col).is_in(self.era_slice))
 
-        return lazy_frame.select(
-            [self.id_col, self.era_col, self.target_column, *feature_names]
+        working_frame = lazy_frame.select(
+            [
+                self.id_col,
+                self.era_col,
+                self.target_column,
+                *extra_target_columns,
+                *feature_names,
+            ]
         ).collect()
+        return self._attach_benchmark_columns(working_frame)
 
     def _run_parity_gate(
         self,
@@ -264,6 +292,8 @@ class PromotionRunner:
             self.custom_evaluation_engine.evaluate_eras(
                 parity_frame,
                 feature_columns=feature_names,
+                benchmark_prediction_col=self.benchmark_prediction_col,
+                benchmark_mmc_col=self.benchmark_mmc_col,
                 neutralization_engine=self.neutralization_engine,
                 neutralization_subset_name=self.feature_subset,
             )
@@ -272,6 +302,8 @@ class PromotionRunner:
             self.official_evaluation_engine.evaluate_eras(
                 parity_frame,
                 feature_columns=feature_names,
+                benchmark_prediction_col=self.benchmark_prediction_col,
+                benchmark_mmc_col=self.benchmark_mmc_col,
             )
         )
 
@@ -290,7 +322,56 @@ class PromotionRunner:
             official_summary.max_feature_exposure,
             name="max_feature_exposure",
         )
+        self._assert_optional_allclose(
+            custom_summary.mean_benchmark_corr,
+            official_summary.mean_benchmark_corr,
+            name="mean_benchmark_corr",
+        )
+        self._assert_optional_allclose(
+            custom_summary.mean_mmc,
+            official_summary.mean_mmc,
+            name="mean_mmc",
+        )
         return selected_eras, custom_summary, official_summary
+
+    def _attach_benchmark_columns(self, working_frame: pl.DataFrame) -> pl.DataFrame:
+        benchmark_columns = [
+            column
+            for column in (
+                self.benchmark_prediction_col,
+                self.benchmark_mmc_col,
+            )
+            if column is not None
+        ]
+        if self.benchmark_dataset_name is None:
+            if benchmark_columns:
+                raise ValueError(
+                    "benchmark_dataset_name is required when benchmark columns are configured"
+                )
+            return working_frame
+        if not benchmark_columns:
+            return working_frame
+
+        benchmark_frame = self.agent.scan_dataset(
+            self.benchmark_dataset_name,
+            include_metadata=True,
+            include_targets=False,
+            extra_columns=benchmark_columns,
+        )
+        if self.era_slice is not None:
+            benchmark_frame = benchmark_frame.filter(
+                pl.col(self.era_col).is_in(self.era_slice)
+            )
+
+        deduped_columns = list(
+            dict.fromkeys([self.id_col, self.era_col, *benchmark_columns])
+        )
+        return working_frame.join(
+            benchmark_frame.select(deduped_columns).collect(),
+            on=[self.id_col, self.era_col],
+            how="left",
+            validate="1:1",
+        )
 
     @staticmethod
     def _assert_optional_allclose(

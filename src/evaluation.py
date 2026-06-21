@@ -6,12 +6,15 @@ from typing import Sequence
 import numpy as np
 import pandas as pd
 import polars as pl
+from numerai_tools.scoring import (
+    correlation_contribution as official_correlation_contribution,
+)
 from numerai_tools.scoring import feature_neutral_corr as official_feature_neutral_corr
 from numerai_tools.scoring import (
     max_feature_correlation as official_max_feature_correlation,
 )
 from numerai_tools.scoring import numerai_corr as official_numerai_corr
-from scipy import stats
+from scipy import optimize, stats
 
 from src.risk import CachedPseudoInverse, NeutralizationEngine
 
@@ -21,6 +24,7 @@ class EraMetricRow:
     era: str
     corr: float
     fnc: float | None
+    mmc: float | None
     benchmark_corr: float | None
     feature_exposure: float | None
     n_rows: int
@@ -32,6 +36,7 @@ class EvaluationSummary:
     sharpe_corr: float
     max_drawdown_corr: float
     mean_fnc: float | None
+    mean_mmc: float | None
     mean_benchmark_corr: float | None
     max_feature_exposure: float | None
     eras_evaluated: int
@@ -41,6 +46,19 @@ class EvaluationSummary:
 class FastFailGateResult:
     passed: bool
     failures: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class TargetWeightOptimizationResult:
+    target_weights: dict[str, float]
+    mean_corr_by_target: dict[str, float]
+    sharpe_corr_by_target: dict[str, float]
+    volatility_by_target: dict[str, float]
+    prediction_correlation_matrix: pd.DataFrame
+    covariance_matrix: pd.DataFrame
+    theoretical_mean_corr: float
+    theoretical_sigma: float
+    theoretical_sharpe: float
 
 
 class EvaluationEngine:
@@ -69,6 +87,7 @@ class EvaluationEngine:
         *,
         feature_columns: Sequence[str] | None = None,
         benchmark_prediction_col: str | None = None,
+        benchmark_mmc_col: str | None = None,
         neutralization_engine: NeutralizationEngine | None = None,
         neutralization_subset_name: str | None = None,
         neutralization_proportion: float = 1.0,
@@ -77,6 +96,7 @@ class EvaluationEngine:
             df,
             feature_columns=feature_columns,
             benchmark_prediction_col=benchmark_prediction_col,
+            benchmark_mmc_col=benchmark_mmc_col,
         )
         feature_names = tuple(feature_columns or ())
         if self.backend == "official":
@@ -84,12 +104,14 @@ class EvaluationEngine:
                 frame,
                 feature_names=feature_names,
                 benchmark_prediction_col=benchmark_prediction_col,
+                benchmark_mmc_col=benchmark_mmc_col,
             )
 
         return self._evaluate_eras_custom(
             frame,
             feature_names=feature_names,
             benchmark_prediction_col=benchmark_prediction_col,
+            benchmark_mmc_col=benchmark_mmc_col,
             neutralization_engine=neutralization_engine,
             neutralization_subset_name=neutralization_subset_name,
             neutralization_proportion=neutralization_proportion,
@@ -101,6 +123,7 @@ class EvaluationEngine:
         *,
         feature_names: tuple[str, ...],
         benchmark_prediction_col: str | None,
+        benchmark_mmc_col: str | None,
         neutralization_engine: NeutralizationEngine | None,
         neutralization_subset_name: str | None,
         neutralization_proportion: float,
@@ -120,8 +143,14 @@ class EvaluationEngine:
                     benchmark_prediction_col
                 ).to_numpy()
                 benchmark_corr = self.prediction_correlation(
-                    predictions,
-                    benchmark_predictions,
+                    predictions, benchmark_predictions
+                )
+
+            mmc = None
+            if benchmark_mmc_col is not None:
+                mmc = self._official_mmc_from_era_frame(
+                    era_frame,
+                    benchmark_mmc_col=benchmark_mmc_col,
                 )
 
             feature_exposure = None
@@ -151,6 +180,7 @@ class EvaluationEngine:
                     era=era,
                     corr=corr,
                     fnc=fnc,
+                    mmc=mmc,
                     benchmark_corr=benchmark_corr,
                     feature_exposure=feature_exposure,
                     n_rows=era_frame.height,
@@ -165,6 +195,7 @@ class EvaluationEngine:
         *,
         feature_names: tuple[str, ...],
         benchmark_prediction_col: str | None,
+        benchmark_mmc_col: str | None,
     ) -> list[EraMetricRow]:
         metrics: list[EraMetricRow] = []
 
@@ -190,6 +221,18 @@ class EvaluationEngine:
                     benchmark_series.to_numpy(),
                 )
 
+            mmc = None
+            if benchmark_mmc_col is not None:
+                mmc = self._official_mmc(
+                    prediction_frame,
+                    target_series,
+                    pd.Series(
+                        era_frame.get_column(benchmark_mmc_col).to_numpy(),
+                        index=prediction_frame.index,
+                        name=benchmark_mmc_col,
+                    ),
+                )
+
             fnc = None
             feature_exposure = None
             if feature_frame is not None:
@@ -208,6 +251,7 @@ class EvaluationEngine:
                     era=era,
                     corr=corr,
                     fnc=fnc,
+                    mmc=mmc,
                     benchmark_corr=benchmark_corr,
                     feature_exposure=feature_exposure,
                     n_rows=era_frame.height,
@@ -222,6 +266,7 @@ class EvaluationEngine:
 
         corrs = np.asarray([row.corr for row in era_metrics], dtype=np.float64)
         fncs = [row.fnc for row in era_metrics if row.fnc is not None]
+        mmcs = [row.mmc for row in era_metrics if row.mmc is not None]
         benchmark_corrs = [
             row.benchmark_corr for row in era_metrics if row.benchmark_corr is not None
         ]
@@ -236,6 +281,7 @@ class EvaluationEngine:
             sharpe_corr=self.safe_sharpe(corrs, epsilon=self.epsilon),
             max_drawdown_corr=self.compute_max_drawdown(corrs),
             mean_fnc=(float(np.mean(fncs)) if fncs else None),
+            mean_mmc=(float(np.mean(mmcs)) if mmcs else None),
             mean_benchmark_corr=(
                 float(np.mean(benchmark_corrs)) if benchmark_corrs else None
             ),
@@ -255,6 +301,7 @@ class EvaluationEngine:
         max_feature_exposure: float | None = None,
         max_benchmark_corr: float | None = None,
         min_mean_fnc: float | None = None,
+        min_mean_mmc: float | None = None,
     ) -> FastFailGateResult:
         failures: list[str] = []
 
@@ -297,8 +344,139 @@ class EvaluationEngine:
             failures.append(
                 f"mean_fnc {summary.mean_fnc:.6f} is below minimum {min_mean_fnc:.6f}"
             )
+        if (
+            min_mean_mmc is not None
+            and summary.mean_mmc is not None
+            and summary.mean_mmc < min_mean_mmc
+        ):
+            failures.append(
+                f"mean_mmc {summary.mean_mmc:.6f} is below minimum {min_mean_mmc:.6f}"
+            )
 
         return FastFailGateResult(passed=not failures, failures=tuple(failures))
+
+    def optimize_target_weights(
+        self,
+        target_predictions: dict[str, np.ndarray],
+        targets: np.ndarray,
+        eras: Sequence[str],
+        *,
+        initial_weights: Sequence[float] | None = None,
+    ) -> TargetWeightOptimizationResult:
+        if not target_predictions:
+            raise ValueError("target_predictions must be non-empty")
+
+        target_names = tuple(target_predictions)
+        target_values = self._coerce_vector(targets, name="targets")
+        era_values = np.asarray(eras, dtype=str).reshape(-1)
+        self._ensure_matching_lengths(target_values, era_values)
+
+        prediction_frame = pd.DataFrame(
+            {
+                target_name: self._coerce_vector(
+                    target_predictions[target_name],
+                    name=f"target_predictions[{target_name!r}]",
+                )
+                for target_name in target_names
+            }
+        )
+        for column_name in prediction_frame.columns:
+            self._ensure_matching_lengths(
+                prediction_frame[column_name].to_numpy(),
+                target_values,
+            )
+
+        mean_corr_by_target: dict[str, float] = {}
+        sharpe_corr_by_target: dict[str, float] = {}
+        volatility_by_target: dict[str, float] = {}
+        mean_vector: list[float] = []
+        volatility_vector: list[float] = []
+        for target_name in target_names:
+            era_corrs = self._compute_era_corrs(
+                prediction_frame[target_name].to_numpy(),
+                target_values,
+                era_values,
+            )
+            mean_corr = float(np.mean(era_corrs))
+            volatility = float(np.std(era_corrs))
+            sharpe_corr = self.safe_sharpe(era_corrs, epsilon=self.epsilon)
+            mean_corr_by_target[target_name] = mean_corr
+            sharpe_corr_by_target[target_name] = sharpe_corr
+            volatility_by_target[target_name] = volatility
+            mean_vector.append(mean_corr)
+            volatility_vector.append(volatility)
+
+        correlation_matrix = prediction_frame.corr(method="spearman").fillna(0.0)
+        mean_array = np.asarray(mean_vector, dtype=np.float64)
+        volatility_array = np.asarray(volatility_vector, dtype=np.float64)
+        covariance_values = np.outer(
+            volatility_array, volatility_array
+        ) * correlation_matrix.to_numpy(dtype=np.float64)
+        covariance_values = (covariance_values + covariance_values.T) / 2.0
+        covariance_matrix = pd.DataFrame(
+            covariance_values,
+            index=target_names,
+            columns=target_names,
+        )
+
+        if len(target_names) == 1:
+            weights = np.array([1.0], dtype=np.float64)
+        else:
+            if initial_weights is not None and len(initial_weights) != len(
+                target_names
+            ):
+                raise ValueError(
+                    "initial_weights length must match target_predictions length"
+                )
+            starting_weights = self._resolve_initial_weights(
+                initial_weights,
+                mean_array,
+            )
+            optimization = optimize.minimize(
+                self._negative_portfolio_sharpe,
+                x0=starting_weights,
+                args=(mean_array, covariance_values),
+                method="SLSQP",
+                bounds=[(0.0, 1.0)] * len(target_names),
+                constraints=[
+                    {
+                        "type": "eq",
+                        "fun": lambda weights: float(np.sum(weights) - 1.0),
+                    }
+                ],
+                options={"maxiter": 500, "ftol": 1e-12},
+            )
+            if not optimization.success:
+                raise ValueError(
+                    "target weight optimization failed: " f"{optimization.message}"
+                )
+            weights = np.asarray(optimization.x, dtype=np.float64)
+            weights = np.clip(weights, 0.0, None)
+            weights = weights / max(float(weights.sum()), self.epsilon)
+
+        theoretical_mean_corr = float(weights @ mean_array)
+        theoretical_variance = float(weights @ covariance_values @ weights)
+        theoretical_sigma = float(np.sqrt(max(theoretical_variance, self.epsilon)))
+        theoretical_sharpe = theoretical_mean_corr / max(
+            theoretical_sigma,
+            self.epsilon,
+        )
+        target_weights = {
+            target_name: float(weight)
+            for target_name, weight in zip(target_names, weights, strict=True)
+        }
+
+        return TargetWeightOptimizationResult(
+            target_weights=target_weights,
+            mean_corr_by_target=mean_corr_by_target,
+            sharpe_corr_by_target=sharpe_corr_by_target,
+            volatility_by_target=volatility_by_target,
+            prediction_correlation_matrix=correlation_matrix,
+            covariance_matrix=covariance_matrix,
+            theoretical_mean_corr=theoretical_mean_corr,
+            theoretical_sigma=theoretical_sigma,
+            theoretical_sharpe=theoretical_sharpe,
+        )
 
     def numerai_corr(
         self,
@@ -312,9 +490,7 @@ class EvaluationEngine:
         self._ensure_matching_lengths(predictions, target_values)
         gaussianized_predictions = self.rank_to_gaussian(predictions, epsilon=eps)
         return self.tail_correlation(
-            gaussianized_predictions,
-            target_values,
-            epsilon=eps,
+            gaussianized_predictions, target_values, epsilon=eps
         )
 
     def prediction_correlation(
@@ -352,11 +528,7 @@ class EvaluationEngine:
         return self.safe_pearson(prediction_tail, target_tail, epsilon=eps)
 
     @staticmethod
-    def safe_pearson(
-        x: np.ndarray,
-        y: np.ndarray,
-        epsilon: float = 1e-12,
-    ) -> float:
+    def safe_pearson(x: np.ndarray, y: np.ndarray, epsilon: float = 1e-12) -> float:
         left = np.asarray(x, dtype=np.float64).reshape(-1)
         right = np.asarray(y, dtype=np.float64).reshape(-1)
         if left.shape[0] != right.shape[0]:
@@ -492,24 +664,6 @@ class EvaluationEngine:
 
         return cached
 
-    def _validate_frame(
-        self,
-        df: pl.DataFrame,
-        *,
-        feature_columns: Sequence[str] | None,
-        benchmark_prediction_col: str | None,
-    ) -> pl.DataFrame:
-        required = {self.era_col, self.prediction_col, self.target_col}
-        if feature_columns is not None:
-            required.update(feature_columns)
-        if benchmark_prediction_col is not None:
-            required.add(benchmark_prediction_col)
-        missing = sorted(required.difference(df.columns))
-        if missing:
-            missing_columns = ", ".join(missing)
-            raise KeyError(f"Missing required columns: {missing_columns}")
-        return df
-
     def _official_inputs(
         self,
         era_frame: pl.DataFrame,
@@ -586,16 +740,71 @@ class EvaluationEngine:
             return 0.0
         try:
             _, value = official_max_feature_correlation(
-                prediction_series,
-                feature_frame,
+                prediction_series, feature_frame
             )
         except (AssertionError, KeyError, ValueError, ZeroDivisionError):
             return 0.0
         return self._sanitize_metric(float(value))
 
-    @staticmethod
-    def _sanitize_metric(value: float) -> float:
-        return 0.0 if not np.isfinite(value) else float(value)
+    def _official_mmc_from_era_frame(
+        self,
+        era_frame: pl.DataFrame,
+        *,
+        benchmark_mmc_col: str,
+    ) -> float:
+        prediction_frame = pd.DataFrame(
+            {self.prediction_col: era_frame.get_column(self.prediction_col).to_numpy()},
+            index=era_frame.get_column(self.id_col).to_list(),
+        )
+        target_series = pd.Series(
+            era_frame.get_column(self.target_col).to_numpy(),
+            index=prediction_frame.index,
+            name=self.target_col,
+        )
+        benchmark_series = pd.Series(
+            era_frame.get_column(benchmark_mmc_col).to_numpy(),
+            index=prediction_frame.index,
+            name=benchmark_mmc_col,
+        )
+        return self._official_mmc(prediction_frame, target_series, benchmark_series)
+
+    def _official_mmc(
+        self,
+        prediction_frame: pd.DataFrame,
+        target_series: pd.Series,
+        benchmark_series: pd.Series,
+    ) -> float:
+        try:
+            value = float(
+                official_correlation_contribution(
+                    prediction_frame,
+                    benchmark_series,
+                    target_series,
+                ).iloc[0]
+            )
+        except (AssertionError, ValueError, ZeroDivisionError):
+            return 0.0
+        return self._sanitize_metric(value)
+
+    def _validate_frame(
+        self,
+        df: pl.DataFrame,
+        *,
+        feature_columns: Sequence[str] | None,
+        benchmark_prediction_col: str | None,
+        benchmark_mmc_col: str | None,
+    ) -> pl.DataFrame:
+        required = {self.era_col, self.prediction_col, self.target_col}
+        if feature_columns is not None:
+            required.update(feature_columns)
+        if benchmark_prediction_col is not None:
+            required.add(benchmark_prediction_col)
+        if benchmark_mmc_col is not None:
+            required.add(benchmark_mmc_col)
+        missing = sorted(required.difference(df.columns))
+        if missing:
+            raise KeyError(f"Missing required columns: {', '.join(missing)}")
+        return df
 
     @staticmethod
     def _coerce_vector(values: np.ndarray, *, name: str) -> np.ndarray:
@@ -608,3 +817,61 @@ class EvaluationEngine:
     def _ensure_matching_lengths(left: np.ndarray, right: np.ndarray) -> None:
         if left.shape[0] != right.shape[0]:
             raise ValueError("Input vectors must have matching lengths")
+
+    def _compute_era_corrs(
+        self,
+        predictions: np.ndarray,
+        targets: np.ndarray,
+        eras: np.ndarray,
+    ) -> np.ndarray:
+        prediction_values = self._coerce_vector(predictions, name="predictions")
+        target_values = self._coerce_vector(targets, name="targets")
+        era_values = np.asarray(eras, dtype=str).reshape(-1)
+        self._ensure_matching_lengths(prediction_values, target_values)
+        self._ensure_matching_lengths(prediction_values, era_values)
+
+        era_corrs = [
+            self.numerai_corr(
+                prediction_values[era_values == era],
+                target_values[era_values == era],
+                epsilon=self.epsilon,
+            )
+            for era in pd.unique(era_values)
+        ]
+        return np.asarray(era_corrs, dtype=np.float64)
+
+    def _resolve_initial_weights(
+        self,
+        initial_weights: Sequence[float] | None,
+        mean_corrs: np.ndarray,
+    ) -> np.ndarray:
+        if initial_weights is not None:
+            weights = np.asarray(initial_weights, dtype=np.float64)
+        else:
+            positive_means = np.clip(mean_corrs, 0.0, None)
+            if float(positive_means.sum()) > self.epsilon:
+                weights = positive_means / float(positive_means.sum())
+            else:
+                weights = np.full(mean_corrs.shape[0], 1.0 / mean_corrs.shape[0])
+
+        if np.any(weights < 0.0):
+            raise ValueError("initial_weights must be non-negative")
+        weight_sum = float(weights.sum())
+        if weight_sum <= self.epsilon:
+            raise ValueError("initial_weights must sum to a positive value")
+        return weights / weight_sum
+
+    def _negative_portfolio_sharpe(
+        self,
+        weights: np.ndarray,
+        mean_corrs: np.ndarray,
+        covariance_matrix: np.ndarray,
+    ) -> float:
+        portfolio_mean = float(weights @ mean_corrs)
+        portfolio_variance = float(weights @ covariance_matrix @ weights)
+        portfolio_sigma = float(np.sqrt(max(portfolio_variance, self.epsilon)))
+        return -(portfolio_mean / max(portfolio_sigma, self.epsilon))
+
+    @staticmethod
+    def _sanitize_metric(value: float) -> float:
+        return 0.0 if not np.isfinite(value) else float(value)

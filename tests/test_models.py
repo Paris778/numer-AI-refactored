@@ -5,7 +5,7 @@ import polars as pl
 import pytest
 
 from src.features import PurgedEraSplitter
-from src.models import ModelOrchestrator
+from src.models import ModelOrchestrator, WeightedMultiTargetPredictor
 
 
 @pytest.fixture(scope="module")
@@ -33,7 +33,7 @@ def toy_training_frame() -> pl.DataFrame:
 def orchestrator() -> ModelOrchestrator:
     return ModelOrchestrator(
         feature_names=["feature_alpha", "feature_beta", "feature_gamma"],
-        target_column="target",
+        target_columns=["target"],
         model_library="lightgbm",
         prefer_gpu=False,
         early_stopping_rounds=10,
@@ -78,6 +78,7 @@ def test_cross_validation_returns_oof_predictions(
     assert len(result.fold_results) == 3
     assert result.oof_predictions.shape[0] == toy_training_frame.height
     assert np.isfinite(result.oof_predictions).all()
+    assert result.predictor.model_count == 3
 
 
 def test_anchor_and_cv_modes_produce_different_prediction_surfaces(
@@ -102,3 +103,82 @@ def test_anchor_and_cv_modes_produce_different_prediction_surfaces(
     assert cv_result.total_fit_seconds > 0.0
     assert anchor_result.fit_seconds > 0.0
     assert not np.allclose(anchor_result.validation_predictions, ensemble_predictions)
+
+
+def test_rank_average_predictions_matches_percentile_rank_ensemble(
+    orchestrator: ModelOrchestrator,
+) -> None:
+    pred_a = np.array([0.1, 0.2, 0.8, 0.9], dtype=np.float64)
+    pred_b = np.array([10.0, 20.0, 80.0, 90.0], dtype=np.float64)
+
+    averaged = orchestrator.rank_average_predictions([pred_a, pred_b])
+
+    expected = np.array([0.25, 0.5, 0.75, 1.0], dtype=np.float64)
+    assert np.allclose(averaged, expected)
+
+
+def test_multi_target_predictor_trains_and_predicts(
+    toy_training_frame: pl.DataFrame,
+) -> None:
+    enriched = toy_training_frame.with_columns(
+        (0.7 * pl.col("target") + 0.1).alias("target_aux")
+    )
+    orchestrator = ModelOrchestrator(
+        feature_names=["feature_alpha", "feature_beta", "feature_gamma"],
+        target_columns=["target", "target_aux"],
+        model_library="lightgbm",
+        prefer_gpu=False,
+        early_stopping_rounds=10,
+        model_params={
+            "n_estimators": 40,
+            "learning_rate": 0.1,
+            "num_leaves": 15,
+            "min_child_samples": 5,
+        },
+    )
+
+    result = orchestrator.train_cross_validation(
+        enriched,
+        PurgedEraSplitter(n_splits=3, purge_buffer=1),
+    )
+    prediction_frame = enriched.select(
+        ["id", "feature_alpha", "feature_beta", "feature_gamma"]
+    ).to_pandas()
+    predictions = result.predictor.predict(prediction_frame)
+
+    assert result.model_count == 6
+    assert predictions.shape[0] == enriched.height
+    assert np.isfinite(predictions).all()
+
+
+def test_weighted_multi_target_predictor_applies_target_weights() -> None:
+    class StubModel:
+        def __init__(self, outputs: list[float]) -> None:
+            self._outputs = np.asarray(outputs, dtype=np.float64)
+
+        def predict(self, frame):
+            return self._outputs
+
+    feature_frame = pl.DataFrame({"feature_alpha": [0.0, 1.0, 2.0, 3.0]}).to_pandas()
+    predictor = WeightedMultiTargetPredictor(
+        feature_names=("feature_alpha",),
+        target_models={
+            "target_ender_20": (StubModel([0.1, 0.2, 0.8, 0.9]),),
+            "target_xerxes_20": (StubModel([0.9, 0.7, 0.3, 0.1]),),
+        },
+        target_weights={
+            "target_ender_20": 0.8,
+            "target_xerxes_20": 0.2,
+        },
+    )
+
+    predictions = predictor.predict(feature_frame)
+    expected = ModelOrchestrator.weighted_rank_average_predictions(
+        [
+            np.array([0.1, 0.2, 0.8, 0.9], dtype=np.float64),
+            np.array([0.9, 0.7, 0.3, 0.1], dtype=np.float64),
+        ],
+        [0.8, 0.2],
+    )
+
+    assert np.allclose(predictions, expected)

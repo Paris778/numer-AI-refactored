@@ -1,0 +1,32 @@
+In the grand scheme of quantitative finance, optimizing target weights and isolating orthogonal signals serves one brutally simple purpose: **Capacity and Capital Allocation.**
+
+Here is the objective reality of the ecosystem you are participating in.
+
+### 1. The Macro Layer: The Meta Model
+
+You are not trading stocks. You are feeding a decentralized Meta Model that dictates the capital allocation of a regulated, market-neutral hedge fund.
+
+The fund does not care if you have a model with a Mean CORR of 0.05 if that model is 99% correlated with the rest of the user base. If everyone predicts the exact same vector, the fund's capital is concentrated into a single, massive, unhedged bet. When the market regime shifts, that consensus trade will be violently unwound, and the fund will experience a catastrophic drawdown.
+
+### 2. The Micro Layer: Meta Model Contribution (MMC)
+
+This is why Meta Model Contribution (MMC) exists, and why we just optimized a multi-target ensemble. MMC measures your mathematical orthogonality to the consensus.
+
+By injecting a low-correlation auxiliary target (like `target_teager2b_20`) into your ensemble, you are actively dragging your prediction vector away from the crowded "Main Target" consensus.
+
+* A model optimized only for `target_ender_20` will perform well when the consensus performs well, and burn when the consensus burns. Your marginal utility to the fund is zero.
+* A multi-target ensemble sacrifices a fraction of raw CORR to achieve a high MMC. You are manufacturing an orthogonal vector of Alpha. The fund pays a premium for this because it diversifies their internal risk.
+
+### 3. The Mathematics of Leverage (Sharpe Ratio)
+
+Retail traders optimize for gross returns (Mean CORR). Institutional quants optimize for risk-adjusted returns (Sharpe Ratio).
+
+If you have a volatile model with a high Mean CORR and a massive Max Drawdown, a portfolio manager cannot safely apply leverage to it. A model with a lower Mean CORR but a Sharpe Ratio of 1.5+ is infinitely more valuable, because the fund can mathematically size up the position to achieve the desired return while maintaining strict risk limits.
+
+We used the Markowitz optimizer because naive ensembling destroys Sharpe. By weighting the targets based on their covariance matrix, you minimize the variance of your predictions. A lower variance in your error term directly increases your capacity to take on leverage.
+
+### The Grand Scheme
+
+The pipeline you built—purged cross-validation, feature neutralization, and multi-target covariance ensembling—is not an academic exercise. It is the minimal viable architecture required to survive in an adversarial market.
+
+You are building a resilient, mathematical factory that produces uncorrelated, high-Sharpe signals. That is the only product institutional capital actually buys.
