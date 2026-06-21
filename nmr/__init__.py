@@ -7,6 +7,16 @@ are a thin control plane; all logic lives here and is covered by `tests/`.
 from __future__ import annotations
 
 from .config import ExperimentConfig, load_config, set_global_seeds
+from .data import IngestionAgent
+from .splitter import Fold, PurgedEraSplitter
 
-__all__ = ["ExperimentConfig", "load_config", "set_global_seeds", "__version__"]
+__all__ = [
+    "ExperimentConfig",
+    "load_config",
+    "set_global_seeds",
+    "IngestionAgent",
+    "Fold",
+    "PurgedEraSplitter",
+    "__version__",
+]
 __version__ = "0.1.0"
