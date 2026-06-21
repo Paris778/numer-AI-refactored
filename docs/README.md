@@ -21,6 +21,7 @@ Read in this order:
 11. `02-strategy/community-wisdom.md`
 12. `03-reference/numerapi.md` and `03-reference/numerai-tools.md`
 13. `04-research/research-program.md` (optional but high value)
+14. `06-evaluation/evaluation-suite-bible.md` (how this repo *judges* a model — the evaluation spec of record)
 
 If you only have 15 minutes, read sections 2 and 3 below, then read items 1-8 above.
 
@@ -154,6 +155,7 @@ Interpretation for this repository:
 | `04-research/advanced-ideas.md` | T3 | Experimental ideas backlog | `llm_reports/perplexity_deep_research_ideas.md` |
 | `04-research/neural-networks.md` | T3 | NN-specific advanced exploration | `llm_reports/perplexity_deep_research_NN.md` |
 | `05-notebooks/*` | T1 | Executable onboarding and examples | `onboarding_notebooks/` + `community_models_and_notebooks/` |
+| `06-evaluation/evaluation-suite-bible.md` | T0 | Evaluation suite spec of record (metrics, math, build slices E1–E6) | this build |
 | `99-archive/*` | T4 | Peripheral or low-priority context | archive sources |
 
 ## 6) Provenance And Merge Policy
