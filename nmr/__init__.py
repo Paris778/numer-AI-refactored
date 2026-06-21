@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from .config import ExperimentConfig, load_config, set_global_seeds
 from .data import IngestionAgent
+from .evaluation import EvaluationEngine, MetricSummary
+from .risk import NeutralizationEngine
 from .splitter import Fold, PurgedEraSplitter
 
 __all__ = [
@@ -15,6 +17,9 @@ __all__ = [
     "load_config",
     "set_global_seeds",
     "IngestionAgent",
+    "MetricSummary",
+    "EvaluationEngine",
+    "NeutralizationEngine",
     "Fold",
     "PurgedEraSplitter",
     "__version__",
