@@ -108,9 +108,11 @@ Given a per-era series $x = (x_1, \dots, x_n)$, a statistic $\theta = g(x)$ (e.g
 2. For each replicate $b$: draw $\lceil n/\ell \rceil$ blocks uniformly with replacement, concatenate, truncate to length $n$, compute $\theta^{*}_b = g(\cdot)$.
 3. CI = empirical percentiles $[\,\theta^{*}_{(\alpha/2)},\ \theta^{*}_{(1-\alpha/2)}\,]$.
 
+- **Row-resampling over an aligned matrix (hard API constraint).** Resampling is over the **era axis** of a 1-D *or* 2-D array (rows = eras). The same drawn block indices are applied to **every column together**, so multi-series, era-aligned statistics resample coherently. This is mandatory so a **conditional** statistic — e.g. the tail-conditional book correlation (§7.4) — can recompute its own mask **inside** `stat_fn` on each contiguous resampled replicate. Pre-slicing a non-contiguous conditional subset before bootstrapping is forbidden.
+
 - **Block length — heuristic *then* a mandatory horizon-floor clamp.** Start from $\ell \approx n^{1/3}$ (rounded) as a *suggestion only*, then **clamp to the physical overlap floor**: $\ell \ge 5$ for **20D** targets, $\ell \ge 13$ for **60D** targets. The per-era series inherits its autocorrelation from target overlap (20D windows span ~4 eras, 60D windows span ~12 eras). A block shorter than the overlap slices through a single target's return window and *destroys* the dependence the bootstrap exists to preserve, understating the CI. **The floor always wins over the heuristic.** (At $n=574$ the bare heuristic gives $\ell\approx8$, which is silently too short for 60D — hence the clamp. The 8/16 purge convention may be used as an even more conservative floor.)
 - **Seeded:** the same `seed` ⇒ the same draws ⇒ the same CI, across processes.
-- **Signature:** `block_bootstrap_ci(series, stat_fn, *, block_len, n_boot, seed, alpha=0.05) -> (point, lo, hi)`. `block_len` must be resolved through the horizon-floor clamp before use; the horizon of the target under test is a required input to that resolution.
+- **Signature:** `block_bootstrap_ci(data, stat_fn, *, block_len, n_boot, seed, alpha=0.05) -> (point, lo, hi)` where `data` is era-indexed 1-D or 2-D (rows = eras). `block_len` must be resolved through the horizon-floor clamp before use; the horizon of the target under test is a required input to that resolution.
 
 ### 4.2 Autocorrelation-adjusted Sharpe (Lo, 2002)
 
@@ -281,6 +283,11 @@ Does this candidate actually diversify our **existing staked book**, or is it a 
 - **$\rho_{\text{global}}$:** correlation of candidate vs book per-era scores over all eras.
 - **$\rho_{\text{tail}}$:** correlation conditioned on the eras where the **book's own** per-era score is in its worst decile (~57 of 574 eras).
 - **spread** $= \rho_{\text{tail}} - \rho_{\text{global}}$, reported **with a block-bootstrap CI** (§4.1) because the conditioning set is small.
+- **Tail-conditional bootstrap — mandatory procedure (do not pre-slice).** The worst-decile eras are **non-contiguous** — scattered drawdown clusters across the 574-era horizon. Slicing them into an isolated ~57-era vector and block-bootstrapping *that* is **wrong**: it forces blocks across eras that were years apart (manufacturing fake serial dependence) and erases the real temporal clustering of drawdowns. The **only** correct procedure:
+  1. Block-bootstrap the **full, contiguous, era-aligned joint series** of candidate **and** book *together* (circular blocks over all $n$ eras), so each replicate preserves true regime serial correlation.
+  2. **Inside** the bootstrap's `stat_fn`, recompute the worst-decile threshold on the **resampled book path** for that replicate.
+  3. Mask both resampled series to those indices and compute $\rho_{\text{tail}}$ (and the spread) on the masked subset.
+  This lets the conditional mask vary naturally with the resampled path and propagates the uncertainty in *which* eras are in the tail. It requires E1's `block_bootstrap_ci` to resample **rows of an aligned matrix** (not a single 1-D vector) and to pass the resampled block to a caller-supplied `stat_fn` — a hard E1 API constraint (§4.1).
 - A significantly **negative** spread is the tail-hedge signal: the candidate decouples exactly when the book bleeds. **This is a flagged diagnostic, not a hard threshold** — vetoing on $\rho_{\text{global}}$ alone would discard genuine crash-hedges.
 - Also report `max` and `mean` pairwise cross-sectional prediction rank correlation for plain redundancy, clearly labeled as a *separate* quantity.
 
@@ -414,7 +421,7 @@ Same workflow as the S0–S10 build: the spec is fixed here, an engineer impleme
 
 - **Files:** `nmr/scorecard.py` (`book_correlation`) + integration into the S11 `BenchmarkSuite`, optionally `ExperimentRunner` / `RunRegistry` (scorecard into `run.json`).
 - **Surface:** `book_correlation(candidate_oof, book_oofs, *, primary_book_scores, seed)` → $(\rho_{\text{global}}, \rho_{\text{tail}}, \text{spread})$ with CI (§7.4), plus labeled cross-sectional redundancy `max`/`mean`; every benchmark baseline emits the full scorecard.
-- **Gates (hardest):** **null baselines floor on every metric** including the new ones (constant-0.5, uniform-random, gaussian-random ⇒ CORR≈0, payout≈0, FNC≈0, well-defined rank stability); tail-orthogonality correctness; benchmark ladder emits Tier-1 + Tier-2 for all; end-to-end determinism.
+- **Gates (hardest):** **null baselines floor on every metric** including the new ones (constant-0.5, uniform-random, gaussian-random ⇒ CORR≈0, payout≈0, FNC≈0, well-defined rank stability); **tail-conditional bootstrap correctness** — the worst-decile mask is recomputed *inside* `stat_fn` on the contiguous resampled joint series, never pre-sliced (§7.4); benchmark ladder emits Tier-1 + Tier-2 for all; end-to-end determinism.
 
 ---
 
