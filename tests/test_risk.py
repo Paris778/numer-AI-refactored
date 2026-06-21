@@ -119,19 +119,45 @@ def test_cache_hit_avoids_recompute(tmp_path, monkeypatch: pytest.MonkeyPatch) -
     df = _risk_frame().filter(pl.col("era") == "1")
     engine = NeutralizationEngine(cache_dir=tmp_path)
     call_count = 0
-    original = np.linalg.lstsq
+    original = np.linalg.pinv
 
-    def tracking_lstsq(*args, **kwargs):
+    def tracking_pinv(*args, **kwargs):
         nonlocal call_count
         call_count += 1
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(np.linalg, "lstsq", tracking_lstsq)
+    monkeypatch.setattr(np.linalg, "pinv", tracking_pinv)
+
+    shifted_df = df.with_columns((pl.col("pred") * 1.7 + 3.0).alias("pred"))
 
     engine.neutralize(df, pred_col="pred", feature_cols=["f1", "f2"], proportion=1.0)
     engine.neutralize(df, pred_col="pred", feature_cols=["f1", "f2"], proportion=0.25)
+    engine.neutralize(
+        shifted_df, pred_col="pred", feature_cols=["f1", "f2"], proportion=1.0
+    )
 
     assert call_count == 1
+
+
+def test_cache_hit_reuses_same_pinv_for_different_predictions(tmp_path) -> None:
+    df = _risk_frame().filter(pl.col("era") == "1")
+    second_pred_df = df.with_columns(
+        (pl.col("pred") * -0.4 + 2.5 * pl.col("f1") + 0.7).alias("pred")
+    )
+    engine = NeutralizationEngine(cache_dir=tmp_path)
+
+    first = engine.neutralize(
+        df, pred_col="pred", feature_cols=["f1", "f2"], proportion=1.0
+    )
+    second = engine.neutralize(
+        second_pred_df, pred_col="pred", feature_cols=["f1", "f2"], proportion=1.0
+    )
+
+    assert not np.allclose(
+        first.get_column("pred").to_numpy(),
+        second.get_column("pred").to_numpy(),
+        atol=1e-12,
+    )
 
 
 def test_cache_validation_recomputes_on_mismatched_ids(
@@ -143,14 +169,14 @@ def test_cache_validation_recomputes_on_mismatched_ids(
     )
     engine = NeutralizationEngine(cache_dir=tmp_path)
     call_count = 0
-    original = np.linalg.lstsq
+    original = np.linalg.pinv
 
-    def tracking_lstsq(*args, **kwargs):
+    def tracking_pinv(*args, **kwargs):
         nonlocal call_count
         call_count += 1
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(np.linalg, "lstsq", tracking_lstsq)
+    monkeypatch.setattr(np.linalg, "pinv", tracking_pinv)
 
     engine.neutralize(df, pred_col="pred", feature_cols=["f1", "f2"], proportion=1.0)
     engine.neutralize(
@@ -170,14 +196,14 @@ def test_cache_validation_recomputes_on_mismatched_features(
     )
     engine = NeutralizationEngine(cache_dir=tmp_path)
     call_count = 0
-    original = np.linalg.lstsq
+    original = np.linalg.pinv
 
-    def tracking_lstsq(*args, **kwargs):
+    def tracking_pinv(*args, **kwargs):
         nonlocal call_count
         call_count += 1
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(np.linalg, "lstsq", tracking_lstsq)
+    monkeypatch.setattr(np.linalg, "pinv", tracking_pinv)
 
     engine.neutralize(df, pred_col="pred", feature_cols=["f1", "f2"], proportion=1.0)
     engine.neutralize(df, pred_col="pred", feature_cols=["f1", "f3"], proportion=1.0)

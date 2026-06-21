@@ -9,6 +9,7 @@ from __future__ import annotations
 from .config import ExperimentConfig, load_config, set_global_seeds
 from .data import IngestionAgent
 from .evaluation import EvaluationEngine, MetricSummary
+from .models import CVResult, ModelOrchestrator
 from .risk import NeutralizationEngine
 from .splitter import Fold, PurgedEraSplitter
 
@@ -17,6 +18,8 @@ __all__ = [
     "load_config",
     "set_global_seeds",
     "IngestionAgent",
+    "CVResult",
+    "ModelOrchestrator",
     "MetricSummary",
     "EvaluationEngine",
     "NeutralizationEngine",

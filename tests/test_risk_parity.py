@@ -83,6 +83,32 @@ def test_custom_matches_oracle_on_synthetic_multi_era(tmp_path) -> None:
     assert np.allclose(actual, expected, atol=NEUTRALIZE_ATOL, rtol=0.0, equal_nan=True)
 
 
+def test_cached_reuse_across_predictions_matches_fresh_oracle(tmp_path) -> None:
+    df_a = _synthetic_parity_frame().filter(pl.col("era") == "1")
+    df_b = df_a.with_columns(
+        (
+            (-0.35 * pl.col("pred")) + (1.1 * pl.col("f1")) - (0.6 * pl.col("f2")) + 0.4
+        ).alias("pred")
+    )
+    feature_cols = ["f1", "f2", "f3"]
+    engine = NeutralizationEngine(cache_dir=tmp_path)
+
+    engine.neutralize(df_a, pred_col="pred", feature_cols=feature_cols, proportion=1.0)
+    cached_b = engine.neutralize(
+        df_b, pred_col="pred", feature_cols=feature_cols, proportion=1.0
+    )
+
+    actual = cached_b.sort(["era", "id"]).get_column("pred").to_numpy()
+    expected = _oracle_per_era(df_b, pred_col="pred", feature_cols=feature_cols)
+
+    _assert_non_vacuous(
+        pred_before=df_b.sort(["era", "id"]).get_column("pred").to_numpy(),
+        pred_after=actual,
+        expected_rows=df_b.height,
+    )
+    assert np.allclose(actual, expected, atol=NEUTRALIZE_ATOL, rtol=0.0, equal_nan=True)
+
+
 _REAL_VALIDATION = Path("data/v5.2/validation.parquet")
 _REAL_FEATURES = Path("data/v5.2/features.json")
 

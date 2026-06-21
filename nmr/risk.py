@@ -2,7 +2,8 @@
 
 `NeutralizationEngine` applies Numerai-style linear feature neutralization to a
 prediction column on a per-era basis. The expensive least-squares coefficients
-are cached per era/content signature so repeated sweeps can reuse solves safely.
+are cached via the per-era pseudo-inverse of the design matrix so repeated
+sweeps can reuse solves safely across different prediction vectors.
 """
 
 from __future__ import annotations
@@ -96,52 +97,50 @@ class NeutralizationEngine:
             return np.full_like(pred, np.nan, dtype=float)
 
         design = self._design_matrix(features)
-        coeffs = self._load_or_compute_coefficients(
+        pseudo_inverse = self._load_or_compute_pseudo_inverse(
             era_df,
             era_label=era_label,
             feature_cols=feature_cols,
             design=design,
-            pred=pred,
         )
+        coeffs = pseudo_inverse.dot(pred)
         adjustment = design.dot(coeffs)
         return pred - (proportion * adjustment)
 
-    def _load_or_compute_coefficients(
+    def _load_or_compute_pseudo_inverse(
         self,
         era_df: pl.DataFrame,
         *,
         era_label: str,
         feature_cols: Sequence[str],
         design: np.ndarray,
-        pred: np.ndarray,
     ) -> np.ndarray:
         metadata = self._cache_metadata(
             era_df,
             era_label=era_label,
             feature_cols=feature_cols,
         )
-        coeffs_path, metadata_path = self._cache_paths(metadata)
+        pseudo_inverse_path, metadata_path = self._cache_paths(metadata)
 
-        cached = self._load_cached_coefficients(
-            coeffs_path,
+        cached = self._load_cached_array(
+            pseudo_inverse_path,
             metadata_path,
             expected_metadata=metadata,
         )
         if cached is not None:
             return cached
 
-        coeffs = self._solve_least_squares(design, pred)
-        self._store_cached_coefficients(
-            coeffs_path,
+        pseudo_inverse = self._compute_pseudo_inverse(design)
+        self._store_cached_array(
+            pseudo_inverse_path,
             metadata_path,
             metadata=metadata,
-            coeffs=coeffs,
+            array=pseudo_inverse,
         )
-        return coeffs
+        return pseudo_inverse
 
-    def _solve_least_squares(self, design: np.ndarray, pred: np.ndarray) -> np.ndarray:
-        coeffs = np.linalg.lstsq(design, pred.reshape(-1, 1), rcond=1e-6)[0]
-        return np.asarray(coeffs).reshape(-1)
+    def _compute_pseudo_inverse(self, design: np.ndarray) -> np.ndarray:
+        return np.asarray(np.linalg.pinv(design, rcond=1e-6), dtype=float)
 
     def _design_matrix(self, features: np.ndarray) -> np.ndarray:
         intercept = np.ones((features.shape[0], 1), dtype=float)
@@ -190,14 +189,14 @@ class NeutralizationEngine:
         base = self._cache_dir / f"era_{era_label}_{cache_key}"
         return base.with_suffix(".npy"), base.with_suffix(".json")
 
-    def _load_cached_coefficients(
+    def _load_cached_array(
         self,
-        coeffs_path: Path,
+        array_path: Path,
         metadata_path: Path,
         *,
         expected_metadata: dict[str, object],
     ) -> np.ndarray | None:
-        if not coeffs_path.exists() or not metadata_path.exists():
+        if not array_path.exists() or not metadata_path.exists():
             return None
 
         try:
@@ -209,21 +208,21 @@ class NeutralizationEngine:
             return None
 
         try:
-            coeffs = np.load(coeffs_path)
+            array = np.load(array_path)
         except OSError:
             return None
-        return np.asarray(coeffs, dtype=float).reshape(-1)
+        return np.asarray(array, dtype=float)
 
-    def _store_cached_coefficients(
+    def _store_cached_array(
         self,
-        coeffs_path: Path,
+        array_path: Path,
         metadata_path: Path,
         *,
         metadata: dict[str, object],
-        coeffs: np.ndarray,
+        array: np.ndarray,
     ) -> None:
         self._cache_dir.mkdir(parents=True, exist_ok=True)
-        np.save(coeffs_path, np.asarray(coeffs, dtype=float))
+        np.save(array_path, np.asarray(array, dtype=float))
         metadata_path.write_text(
             json.dumps(metadata, sort_keys=True, indent=2),
             encoding="utf-8",
