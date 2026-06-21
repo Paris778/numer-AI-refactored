@@ -52,7 +52,7 @@ Your payout is a primarily a function of your scores. If you have a positive sco
 The maximum payout or burn per round is capped at ±5% and uses the following formula:
 
 ```
-payout = stake * clip(payout_factor * (corr * 0.5 + mmc * 2), -0.05, 0.05) 
+payout = stake * clip(payout_factor * (corr * 0.75 + mmc * 2.25), -0.05, 0.05) 
 ```
 Updated formula : 0.75corr + 2.25mmc
 
