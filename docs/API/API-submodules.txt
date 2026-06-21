@@ -1,0 +1,72 @@
+numerapi package
+Submodules
+numerapi.base_api module
+Api
+Api.check_new_round
+Api.check_round_open
+Api.diagnostics
+Api.download_dataset
+Api.download_submission
+Api.get_account
+Api.get_account_leaderboard
+Api.get_account_transactions
+Api.get_current_round
+Api.get_models
+Api.intra_round_scores
+Api.list_datasets
+Api.model_upload
+Api.model_upload_data_versions
+Api.model_upload_docker_images
+Api.modelid_to_modelname
+Api.models_of_account
+Api.pipeline_status
+Api.raw_query
+Api.round_model_performances
+Api.round_model_performances_v2
+Api.set_bio
+Api.set_global_data_dir
+Api.set_link
+Api.set_submission_webhook
+Api.stake_change
+Api.stake_decrease
+Api.stake_drain
+Api.stake_increase
+Api.submission_ids
+Api.upload_diagnostics
+Api.wallet_transactions
+numerapi.cli module
+CommonJSONEncoder
+CommonJSONEncoder.default
+prettify
+numerapi.numerapi module
+NumerAPI
+NumerAPI.daily_model_performances
+NumerAPI.daily_user_performances
+NumerAPI.get_competitions
+NumerAPI.get_leaderboard
+NumerAPI.get_submission_filenames
+NumerAPI.get_user
+NumerAPI.public_user_profile
+NumerAPI.stake_get
+NumerAPI.stake_set
+NumerAPI.submission_status
+NumerAPI.upload_predictions
+numerapi.signalsapi module
+SignalsAPI
+SignalsAPI.daily_model_performances
+SignalsAPI.download_validation_data
+SignalsAPI.get_leaderboard
+SignalsAPI.public_user_profile
+SignalsAPI.stake_get
+SignalsAPI.submission_status
+SignalsAPI.ticker_universe
+SignalsAPI.upload_predictions
+numerapi.utils module
+download_file
+is_valid_uuid
+parse_datetime_string
+parse_float_string
+post_with_err_handling
+replace
+Module contents¶
+Numerai Python API

@@ -1,0 +1,72 @@
+# Numerai Architecture Overview
+
+This document provides a structured, high-level technical summary of the Numerai ecosystem, designed for LLM consumption and quick reference.
+
+---
+
+## 1. Core Architecture: The Numerai Triangle
+
+Numerai operates through three interdependent components: the **Hedge Fund**, the **User Models**, and the **Rewards/Staking System**.
+
+### A. The Hedge Fund (HF)
+
+* **Nature:** A traditional, regulated quantitative hedge fund (USA-based).
+* **Strategy:** Market neutral (aims for profit regardless of market direction by balancing long and short positions).
+* **Operational Role:** The HF executes trades in global stock markets based on the **Meta Model** (the aggregate of user predictions).
+* **Data Disclosure:** Performance data and specific holdings are generally private/non-disclosed due to SEC regulations.
+
+### B. User Models (The AI Layer)
+
+Numerai crowdsources stock market predictions (signals) from global data scientists to replace a traditional in-house "army of quants."
+
+* **The Meta Model:** An ensemble model created by combining all staked user submissions. The Hedge Fund’s capital is controlled by this aggregate signal.
+* **Participation Tracks:**
+* **Numerai Tournament (Classic):** Users receive obfuscated, regularized data. You do not know which features or stocks you are modeling (Black Box). This prevents data licensing issues and forces a pure machine learning approach over financial domain knowledge.
+* **Numerai Signals:** For advanced users who bring their own data. Users submit predictions for known stock tickers.
+
+
+* **Model Requirements:** * Models must **rank** stocks relatively rather than predicting absolute prices.
+* Predictions are submitted weekly.
+* Numerai never sees your code/model; they only receive the numerical output (predictions).
+
+
+
+### C. Rewards & Staking (The Crypto Layer)
+
+The incentive mechanism ensures "skin in the game" to prevent bad actors and identify high-confidence signals.
+
+* **Numeraire (NMR):** An ERC-20 token on the Ethereum blockchain used for staking.
+* **Staking Mechanism:**
+* **Optional:** Users can submit models without staking to learn/test. Unstaked models do not earn rewards or influence the Meta Model.
+* **Skin in the Game:** To earn rewards, users lock NMR to their model.
+* **The "Burn":** If a model's correlation with the target is negative (poor performance), a portion of the staked NMR is **destroyed** (erased from the blockchain).
+* **The "Earn":** If a model's correlation is positive, the user earns additional NMR.
+
+
+* **Erasure Protocol:** The decentralized smart contract framework that handles the locking and destruction of NMR.
+* **Key Distinction:** When NMR is burned, it is not "taken" by Numerai; it is permanently removed from the total supply.
+
+---
+
+## 2. Technical Concepts for Data Scientists
+
+| Concept | Description |
+| --- | --- |
+| **Obfuscated Data** | Feature names and stock identities are hidden. Models must find patterns in the abstract math. |
+| **Eras** | Data is organized into temporal blocks. While rows are independent, they belong to specific time periods. |
+| **Correlation (Corr)** | The primary scoring metric. Measures how well your predicted rankings align with actual market outcomes. |
+| **MMC (Meta Model Contribution)** | An optional score measuring how much value your model adds to the Meta Model ensemble relative to other users. |
+| **Stake-Weighting** | The Meta Model gives more weight to users who have staked more NMR, assuming stake size correlates with user confidence. |
+
+---
+
+## 3. Workflow Summary
+
+1. **Download:** Access the obfuscated dataset from the Tournament page.
+2. **Train:** Build a machine learning model (Regression/Ranking) to predict the target.
+3. **Submit:** Upload predictions to the Numerai API/Website.
+4. **Stake:** (Optional) Lock NMR to the model.
+5. **Score:** Wait for real-world market results (scoring happens over several weeks).
+6. **Payout:** Receive NMR rewards or suffer a "burn" based on correlation performance.
+
+---
