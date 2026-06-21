@@ -21,7 +21,8 @@ from dataclasses import dataclass
 
 import numpy as np
 import polars as pl
-from scipy import stats
+
+from nmr._transforms import power_1_5, rank_gaussianize
 
 __all__ = ["MetricSummary", "EvaluationEngine"]
 
@@ -272,8 +273,8 @@ class EvaluationEngine:
         return float(feature_neutral_corr(preds, features, target)[pred_col])
 
     def _custom_corr(self, pred: np.ndarray, target: np.ndarray) -> float:
-        transformed_pred = self._pow_1_5(self._gaussianize(self._tie_kept_rank(pred)))
-        transformed_target = self._pow_1_5(target - np.mean(target))
+        transformed_pred = power_1_5(rank_gaussianize(pred))
+        transformed_target = power_1_5(target - np.mean(target))
         return self._pearson_corr(transformed_pred, transformed_target)
 
     def _custom_mmc(
@@ -282,8 +283,8 @@ class EvaluationEngine:
         meta: np.ndarray,
         target: np.ndarray,
     ) -> float:
-        ranked_pred = self._gaussianize(self._tie_kept_rank(pred))
-        ranked_meta = self._gaussianize(self._tie_kept_rank(meta))
+        ranked_pred = rank_gaussianize(pred)
+        ranked_meta = rank_gaussianize(meta)
         denominator = float(ranked_meta @ ranked_meta)
         if denominator == 0.0:
             return 0.0
@@ -306,7 +307,7 @@ class EvaluationEngine:
         features: np.ndarray,
         target: np.ndarray,
     ) -> float:
-        ranked_pred = self._gaussianize(self._tie_kept_rank(pred)).reshape(-1, 1)
+        ranked_pred = rank_gaussianize(pred).reshape(-1, 1)
         neutralizers = np.hstack([features, np.ones((len(features), 1), dtype=float)])
         least_squares = np.linalg.lstsq(neutralizers, ranked_pred, rcond=1e-6)[0]
         neutral_pred = ranked_pred - neutralizers.dot(least_squares)
@@ -348,15 +349,6 @@ class EvaluationEngine:
                 ) from exc
             numeric_to_label.setdefault(numeric_label, label)
         return [numeric_to_label[num] for num in sorted(numeric_to_label)]
-
-    def _tie_kept_rank(self, values: np.ndarray) -> np.ndarray:
-        return (stats.rankdata(values, method="average") - 0.5) / len(values)
-
-    def _gaussianize(self, values: np.ndarray) -> np.ndarray:
-        return stats.norm.ppf(values)
-
-    def _pow_1_5(self, values: np.ndarray) -> np.ndarray:
-        return np.sign(values) * np.abs(values) ** 1.5
 
     def _pearson_corr(self, left: np.ndarray, right: np.ndarray) -> float:
         left_centered = left - np.mean(left)
