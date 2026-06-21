@@ -22,6 +22,19 @@ from .inference import (
     resolve_block_len,
 )
 from .models import CVResult, ModelOrchestrator
+from .payout import (
+    PayoutResult,
+    PayoutSeries,
+    burn_rate,
+    calmar,
+    cvar,
+    max_burn_streak,
+    max_drawdown,
+    payout_report,
+    payout_series,
+    sortino,
+    time_to_recovery,
+)
 from .registry import RunRegistry
 from .research import (
     HyperparameterSweep,
@@ -56,6 +69,17 @@ __all__ = [
     "block_bootstrap_ci",
     "ac_adjusted_sharpe",
     "deflated_sharpe",
+    "PayoutSeries",
+    "PayoutResult",
+    "payout_series",
+    "payout_report",
+    "burn_rate",
+    "cvar",
+    "sortino",
+    "max_drawdown",
+    "calmar",
+    "max_burn_streak",
+    "time_to_recovery",
     "NeutralizationEngine",
     "RunResult",
     "ExperimentRunner",
