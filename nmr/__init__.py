@@ -11,6 +11,16 @@ from .data import IngestionAgent
 from .deployment import DeploymentArtifact, load_predict, serialize_predict
 from .ensemble import Ensembler
 from .evaluation import EvaluationEngine, MetricSummary
+from .inference import (
+    BootstrapCI,
+    SeriesStats,
+    ac_adjusted_sharpe,
+    block_bootstrap_ci,
+    deflated_sharpe,
+    era_series_stats,
+    resolve_bandwidth,
+    resolve_block_len,
+)
 from .models import CVResult, ModelOrchestrator
 from .registry import RunRegistry
 from .research import (
@@ -38,6 +48,14 @@ __all__ = [
     "ModelOrchestrator",
     "MetricSummary",
     "EvaluationEngine",
+    "SeriesStats",
+    "BootstrapCI",
+    "era_series_stats",
+    "resolve_block_len",
+    "resolve_bandwidth",
+    "block_bootstrap_ci",
+    "ac_adjusted_sharpe",
+    "deflated_sharpe",
     "NeutralizationEngine",
     "RunResult",
     "ExperimentRunner",
