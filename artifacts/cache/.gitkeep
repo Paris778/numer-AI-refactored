@@ -1,0 +1,2 @@
+# Keeps the artifacts directory tree in version control while its generated
+# contents (caches, run outputs, deployment bundles) stay git-ignored.

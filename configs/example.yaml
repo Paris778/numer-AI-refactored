@@ -1,0 +1,30 @@
+# Example experiment configuration for the `nmr` framework.
+#
+# Every field is optional; omitted fields fall back to the typed defaults in
+# `nmr/config.py`. Unknown keys or invalid values fail fast at load time.
+
+run:
+  name: baseline-lgbm-small
+  seed: 42
+
+data:
+  version: v5.2
+  feature_set: small        # small | medium | all
+  targets:
+    - target
+
+split:
+  scheme: walk_forward      # walk_forward | anchor
+  purge_eras: 8             # 20D targets; use 16 for 60D
+  embargo_eras: 4
+  n_folds: 4
+
+model:
+  backend: lightgbm         # lightgbm | xgboost
+  preset: fast              # fast | standard | deep
+  params: {}                # explicit overrides on top of the preset
+
+evaluation:
+  backend: custom           # custom (fast) | official (numerai_tools oracle)
+  main_target: target
+  metrics: [corr, mmc, fnc, sharpe]

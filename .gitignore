@@ -11,3 +11,9 @@ data/v5.2/validation_example_preds.csv
 .ipynb_checkpoints/
 __pycache__/
 *.pyc
+
+# experiment / deployment outputs (keep the directory tree via .gitkeep)
+artifacts/**
+!artifacts/
+!artifacts/**/
+!artifacts/**/.gitkeep
