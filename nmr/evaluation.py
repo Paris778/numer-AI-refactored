@@ -24,9 +24,10 @@ import polars as pl
 
 from nmr._transforms import power_1_5, rank_gaussianize
 
-__all__ = ["MetricSummary", "EvaluationEngine"]
+__all__ = ["MIN_OVERLAP_ERAS", "MetricSummary", "EvaluationEngine"]
 
 _VALID_BACKENDS = ("custom", "official")
+MIN_OVERLAP_ERAS = 20
 
 
 @dataclass(frozen=True)
@@ -106,6 +107,68 @@ class EvaluationEngine:
                 target_col=target_col,
             ),
         )
+
+    def per_era_bmc(
+        self,
+        df: pl.DataFrame,
+        *,
+        pred_col: str,
+        benchmark_col: str,
+        target_col: str,
+        era_col: str = "era",
+        min_overlap_eras: int = MIN_OVERLAP_ERAS,
+    ) -> dict[str, float]:
+        self._validate_required_columns(
+            df, [era_col, pred_col, benchmark_col, target_col]
+        )
+        overlap_eras = self._resolve_overlap_eras(
+            df,
+            era_col=era_col,
+            coverage_col=benchmark_col,
+            min_overlap_eras=min_overlap_eras,
+        )
+
+        scores: dict[str, float] = {}
+        for era in overlap_eras:
+            era_df = df.filter(pl.col(era_col) == era)
+            clean_df = self._clean_frame(era_df, [pred_col, benchmark_col, target_col])
+            score = self._mmc_single_era(
+                clean_df,
+                pred_col=pred_col,
+                meta_col=benchmark_col,
+                target_col=target_col,
+            )
+            scores[era] = self._normalize_score(score)
+        return scores
+
+    def per_era_cwmm(
+        self,
+        df: pl.DataFrame,
+        *,
+        pred_col: str,
+        meta_col: str,
+        era_col: str = "era",
+        min_overlap_eras: int = MIN_OVERLAP_ERAS,
+    ) -> dict[str, float]:
+        self._validate_required_columns(df, [era_col, pred_col, meta_col])
+        overlap_eras = self._resolve_overlap_eras(
+            df,
+            era_col=era_col,
+            coverage_col=meta_col,
+            min_overlap_eras=min_overlap_eras,
+        )
+
+        scores: dict[str, float] = {}
+        for era in overlap_eras:
+            era_df = df.filter(pl.col(era_col) == era)
+            clean_df = self._clean_frame(era_df, [pred_col, meta_col])
+            score = self._cwmm_single_era(
+                clean_df,
+                pred_col=pred_col,
+                meta_col=meta_col,
+            )
+            scores[era] = self._normalize_score(score)
+        return scores
 
     def summarize(self, per_era: Mapping[str, float]) -> MetricSummary:
         if not per_era:
@@ -226,6 +289,21 @@ class EvaluationEngine:
             target_col=target_col,
         )
 
+    def _cwmm_single_era(
+        self,
+        df: pl.DataFrame,
+        *,
+        pred_col: str,
+        meta_col: str,
+    ) -> float:
+        pred = self._column_values(df, pred_col)
+        meta = self._column_values(df, meta_col)
+        if self._should_short_circuit(pred, meta):
+            return 0.0
+        # There is no numerai_tools oracle for prediction-vs-prediction CWMM;
+        # both backends intentionally use the same custom transform geometry.
+        return self._custom_cwmm(pred, meta)
+
     def _official_corr(
         self,
         df: pl.DataFrame,
@@ -317,6 +395,11 @@ class EvaluationEngine:
         normalized_pred = (neutral_pred / std).ravel()
         return self._custom_corr(normalized_pred, target)
 
+    def _custom_cwmm(self, pred: np.ndarray, meta: np.ndarray) -> float:
+        transformed_pred = power_1_5(rank_gaussianize(pred))
+        transformed_meta = power_1_5(rank_gaussianize(meta))
+        return self._pearson_corr(transformed_pred, transformed_meta)
+
     def _column_values(self, df: pl.DataFrame, col: str) -> np.ndarray:
         return df.get_column(col).cast(pl.Float64).to_numpy()
 
@@ -337,6 +420,46 @@ class EvaluationEngine:
 
     def _normalize_score(self, value: float) -> float:
         return 0.0 if not math.isfinite(value) else float(value)
+
+    def _validate_required_columns(
+        self, df: pl.DataFrame, required_cols: Sequence[str]
+    ) -> None:
+        missing = [col for col in required_cols if col not in df.columns]
+        if missing:
+            raise ValueError(f"Missing required columns: {missing}")
+
+    def _resolve_overlap_eras(
+        self,
+        df: pl.DataFrame,
+        *,
+        era_col: str,
+        coverage_col: str,
+        min_overlap_eras: int,
+    ) -> list[str]:
+        if min_overlap_eras < 1:
+            raise ValueError("min_overlap_eras must be >= 1")
+
+        eras = self._sorted_labels(df.get_column(era_col).to_list())
+        overlap_eras: list[str] = []
+        for era in eras:
+            era_values = (
+                df.filter(pl.col(era_col) == era)
+                .select(pl.col(coverage_col).cast(pl.Float64, strict=False))
+                .drop_nulls()
+                .get_column(coverage_col)
+                .to_numpy()
+            )
+            if era_values.size == 0:
+                continue
+            if np.isfinite(era_values).any():
+                overlap_eras.append(era)
+
+        if len(overlap_eras) < min_overlap_eras:
+            raise ValueError(
+                "Non-vacuity violation: intersection yielded only "
+                f"{len(overlap_eras)} eras; minimum required {min_overlap_eras}."
+            )
+        return overlap_eras
 
     def _sorted_labels(self, labels: Sequence[str]) -> list[str]:
         numeric_to_label: dict[int, str] = {}

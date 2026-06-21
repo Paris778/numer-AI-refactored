@@ -10,7 +10,7 @@ from .config import ExperimentConfig, load_config, set_global_seeds
 from .data import IngestionAgent
 from .deployment import DeploymentArtifact, load_predict, serialize_predict
 from .ensemble import Ensembler
-from .evaluation import EvaluationEngine, MetricSummary
+from .evaluation import MIN_OVERLAP_ERAS, EvaluationEngine, MetricSummary
 from .inference import (
     BootstrapCI,
     SeriesStats,
@@ -61,6 +61,7 @@ __all__ = [
     "ModelOrchestrator",
     "MetricSummary",
     "EvaluationEngine",
+    "MIN_OVERLAP_ERAS",
     "SeriesStats",
     "BootstrapCI",
     "era_series_stats",
