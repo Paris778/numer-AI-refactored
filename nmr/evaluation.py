@@ -24,10 +24,19 @@ import polars as pl
 
 from nmr._transforms import power_1_5, rank_gaussianize
 
-__all__ = ["MIN_OVERLAP_ERAS", "MetricSummary", "EvaluationEngine"]
+__all__ = [
+    "MIN_OVERLAP_ERAS",
+    "NonVacuityError",
+    "MetricSummary",
+    "EvaluationEngine",
+]
 
 _VALID_BACKENDS = ("custom", "official")
 MIN_OVERLAP_ERAS = 20
+
+
+class NonVacuityError(ValueError):
+    """Raised when overlap coverage is below the required non-vacuity floor."""
 
 
 @dataclass(frozen=True)
@@ -455,7 +464,7 @@ class EvaluationEngine:
                 overlap_eras.append(era)
 
         if len(overlap_eras) < min_overlap_eras:
-            raise ValueError(
+            raise NonVacuityError(
                 "Non-vacuity violation: intersection yielded only "
                 f"{len(overlap_eras)} eras; minimum required {min_overlap_eras}."
             )

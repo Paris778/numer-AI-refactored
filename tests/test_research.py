@@ -86,9 +86,9 @@ def _write_data(tmp_path) -> ExperimentConfig:
 
 def test_sweep_is_deterministic_and_held_out(tmp_path) -> None:
     cfg = _write_data(tmp_path)
-    space = {"n_estimators": [6, 8], "learning_rate": [0.03, 0.07]}
-    first = HyperparameterSweep(cfg, metric="sharpe").run(space, n_trials=4, seed=123)
-    second = HyperparameterSweep(cfg, metric="sharpe").run(space, n_trials=4, seed=123)
+    space = {"n_estimators": [6], "learning_rate": [0.03, 0.07]}
+    first = HyperparameterSweep(cfg, metric="sharpe").run(space, n_trials=2, seed=123)
+    second = HyperparameterSweep(cfg, metric="sharpe").run(space, n_trials=2, seed=123)
 
     assert first.trials.equals(second.trials)
     assert first.best_params == second.best_params

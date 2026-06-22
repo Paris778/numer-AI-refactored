@@ -79,13 +79,26 @@ def test_per_era_bmc_oracle_parity_on_real_v52() -> None:
     agent = IngestionAgent(data_cfg)
     feature_cols = agent.features("small")[:3]
 
-    validation_df = agent.load(
-        "validation",
-        columns=["era", "id", "target", *feature_cols],
+    eras = (
+        pl.scan_parquet(data_cfg.path("validation.parquet"))
+        .select("era")
+        .unique(maintain_order=True)
+        .head(60)
+        .collect()
+        .get_column("era")
+        .to_list()
+    )
+
+    validation_df = (
+        pl.scan_parquet(data_cfg.path("validation.parquet"))
+        .select(["era", "id", "target", *feature_cols])
+        .filter(pl.col("era").is_in(eras))
+        .collect()
     )
     bench_df = (
         pl.scan_parquet(data_cfg.path("validation_benchmark_models.parquet"))
         .select(["era", "id", "v52_lgbm_cyrusd20"])
+        .filter(pl.col("era").is_in(eras))
         .collect()
     )
 

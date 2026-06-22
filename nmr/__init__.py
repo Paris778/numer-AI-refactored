@@ -10,7 +10,12 @@ from .config import ExperimentConfig, load_config, set_global_seeds
 from .data import IngestionAgent
 from .deployment import DeploymentArtifact, load_predict, serialize_predict
 from .ensemble import Ensembler
-from .evaluation import MIN_OVERLAP_ERAS, EvaluationEngine, MetricSummary
+from .evaluation import (
+    MIN_OVERLAP_ERAS,
+    EvaluationEngine,
+    MetricSummary,
+    NonVacuityError,
+)
 from .inference import (
     BootstrapCI,
     SeriesStats,
@@ -44,7 +49,16 @@ from .research import (
     neutralization_frontier,
 )
 from .risk import NeutralizationEngine
+from .robustness import (
+    HorizonStabilityResult,
+    PerturbationResult,
+    RegimeCorr,
+    adversarial_perturbation,
+    regime_conditioned_corr,
+    time_horizon_stability,
+)
 from .runner import ExperimentRunner, RunResult
+from .scorecard import MetricCell, MetricScorecard, evaluate_model
 from .splitter import Fold, PurgedEraSplitter
 from .submission import build_submission, validate_submission, write_submission
 
@@ -62,6 +76,7 @@ __all__ = [
     "MetricSummary",
     "EvaluationEngine",
     "MIN_OVERLAP_ERAS",
+    "NonVacuityError",
     "SeriesStats",
     "BootstrapCI",
     "era_series_stats",
@@ -82,6 +97,15 @@ __all__ = [
     "max_burn_streak",
     "time_to_recovery",
     "NeutralizationEngine",
+    "PerturbationResult",
+    "HorizonStabilityResult",
+    "RegimeCorr",
+    "adversarial_perturbation",
+    "time_horizon_stability",
+    "regime_conditioned_corr",
+    "MetricCell",
+    "MetricScorecard",
+    "evaluate_model",
     "RunResult",
     "ExperimentRunner",
     "RunRegistry",
