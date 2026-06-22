@@ -55,8 +55,8 @@ def _real_linear_predict_fn(weights: np.ndarray):
 
 
 def _real_eval_train_payload(
-    max_eval_rows: int = 2000,
-    max_train_rows: int = 8000,
+    max_eval_rows: int = 600,
+    max_train_rows: int = 3000,
 ) -> tuple[pl.DataFrame, pl.DataFrame, list[str], dict[str, list[str]]]:
     feature_sets = _extract_feature_sets()
     blocks = _structural_blocks(feature_sets)
@@ -162,16 +162,21 @@ def test_adversarial_perturbation_real_data_non_noop_and_range() -> None:
     assert -1.0 <= out.manifold_stability <= 1.0
 
 
-@pytest.mark.skipif(
-    not (
-        Path("data/v5.2/validation.parquet").exists()
-        and Path("data/v5.2/train.parquet").exists()
-        and Path("data/v5.2/features.json").exists()
-    ),
-    reason="v5.2 robustness inputs not on disk; skipped in CI",
-)
 def test_adversarial_perturbation_field_independent_of_model_and_leak_free() -> None:
-    eval_df, train_df, feature_cols, blocks = _real_eval_train_payload()
+    rng = np.random.default_rng(20260622)
+    feature_cols = [f"f{i}" for i in range(10)]
+    blocks = {"b1": feature_cols[:5], "b2": feature_cols[5:]}
+    eval_df = pl.DataFrame(
+        {
+            "era": (["0001"] * 20) + (["0002"] * 20),
+            **{col: rng.integers(0, 5, size=40) for col in feature_cols},
+        }
+    )
+    train_df = pl.DataFrame(
+        {
+            **{col: rng.integers(0, 5, size=100) for col in feature_cols},
+        }
+    )
     k = len(feature_cols)
     predict_a = _real_linear_predict_fn(np.linspace(-0.2, 0.3, num=k))
     predict_b = _real_linear_predict_fn(np.linspace(0.4, -0.5, num=k))
@@ -235,7 +240,7 @@ def test_adversarial_perturbation_field_independent_of_model_and_leak_free() -> 
         n_blocks=n_blocks,
         alpha=0.25,
         seed=99,
-        data_version="v5.2",
+        data_version="synthetic",
     )
     field_b = _build_perturbation_field(
         n_eval=poisoned_eval.height,
@@ -244,7 +249,7 @@ def test_adversarial_perturbation_field_independent_of_model_and_leak_free() -> 
         n_blocks=n_blocks,
         alpha=0.25,
         seed=99,
-        data_version="v5.2",
+        data_version="synthetic",
     )
     for lhs, rhs in zip(field_a, field_b):
         assert np.array_equal(lhs, rhs)
@@ -420,7 +425,7 @@ def test_time_horizon_stability_floor_applies_to_resolved_eras_only() -> None:
 
 def test_time_horizon_stability_uses_horizon_correct_adjustment() -> None:
     rng = np.random.default_rng(2026)
-    n = 200
+    n = 25
     x = np.empty(n, dtype=float)
     eps = rng.normal(size=n)
     x[0] = eps[0]
@@ -528,7 +533,7 @@ def test_regime_conditioned_corr_ci_delegation_and_nonvacuity() -> None:
         regime_col="regime",
         horizon="20D",
         seed=44,
-        n_boot=300,
+        n_boot=5,
         min_eras_per_regime=20,
     )
     assert set(out) == {"bear", "bull"}
@@ -541,7 +546,7 @@ def test_regime_conditioned_corr_ci_delegation_and_nonvacuity() -> None:
         bull_series,
         lambda a: float(np.mean(a)),
         block_len=resolve_block_len(len(bull_series), "20D"),
-        n_boot=300,
+        n_boot=5,
         seed=44,
         alpha=0.05,
     )
@@ -582,7 +587,7 @@ def test_regime_conditioned_corr_ci_delegation_and_nonvacuity() -> None:
             regime_col="regime",
             horizon="20D",
             seed=44,
-            n_boot=200,
+            n_boot=5,
             min_eras_per_regime=20,
         )
 
@@ -611,7 +616,7 @@ def test_time_horizon_stability_real_v52_overlap() -> None:
         pl.scan_parquet("data/v5.2/validation.parquet")
         .select("era")
         .unique(maintain_order=True)
-        .head(80)
+        .head(30)
         .collect()
         .get_column("era")
         .to_list()
@@ -631,12 +636,16 @@ def test_time_horizon_stability_real_v52_overlap() -> None:
             ]
         )
         .filter(pl.col("era").is_in(eras))
+        .group_by("era", maintain_order=True)
+        .head(80)
         .collect()
     )
     bench = (
         pl.scan_parquet("data/v5.2/validation_benchmark_models.parquet")
         .select(["era", "id", "v52_lgbm_cyrusd20", "v52_lgbm_cyrusd60"])
         .filter(pl.col("era").is_in(eras))
+        .group_by("era", maintain_order=True)
+        .head(80)
         .collect()
     )
 

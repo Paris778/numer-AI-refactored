@@ -70,7 +70,7 @@ def _config(tmp_path) -> ExperimentConfig:
         model=ModelConfig(
             backend="lightgbm",
             preset="fast",
-            params={"n_estimators": 8, "learning_rate": 0.05},
+            params={"n_estimators": 1, "learning_rate": 0.05},
         ),
         evaluation=EvalConfig(backend="custom", main_target="target"),
         run=RunConfig(

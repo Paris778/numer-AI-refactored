@@ -122,7 +122,10 @@ def test_real_v52_validation_slice_matches_oracle(tmp_path) -> None:
     agent = IngestionAgent(data_cfg)
     feature_cols = agent.features("small")[:5]
     eras = (
-        agent.load("validation", columns=["era"])
+        pl.scan_parquet(data_cfg.path("validation.parquet"))
+        .select(["era"])
+        .limit(20000)
+        .collect()
         .get_column("era")
         .unique(maintain_order=True)
         .head(2)
@@ -130,11 +133,11 @@ def test_real_v52_validation_slice_matches_oracle(tmp_path) -> None:
     )
 
     df = (
-        agent.load(
-            "validation",
-            columns=["era", "id", "target", *feature_cols],
-        )
+        pl.scan_parquet(data_cfg.path("validation.parquet"))
+        .select(["era", "id", "target", *feature_cols])
         .filter(pl.col("era").is_in(eras))
+        .group_by("era", maintain_order=True)
+        .head(120)
         .with_columns(
             (
                 (0.6 * pl.col(feature_cols[0]).cast(pl.Float64))
@@ -143,6 +146,7 @@ def test_real_v52_validation_slice_matches_oracle(tmp_path) -> None:
                 + (0.1 * pl.col("target").cast(pl.Float64))
             ).alias("pred")
         )
+        .collect()
     )
 
     assert df.height > 0

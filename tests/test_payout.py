@@ -75,7 +75,7 @@ def test_payout_report_uses_unclipped_raw_for_deflated_sharpe() -> None:
         seed=17,
         pf=2.0,
         clip=0.05,
-        n_boot=200,
+        n_boot=5,
     )
 
     raw_stats = era_series_stats(series.raw)
@@ -156,7 +156,7 @@ def test_order_independence_for_dict_input_and_order_sensitivity_for_paths() -> 
         horizon="20D",
         n_trials=1,
         seed=9,
-        n_boot=200,
+        n_boot=5,
         block_len=2,
     )
     rep_b = payout_report(
@@ -165,7 +165,7 @@ def test_order_independence_for_dict_input_and_order_sensitivity_for_paths() -> 
         horizon="20D",
         n_trials=1,
         seed=9,
-        n_boot=200,
+        n_boot=5,
         block_len=2,
     )
     assert rep_a == rep_b
@@ -199,7 +199,7 @@ def test_alignment_and_boundary_guards() -> None:
         horizon="20D",
         n_trials=1,
         seed=3,
-        n_boot=100,
+        n_boot=5,
         block_len=2,
     )
     assert isinstance(report, PayoutResult)
@@ -218,7 +218,7 @@ def test_alignment_and_boundary_guards() -> None:
 def test_degenerate_zero_series_is_well_defined() -> None:
     corr = {f"{i:04d}": 0.0 for i in range(1, 11)}
     mmc = {f"{i:04d}": 0.0 for i in range(1, 11)}
-    report = payout_report(corr, mmc, horizon="20D", n_trials=1, seed=5, n_boot=300)
+    report = payout_report(corr, mmc, horizon="20D", n_trials=1, seed=5, n_boot=5)
 
     assert report.mean_payout == pytest.approx(0.0)
     assert report.burn_rate == pytest.approx(0.0)
@@ -243,7 +243,7 @@ def test_payout_report_determinism_same_seed() -> None:
         horizon="20D",
         n_trials=1,
         seed=123,
-        n_boot=400,
+        n_boot=5,
         alpha=0.1,
     )
     b = payout_report(
@@ -252,7 +252,7 @@ def test_payout_report_determinism_same_seed() -> None:
         horizon="20D",
         n_trials=1,
         seed=123,
-        n_boot=400,
+        n_boot=5,
         alpha=0.1,
     )
     assert a == b

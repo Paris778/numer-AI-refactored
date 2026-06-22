@@ -32,9 +32,10 @@ _TRAIN_ROWS = 4
 _LIVE_ROWS = 2
 
 
-@pytest.fixture()
-def dataset_root(tmp_path: Path) -> Path:
-    version_dir = tmp_path / _VERSION
+@pytest.fixture(scope="module")
+def dataset_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    root = tmp_path_factory.mktemp("module_data")
+    version_dir = root / _VERSION
     version_dir.mkdir()
 
     (version_dir / "features.json").write_text(
@@ -75,10 +76,10 @@ def dataset_root(tmp_path: Path) -> Path:
     )
     live_df.write_parquet(version_dir / "live.parquet")
 
-    return tmp_path
+    return root
 
 
-@pytest.fixture()
+@pytest.fixture(scope="module")
 def cfg(dataset_root: Path) -> DataConfig:
     return DataConfig(
         version=_VERSION,
@@ -88,7 +89,7 @@ def cfg(dataset_root: Path) -> DataConfig:
     )
 
 
-@pytest.fixture()
+@pytest.fixture(scope="module")
 def agent(cfg: DataConfig) -> IngestionAgent:
     return IngestionAgent(cfg)
 
@@ -179,6 +180,9 @@ class TestSchema:
     ) -> None:
         call_count = 0
         original_scan = pl.scan_parquet
+
+        # Module-scoped fixtures can pre-populate cache in earlier tests.
+        agent._schema_cache.pop("train", None)
 
         def tracking_scan(*args, **kwargs):
             nonlocal call_count

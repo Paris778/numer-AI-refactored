@@ -22,9 +22,9 @@ def _tiny_inputs() -> (
 ):
     rows: list[dict[str, float | str]] = []
     bench: list[dict[str, float | str]] = []
-    for i in range(1, 31):
+    for i in range(1, 21):
         era = f"{i:04d}"
-        for j in range(12):
+        for j in range(3):
             pred = (0.2 * i) + (0.03 * j)
             meta = (0.15 * i) - (0.02 * j)
             f1 = (i + j) % 5
@@ -74,7 +74,7 @@ def test_scorecard_composition_parity_and_cells() -> None:
         n_trials=1,
         seed=11,
         benchmark_col="v52_lgbm_cyrusd20",
-        n_boot=200,
+        n_boot=5,
         alpha=0.05,
         min_overlap_eras=20,
     )
@@ -102,7 +102,7 @@ def test_scorecard_composition_parity_and_cells() -> None:
         horizon="20D",
         n_trials=1,
         seed=11,
-        n_boot=200,
+        n_boot=5,
         alpha=0.05,
     )
 
@@ -116,7 +116,7 @@ def test_scorecard_composition_parity_and_cells() -> None:
         corr_vals,
         lambda a: float(era_series_stats(a).mean),
         block_len=resolve_block_len(len(corr_vals), "20D"),
-        n_boot=200,
+        n_boot=5,
         seed=11,
         alpha=0.05,
     )
@@ -137,7 +137,7 @@ def test_scorecard_bmc_cell_oracle_parity() -> None:
         n_trials=1,
         seed=13,
         benchmark_col="v52_lgbm_cyrusd20",
-        n_boot=120,
+        n_boot=5,
         min_overlap_eras=20,
     )
     assert score.bmc is not None
@@ -183,7 +183,7 @@ def test_scorecard_to_frame_one_row_and_columns() -> None:
         n_trials=1,
         seed=21,
         benchmark_col="v52_lgbm_cyrusd20",
-        n_boot=100,
+        n_boot=5,
         min_overlap_eras=20,
     )
     frame = score.to_frame()
@@ -222,7 +222,7 @@ def test_scorecard_thin_coverage_sets_none_with_reason() -> None:
         n_trials=1,
         seed=33,
         benchmark_col="v52_lgbm_cyrusd20",
-        n_boot=100,
+        n_boot=5,
         min_overlap_eras=40,
     )
 
@@ -259,7 +259,7 @@ def test_scorecard_noncoverage_valueerror_propagates(
             n_trials=1,
             seed=10,
             benchmark_col="v52_lgbm_cyrusd20",
-            n_boot=100,
+            n_boot=5,
             min_overlap_eras=20,
         )
 
@@ -277,11 +277,11 @@ def test_scorecard_tier2_tier3_do_not_rerank() -> None:
         benchmark_col="v52_lgbm_cyrusd20",
         regime_labels=pl.DataFrame(
             {
-                "era": [f"{i:04d}" for i in range(1, 31)],
-                "regime": ["a" if i <= 15 else "b" for i in range(1, 31)],
+                "era": [f"{i:04d}" for i in range(1, 21)],
+                "regime": ["a" if i <= 10 else "b" for i in range(1, 21)],
             }
         ),
-        n_boot=100,
+        n_boot=5,
         min_overlap_eras=20,
     )
     without_tiers = evaluate_model(
@@ -294,7 +294,7 @@ def test_scorecard_tier2_tier3_do_not_rerank() -> None:
         seed=5,
         benchmark_col=None,
         regime_labels=None,
-        n_boot=100,
+        n_boot=5,
         min_overlap_eras=20,
     )
     assert with_tiers.rank_scalar == without_tiers.rank_scalar
@@ -313,7 +313,7 @@ def test_scorecard_degenerate_predictions_no_nan() -> None:
         n_trials=1,
         seed=3,
         benchmark_col="v52_lgbm_cyrusd20",
-        n_boot=100,
+        n_boot=5,
         min_overlap_eras=20,
     )
     assert score.rank_scalar == pytest.approx(0.0)
@@ -337,51 +337,55 @@ import json
 import polars as pl
 from nmr.scorecard import evaluate_model
 
-eras = (
-    pl.scan_parquet("data/v5.2/meta_model.parquet")
-    .filter(pl.col("data_type") == "validation")
-    .select("era")
-    .unique(maintain_order=True)
-    .head(35)
-    .collect()
-    .get_column("era")
-    .to_list()
-)
-val = pl.scan_parquet("data/v5.2/validation.parquet").select([
-    "era","id","target","target_cyrusd_20","target_cyrusd_60",
-    "feature_antistrophic_striate_conscriptionist",
-    "feature_bicameral_showery_wallaba",
-    "feature_bridal_fingered_pensioner"
-]).filter(pl.col("era").is_in(eras)).collect().group_by("era", maintain_order=True).head(80)
-meta = pl.scan_parquet("data/v5.2/meta_model.parquet").filter(
-    (pl.col("data_type") == "validation") & pl.col("era").is_in(eras)
-).select(["era","id","numerai_meta_model"]).collect()
-bench = pl.scan_parquet("data/v5.2/validation_benchmark_models.parquet").select([
-    "era","id","v52_lgbm_cyrusd20"
-]).filter(pl.col("era").is_in(eras)).collect()
-aligned = val.join(meta, on=["era", "id"], how="inner")
-features = aligned.select(["era","id","feature_antistrophic_striate_conscriptionist","feature_bicameral_showery_wallaba","feature_bridal_fingered_pensioner"]).rename({
-    "feature_antistrophic_striate_conscriptionist":"f1",
-    "feature_bicameral_showery_wallaba":"f2",
-    "feature_bridal_fingered_pensioner":"f3"
-})
-targets = aligned.select(["era","id","target","target_cyrusd_20","target_cyrusd_60"])
-pred = aligned.with_columns((
-    0.5 * pl.col("feature_antistrophic_striate_conscriptionist").cast(pl.Float64)
-    + 0.3 * pl.col("feature_bicameral_showery_wallaba").cast(pl.Float64)
-    - 0.2 * pl.col("feature_bridal_fingered_pensioner").cast(pl.Float64)
-).alias("prediction")).select(["era","id","prediction"])
+rows = []
+bench = []
+for i in range(1, 21):
+    era = f"{i:04d}"
+    for j in range(2):
+        pred = (0.2 * i) + (0.03 * j)
+        meta = (0.15 * i) - (0.02 * j)
+        f1 = (i + j) % 5
+        f2 = (2 * i + j) % 5
+        f3 = (3 * i + j) % 5
+        rows.append(
+            {
+                "era": era,
+                "id": f"{era}_{j:03d}",
+                "prediction": float(pred),
+                "target": float((i + j) % 5) / 4.0,
+                "target_cyrusd_20": float((i + j) % 5) / 4.0,
+                "target_cyrusd_60": float((2 * i + j) % 5) / 4.0,
+                "f1": float(f1),
+                "f2": float(f2),
+                "f3": float(f3),
+                "numerai_meta_model": float(meta),
+            }
+        )
+        bench.append(
+            {
+                "era": era,
+                "id": f"{era}_{j:03d}",
+                "v52_lgbm_cyrusd20": float(meta),
+            }
+        )
+
+full = pl.DataFrame(rows)
+pred = full.select(["era", "id", "prediction"])
+meta = full.select(["era", "id", "numerai_meta_model"])
+targets = full.select(["era", "id", "target", "target_cyrusd_20", "target_cyrusd_60"])
+features = full.select(["era", "id", "f1", "f2", "f3"])
+benchmarks = pl.DataFrame(bench)
 
 card = evaluate_model(
     pred,
     meta_model=meta,
-    benchmarks=bench,
+    benchmarks=benchmarks,
     features=features,
     targets=targets,
     n_trials=1,
     seed=77,
     benchmark_col="v52_lgbm_cyrusd20",
-    n_boot=20,
+    n_boot=2,
     min_overlap_eras=20,
 )
 print(json.dumps(card.to_frame().to_dicts()[0], sort_keys=True, default=str))

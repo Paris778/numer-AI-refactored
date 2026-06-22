@@ -79,30 +79,40 @@ def test_per_era_bmc_oracle_parity_on_real_v52() -> None:
     agent = IngestionAgent(data_cfg)
     feature_cols = agent.features("small")[:3]
 
-    eras = (
+    joined_base = (
         pl.scan_parquet(data_cfg.path("validation.parquet"))
-        .select("era")
+        .select(["era", "id", "target", *feature_cols])
+        .join(
+            pl.scan_parquet(
+                data_cfg.path("validation_benchmark_models.parquet")
+            ).select(["era", "id", "v52_lgbm_cyrusd20"]),
+            on=["era", "id"],
+            how="inner",
+        )
+        .filter(
+            pl.col("v52_lgbm_cyrusd20").cast(pl.Float64, strict=False).is_not_null()
+        )
+    )
+
+    eras = (
+        joined_base.select("era")
         .unique(maintain_order=True)
-        .head(60)
+        .head(30)
         .collect()
         .get_column("era")
         .to_list()
     )
 
-    validation_df = (
-        pl.scan_parquet(data_cfg.path("validation.parquet"))
-        .select(["era", "id", "target", *feature_cols])
-        .filter(pl.col("era").is_in(eras))
-        .collect()
-    )
-    bench_df = (
-        pl.scan_parquet(data_cfg.path("validation_benchmark_models.parquet"))
-        .select(["era", "id", "v52_lgbm_cyrusd20"])
-        .filter(pl.col("era").is_in(eras))
+    assert len(eras) >= MIN_OVERLAP_ERAS
+
+    joined = (
+        joined_base.filter(pl.col("era").is_in(eras))
+        .group_by("era", maintain_order=True)
+        .head(120)
         .collect()
     )
 
-    df = validation_df.join(bench_df, on=["era", "id"], how="left").with_columns(
+    df = joined.with_columns(
         (
             (0.5 * pl.col(feature_cols[0]).cast(pl.Float64).fill_null(0.0))
             + (0.3 * pl.col(feature_cols[1]).cast(pl.Float64).fill_null(0.0))

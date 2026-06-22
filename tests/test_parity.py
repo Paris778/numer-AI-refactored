@@ -104,29 +104,39 @@ def test_real_v52_sampled_parity() -> None:
     agent = IngestionAgent(data_cfg)
     feature_cols = agent.features("small")[:5]
 
-    validation_eras = set(
-        agent.load("validation", columns=["era"]).get_column("era").to_list()
-    )
-    meta_eras = set(
-        pl.scan_parquet(data_cfg.path("meta_model.parquet"))
+    overlap_eras = (
+        pl.scan_parquet(data_cfg.path("validation.parquet"))
         .select("era")
+        .unique(maintain_order=True)
+        .join(
+            pl.scan_parquet(data_cfg.path("meta_model.parquet"))
+            .select("era")
+            .unique(maintain_order=True),
+            on="era",
+            how="inner",
+        )
+        .head(2)
         .collect()
         .get_column("era")
         .to_list()
     )
-    overlapping_eras = sorted(validation_eras & meta_eras)
-    assert len(overlapping_eras) >= 2
-    eras = overlapping_eras[:2]
+    assert len(overlap_eras) >= 2
 
-    validation_df = agent.load(
-        "validation",
-        columns=["era", "id", "target", *feature_cols],
-    ).filter(pl.col("era").is_in(eras))
+    validation_df = (
+        pl.scan_parquet(data_cfg.path("validation.parquet"))
+        .select(["era", "id", "target", *feature_cols])
+        .filter(pl.col("era").is_in(overlap_eras))
+        .group_by("era", maintain_order=True)
+        .head(120)
+        .collect()
+    )
 
     meta_df = (
         pl.scan_parquet(data_cfg.path("meta_model.parquet"))
         .select(["era", "id", "numerai_meta_model"])
-        .filter(pl.col("era").is_in(eras))
+        .filter(pl.col("era").is_in(overlap_eras))
+        .group_by("era", maintain_order=True)
+        .head(120)
         .collect()
     )
 

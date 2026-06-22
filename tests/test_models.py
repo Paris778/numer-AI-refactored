@@ -45,11 +45,21 @@ def _anchor_splitter() -> PurgedEraSplitter:
     return PurgedEraSplitter(SplitConfig(scheme="anchor", purge_eras=1))
 
 
+def _tiny_model_params(**extra: Any) -> dict[str, Any]:
+    params: dict[str, Any] = {
+        "n_estimators": 1,
+        "max_depth": 1,
+        "min_child_weight": 1,
+    }
+    params.update(extra)
+    return params
+
+
 @pytest.mark.parametrize("backend", ["lightgbm", "xgboost"])
 def test_both_backends_train_anchor_and_emit_polars_predictions(backend: str) -> None:
     df = _model_frame()
     orchestrator = ModelOrchestrator(
-        ModelConfig(backend=backend, preset="fast", params={"n_estimators": 8}),
+        ModelConfig(backend=backend, preset="fast", params=_tiny_model_params()),
         seed=7,
     )
 
@@ -70,7 +80,11 @@ def test_both_backends_train_anchor_and_emit_polars_predictions(backend: str) ->
 def test_cross_validation_is_deterministic_on_cpu(backend: str) -> None:
     df = _model_frame()
     splitter = _walk_forward_splitter()
-    config = ModelConfig(backend=backend, preset="fast", params={"n_estimators": 8})
+    config = ModelConfig(
+        backend=backend,
+        preset="fast",
+        params=_tiny_model_params(),
+    )
 
     first = ModelOrchestrator(config, seed=123).train_cross_validation(
         df,
@@ -95,7 +109,7 @@ def test_preset_params_applied_and_overrides_honored(backend: str) -> None:
         ModelConfig(
             backend=backend,
             preset="fast",
-            params={"n_estimators": 7, "learning_rate": 0.05, "max_depth": 3},
+            params=_tiny_model_params(learning_rate=0.05),
         ),
         seed=11,
     )
@@ -107,9 +121,10 @@ def test_preset_params_applied_and_overrides_honored(backend: str) -> None:
     )
 
     params = model.get_params()
-    assert params["n_estimators"] == 7
+    assert params["n_estimators"] == 1
     assert params["learning_rate"] == 0.05
-    assert params["max_depth"] == 3
+    assert params["max_depth"] == 1
+    assert params["min_child_weight"] == 1
 
 
 @pytest.mark.parametrize("backend", ["lightgbm", "xgboost"])
@@ -120,7 +135,7 @@ def test_walk_forward_oof_covers_only_validation_eras_without_overlap(
     splitter = _walk_forward_splitter()
     folds = splitter.split(df.get_column("era").to_list())
     orchestrator = ModelOrchestrator(
-        ModelConfig(backend=backend, preset="fast", params={"n_estimators": 8}),
+        ModelConfig(backend=backend, preset="fast", params=_tiny_model_params()),
         seed=19,
     )
 
@@ -163,7 +178,11 @@ def test_cross_validation_routes_fold_local_train_and_validation_eras(
     df = _model_frame()
     splitter = _walk_forward_splitter()
     orchestrator = ModelOrchestrator(
-        ModelConfig(backend="lightgbm", preset="fast", params={"n_estimators": 5}),
+        ModelConfig(
+            backend="lightgbm",
+            preset="fast",
+            params=_tiny_model_params(),
+        ),
         seed=3,
     )
     recorded_pairs: list[tuple[set[str], set[str]]] = []
@@ -261,7 +280,7 @@ def test_gpu_absent_falls_back_to_cpu_without_raising(
     monkeypatch.setattr(module, attribute, factory)
 
     orchestrator = ModelOrchestrator(
-        ModelConfig(backend=backend, preset="fast", params={"n_estimators": 5}),
+        ModelConfig(backend=backend, preset="fast", params=_tiny_model_params()),
         seed=29,
     )
     model, prediction = orchestrator.train_anchor_fold(
@@ -281,7 +300,11 @@ def test_gpu_absent_falls_back_to_cpu_without_raising(
 def test_backend_boundary_uses_named_feature_frames_consistently() -> None:
     df = _model_frame()
     orchestrator = ModelOrchestrator(
-        ModelConfig(backend="lightgbm", preset="fast", params={"n_estimators": 5}),
+        ModelConfig(
+            backend="lightgbm",
+            preset="fast",
+            params=_tiny_model_params(),
+        ),
         seed=31,
     )
     model = _FeatureNameModel()

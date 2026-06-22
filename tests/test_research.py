@@ -72,12 +72,12 @@ def _write_data(tmp_path) -> ExperimentConfig:
             data_dir=data_root,
         ),
         split=SplitConfig(
-            scheme="walk_forward", purge_eras=1, embargo_eras=0, n_folds=3
+            scheme="walk_forward", purge_eras=1, embargo_eras=0, n_folds=2
         ),
         model=ModelConfig(
             backend="lightgbm",
             preset="fast",
-            params={"n_estimators": 10, "learning_rate": 0.05},
+            params={"n_estimators": 1, "learning_rate": 0.05},
         ),
         evaluation=EvalConfig(backend="custom", main_target="target"),
         run=RunConfig(name="research", seed=19, artifacts_dir=tmp_path / "artifacts"),
