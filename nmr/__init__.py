@@ -6,6 +6,20 @@ are a thin control plane; all logic lives here and is covered by `tests/`.
 
 from __future__ import annotations
 
+from .benchmark import (
+    NULL_BASELINES,
+    TUTORIAL_NOTEBOOK_TO_MODEL_ID,
+    BenchmarkSuite,
+    assert_notebook_prediction_contract,
+    assert_null_floor,
+    assert_slice1_monotone,
+    canonical_scorecards_bytes,
+    discover_tutorial_notebooks,
+    extract_oos_predictions,
+    ingest_tutorial_prediction,
+    ingest_tutorial_prediction_batch,
+    scorecards_sha256,
+)
 from .config import ExperimentConfig, load_config, set_global_seeds
 from .data import IngestionAgent
 from .deployment import DeploymentArtifact, load_predict, serialize_predict
@@ -66,6 +80,18 @@ __all__ = [
     "ExperimentConfig",
     "load_config",
     "set_global_seeds",
+    "NULL_BASELINES",
+    "TUTORIAL_NOTEBOOK_TO_MODEL_ID",
+    "BenchmarkSuite",
+    "discover_tutorial_notebooks",
+    "assert_notebook_prediction_contract",
+    "extract_oos_predictions",
+    "ingest_tutorial_prediction",
+    "ingest_tutorial_prediction_batch",
+    "assert_null_floor",
+    "assert_slice1_monotone",
+    "canonical_scorecards_bytes",
+    "scorecards_sha256",
     "IngestionAgent",
     "DeploymentArtifact",
     "serialize_predict",
