@@ -123,7 +123,11 @@ def test_slice1_null_floor_gate_and_finite_scorecards() -> None:
     suite, _, _ = _suite(seed=91)
     null_scores = suite.run_null_baselines(seed=202)
 
-    assert_null_floor(null_scores, tolerance=0.12)
+    assert_null_floor(
+        null_scores,
+        tolerance=0.04,
+        metric_tolerances={"corr_sharpe_ac": 0.12},
+    )
 
     for model_id, card in null_scores.items():
         row = card.to_frame().row(0, named=True)

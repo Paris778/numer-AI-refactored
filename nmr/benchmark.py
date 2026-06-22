@@ -14,10 +14,14 @@ import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import polars as pl
+from sklearn.linear_model import Ridge
 
+from nmr.evaluation import MIN_OVERLAP_ERAS
+from nmr.inference import block_bootstrap_ci, resolve_block_len
 from nmr.scorecard import MetricScorecard, evaluate_model
 
 __all__ = [
@@ -146,6 +150,100 @@ class BenchmarkSuite:
         if id_col in self._join_keys:
             self._id_to_era = self._targets.select([id_col, era_col]).unique()
 
+    def run_classical_baselines(
+        self,
+        *,
+        min_train_eras: int = 10,
+    ) -> dict[str, MetricScorecard]:
+        """Generate and score S11 classical rungs: trivial, linear, and tree."""
+
+        trivial = self._trivial_prediction_frame()
+        linear = self._walk_forward_model_predictions(
+            model_name="linear",
+            min_train_eras=min_train_eras,
+        )
+        tree = self._walk_forward_model_predictions(
+            model_name="tree",
+            min_train_eras=min_train_eras,
+        )
+
+        return {
+            "trivial": self.evaluate_predictions(trivial, model_id="trivial"),
+            "linear": self.evaluate_predictions(linear, model_id="linear"),
+            "tree": self.evaluate_predictions(tree, model_id="tree"),
+        }
+
+    def compute_book_orthogonality(
+        self,
+        candidate_scores: pl.Series | np.ndarray,
+        book_scores: pl.Series | np.ndarray,
+        *,
+        seed: int,
+        n_boot: int = 1000,
+        horizon: str = "20D",
+    ) -> dict[str, float | tuple[float, float] | None]:
+        """Compute global/tail correlation and spread with joint circular bootstrap.
+
+        The tail mask is recomputed inside each bootstrap replicate on the
+        resampled book path, preserving contiguous temporal dependence.
+        """
+
+        cand = self._as_finite_vector(candidate_scores, name="candidate_scores")
+        book = self._as_finite_vector(book_scores, name="book_scores")
+        if cand.shape[0] != book.shape[0]:
+            raise ValueError(
+                "candidate_scores and book_scores must have the same length"
+            )
+
+        n = int(cand.shape[0])
+        min_overlap = max(MIN_OVERLAP_ERAS, self._eval_cfg.min_overlap_eras)
+        if n < min_overlap:
+            raise ValueError(
+                "Non-vacuity violation: overlap yielded only "
+                f"{n} eras; minimum required {min_overlap}."
+            )
+
+        joint = np.column_stack([cand, book])
+        block_len = resolve_block_len(n, horizon)
+
+        point = self._orthogonality_stat(joint)
+        ci_global = block_bootstrap_ci(
+            joint,
+            lambda arr: float(self._orthogonality_stat(arr)[0]),
+            block_len=block_len,
+            n_boot=n_boot,
+            seed=seed,
+            alpha=self._eval_cfg.alpha,
+        )
+        ci_tail = block_bootstrap_ci(
+            joint,
+            lambda arr: float(self._orthogonality_stat(arr)[1]),
+            block_len=block_len,
+            n_boot=n_boot,
+            seed=seed + 1,
+            alpha=self._eval_cfg.alpha,
+        )
+        ci_spread = block_bootstrap_ci(
+            joint,
+            lambda arr: float(self._orthogonality_stat(arr)[2]),
+            block_len=block_len,
+            n_boot=n_boot,
+            seed=seed + 2,
+            alpha=self._eval_cfg.alpha,
+        )
+
+        return {
+            "rho_global": float(point[0]),
+            "rho_tail": float(point[1]),
+            "spread": float(point[2]),
+            "rho_global_ci": (float(ci_global.lo), float(ci_global.hi)),
+            "rho_tail_ci": (float(ci_tail.lo), float(ci_tail.hi)),
+            "spread_ci": (float(ci_spread.lo), float(ci_spread.hi)),
+            "n_eras": float(n),
+            "redundancy_mean": None,
+            "redundancy_max": None,
+        }
+
     def run_null_baselines(
         self, *, seed: int | None = None
     ) -> dict[str, MetricScorecard]:
@@ -264,6 +362,149 @@ class BenchmarkSuite:
         if cleaned.is_empty():
             raise ValueError("No valid prediction rows after normalization")
         return cleaned
+
+    def _trivial_prediction_frame(self) -> pl.DataFrame:
+        cfg = self._eval_cfg
+        feature_cols = [
+            c for c in self._features.columns if c not in set(self._join_keys)
+        ]
+        if not feature_cols:
+            raise ValueError("features must contain at least one feature column")
+
+        frame = self._features.select([*self._join_keys, *feature_cols]).with_columns(
+            pl.mean_horizontal(
+                [pl.col(c).cast(pl.Float64, strict=False) for c in feature_cols]
+            ).alias(cfg.pred_col)
+        )
+        return frame.select([*self._join_keys, cfg.pred_col]).sort(self._join_keys)
+
+    def _walk_forward_model_predictions(
+        self,
+        *,
+        model_name: str,
+        min_train_eras: int,
+    ) -> pl.DataFrame:
+        cfg = self._eval_cfg
+        feature_cols = [
+            c for c in self._features.columns if c not in set(self._join_keys)
+        ]
+        if not feature_cols:
+            raise ValueError("features must contain at least one feature column")
+
+        train_frame = (
+            self._targets.select([*self._join_keys, cfg.main_target])
+            .join(
+                self._features.select([*self._join_keys, *feature_cols]),
+                on=self._join_keys,
+                how="inner",
+            )
+            .drop_nulls()
+        )
+        if train_frame.is_empty():
+            raise ValueError("No rows available for classical baseline training")
+
+        eras = sorted(train_frame.get_column(cfg.era_col).unique().to_list(), key=int)
+        if len(eras) <= min_train_eras:
+            raise ValueError(
+                "Not enough eras for walk-forward baselines: "
+                f"have {len(eras)}, need > {min_train_eras}"
+            )
+
+        parts: list[pl.DataFrame] = []
+        for idx in range(min_train_eras, len(eras)):
+            train_eras = eras[:idx]
+            test_era = eras[idx]
+
+            train_part = train_frame.filter(pl.col(cfg.era_col).is_in(train_eras))
+            test_part = train_frame.filter(pl.col(cfg.era_col) == test_era)
+            if train_part.is_empty() or test_part.is_empty():
+                continue
+
+            x_train = train_part.select(feature_cols).cast(pl.Float64).to_pandas()
+            y_train = train_part.get_column(cfg.main_target).cast(pl.Float64).to_numpy()
+            x_test = test_part.select(feature_cols).cast(pl.Float64).to_pandas()
+
+            model = self._build_classical_model(model_name)
+            model.fit(x_train, y_train)
+            pred = np.asarray(model.predict(x_test), dtype=float)
+
+            parts.append(
+                test_part.select(self._join_keys).with_columns(
+                    pl.Series(cfg.pred_col, pred)
+                )
+            )
+
+        if not parts:
+            raise ValueError("No walk-forward predictions generated")
+        return pl.concat(parts, how="vertical").sort(self._join_keys)
+
+    def _build_classical_model(self, name: str) -> Any:
+        if name == "linear":
+            return Ridge(alpha=1.0, random_state=self._eval_cfg.seed)
+
+        if name == "tree":
+            try:
+                from lightgbm import LGBMRegressor
+
+                return LGBMRegressor(
+                    n_estimators=120,
+                    learning_rate=0.05,
+                    num_leaves=31,
+                    subsample=1.0,
+                    colsample_bytree=1.0,
+                    random_state=self._eval_cfg.seed,
+                    n_jobs=1,
+                    verbose=-1,
+                )
+            except ImportError:
+                from sklearn.ensemble import GradientBoostingRegressor
+
+                return GradientBoostingRegressor(random_state=self._eval_cfg.seed)
+
+        raise ValueError(f"Unknown classical model name {name!r}")
+
+    @staticmethod
+    def _as_finite_vector(
+        values: pl.Series | np.ndarray,
+        *,
+        name: str,
+    ) -> np.ndarray:
+        arr = (
+            values.cast(pl.Float64, strict=False).to_numpy()
+            if isinstance(values, pl.Series)
+            else np.asarray(values, dtype=float)
+        )
+        if arr.ndim != 1:
+            raise ValueError(f"{name} must be 1-D")
+        if arr.size == 0:
+            raise ValueError(f"{name} must be non-empty")
+        if not np.isfinite(arr).all():
+            raise ValueError(f"{name} must contain only finite values")
+        return arr
+
+    @staticmethod
+    def _safe_corr(left: np.ndarray, right: np.ndarray) -> float:
+        if left.size < 2 or right.size < 2:
+            return 0.0
+        left_centered = left - np.mean(left)
+        right_centered = right - np.mean(right)
+        denom = float(np.linalg.norm(left_centered) * np.linalg.norm(right_centered))
+        if denom == 0.0 or not np.isfinite(denom):
+            return 0.0
+        return float((left_centered @ right_centered) / denom)
+
+    def _orthogonality_stat(self, joint: np.ndarray) -> tuple[float, float, float]:
+        if joint.ndim != 2 or joint.shape[1] != 2:
+            raise ValueError("joint must be shaped (n, 2)")
+        cand = joint[:, 0]
+        book = joint[:, 1]
+        global_rho = self._safe_corr(cand, book)
+
+        threshold = float(np.quantile(book, 0.10))
+        mask = book <= threshold
+        tail_rho = self._safe_corr(cand[mask], book[mask])
+        spread = float(tail_rho - global_rho)
+        return float(global_rho), float(tail_rho), spread
 
 
 def ingest_tutorial_prediction(
@@ -448,10 +689,12 @@ def assert_null_floor(
     scorecards: Mapping[str, MetricScorecard],
     *,
     tolerance: float = 0.05,
+    metric_tolerances: Mapping[str, float] | None = None,
 ) -> None:
     """Ensure null baselines remain near zero on core skill metrics."""
 
     tol = float(tolerance)
+    metric_tol = dict(metric_tolerances or {})
     for name in NULL_BASELINES:
         if name not in scorecards:
             raise ValueError(f"Missing null baseline scorecard {name!r}")
@@ -469,10 +712,11 @@ def assert_null_floor(
             "corr_sharpe_ac": score.corr_sharpe_ac.value,
         }
         for metric_name, value in checks.items():
-            if abs(float(value)) > tol:
+            threshold = float(metric_tol.get(metric_name, tol))
+            if abs(float(value)) > threshold:
                 raise ValueError(
                     "Null floor violation for "
-                    f"{name}.{metric_name}: observed={value:.8f}, tolerance={tol:.8f}"
+                    f"{name}.{metric_name}: observed={value:.8f}, tolerance={threshold:.8f}"
                 )
 
 
