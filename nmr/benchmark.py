@@ -711,6 +711,10 @@ def assert_null_floor(
             "fnc": score.fnc,
             "corr_sharpe_ac": score.corr_sharpe_ac.value,
         }
+        if score.bmc is not None:
+            checks["bmc"] = score.bmc.value
+        if score.cwmm is not None:
+            checks["cwmm"] = score.cwmm.value
         for metric_name, value in checks.items():
             threshold = float(metric_tol.get(metric_name, tol))
             if abs(float(value)) > threshold:
@@ -761,7 +765,7 @@ def assert_slice1_monotone(
 
 def canonical_scorecards_bytes(scorecards: Mapping[str, MetricScorecard]) -> bytes:
     payload = {
-        model_id: scorecards[model_id].to_frame().to_dicts()[0]
+        model_id: _sanitize_json_payload(scorecards[model_id].to_frame().to_dicts()[0])
         for model_id in sorted(scorecards)
     }
     encoded = json.dumps(
@@ -849,3 +853,24 @@ def _json_default(value: object) -> object:
     if isinstance(value, np.integer):
         return int(value)
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def _sanitize_json_payload(value: object) -> object:
+    if isinstance(value, dict):
+        return {str(k): _sanitize_json_payload(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_json_payload(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_sanitize_json_payload(v) for v in value)
+    if isinstance(value, (float, np.floating)):
+        f = float(value)
+        if np.isfinite(f):
+            return f
+        if np.isnan(f):
+            return "NaN"
+        if f > 0:
+            return "Infinity"
+        return "-Infinity"
+    if isinstance(value, np.integer):
+        return int(value)
+    return value
