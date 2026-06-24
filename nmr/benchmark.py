@@ -18,16 +18,17 @@ from typing import Any
 
 import numpy as np
 import polars as pl
-from sklearn.linear_model import Ridge
-
 from nmr.evaluation import MIN_OVERLAP_ERAS
 from nmr.inference import block_bootstrap_ci, resolve_block_len
 from nmr.scorecard import MetricScorecard, evaluate_model
+from sklearn.linear_model import Ridge
 
 __all__ = [
     "NULL_BASELINES",
     "TUTORIAL_NOTEBOOK_TO_MODEL_ID",
     "BenchmarkSuite",
+    "scorecards_to_frame",
+    "write_scorecards_csv",
     "discover_tutorial_notebooks",
     "assert_notebook_prediction_contract",
     "extract_oos_predictions",
@@ -298,6 +299,19 @@ class BenchmarkSuite:
         for model_id, frame in predictions_by_model_id.items():
             out[model_id] = self.evaluate_predictions(frame, model_id=model_id)
         return out
+
+    def scorecards_to_frame(
+        self,
+        scorecards: Mapping[str, MetricScorecard],
+    ) -> pl.DataFrame:
+        return scorecards_to_frame(scorecards)
+
+    def write_scorecards_csv(
+        self,
+        scorecards: Mapping[str, MetricScorecard],
+        output_path: str | Path,
+    ) -> Path:
+        return write_scorecards_csv(scorecards, output_path)
 
     def null_prediction_frame(self, baseline: str, *, seed: int) -> pl.DataFrame:
         pred_col = self._eval_cfg.pred_col
@@ -596,6 +610,38 @@ def ingest_tutorial_prediction_batch(
         out[model_id] = frame
 
     return out
+
+
+def scorecards_to_frame(scorecards: Mapping[str, MetricScorecard]) -> pl.DataFrame:
+    if not scorecards:
+        raise ValueError("scorecards must be non-empty")
+
+    frames: list[pl.DataFrame] = []
+    for model_id in sorted(scorecards):
+        frame = scorecards[model_id].to_frame()
+        row_model_id = frame.get_column("model_id")[0]
+        if row_model_id != model_id:
+            raise ValueError(
+                "Scorecard model_id mismatch: "
+                f"mapping key {model_id!r} != row model_id {row_model_id!r}"
+            )
+        frames.append(frame)
+
+    return pl.concat(frames, how="vertical_relaxed").sort("model_id")
+
+
+def write_scorecards_csv(
+    scorecards: Mapping[str, MetricScorecard],
+    output_path: str | Path,
+) -> Path:
+    path = Path(output_path)
+    if path.suffix.lower() != ".csv":
+        raise ValueError(f"output_path must be a .csv file: {path}")
+
+    frame = scorecards_to_frame(scorecards)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frame.write_csv(path)
+    return path
 
 
 def discover_tutorial_notebooks(root: str | Path) -> dict[str, Path]:

@@ -19,6 +19,8 @@ from .benchmark import (
     ingest_tutorial_prediction,
     ingest_tutorial_prediction_batch,
     scorecards_sha256,
+    scorecards_to_frame,
+    write_scorecards_csv,
 )
 from .config import ExperimentConfig, load_config, set_global_seeds
 from .data import IngestionAgent
@@ -83,6 +85,8 @@ __all__ = [
     "NULL_BASELINES",
     "TUTORIAL_NOTEBOOK_TO_MODEL_ID",
     "BenchmarkSuite",
+    "scorecards_to_frame",
+    "write_scorecards_csv",
     "discover_tutorial_notebooks",
     "assert_notebook_prediction_contract",
     "extract_oos_predictions",

@@ -10,7 +10,6 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import pytest
-
 from nmr.benchmark import (
     BenchmarkSuite,
     assert_notebook_prediction_contract,
@@ -19,6 +18,8 @@ from nmr.benchmark import (
     discover_tutorial_notebooks,
     extract_oos_predictions,
     scorecards_sha256,
+    scorecards_to_frame,
+    write_scorecards_csv,
 )
 
 
@@ -222,3 +223,28 @@ print(scorecards_sha256(suite.run_null_baselines(seed=77)))
     run1 = subprocess.run(cmd, capture_output=True, text=True, check=True)
     run2 = subprocess.run(cmd, capture_output=True, text=True, check=True)
     assert run1.stdout.strip() == run2.stdout.strip()
+
+
+def test_slice1_scorecards_csv_persistence(tmp_path: Path) -> None:
+    suite, predictions, _ = _suite(seed=55)
+
+    scores = suite.run_null_baselines(seed=55)
+    scores["candidate"] = suite.evaluate_predictions(
+        predictions,
+        model_id="candidate",
+        seed=55,
+    )
+
+    frame = scorecards_to_frame(scores)
+    out_path = write_scorecards_csv(
+        scores, tmp_path / "artifacts" / "benchmark_scores.csv"
+    )
+
+    assert out_path == tmp_path / "artifacts" / "benchmark_scores.csv"
+    assert out_path.exists()
+
+    persisted = pl.read_csv(out_path)
+    assert persisted.columns == frame.columns
+    assert persisted.get_column("model_id").to_list() == sorted(scores)
+    assert persisted.height == len(scores)
+    assert persisted.sort("model_id").to_dicts() == frame.sort("model_id").to_dicts()
