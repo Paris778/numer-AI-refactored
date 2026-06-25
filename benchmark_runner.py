@@ -141,30 +141,15 @@ def _profile_label_space(
     )
 
 
-def _safe_scorecards_to_frame(scorecards: dict[str, object]) -> pl.DataFrame:
-    try:
-        return scorecards_to_frame(scorecards)
-    except AttributeError:
-        frames = []
-        for model_id, sc in sorted(scorecards.items()):
-            if hasattr(sc, "to_frame") and callable(sc.to_frame):
-                frames.append(sc.to_frame())
-            else:
-                frames.append(
-                    pl.DataFrame(
-                        {
-                            "model_id": [model_id],
-                            "n_eras": [int(getattr(sc, "n_eras", 0))],
-                            "rank_scalar": [float(getattr(sc, "rank_scalar", 0.0))],
-                            "deflated_sharpe": [
-                                float(getattr(sc, "deflated_sharpe", 0.0))
-                            ],
-                        }
-                    )
-                )
-        if not frames:
-            raise ValueError("Scorecards collection is empty.")
-        return pl.concat(frames, how="vertical_relaxed").sort("model_id")
+def _fallback_scorecard_frame(model_id: str, n_eras: int) -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "model_id": [model_id],
+            "n_eras": [int(n_eras)],
+            "rank_scalar": [0.0],
+            "deflated_sharpe": [0.0],
+        }
+    )
 
 
 def main() -> int:
@@ -232,13 +217,7 @@ def main() -> int:
 
     log.info("Step 3/4: Processing strategies sequentially with safety guards")
     scorecards, runtime_rows, label_profile_frames = {}, [], []
-
-    # Simple structured dataclass wrapper for fallbacks instead of a messy dynamic inline class
-    @dataclass
-    class MockScorecard:
-        rank_scalar: float = 0.0
-        deflated_sharpe: float = 0.0
-        n_eras: int = 0
+    fallback_scorecard_frames: list[pl.DataFrame] = []
 
     for ctx in _candidate_strategies(
         suite, benchmarks, args.seed, args.min_train_eras, args.fast_mode
@@ -265,7 +244,12 @@ def main() -> int:
                 ctx.model_id,
             )
             n_eras_unique = norm_preds.select(pl.col("era").n_unique()).item()
-            scorecards[ctx.model_id] = MockScorecard(n_eras=n_eras_unique)
+            fallback_scorecard_frames.append(
+                _fallback_scorecard_frame(
+                    model_id=ctx.model_id,
+                    n_eras=int(n_eras_unique) if n_eras_unique is not None else 0,
+                )
+            )
         else:
             scorecards[ctx.model_id] = suite.evaluate_normalized_predictions(
                 norm_preds, model_id=ctx.model_id, seed=ctx.seed
@@ -290,10 +274,21 @@ def main() -> int:
         args.labels_output
     )
 
-    out = _safe_scorecards_to_frame(scorecards).join(
-        pl.DataFrame(runtime_rows),
-        on="model_id",
-        how="left",
+    scorecard_frames: list[pl.DataFrame] = []
+    if scorecards:
+        scorecard_frames.append(scorecards_to_frame(scorecards))
+    scorecard_frames.extend(fallback_scorecard_frames)
+    if not scorecard_frames:
+        raise ValueError("No scorecards were produced.")
+
+    out = (
+        pl.concat(scorecard_frames, how="diagonal_relaxed")
+        .sort("model_id")
+        .join(
+            pl.DataFrame(runtime_rows),
+            on="model_id",
+            how="left",
+        )
     )
     out.write_csv(args.output)
     log.info("Run successfully complete.")

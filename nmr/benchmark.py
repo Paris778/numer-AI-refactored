@@ -397,8 +397,8 @@ class BenchmarkSuite:
             .with_columns(pl.col(pred_col).cast(pl.Float64, strict=False))
             .drop_nulls()
             .filter(pl.col(pred_col).is_finite())
-            .unique(subset=self._join_keys, keep="first")
             .sort(self._join_keys)
+            .unique(subset=self._join_keys, keep="first")
         )
 
         if cleaned.is_empty():
@@ -575,14 +575,17 @@ def ingest_tutorial_prediction(
     columns = set(frame.columns)
 
     if pred_col not in columns:
-        numeric_candidates = [
-            col for col, dtype in zip(frame.columns, frame.dtypes) if dtype.is_numeric()
-        ]
-        if len(numeric_candidates) == 1:
-            frame = frame.rename({numeric_candidates[0]: pred_col})
-            columns = set(frame.columns)
-        else:
+        pred_candidate = _infer_prediction_column(
+            frame.columns,
+            frame.dtypes,
+            pred_col=pred_col,
+            era_col=era_col,
+            id_col=id_col,
+        )
+        if pred_candidate is None:
             raise ValueError(f"Missing required prediction column {pred_col!r}")
+        frame = frame.rename({pred_candidate: pred_col})
+        columns = set(frame.columns)
 
     if id_col not in columns:
         id_candidate = _infer_id_column(
@@ -722,11 +725,15 @@ def extract_oos_predictions(
             frame = frame.rename({candidate: id_col})
 
     if pred_col not in frame.columns:
-        numeric_candidates = [
-            col for col, dtype in zip(frame.columns, frame.dtypes) if dtype.is_numeric()
-        ]
-        if len(numeric_candidates) == 1:
-            frame = frame.rename({numeric_candidates[0]: pred_col})
+        pred_candidate = _infer_prediction_column(
+            frame.columns,
+            frame.dtypes,
+            pred_col=pred_col,
+            era_col=era_col,
+            id_col=id_col,
+        )
+        if pred_candidate is not None:
+            frame = frame.rename({pred_candidate: pred_col})
 
     missing = [name for name in (id_col, pred_col) if name not in frame.columns]
     if missing:
@@ -839,10 +846,12 @@ def assert_slice1_monotone(
 
 
 def canonical_scorecards_bytes(scorecards: Mapping[str, MetricScorecard]) -> bytes:
-    payload = {
-        model_id: _sanitize_json_payload(scorecards[model_id].to_frame().to_dicts()[0])
-        for model_id in sorted(scorecards)
-    }
+    frame = scorecards_to_frame(scorecards).sort("model_id")
+    payload: dict[str, object] = {}
+    for row in frame.iter_rows(named=True):
+        model_id = str(row["model_id"])
+        payload[model_id] = _sanitize_json_payload(row)
+
     encoded = json.dumps(
         payload,
         sort_keys=True,
@@ -863,7 +872,25 @@ def _verify_notebook_contract(notebook_path: Path) -> None:
         known = sorted(_TUTORIAL_NOTEBOOK_ANCHORS)
         raise ValueError(f"Notebook {notebook_name!r} not in tutorial roster: {known}")
 
-    text = notebook_path.read_text(encoding="utf-8")
+    try:
+        raw = json.loads(notebook_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"Failed to parse notebook JSON for {notebook_name!r}"
+        ) from exc
+
+    cells = raw.get("cells", []) if isinstance(raw, dict) else []
+    source_parts: list[str] = []
+    for cell in cells:
+        if not isinstance(cell, dict):
+            continue
+        source = cell.get("source", [])
+        if isinstance(source, str):
+            source_parts.append(source)
+        elif isinstance(source, list):
+            source_parts.extend(str(line) for line in source)
+
+    text = "\n".join(source_parts)
     anchors = _TUTORIAL_NOTEBOOK_ANCHORS[notebook_name]
     missing = [anchor for anchor in anchors if anchor not in text]
     if missing:
@@ -913,6 +940,49 @@ def _infer_id_column(
         if alias in normalized:
             return normalized[alias]
     return non_metric[0]
+
+
+def _infer_prediction_column(
+    columns: Sequence[str],
+    dtypes: Sequence[pl.DataType],
+    *,
+    pred_col: str,
+    era_col: str,
+    id_col: str,
+) -> str | None:
+    normalized = {col.lower(): col for col in columns}
+    aliases = (
+        pred_col.lower(),
+        "prediction",
+        "predictions",
+        "pred",
+        "score",
+        "scores",
+        "model_prediction",
+        "numerai_prediction",
+    )
+    for alias in aliases:
+        resolved = normalized.get(alias)
+        if resolved is not None and resolved not in {era_col, id_col}:
+            return resolved
+
+    numeric_candidates = [
+        col
+        for col, dtype in zip(columns, dtypes)
+        if dtype.is_numeric() and col not in {era_col, id_col}
+    ]
+    if len(numeric_candidates) == 1:
+        return numeric_candidates[0]
+
+    pred_like = [
+        col
+        for col in numeric_candidates
+        if "pred" in col.lower() or "score" in col.lower()
+    ]
+    if len(pred_like) == 1:
+        return pred_like[0]
+
+    return None
 
 
 def _assert_scorecard_finite(score: MetricScorecard, *, model_id: str) -> None:
