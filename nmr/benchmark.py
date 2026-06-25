@@ -489,11 +489,12 @@ class BenchmarkSuite:
                 from lightgbm import LGBMRegressor
 
                 return LGBMRegressor(
-                    n_estimators=120,
+                    n_estimators=200,
                     learning_rate=0.05,
-                    num_leaves=31,
-                    subsample=1.0,
-                    colsample_bytree=1.0,
+                    max_depth=5,
+                    num_leaves=15,
+                    subsample=0.8,
+                    colsample_bytree=0.1,
                     random_state=self._eval_cfg.seed,
                     n_jobs=1,
                     verbose=-1,
