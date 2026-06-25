@@ -18,10 +18,11 @@ from typing import Any
 
 import numpy as np
 import polars as pl
+from sklearn.linear_model import Ridge
+
 from nmr.evaluation import MIN_OVERLAP_ERAS
 from nmr.inference import block_bootstrap_ci, resolve_block_len
 from nmr.scorecard import MetricScorecard, evaluate_model
-from sklearn.linear_model import Ridge
 
 __all__ = [
     "NULL_BASELINES",
@@ -263,10 +264,23 @@ class BenchmarkSuite:
         seed: int | None = None,
     ) -> MetricScorecard:
         normalized = self._normalize_predictions(predictions)
+        return self.evaluate_normalized_predictions(
+            normalized,
+            model_id=model_id,
+            seed=seed,
+        )
+
+    def evaluate_normalized_predictions(
+        self,
+        normalized_predictions: pl.DataFrame,
+        *,
+        model_id: str,
+        seed: int | None = None,
+    ) -> MetricScorecard:
         run_seed = self._eval_cfg.seed if seed is None else int(seed)
         cfg = self._eval_cfg
         return evaluate_model(
-            normalized,
+            normalized_predictions,
             meta_model=self._meta_model,
             benchmarks=self._benchmarks,
             features=self._features,
@@ -290,6 +304,20 @@ class BenchmarkSuite:
             trials_sr_var=cfg.trials_sr_var,
             sr0_benchmark=cfg.sr0_benchmark,
         )
+
+    def normalized_era_labels(self, predictions: pl.DataFrame) -> pl.DataFrame:
+        """Return per-era row counts from normalized predictions for profiling."""
+
+        normalized = self._normalize_predictions(predictions)
+        era_col = self._eval_cfg.era_col
+        return (
+            normalized.group_by(era_col).len().rename({"len": "n_rows"}).sort(era_col)
+        )
+
+    def normalize_predictions(self, predictions: pl.DataFrame) -> pl.DataFrame:
+        """Public wrapper for benchmark orchestration that needs normalized frames."""
+
+        return self._normalize_predictions(predictions)
 
     def evaluate_tutorial_predictions(
         self,
