@@ -1,0 +1,37 @@
+# First competitive model: small-feature-set LightGBM ensemble over multiple
+# 20D targets, with full feature neutralization.
+
+run:
+  name: first-competitive-lgbm-small
+  seed: 20260713
+
+data:
+  version: v5.2
+  feature_set: small
+  targets:
+    - target_cyrusd_20
+    - target_ender_20
+    - target_jasper_20
+    - target_teager2b_20
+
+split:
+  scheme: walk_forward
+  purge_eras: 8
+  embargo_eras: 4
+  n_folds: 4
+
+model:
+  backend: lightgbm
+  preset: standard
+  params:
+    n_estimators: 5000
+    learning_rate: 0.005
+    max_depth: 6
+    num_leaves: 64
+    colsample_bytree: 0.1
+    subsample: 0.8
+
+evaluation:
+  backend: custom
+  main_target: target_cyrusd_20
+  metrics: [corr, mmc, fnc, sharpe]
