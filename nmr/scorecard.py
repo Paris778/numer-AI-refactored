@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -77,6 +78,8 @@ class MetricScorecard:
     cwmm: MetricCell | None
     cwmm_reason: str | None
     book_correlation: object | None
+    metric_timing_seconds: dict[str, float] | None
+    eval_total_seconds: float
 
     def to_frame(self) -> pl.DataFrame:
         row: dict[str, Any] = {
@@ -96,7 +99,19 @@ class MetricScorecard:
             "time_to_recovery": self.time_to_recovery,
             "max_feature_exposure": self.max_feature_exposure,
             "book_correlation": self.book_correlation,
+            "quality_metric_total_seconds": self.eval_total_seconds,
         }
+
+        metric_timings = self.metric_timing_seconds or {}
+        if metric_timings:
+            row["quality_metric_timings_json"] = json.dumps(
+                {k: float(metric_timings[k]) for k in sorted(metric_timings)},
+                sort_keys=True,
+            )
+            for name in sorted(metric_timings):
+                row[f"timing_{name}_seconds"] = float(metric_timings[name])
+        else:
+            row["quality_metric_timings_json"] = None
 
         self._flatten_metric_cell(row, "mean_payout", self.mean_payout)
         self._flatten_metric_cell(row, "corr", self.corr)
@@ -306,6 +321,12 @@ def evaluate_model(
     trials_sr_var: float | None = None,
     sr0_benchmark: float = 0.0,
 ) -> MetricScorecard:
+    eval_start = time.perf_counter()
+    metric_timing_seconds: dict[str, float] = {}
+
+    def _mark(name: str, started: float) -> None:
+        metric_timing_seconds[name] = round(time.perf_counter() - started, 6)
+
     for name, frame in {
         "predictions": predictions,
         "meta_model": meta_model,
@@ -332,12 +353,14 @@ def evaluate_model(
     ):
         join_keys = [era_col, id_col]
 
+    t0 = time.perf_counter()
     base = (
         predictions.select([*join_keys, pred_col])
         .join(meta_model.select([*join_keys, meta_col]), on=join_keys, how="inner")
         .join(targets, on=join_keys, how="inner")
         .join(features, on=join_keys, how="inner")
     )
+    _mark("join_base", t0)
     if base.is_empty():
         raise ValueError(
             "No overlap rows after joining predictions, meta_model, targets, and features"
@@ -355,23 +378,29 @@ def evaluate_model(
                 if candidate_cols:
                     bench_col = candidate_cols[0]
             if bench_col is not None and bench_col in benchmarks.columns:
+                t0 = time.perf_counter()
                 base = base.join(
                     benchmarks.select([*join_keys, bench_col]),
                     on=join_keys,
                     how="left",
                 )
+                _mark("join_benchmark", t0)
 
     feature_cols = [c for c in features.columns if c not in set(join_keys)]
     if not feature_cols:
         raise ValueError("features must contain at least one feature column")
 
     evaluator = EvaluationEngine("custom")
+    t0 = time.perf_counter()
     corr_by_era = evaluator.per_era_corr(
         base,
         pred_col=pred_col,
         target_col=main_target,
         era_col=era_col,
     )
+    _mark("corr_by_era", t0)
+
+    t0 = time.perf_counter()
     mmc_by_era = evaluator.per_era_mmc(
         base,
         pred_col=pred_col,
@@ -379,6 +408,9 @@ def evaluate_model(
         target_col=main_target,
         era_col=era_col,
     )
+    _mark("mmc_by_era", t0)
+
+    t0 = time.perf_counter()
     fnc_by_era = evaluator.per_era_fnc(
         base,
         pred_col=pred_col,
@@ -386,7 +418,9 @@ def evaluate_model(
         target_col=main_target,
         era_col=era_col,
     )
+    _mark("fnc_by_era", t0)
 
+    t0 = time.perf_counter()
     payout = payout_report(
         corr_by_era,
         mmc_by_era,
@@ -400,7 +434,9 @@ def evaluate_model(
         trials_sr_var=trials_sr_var,
         sr0_benchmark=sr0_benchmark,
     )
+    _mark("payout_report", t0)
 
+    t0 = time.perf_counter()
     corr_cell = _cell_from_series(
         corr_by_era,
         horizon=horizon,
@@ -408,6 +444,9 @@ def evaluate_model(
         n_boot=n_boot,
         alpha=alpha,
     )
+    _mark("corr_cell", t0)
+
+    t0 = time.perf_counter()
     mmc_cell = _cell_from_series(
         mmc_by_era,
         horizon=horizon,
@@ -415,6 +454,9 @@ def evaluate_model(
         n_boot=n_boot,
         alpha=alpha,
     )
+    _mark("mmc_cell", t0)
+
+    t0 = time.perf_counter()
     corr_sharpe_cell = _cell_from_sharpe_series(
         corr_by_era,
         horizon=horizon,
@@ -422,19 +464,28 @@ def evaluate_model(
         n_boot=n_boot,
         alpha=alpha,
     )
+    _mark("corr_sharpe_cell", t0)
+
+    t0 = time.perf_counter()
     fnc_value = era_series_stats(
         [fnc_by_era[k] for k in _sorted_numeric_keys(fnc_by_era)]
     ).mean
+    _mark("fnc_summary", t0)
+
+    t0 = time.perf_counter()
     std_corr = era_series_stats(
         [corr_by_era[k] for k in _sorted_numeric_keys(corr_by_era)]
     ).std
+    _mark("std_corr_summary", t0)
 
+    t0 = time.perf_counter()
     exposure_df = feature_exposure_report(
         base.select([era_col, pred_col, *feature_cols]),
         feature_cols=feature_cols,
         era_col=era_col,
         pred_col=pred_col,
     )
+    _mark("feature_exposure", t0)
     max_feature_exposure = (
         float(exposure_df.get_column("max_abs_exposure").to_list()[0])
         if exposure_df.height > 0
@@ -446,6 +497,7 @@ def evaluate_model(
     if bench_col is not None and bench_col in base.columns:
         target_name = _infer_horizon_target_name(bench_col, base.columns)
         if target_name is not None:
+            t0 = time.perf_counter()
             try:
                 horizon_result = time_horizon_stability(
                     base,
@@ -458,6 +510,7 @@ def evaluate_model(
             except NonVacuityError as exc:
                 horizon_result = None
                 horizon_reason = str(exc)
+            _mark("horizon_stability", t0)
         else:
             horizon_reason = "horizon target columns unavailable"
     else:
@@ -466,6 +519,7 @@ def evaluate_model(
     regime_result: dict[str, RegimeCorr] | None = None
     regime_reason: str | None = None
     if regime_labels is not None:
+        t0 = time.perf_counter()
         try:
             regime_result = regime_conditioned_corr(
                 base.select([era_col, pred_col, main_target]),
@@ -483,12 +537,14 @@ def evaluate_model(
         except NonVacuityError as exc:
             regime_result = None
             regime_reason = str(exc)
+        _mark("regime_conditioned_corr", t0)
     else:
         regime_reason = "regime labels unavailable"
 
     bmc_cell: MetricCell | None = None
     bmc_reason: str | None = None
     if bench_col is not None and bench_col in base.columns:
+        t0 = time.perf_counter()
         try:
             bmc_by_era = evaluator.per_era_bmc(
                 base,
@@ -508,11 +564,13 @@ def evaluate_model(
         except NonVacuityError as exc:
             bmc_cell = None
             bmc_reason = str(exc)
+        _mark("bmc", t0)
     else:
         bmc_reason = "benchmark unavailable"
 
     cwmm_cell: MetricCell | None = None
     cwmm_reason: str | None = None
+    t0 = time.perf_counter()
     try:
         cwmm_by_era = evaluator.per_era_cwmm(
             base,
@@ -531,6 +589,9 @@ def evaluate_model(
     except NonVacuityError as exc:
         cwmm_cell = None
         cwmm_reason = str(exc)
+    _mark("cwmm", t0)
+
+    eval_total_seconds = round(time.perf_counter() - eval_start, 6)
 
     return MetricScorecard(
         model_id=model_id,
@@ -562,4 +623,6 @@ def evaluate_model(
         cwmm=cwmm_cell,
         cwmm_reason=cwmm_reason,
         book_correlation=None,
+        metric_timing_seconds=metric_timing_seconds,
+        eval_total_seconds=eval_total_seconds,
     )
