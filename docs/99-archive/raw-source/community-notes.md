@@ -73,3 +73,27 @@ The prediction variance will be the mean of the square deviations from the mean 
 Consider the alternative of actually predicting for the uncertain stocks and submitting a prediction like the following: [-2, -1, 0, 1, 2].
 Now the variance of your prediction is ((-2)^2 + (-1)^2 + 0 + (1)^2 + (2)^2)/5 = 10/5 =2. This means your standard deviation is now sqrt(2) or about 1.415. This means that for predicting -1 and 1 for the second and fourth stocks respectively to be EV maximizing, the new dot product must be at least 1.415/1.264 times as large as it had originally been at 8; i.e. the expected dot product should be at least 8.96 . We already have at least 8 in expected dot product from the certain first and fifth stocks, so we need the two middling predictions to contribute an expected dot product of at least 0.96 . The expected dot product contribution of the two middling stocks for a given probability p of the second stock being -1 is as follows -1 * ((-1) * p + 1  * (1-p)) [this is the ev from predicting -1 for stock 2] + 1 * ((-1) * (1-p) + 1 * p) [ev from predicting 1 for stock 4]. This simplifies to the EV contribution being 4p - 2. In our case p = 0.75, so we get an expected dot product contribution of 4 * 0.75-2 = 3 - 2 = 1. Since 1 is greater than 0.96, we get enough extra dot product from the middling predictions to justify the extra standard deviation of predicting [-2, -1, 0, 1, 2]. 
 This toy example shows that since middling predictions contribute so little to the standard devation of the predictions relative to the most extreme predictions, it's hard to justify the loss in dot product from zeroing them out. I think people can get a lot out of working through some of the math on optimizing corr (which is like optimizing dot product subject to an l2 norm constraint on your predictions) and similar metrics for the sake of better understanding the problem at hand. The math for MMC is obviously a bit different, so taking some time to understand that is also helpful. If the math is overly tedious, I think using a chatbot to implement some of these calculations with low dimensional vectors you can visualize can really help with intuition.
+
+----------------------------------------
+From wigglemouse (grandmaster) 
+
+My question : Hello !!! Silly question
+
+I was wondering how does the lifecycle of your models looks like. 
+Specifically at what stage do you determine whether a model is worth staking on ? 
+Do you decide based on your test performance ? Or do you let the model soak into prod for a while ? 
+
+If metrics, what signals are you specifically looking for ? 
+
+Thanks ✨
+
+Wigglemouse (Grandmaster) : 
+True Contribution has been defunct for a while.
+
+Anyway, if you use the validation tool (or validate it yourself locally) on a big backtest, that will give you an idea.  However, the bigger the backtest, the less actual data you have to train with (although you can do a walk-forward thing where you model is retrained with additional data every so many steps).  The training/validation split in the data files is arbitrary, btw, and there is no particular reason to respect it -- most people use much or all of the validation data (which is more recent, the data is in order) for training.  So just backtesting over a long time-frame with all the usual warnings about backtesting -- make sure you've got no leaks (you do need to "embargo" a certain number eras so the targets aren't overlapping with your training data), you aren't p-hacking to death, etc etc.  (Everybody has bugs at some point that makes their model look great -- if your model has no crappy periods, something is wrong.)  Then prepare a pipeline (or just use a pickled model if your model fits) for live submission, and just do it.  There is no reason to wait until it is "ready" just to submit because you don't have to stake right away (or ever) if you don't want to.
+
+You can't really "validate in live" unless you want to wait like 2 years to see how it does through various regimes.  And just remember there is no such thing as a model that does well all of the time.
+
+The other thing is we get data updates and sometimes even target updates, so every so many months you are going to have to change/update your model(s) anyway just to keep up.  So there is basically no other way to validate your model except backtesting. 
+...
+BUT...the most important metrics (mmc in main or mpc in signals) can't actually be backtested, not really.  And that's because those are based on how your model fits in to the metamodel along with everybody else's for each period, and how much unique contribution it has.  And you just have to get a feel for that really -- you need to be different, but still good, or just very very good (i.e. not quite as "unique", but just dominant), etc.  So just jump in.
