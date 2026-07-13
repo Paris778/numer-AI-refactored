@@ -847,6 +847,15 @@ def assert_slice1_monotone(
 
 def canonical_scorecards_bytes(scorecards: Mapping[str, MetricScorecard]) -> bytes:
     frame = scorecards_to_frame(scorecards).sort("model_id")
+    # Timing fields are wall-clock dependent and must not participate in
+    # cross-process determinism hashes.
+    timing_cols = {
+        "quality_metric_total_seconds",
+        "quality_metric_timings_json",
+    }
+    timing_cols.update(c for c in frame.columns if c.startswith("timing_"))
+    frame = frame.drop(*sorted(timing_cols & set(frame.columns)))
+
     payload: dict[str, object] = {}
     for row in frame.iter_rows(named=True):
         model_id = str(row["model_id"])

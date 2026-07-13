@@ -388,7 +388,16 @@ card = evaluate_model(
     n_boot=2,
     min_overlap_eras=20,
 )
-print(json.dumps(card.to_frame().to_dicts()[0], sort_keys=True, default=str))
+row = card.to_frame().to_dicts()[0]
+# Timing fields are wall-clock dependent and must not participate in
+# cross-process determinism checks.
+row = {
+    k: v
+    for k, v in row.items()
+    if k not in {"quality_metric_total_seconds", "quality_metric_timings_json"}
+    and not k.startswith("timing_")
+}
+print(json.dumps(row, sort_keys=True, default=str))
 """
     cmd = [sys.executable, "-c", code]
     run1 = subprocess.run(cmd, capture_output=True, text=True, check=True)

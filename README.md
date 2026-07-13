@@ -4,12 +4,10 @@ A lean, reproducible research framework for the Numerai Classic tournament.
 Optimized for idea throughput: fast experimentation, deterministic pipelines,
 and institution-grade submissions — without bloated abstractions.
 
-> **Status note (2026-06-21):** This README reflects the *actual* state of the
-> repository. A previous README described a "completed six-slice pipeline" with
-> `src/` modules and 43 passing tests — none of which existed on disk. That
-> document was an aspirational blueprint, not a status report, and has been
-> replaced. The blueprint's *design* survives as the roadmap below; its claimed
-> *completion* did not.
+> **Status note (2026-07-13):** This README reflects the *actual* state of the
+> repository. The implementation is now substantially complete across the
+> planned slices; only minor serialization hygiene (timing fields in
+> cross-process determinism hashes) and documentation polish remain.
 
 ## North Star
 
@@ -21,18 +19,20 @@ research velocity. Every module must justify its existence by accelerating that.
 | Slice | Scope | Status |
 |------:|-------|--------|
 | 0 | Foundation: package skeleton, typed config, determinism, test harness | ✅ Done |
-| 1 | Data layer — `IngestionAgent` (Polars lazy ingestion) | ⬜ Planned |
-| 2 | Validation & features — `PurgedEraSplitter`, `FeatureFactory` | ⬜ Planned |
-| 3 | Evaluation oracle — dual-backend metrics + `numerai_tools` parity | ⬜ Planned |
-| 4 | Risk — `NeutralizationEngine` (intercept-aware, era-cached) | ⬜ Planned |
-| 5 | Modeling — `ModelOrchestrator` (LightGBM/XGBoost, anchor + CV, OOF) | ⬜ Planned |
-| 6 | Ensembling & target stacking (rank-domain) | ⬜ Planned |
-| 7 | Submission & deployment (`predict` builder, cloudpickle, provenance) | ⬜ Planned |
-| 8 | Experiment runner & registry (deterministic promotion DAG) | ⬜ Planned |
-| 9 | Research enablement (HPO sweeps, diagnostics) | ⬜ Planned |
+| 1 | Data layer — `IngestionAgent` (Polars lazy ingestion) | ✅ Done |
+| 2 | Validation & features — `PurgedEraSplitter` | ✅ Done |
+| 3 | Evaluation oracle — dual-backend metrics + `numerai_tools` parity | ✅ Done |
+| 4 | Risk — `NeutralizationEngine` (intercept-aware, era-cached) | ✅ Done |
+| 5 | Modeling — `ModelOrchestrator` (LightGBM/XGBoost, anchor + CV, OOF) | ✅ Done |
+| 6 | Ensembling & target stacking (rank-domain) | ✅ Done |
+| 7 | Submission & deployment (`predict` builder, cloudpickle, provenance) | ✅ Done |
+| 8 | Experiment runner & registry (deterministic promotion DAG) | ✅ Done |
+| 9 | Research enablement (HPO sweeps, diagnostics) | ✅ Done |
+| E6 | Benchmark harness — null/classical baselines + tutorial ingestion | ✅ Done |
 
-What actually exists today: `nmr/config.py` (typed experiment config) plus its
-tests. Everything else is a planned module on the roadmap above.
+What actually exists today: the full `nmr/` package pipeline from config to
+submission, plus a real-data benchmark runner. See `nmr/` for the implementation
+and `tests/` for coverage.
 
 ## Design Laws (non-negotiable)
 
@@ -52,10 +52,23 @@ tests. Everything else is a planned module on the roadmap above.
 numer-AI-refactored/
 ├─ nmr/                  # the framework package (tested boundary)
 │  ├─ __init__.py
-│  └─ config.py          # ✅ typed YAML config, determinism, path resolution
-│  # planned: data.py, features.py, risk.py, models.py,
-│  #          ensemble.py, evaluation.py, submission.py,
-│  #          deployment.py, runner.py, registry.py, notebook_utils.py
+│  ├─ _transforms.py     # shared rank/gaussianize/power transforms
+│  ├─ benchmark.py       # E6 benchmark harness and null/classical baselines
+│  ├─ config.py          # ✅ typed YAML config, determinism, path resolution
+│  ├─ data.py            # lazy Polars ingestion agent
+│  ├─ deployment.py      # cloudpickle predict artifact + integrity manifest
+│  ├─ ensemble.py        # rank-domain blending and weight learning
+│  ├─ evaluation.py      # dual-backend CORR/MMC/FNC/BMC/CWMM metrics
+│  ├─ inference.py       # bootstrap CI, AC-adjusted Sharpe, Deflated Sharpe
+│  ├─ models.py          # LightGBM/XGBoost orchestrator (CV OOF + anchor)
+│  ├─ payout.py          # payout proxy and downside diagnostics
+│  ├─ registry.py        # atomic run registry with champion promotion
+│  ├─ research.py        # HPO sweeps and neutralization frontier
+│  ├─ risk.py            # per-era feature neutralization engine
+│  ├─ robustness.py      # perturbation, horizon, and regime diagnostics
+│  ├─ runner.py          # deterministic end-to-end experiment runner
+│  ├─ scorecard.py       # MetricScorecard aggregator
+│  └─ submission.py      # Numerai submission builder/validator
 ├─ configs/              # experiment configs (YAML)
 │  └─ example.yaml
 ├─ tests/                # unit, parity, deployment, runner verification
