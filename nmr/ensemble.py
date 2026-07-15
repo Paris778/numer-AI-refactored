@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 
 import numpy as np
@@ -9,6 +10,8 @@ import polars as pl
 from scipy.optimize import nnls
 
 from nmr._transforms import rank_gaussianize, rank_gaussianize_unit_variance
+
+logger = logging.getLogger("nmr.ensemble")
 
 __all__ = ["Ensembler"]
 
@@ -60,6 +63,11 @@ class Ensembler:
         era_col: str = "era",
         method: str = "ridge",
     ) -> tuple[float, ...]:
+        logger.info(
+            "[learn_weights] learning weights for %d predictions via %s",
+            len(pred_cols),
+            method,
+        )
         pred_list = _validate_pred_cols(pred_cols)
         clean = oof_df.select([era_col, *pred_list, target_col]).drop_nulls()
         if clean.is_empty():
@@ -90,6 +98,9 @@ class Ensembler:
         else:
             raise ValueError("method must be 'ridge' or 'non_negative'")
 
+        logger.info(
+            "[learn_weights] weights learned: %s", [round(float(w), 4) for w in weights]
+        )
         return tuple(float(value) for value in weights)
 
 

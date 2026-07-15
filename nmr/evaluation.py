@@ -15,6 +15,7 @@ Sharpe is defined as `0.0`.
 
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -23,6 +24,8 @@ import numpy as np
 import polars as pl
 
 from nmr._transforms import power_1_5, rank_gaussianize
+
+logger = logging.getLogger("nmr.evaluation")
 
 __all__ = [
     "MIN_OVERLAP_ERAS",

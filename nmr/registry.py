@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -12,6 +13,8 @@ from typing import Any
 import polars as pl
 
 from nmr.runner import RunResult
+
+logger = logging.getLogger("nmr.registry")
 
 __all__ = ["RunRegistry"]
 
@@ -22,11 +25,13 @@ class RunRegistry:
         self._root.mkdir(parents=True, exist_ok=True)
 
     def record(self, result: RunResult) -> Path:
+        logger.info("[record] recording run %s", result.run_id)
         run_dir = self._root / result.run_id
         run_dir.mkdir(parents=True, exist_ok=True)
 
         oof_path = run_dir / "oof.parquet"
         result.oof.write_parquet(oof_path)
+        logger.info("[record] OOF written to %s", oof_path)
 
         run_payload = {
             "run_id": result.run_id,
@@ -37,6 +42,7 @@ class RunRegistry:
             "artifact_manifest": result.artifact.manifest if result.artifact else None,
         }
         self._atomic_json_write(run_dir / "run.json", run_payload)
+        logger.info("[record] run metadata written to %s/run.json", run_dir)
         return run_dir
 
     def list(self) -> list[dict[str, Any]]:
@@ -58,12 +64,14 @@ class RunRegistry:
         return max(runs, key=lambda run: float(run["metrics"][metric]))
 
     def promote(self, run_id: str) -> Path:
+        logger.info("[promote] promoting run %s to champion", run_id)
         run_json = self._root / run_id / "run.json"
         if not run_json.exists():
             raise FileNotFoundError(f"Run {run_id!r} does not exist in registry")
 
         champion_path = self._root / "champion.json"
         self._atomic_json_write(champion_path, {"run_id": run_id})
+        logger.info("[promote] champion pointer written to %s", champion_path)
         return champion_path
 
     def _atomic_json_write(self, path: Path, payload: dict[str, Any]) -> None:

@@ -13,6 +13,8 @@ folds directly and refuses to widen scope into ranking, ensembling, or scoring.
 
 from __future__ import annotations
 
+import logging
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -25,6 +27,8 @@ import xgboost as xgb
 
 from nmr.config import ModelConfig
 from nmr.splitter import Fold, PurgedEraSplitter
+
+logger = logging.getLogger("nmr.models")
 
 __all__ = ["CVResult", "ModelOrchestrator"]
 
@@ -100,6 +104,7 @@ class ModelOrchestrator:
         era_col: str = "era",
     ) -> CVResult:
         folds = splitter.split(df.get_column(era_col).to_list())
+        logger.info("[train_cross_validation] %s: %d folds", target_col, len(folds))
         models: list[object] = []
         oof_parts: list[pl.DataFrame] = []
         seen_val_eras: set[str] = set()
@@ -111,12 +116,28 @@ class ModelOrchestrator:
                     f"Validation eras must be disjoint across folds, got {sorted(overlap)}"
                 )
 
+            logger.info(
+                "[train_cross_validation] %s: fold %d/%d train_eras=%d val_eras=%d",
+                target_col,
+                fold.index + 1,
+                len(folds),
+                len(fold.train_eras),
+                len(fold.val_eras),
+            )
+            t0 = time.time()
             model, fold_predictions = self._fit_predict_fold(
                 df,
                 fold=fold,
                 feature_cols=feature_cols,
                 target_col=target_col,
                 era_col=era_col,
+            )
+            logger.info(
+                "[train_cross_validation] %s: fold %d/%d trained in %.1fs",
+                target_col,
+                fold.index + 1,
+                len(folds),
+                time.time() - t0,
             )
             models.append(model)
             oof_parts.append(fold_predictions)
@@ -126,6 +147,9 @@ class ModelOrchestrator:
             raise ValueError("No folds produced OOF predictions")
 
         oof = pl.concat(oof_parts, how="vertical")
+        logger.info(
+            "[train_cross_validation] %s: OOF complete rows=%d", target_col, oof.height
+        )
         return CVResult(oof=oof, models=tuple(models))
 
     def _fit_predict_fold(
@@ -143,9 +167,22 @@ class ModelOrchestrator:
         if train_df.is_empty() or val_df.is_empty():
             raise ValueError(f"Degenerate training slice for fold {fold.index}")
 
+        logger.info(
+            "[_fit_predict_fold] %s fold %d: fitting model on %d rows",
+            target_col,
+            fold.index,
+            train_df.height,
+        )
+        t0 = time.time()
         model = self._fit_model(
             features=self._feature_frame(train_df, feature_cols=feature_cols),
             target=train_df.get_column(target_col).to_numpy(),
+        )
+        logger.info(
+            "[_fit_predict_fold] %s fold %d: fit complete in %.1fs",
+            target_col,
+            fold.index,
+            time.time() - t0,
         )
         prediction = self._predict_model(
             model,

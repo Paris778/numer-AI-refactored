@@ -22,12 +22,12 @@ split:
 
 model:
   backend: lightgbm
-  preset: standard
+  preset: fast
   params:
-    n_estimators: 5000
-    learning_rate: 0.005
-    max_depth: 6
-    num_leaves: 64
+    n_estimators: 1000
+    learning_rate: 0.01
+    max_depth: 5
+    num_leaves: 31
     colsample_bytree: 0.1
     subsample: 0.8
 

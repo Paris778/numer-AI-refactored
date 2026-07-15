@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import platform
 from collections.abc import Callable, Sequence
@@ -14,6 +15,8 @@ from pathlib import Path
 from typing import Any
 
 import cloudpickle
+
+logger = logging.getLogger("nmr.deployment")
 
 __all__ = ["DeploymentArtifact", "load_predict", "serialize_predict"]
 
@@ -46,6 +49,11 @@ def serialize_predict(
     }
     payload_bytes = cloudpickle.dumps(payload)
     artifact_path.write_bytes(payload_bytes)
+    logger.info(
+        "[serialize_predict] artifact written to %s (%d bytes)",
+        artifact_path,
+        len(payload_bytes),
+    )
 
     manifest = {
         "created_at": datetime.now(timezone.utc).isoformat(),

@@ -5,7 +5,9 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import logging
 import platform
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
@@ -23,6 +25,8 @@ from nmr.evaluation import EvaluationEngine, MetricSummary
 from nmr.models import ModelOrchestrator
 from nmr.risk import NeutralizationEngine
 from nmr.splitter import PurgedEraSplitter
+
+logger = logging.getLogger("nmr.runner")
 
 __all__ = ["RunResult", "ExperimentRunner"]
 
@@ -42,15 +46,26 @@ class ExperimentRunner:
         self._run_id = self._compute_run_id(config)
 
     def run(self, *, deploy: bool = False) -> RunResult:
+        logger.info("[run] starting experiment run_id=%s", self._run_id)
         set_global_seeds(self._config.run.seed)
 
         agent = IngestionAgent(self._config.data)
         feature_cols = agent.features(self._config.data.feature_set)
         main_target = self._config.evaluation.main_target
         target_cols = list(dict.fromkeys([*self._config.data.targets, main_target]))
+        logger.info(
+            "[run] loading train data: features=%d targets=%s",
+            len(feature_cols),
+            target_cols,
+        )
         train_df = agent.load(
             "train",
             columns=["era", "id", *feature_cols, *target_cols],
+        )
+        logger.info(
+            "[run] train data loaded: rows=%d cols=%d",
+            train_df.height,
+            len(train_df.columns),
         )
 
         splitter = PurgedEraSplitter(self._config.split)
@@ -71,6 +86,7 @@ class ExperimentRunner:
             how="inner",
         )
         pred_cols = [col for col in cv_oof.columns if col.startswith("pred_")]
+        logger.info("[run] blending %d target predictions", len(pred_cols))
 
         ensembler = Ensembler()
         weights = ensembler.learn_weights(
@@ -80,6 +96,7 @@ class ExperimentRunner:
             era_col="era",
             method="ridge",
         )
+        logger.info("[run] ensemble weights: %s", dict(zip(pred_cols, weights)))
         blended = ensembler.blend(
             joined,
             pred_cols=pred_cols,
@@ -88,6 +105,9 @@ class ExperimentRunner:
             out_col="prediction",
         )
 
+        logger.info(
+            "[run] neutralizing predictions with %d features", len(feature_cols)
+        )
         neutralized = NeutralizationEngine().neutralize(
             blended,
             pred_col="prediction",
@@ -96,6 +116,7 @@ class ExperimentRunner:
             proportion=1.0,
         )
 
+        logger.info("[run] evaluating OOF predictions")
         evaluator = EvaluationEngine(self._config.evaluation.backend)
         per_era_corr = evaluator.per_era_corr(
             neutralized,
@@ -104,10 +125,18 @@ class ExperimentRunner:
             era_col="era",
         )
         metrics = evaluator.summarize(per_era_corr)
+        logger.info(
+            "[run] metrics: mean=%.5f std=%.5f sharpe=%.5f max_drawdown=%.5f",
+            metrics.mean,
+            metrics.std,
+            metrics.sharpe,
+            metrics.max_drawdown,
+        )
         oof = neutralized.select(["id", "era", "prediction"]).sort(["era", "id"])
 
         artifact = None
         if deploy:
+            logger.info("[run] serializing deploy artifact")
             artifact = self._serialize_predict_artifact(
                 model=model_orchestrator,
                 train_df=train_df,
@@ -115,6 +144,7 @@ class ExperimentRunner:
                 target_col=main_target,
                 splitter=splitter,
             )
+            logger.info("[run] artifact written to %s", artifact.path)
 
         manifest = {
             "run_id": self._run_id,
@@ -145,14 +175,29 @@ class ExperimentRunner:
         splitter: PurgedEraSplitter,
         model_orchestrator: ModelOrchestrator,
     ) -> pl.DataFrame:
+        targets = self._config.data.targets
+        logger.info(
+            "[train_multi_target_oof] training %d target(s): %s", len(targets), targets
+        )
         stacked: pl.DataFrame | None = None
-        for target in self._config.data.targets:
+        for idx, target in enumerate(targets, start=1):
+            logger.info(
+                "[train_multi_target_oof] target %d/%d: %s", idx, len(targets), target
+            )
+            t0 = time.time()
             cv_result = model_orchestrator.train_cross_validation(
                 train_df,
                 feature_cols=feature_cols,
                 target_col=target,
                 splitter=splitter,
                 era_col="era",
+            )
+            logger.info(
+                "[train_multi_target_oof] target %d/%d complete in %.1fs (oof rows=%d)",
+                idx,
+                len(targets),
+                time.time() - t0,
+                cv_result.oof.height,
             )
             target_oof = cv_result.oof.rename({"prediction": f"pred_{target}"})
             if stacked is None:
@@ -161,6 +206,7 @@ class ExperimentRunner:
                 stacked = stacked.join(target_oof, on=["id", "era"], how="inner")
 
         assert stacked is not None
+        logger.info("[train_multi_target_oof] stacked OOF shape: %s", stacked.shape)
         return stacked
 
     def _serialize_predict_artifact(
@@ -173,6 +219,7 @@ class ExperimentRunner:
         splitter: PurgedEraSplitter,
     ) -> DeploymentArtifact:
         del splitter
+        logger.info("[serialize_predict_artifact] training anchor fold for deployment")
         anchor_splitter = PurgedEraSplitter(
             SplitConfig(
                 scheme="anchor",
@@ -181,12 +228,17 @@ class ExperimentRunner:
                 n_folds=1,
             )
         )
+        t0 = time.time()
         anchor_model, _ = model.train_anchor_fold(
             train_df,
             feature_cols=feature_cols,
             target_col=target_col,
             splitter=anchor_splitter,
             era_col="era",
+        )
+        logger.info(
+            "[serialize_predict_artifact] anchor fold trained in %.1fs",
+            time.time() - t0,
         )
         ordered_features = list(feature_cols)
 

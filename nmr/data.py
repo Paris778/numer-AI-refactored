@@ -21,12 +21,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import polars as pl
 
 from nmr.config import DataConfig
+
+logger = logging.getLogger("nmr.data")
 
 __all__ = ["IngestionAgent"]
 
@@ -170,7 +173,12 @@ class IngestionAgent:
 
     def load(self, split: str, **kwargs) -> pl.DataFrame:
         """Collect the lazy scan for ``split``."""
-        return self.scan(split, **kwargs).collect()
+        logger.info("[load] collecting %s", split)
+        df = self.scan(split, **kwargs).collect()
+        logger.info(
+            "[load] %s collected: rows=%d cols=%d", split, df.height, len(df.columns)
+        )
+        return df
 
     def train(self, **kwargs) -> pl.LazyFrame:
         """Equivalent to ``scan(\"train\", **kwargs)``."""

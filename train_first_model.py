@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 from nmr import ExperimentRunner, load_config
 from nmr.registry import RunRegistry
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+    datefmt="%H:%M:%S",
+)
 
 
 def main() -> int:

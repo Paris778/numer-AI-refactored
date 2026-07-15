@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -17,6 +18,8 @@ import numpy as np
 import polars as pl
 
 from nmr.config import REPO_ROOT
+
+logger = logging.getLogger("nmr.risk")
 
 __all__ = ["NeutralizationEngine"]
 
@@ -64,9 +67,12 @@ class NeutralizationEngine:
 
         work_df = df.with_row_index("__row_idx__")
         eras = work_df.get_column(era_col).unique(maintain_order=True).to_list()
+        logger.info("[neutralize] neutralizing %d eras", len(eras))
         parts: list[pl.DataFrame] = []
 
-        for era in eras:
+        for idx, era in enumerate(eras, start=1):
+            if idx == 1 or idx == len(eras) or idx % 50 == 0:
+                logger.info("[neutralize] era %d/%d: %s", idx, len(eras), era)
             era_df = work_df.filter(pl.col(era_col) == era)
             neutralized = self._neutralize_era(
                 era_df,
@@ -79,7 +85,9 @@ class NeutralizationEngine:
                 era_df.with_columns(pl.Series(name=pred_col, values=neutralized))
             )
 
-        return pl.concat(parts).sort("__row_idx__").drop("__row_idx__")
+        result = pl.concat(parts).sort("__row_idx__").drop("__row_idx__")
+        logger.info("[neutralize] complete")
+        return result
 
     def _neutralize_era(
         self,
