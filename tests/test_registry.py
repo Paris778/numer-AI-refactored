@@ -188,3 +188,17 @@ def test_best_validates_metric_name(tmp_path) -> None:
     registry.record(_result("a" * 64, sharpe=0.5))
     with pytest.raises(ValueError, match="metric"):
         registry.best("nope")
+
+
+def test_promote_if_better_corrupted_champion_pointer_is_treated_as_no_champion(
+    tmp_path,
+) -> None:
+    registry = RunRegistry(tmp_path)
+    registry.record(_result_with_scorecard("a" * 64, sharpe_ac=0.8))
+    champion_path = tmp_path / "champion.json"
+    champion_path.write_text(json.dumps({}), encoding="utf-8")  # no run_id key
+
+    path, promoted = registry.promote_if_better("a" * 64)
+
+    assert promoted is True
+    assert json.loads(path.read_text(encoding="utf-8")) == {"run_id": "a" * 64}

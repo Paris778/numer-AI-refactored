@@ -167,6 +167,15 @@ def feature_exposure_report(
         features = clean.select(feature_list).cast(pl.Float64).to_numpy()
         per_era[era] = _pred_feature_pearson(pred, features)
 
+    if not per_era:
+        return pl.DataFrame(
+            {
+                "feature": feature_list,
+                "mean_abs_exposure": [0.0] * len(feature_list),
+                "max_abs_exposure": [0.0] * len(feature_list),
+            }
+        )
+
     eras = sorted(per_era, key=int)
     matrix = np.column_stack([per_era[era] for era in eras])
     rows = [

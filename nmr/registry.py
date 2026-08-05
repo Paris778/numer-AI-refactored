@@ -162,6 +162,13 @@ class RunRegistry:
             return champion_path, True
 
         champion_id = json.loads(champion_path.read_text(encoding="utf-8")).get("run_id")
+        if not champion_id:
+            logger.warning(
+                "[promote_if_better] champion pointer corrupt (missing run_id); "
+                "treating as no champion"
+            )
+            self._atomic_json_write(champion_path, {"run_id": run_id})
+            return champion_path, True
         champion_json = self._root / champion_id / "run.json"
         if not champion_json.exists():
             logger.warning(

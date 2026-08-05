@@ -35,6 +35,7 @@ def test_candidate_strategies_consumes_only_public_api() -> None:
     assert [ctx.model_id for ctx in contexts] == ["constant-0.5", "linear", "bench_a"]
     assert contexts[0].seed == 77
     assert contexts[1].seed == 81
+    assert contexts[2].seed == 83  # benchmark_model rows keep seed + 6 (bootstrap CIs)
 
 
 def test_dashboard_escapes_html_interpolation() -> None:

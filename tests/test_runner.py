@@ -260,3 +260,15 @@ def test_mmc_metric_requires_validation_scorecard(tmp_path) -> None:
     import pytest as _pytest
     with _pytest.raises(ValueError, match="mmc"):
         ExperimentRunner(bad).run(deploy=False)
+
+
+def test_fold_held_out_weight_learning_and_scoring_eras(tmp_path) -> None:
+    cfg = _config(tmp_path)
+    result = ExperimentRunner(cfg).run(deploy=False)
+    folds = PurgedEraSplitter(cfg.split).split(
+        _build_train_frame().get_column("era").to_list()
+    )
+    assert set(result.manifest["weight_learning_eras"]) == {
+        era for fold in folds[:-1] for era in fold.val_eras
+    }
+    assert set(result.manifest["scoring_eras"]) == set(folds[-1].val_eras)

@@ -153,3 +153,13 @@ def test_feature_exposure_report_is_deterministic_and_sorted() -> None:
     assert first.columns == ["feature", "mean_abs_exposure", "max_abs_exposure"]
     values = first.get_column("max_abs_exposure").to_list()
     assert values == sorted(values, reverse=True)
+
+
+def test_feature_exposure_report_empty_oof_returns_zero_exposures() -> None:
+    empty = pl.DataFrame({"era": [], "prediction": [], "f1": []})
+    report = feature_exposure_report(empty, feature_cols=["f1"])
+
+    assert report.height == 1
+    assert report.get_column("feature").to_list() == ["f1"]
+    assert report.get_column("mean_abs_exposure").to_list() == [0.0]
+    assert report.get_column("max_abs_exposure").to_list() == [0.0]
