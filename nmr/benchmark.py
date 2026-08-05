@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +24,8 @@ from sklearn.linear_model import Ridge
 from nmr.evaluation import MIN_OVERLAP_ERAS
 from nmr.inference import block_bootstrap_ci, resolve_block_len
 from nmr.scorecard import MetricScorecard, evaluate_model
+
+logger = logging.getLogger("nmr.benchmark")
 
 __all__ = [
     "NULL_BASELINES",
@@ -482,6 +485,11 @@ class BenchmarkSuite:
 
         parts: list[pl.DataFrame] = []
         for idx in range(min_train_eras, len(eras)):
+            logger.info(
+                "[walk_forward] %s baseline: era %d/%d (train %d eras -> predict %s)",
+                model_name, idx - min_train_eras + 1, len(eras) - min_train_eras,
+                idx, eras[idx],
+            )
             train_eras = eras[:idx]
             test_era = eras[idx]
 
@@ -513,24 +521,19 @@ class BenchmarkSuite:
             return Ridge(alpha=1.0, random_state=self._eval_cfg.seed)
 
         if name == "tree":
-            try:
-                from lightgbm import LGBMRegressor
+            from lightgbm import LGBMRegressor
 
-                return LGBMRegressor(
-                    n_estimators=200,
-                    learning_rate=0.05,
-                    max_depth=5,
-                    num_leaves=15,
-                    subsample=0.8,
-                    colsample_bytree=0.1,
-                    random_state=self._eval_cfg.seed,
-                    n_jobs=1,
-                    verbose=-1,
-                )
-            except ImportError:
-                from sklearn.ensemble import GradientBoostingRegressor
-
-                return GradientBoostingRegressor(random_state=self._eval_cfg.seed)
+            return LGBMRegressor(
+                n_estimators=200,
+                learning_rate=0.05,
+                max_depth=5,
+                num_leaves=15,
+                subsample=0.8,
+                colsample_bytree=0.1,
+                random_state=self._eval_cfg.seed,
+                n_jobs=1,
+                verbose=-1,
+            )
 
         raise ValueError(f"Unknown classical model name {name!r}")
 
@@ -976,6 +979,10 @@ def _infer_id_column(
     for alias in ("id", "index", "unnamed: 0", "column_1", ""):
         if alias in normalized:
             return normalized[alias]
+    logger.warning(
+        "[tutorial] no known id alias in columns %r; inferring first non-metric column %r",
+        columns, non_metric[0],
+    )
     return non_metric[0]
 
 

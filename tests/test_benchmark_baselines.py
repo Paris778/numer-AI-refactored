@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import polars as pl
+import pytest
 
 from nmr.benchmark import NULL_BASELINES, BenchmarkSuite
 
@@ -55,3 +56,21 @@ def test_generator_includes_classical_with_min_train_eras() -> None:
     assert [seed for _, _, _, seed in items] == [7, 8, 9, 10, 11, 12]
     for _, _, raw_preds, _ in items:
         assert {"era", "id", "prediction"} <= set(raw_preds.columns)
+
+
+def test_walk_forward_uses_lightgbm_tree_without_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import builtins
+
+    suite = _suite(seed=7)
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "lightgbm":
+            raise ImportError("simulated missing lightgbm")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    with pytest.raises(ImportError):
+        suite._build_classical_model("tree")
