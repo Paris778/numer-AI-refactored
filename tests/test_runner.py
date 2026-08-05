@@ -106,7 +106,9 @@ def _config(tmp_path) -> ExperimentConfig:
             params={"n_estimators": 10, "learning_rate": 0.05, "min_data_in_leaf": 2},
         ),
         evaluation=EvalConfig(
-            backend="custom", main_target="target", validation_scorecard=False
+            backend="custom", main_target="target",
+            metrics=("corr", "fnc", "sharpe"),  # mmc is validation-only; guard rejects it without the validation stage
+            validation_scorecard=False,
         ),
         run=RunConfig(
             seed=17, artifacts_dir=tmp_path / "artifacts", name="runner-test"
@@ -224,3 +226,37 @@ def test_deployed_artifact_matches_validation_stage_predictions(tmp_path) -> Non
         actual.get_column("prediction").to_numpy(),
         atol=1e-12,
     )
+
+
+def test_single_fold_falls_back_to_uniform_weights(tmp_path, caplog) -> None:
+    cfg = _config(tmp_path)
+    single_fold = ExperimentConfig(
+        data=cfg.data, split=SplitConfig(scheme="anchor", purge_eras=1, n_folds=1),
+        model=cfg.model,
+        evaluation=EvalConfig(
+            backend="custom", main_target="target",
+            metrics=("corr", "fnc", "sharpe"),  # mmc is validation-only; guard rejects it without the validation stage
+            validation_scorecard=False,
+        ),
+        run=cfg.run,
+    )
+    import logging
+    with caplog.at_level(logging.WARNING, logger="nmr.runner"):
+        result = ExperimentRunner(single_fold).run(deploy=False)
+    assert result.manifest["weights"] == [0.5, 0.5]  # 2 components, uniform
+    assert any("uniform" in record.message for record in caplog.records)
+
+
+def test_mmc_metric_requires_validation_scorecard(tmp_path) -> None:
+    cfg = _config(tmp_path)
+    bad = ExperimentConfig(
+        data=cfg.data, split=cfg.split, model=cfg.model,
+        evaluation=EvalConfig(
+            backend="custom", main_target="target",
+            validation_scorecard=False, metrics=("corr", "mmc", "sharpe"),
+        ),
+        run=cfg.run,
+    )
+    import pytest as _pytest
+    with _pytest.raises(ValueError, match="mmc"):
+        ExperimentRunner(bad).run(deploy=False)

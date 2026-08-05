@@ -25,6 +25,7 @@ VALID_MODEL_BACKENDS = ("lightgbm", "xgboost")
 VALID_MODEL_PRESETS = ("fast", "standard", "deep")
 VALID_EVAL_BACKENDS = ("custom", "official")
 VALID_SPLIT_SCHEMES = ("walk_forward", "anchor")
+VALID_ENSEMBLE_METHODS = ("ridge", "non_negative")
 
 __all__ = [
     "REPO_ROOT",
@@ -33,6 +34,7 @@ __all__ = [
     "ModelConfig",
     "EvalConfig",
     "RiskConfig",
+    "EnsembleConfig",
     "RunConfig",
     "ExperimentConfig",
     "load_config",
@@ -143,6 +145,19 @@ class RiskConfig:
 
 
 @dataclass(frozen=True)
+class EnsembleConfig:
+    """Ensemble weight-learning method (applies to the OOF blend)."""
+
+    method: str = "ridge"
+
+    def __post_init__(self) -> None:
+        if self.method not in VALID_ENSEMBLE_METHODS:
+            raise ValueError(
+                f"ensemble.method={self.method!r} not in {VALID_ENSEMBLE_METHODS}"
+            )
+
+
+@dataclass(frozen=True)
 class RunConfig:
     """Run identity, determinism seed, and artifact output location."""
 
@@ -165,6 +180,7 @@ class ExperimentConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     evaluation: EvalConfig = field(default_factory=EvalConfig)
     risk: RiskConfig = field(default_factory=RiskConfig)
+    ensemble: EnsembleConfig = field(default_factory=EnsembleConfig)
     run: RunConfig = field(default_factory=RunConfig)
 
 
@@ -174,6 +190,7 @@ _SECTIONS = {
     "model": ModelConfig,
     "evaluation": EvalConfig,
     "risk": RiskConfig,
+    "ensemble": EnsembleConfig,
     "run": RunConfig,
 }
 

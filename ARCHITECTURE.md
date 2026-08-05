@@ -24,11 +24,11 @@ ExperimentConfig
 |       ModelOrchestrator.train_cross_validation()               |
 |         └── PurgedEraSplitter folds (walk_forward, 8-era purge)|
 |       → OOF pred_{target} columns joined on [id, era]          |
-|  4. Ensembler.learn_weights(method="ridge")                    |
+|  4. Ensembler.learn_weights(ensemble.method) on folds 0..K-2    |
 |     Ensembler.blend()               rank-domain, re-gaussianize|
 |  5. NeutralizationEngine.neutralize(proportion=1.0)            |
 |         └── per-era pinv cache: artifacts/cache/neutralization |
-|  6. EvaluationEngine.per_era_corr() → summarize()              |
+|  6. per_era_corr() on scoring eras (final fold) → summarize()  |
 |  7. [deploy] full-history pipeline → serialize_predict()       |
 |         └── artifacts/runs/{run_id}/predict.pkl (+manifest)    |
 +---------------------------------------------------------------+
@@ -68,8 +68,9 @@ Frozen dataclasses; `__post_init__` validates enums, non-negativity, and non-emp
 | `model: ModelConfig` | `backend="lightgbm"`, `preset="fast"`, `params={}` | backend ∈ `("lightgbm", "xgboost")`, preset ∈ `("fast", "standard", "deep")` |
 | `evaluation: EvalConfig` | `backend="custom"`, `main_target="target"`, `metrics=("corr","mmc","fnc","sharpe")`, `validation_scorecard=True` | backend ∈ `("custom", "official")` |
 
-`metrics` semantics: CORR/FNC/sharpe-family are computed on the train OOF in `run()`; MMC/BMC/CWMM are validation-only (they need the meta model / benchmark columns that only the validation stage provides). `validation_scorecard=False` skips the validation stage entirely (no meta/benchmark assets required). `metrics` is validated at load time but not yet wired to gate the validation stage (e.g. `mmc` without `validation_scorecard` is accepted; the scoping guard is deferred).
+`metrics` semantics: CORR/FNC/sharpe-family are computed on the train OOF in `run()`; MMC/BMC/CWMM are validation-only (they need the meta model / benchmark columns that only the validation stage provides). `validation_scorecard=False` skips the validation stage entirely (no meta/benchmark assets required). `metrics` gates `run()` at start: requesting `mmc` while `validation_scorecard=False` raises `ValueError` before any training (MMC covers validation eras only, via the meta model).
 | `risk: RiskConfig` | `neutralization_proportion=1.0`, `cache_max_bytes=None` | proportion ∈ [0, 1]; `cache_max_bytes` ≥ 0 or None |
+| `ensemble: EnsembleConfig` | `method="ridge"` | method ∈ `("ridge", "non_negative")` |
 | `run: RunConfig` | `name="default"`, `seed=42`, `artifacts_dir=REPO_ROOT/"artifacts"` | — |
 
 `REPO_ROOT = Path(__file__).resolve().parent.parent`. Relative paths resolve against it. See [configs/example.yaml](configs/example.yaml) for the annotated schema and [configs/first_model.yaml](configs/first_model.yaml) for the current competitive config (4×20D targets, ridge ensemble, full neutralization, seed 20260713).
@@ -158,6 +159,8 @@ LightGBM adds `objective="regression"`, `random_state=seed`, `n_jobs=1`, `determ
   - **ridge** (α=1.0): `solve(XᵀX + I, Xᵀy)`
   - **nnls**: `scipy.optimize.nnls(X, y)`
 
+The weight-learning `method` is driven by `EnsembleConfig.method` in both `run()` (§N) and the HPO path `_held_out_metric` (§L), so sweeps evaluate the same blend the runner deploys. `neutralization_frontier` sweeps proportions explicitly and does not use it.
+
 ### I. Statistical Inference — `nmr/inference.py`
 
 | Function | Mechanism |
@@ -212,7 +215,7 @@ Flow: join predictions ∩ meta ∩ targets ∩ features on `[era]` or `[era, id
 
 ### N. Runner, Registry, Submission, Deployment
 
-**`nmr/runner.py`** — stage order in §1 diagram. `RunResult(run_id, oof, metrics, artifact, manifest, scorecard=None, validation_predictions=None)`. `run_id` = SHA256 of `{config (data_dir/artifacts_dir stripped), data_version, code_fingerprint, environment_fingerprint}` where code fingerprint = SHA256 over sorted `nmr/*.py` names+contents and environment = Python + versions of numpy/polars/pandas/lightgbm/xgboost. The deploy pipeline is built **at most once** per run, when `deploy or evaluation.validation_scorecard` (`_build_deploy_pipeline`: per-target all-eras CPU-only models + rank-gaussianize + learned weights + neutralize; no `splitter`), and that single closure is shared by the validation stage and the deploy block — never retrained. The **validation stage** (`_run_validation_stage`) loads `validation.parquet` plus `meta_model.parquet` (required — missing ⇒ `FileNotFoundError`) and `validation_benchmark_models.parquet` (optional — BMC/horizon disabled when absent), drops the first `split.purge_eras` validation eras (20D-target overlap), scores the shared pipeline, and produces a full `MetricScorecard` with `benchmark_col` = first non-join benchmark column (same convention as `benchmark_runner`); the run manifest records `validation_purge_dropped_first_eras`. Then `_serialize_predict_artifact(predict_fn, model_meta, artifact_path)` serializes (never retrains) to `artifacts/runs/{run_id}/predict.pkl` + manifest. The artifact's `models` metadata carries `targets`/`weights`/`proportion`/`geometry="all_eras"`/`device="cpu"`/`feature_names`; the run manifest adds `pipeline_device="cpu"`.
+**`nmr/runner.py`** — stage order in §1 diagram. `RunResult(run_id, oof, metrics, artifact, manifest, scorecard=None, validation_predictions=None)`. `run_id` = SHA256 of `{config (data_dir/artifacts_dir stripped), data_version, code_fingerprint, environment_fingerprint}` where code fingerprint = SHA256 over sorted `nmr/*.py` names+contents and environment = Python + versions of numpy/polars/pandas/lightgbm/xgboost. Ensemble weights are learned on the validation eras of folds `0..K-2` via `EnsembleConfig.method`; when `n_folds < 2` they fall back to uniform `1/n_components` with a logged warning. OOF metrics are computed on the **final fold's** validation eras only (`scoring_eras`), so the OOF scorecard carries no in-sample weight-fitting bias; the returned OOF frame itself still spans every fold. The manifest records `weights`, `weight_learning_eras`, `scoring_eras`, and `summary_metrics` (OOF aggregates for each requested non-MMC metric). The deploy pipeline is built **at most once** per run, when `deploy or evaluation.validation_scorecard` (`_build_deploy_pipeline`: per-target all-eras CPU-only models + rank-gaussianize + learned weights + neutralize; no `splitter`), and that single closure is shared by the validation stage and the deploy block — never retrained. The **validation stage** (`_run_validation_stage`) loads `validation.parquet` plus `meta_model.parquet` (required — missing ⇒ `FileNotFoundError`) and `validation_benchmark_models.parquet` (optional — BMC/horizon disabled when absent), drops the first `split.purge_eras` validation eras (20D-target overlap), scores the shared pipeline, and produces a full `MetricScorecard` with `benchmark_col` = first non-join benchmark column (same convention as `benchmark_runner`); the run manifest records `validation_purge_dropped_first_eras`. Then `_serialize_predict_artifact(predict_fn, model_meta, artifact_path)` serializes (never retrains) to `artifacts/runs/{run_id}/predict.pkl` + manifest. The artifact's `models` metadata carries `targets`/`weights`/`proportion`/`geometry="all_eras"`/`device="cpu"`/`feature_names`; the run manifest adds `pipeline_device="cpu"`.
 
 **`nmr/registry.py`** — `RunRegistry(root)`:
 

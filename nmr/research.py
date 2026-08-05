@@ -235,7 +235,7 @@ def _held_out_metric(config: ExperimentConfig, *, metric_name: str) -> float:
         pred_cols=pred_cols,
         target_col=main_target,
         era_col="era",
-        method="ridge",
+        method=config.ensemble.method,
     )
 
     anchor_splitter = PurgedEraSplitter(
@@ -276,12 +276,14 @@ def _held_out_metric(config: ExperimentConfig, *, metric_name: str) -> float:
         era_col="era",
         out_col="prediction",
     )
-    neutralized = NeutralizationEngine().neutralize(
+    neutralized = NeutralizationEngine(
+        max_cache_bytes=config.risk.cache_max_bytes
+    ).neutralize(
         blended,
         pred_col="prediction",
         feature_cols=feature_cols,
         era_col="era",
-        proportion=1.0,
+        proportion=config.risk.neutralization_proportion,
     )
     evaluator = EvaluationEngine(config.evaluation.backend)
     per_era = evaluator.per_era_corr(

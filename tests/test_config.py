@@ -95,3 +95,11 @@ def test_risk_section_validates_proportion() -> None:
     assert RiskConfig(neutralization_proportion=0.0).neutralization_proportion == 0.0
     with pytest.raises(ValueError):
         RiskConfig(neutralization_proportion=1.5)
+
+
+def test_ensemble_section_validates_method() -> None:
+    from nmr.config import EnsembleConfig
+    assert EnsembleConfig().method == "ridge"
+    assert EnsembleConfig(method="non_negative").method == "non_negative"
+    with pytest.raises(ValueError):
+        EnsembleConfig(method="svm")

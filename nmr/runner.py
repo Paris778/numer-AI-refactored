@@ -57,6 +57,13 @@ class ExperimentRunner:
         self._run_id = self._compute_run_id(config)
 
     def run(self, *, deploy: bool = False) -> RunResult:
+        requested_metrics = set(self._config.evaluation.metrics)
+        if "mmc" in requested_metrics and not self._config.evaluation.validation_scorecard:
+            raise ValueError(
+                "evaluation.metrics includes 'mmc' but the validation scorecard stage "
+                "is disabled (evaluation.validation_scorecard=false). MMC requires the "
+                "meta model, which covers validation eras only."
+            )
         logger.info("[run] starting experiment run_id=%s", self._run_id)
         set_global_seeds(self._config.run.seed)
 
@@ -100,14 +107,32 @@ class ExperimentRunner:
         logger.info("[run] blending %d target predictions", len(pred_cols))
 
         ensembler = Ensembler()
-        weights = ensembler.learn_weights(
-            joined.select(["era", *pred_cols, main_target]),
-            pred_cols=pred_cols,
-            target_col=main_target,
-            era_col="era",
-            method="ridge",
+        folds = splitter.split(train_df.get_column("era").to_list())
+        if len(folds) < 2:
+            logger.warning(
+                "[run] n_folds < 2; falling back to uniform ensemble weights"
+            )
+            weights = tuple(1.0 / len(pred_cols) for _ in pred_cols)
+            weight_learning_eras: list[str] = []
+        else:
+            weight_learning_eras = [
+                era for fold in folds[:-1] for era in fold.val_eras
+            ]
+            weight_df = joined.filter(pl.col("era").is_in(weight_learning_eras))
+            weights = ensembler.learn_weights(
+                weight_df.select(["era", *pred_cols, main_target]),
+                pred_cols=pred_cols,
+                target_col=main_target,
+                era_col="era",
+                method=self._config.ensemble.method,
+            )
+        scoring_eras = (
+            [era for fold in folds for era in fold.val_eras]
+            if len(folds) < 2
+            else list(folds[-1].val_eras)
         )
-        logger.info("[run] ensemble weights: %s", dict(zip(pred_cols, weights)))
+        logger.info("[run] ensemble weights: %s (learned on %d eras, scored on %d)",
+                    dict(zip(pred_cols, weights)), len(weight_learning_eras), len(scoring_eras))
         blended = ensembler.blend(
             joined,
             pred_cols=pred_cols,
@@ -132,12 +157,15 @@ class ExperimentRunner:
 
         logger.info("[run] evaluating OOF predictions")
         evaluator = EvaluationEngine(self._config.evaluation.backend)
-        per_era_corr = evaluator.per_era_corr(
+        per_era_all = evaluator.per_era_corr(
             neutralized,
             pred_col="prediction",
             target_col=main_target,
             era_col="era",
         )
+        per_era_corr = {
+            era: value for era, value in per_era_all.items() if era in set(scoring_eras)
+        }
         metrics = evaluator.summarize(per_era_corr)
         logger.info(
             "[run] metrics: mean=%.5f std=%.5f sharpe=%.5f max_drawdown=%.5f",
@@ -146,6 +174,20 @@ class ExperimentRunner:
             metrics.sharpe,
             metrics.max_drawdown,
         )
+
+        summary_metrics: dict[str, float] = {
+            "corr": metrics.mean,
+            "sharpe": metrics.sharpe,
+        }
+        if "fnc" in set(self._config.evaluation.metrics):
+            fnc_by_era = evaluator.per_era_fnc(
+                neutralized.filter(pl.col("era").is_in(set(scoring_eras))),
+                pred_col="prediction",
+                feature_cols=feature_cols,
+                target_col=main_target,
+                era_col="era",
+            )
+            summary_metrics["fnc"] = evaluator.summarize(fnc_by_era).mean
         oof = neutralized.select(["id", "era", "prediction"]).sort(["era", "id"])
 
         pipeline = None
@@ -192,6 +234,9 @@ class ExperimentRunner:
             "feature_cols": list(feature_cols),
             "pred_cols": pred_cols,
             "weights": list(weights),
+            "weight_learning_eras": weight_learning_eras,
+            "scoring_eras": scoring_eras,
+            "summary_metrics": summary_metrics,
             "pipeline_device": "cpu",
             "metrics": dataclasses.asdict(metrics),
             "code_fingerprint": self._code_fingerprint(),
