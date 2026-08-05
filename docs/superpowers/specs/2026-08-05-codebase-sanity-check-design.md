@@ -47,19 +47,21 @@ config → data → splitter → models (CV OOF | full-history) → ensemble (we
 
 ### A2. Deployable artifact = evaluated strategy (F-002, F-019, F-026, F-013 fold-in, all-eras anchor)
 - `ModelOrchestrator.train_full_history(df, *, feature_cols, target_col, era_col) -> object`: fits one seeded model on **all eras** (no fold, no purge) via the existing `_fit_model`; applies the F-007 null-target filter (see B3).
-- `_serialize_predict_artifact(model, train_df, feature_cols, target_cols, weights, proportion, artifact_path)` (no `splitter` param — F-026):
-  - trains one full-history model per `data.targets` component;
-  - builds a closure `predict(live_features, live_benchmark_models=None)` that: selects ordered features → per-target model predictions → **per-era rank-gaussianize** (per `Ensembler` geometry; if `live_features` carries an `era` column, group by it, else treat all rows as one era — documented contract) → weighted blend → re-gaussianize → neutralize with `proportion` via `neutralize_array`.
+- `_serialize_predict_artifact(orchestrator, train_df, feature_cols, target_cols, weights, proportion, artifact_path)` (no `splitter` param — F-026):
+  - trains one full-history model per `data.targets` component (CPU params only — see below);
+  - builds a closure `predict(live_features, live_benchmark_models=None)` that: selects ordered features → per-target model predictions → **per-era rank-gaussianize** (per `Ensembler` geometry; if `live_features` carries an `era` column, group by it, else treat all rows as one era — documented contract, dual path pinned by test) → weighted blend → re-gaussianize → neutralize with `proportion` via `neutralize_array`.
   - **Deployment runtime constraint:** the closure's code path references only `numpy`/`scipy` (verified: `nmr/_transforms.py` imports numpy + scipy only). `cloudpickle.register_pickle_by_value(nmr._transforms)` is called before `dumps` so the *actual shared* implementations (`rank_gaussianize`, `rank_gaussianize_unit_variance`, `neutralize_array`) are embedded by value — **no duplicated transform math, no `nmr` import at load time**. No polars/pandas in the embedded code path (pandas receives the input frame at the boundary only).
-- `neutralize_array(pred, features, proportion) -> np.ndarray`: new pure-numpy module-level helper in `nmr/_transforms.py`; single implementation used by both `NeutralizationEngine._neutralize_era` and the closure. Zero-variance → returns input unchanged (B4 contract).
+- `neutralize_array(pred, features, proportion, *, pseudo_inverse=None) -> np.ndarray`: new pure-numpy module-level helper in `nmr/_transforms.py`. **Single implementation that respects the pinv cache:** the engine passes its cached per-era `pseudo_inverse` (no re-solve — B4's optimization preserved); the closure passes `None` and the helper computes `np.linalg.pinv(design, rcond=1e-6)` inline. The `_design_matrix` intercept construction lives **inside the helper** so cached and uncached paths share identical geometry and `rcond` (numerics can never diverge). Zero-variance → returns input unchanged (B4 contract). Pinned by a test: cached-path output == uncached-path output on the same era.
+- **Full-history models are CPU-only** (`train_full_history` never attempts GPU params): determinism guarantees are per-device, and the artifact is the one object that must reproduce anywhere (hosted runtime may lack GPU). Both the artifact and the validation stage use the same CPU-trained full-history models, so the fidelity test's two sides come from identical numerics.
 - `serialize_predict` writes **atomically**: payload via temp file + fsync + `os.replace`, then the manifest the same way (F-013). AGENTS.md §9 updated in this commit.
 - Manifest gains: `weights`, `targets`, `proportion`, `feature_set`, `anchor_geometry: "all_eras"`, resolved device.
 - Fidelity regression test (F-019): on a synthetic fixture, `loaded_predict(val_features)` must rank ≈ 1.0 (Spearman) vs. the **validation-stage predictions** (same full-history models, in-repo transforms) on a shared era. (Not vs. CV OOF — the models differ by construction under all-eras training.)
 
 ### A3. Validation scorecard stage (FEAT-002, F-004 root)
-- `ExperimentRunner.run()` gains a validation stage (config-gated): full-history models → predict on `validation.parquet` → rank-normalize → blend with the **single** OOF-learned weight set → neutralize → **drop the first `split.purge_eras` validation eras** (20D-target overlap with the last train eras — leakage) → `evaluate_model(...)` with meta model, benchmark models, features, targets, `backend=config.evaluation.backend` → `MetricScorecard` stored in `run.json` + manifest.
+- `ExperimentRunner.run()` gains a validation stage, gated by **`evaluation.validation_scorecard: bool = True`** (new config field, default `true` — the honest-metrics path is the default; synthetic-fixture/smoke tests set it `false`): full-history models → predict on `validation.parquet` → rank-normalize → blend with the **single** OOF-learned weight set → neutralize → **drop the first `split.purge_eras` validation eras** (20D-target overlap with the last train eras — leakage) → `evaluate_model(...)` with meta model, benchmark models, features, targets, `backend=config.evaluation.backend` → `MetricScorecard` stored in `run.json` + manifest.
+- **Interaction:** `deploy=True` with `validation_scorecard=false` still trains full-history models (the artifact needs them); when both are enabled the full-history models are trained **once** and shared between the validation stage and the artifact.
 - `run.json` gains a `scorecard` block (flattened `MetricScorecard.to_frame()` row minus timing fields — timing fields poison canonical hashes, and scorecards here are not hashed, but exclude them from the registry payload anyway for cleanliness).
-- Manifest records `validation_purge_dropped_first_eras: purge_eras`.
+- Manifest records `validation_purge_dropped_first_eras: purge_eras`. Test asserts the first `purge_eras` validation eras are absent from the scorecard's era set and the manifest field is present.
 
 ### A4. Unified dashboard (F-004, F-023)
 - `generate_dashboard` trained rows read `run.json["scorecard"]` (`corr` → mean, `corr_sharpe_ac` → sharpe, `std_corr` → std, scorecard `max_drawdown`) — same definitions as benchmark rows → one ranked leaderboard is valid.
@@ -71,9 +73,10 @@ config → data → splitter → models (CV OOF | full-history) → ensemble (we
 ### B1. Registry & guarded promotion (F-003, F-021, F-022)
 - `RunRegistry.promote_if_better(run_id, metric="corr_sharpe_ac") -> tuple[Path, bool]`:
   - regex-validates `run_id` as `[0-9a-f]{64}` (same as `promote` — F-022 in both);
-  - validates `metric` against a `_SCORECARD_METRIC_FIELDS` tuple (scorecard fields: `corr_sharpe_ac`, `rank_scalar`, `corr`, `mmc`, `fnc`, `std_corr`, `max_drawdown`, `deflated_sharpe`) with a clear `ValueError`;
+  - validates `metric` against `_SCORECARD_METRIC_FIELDS` **with direction**: `{metric: higher_is_better}` mapping — `max_drawdown` and `std_corr` are lower-is-better; comparison honors direction (a naive `new > old` on those would promote *worse* models);
   - compares against the current champion's recorded **scorecard** metric; promotes only if strictly better, or if no champion exists (corrupted champion pointer → missing run dir → treated as no champion);
-  - legacy runs without a scorecard are **refused** auto-promotion (require manual `promote()`); logs the refusal.
+  - **legacy champion rule:** a scorecard-bearing candidate MAY displace a scorecard-less champion (logged `"champion has no scorecard; promoting on presence"`) — the legacy champion's OOF metrics are exactly the in-sample-biased numbers this work distrusts;
+  - legacy **candidates** (no scorecard) are refused auto-promotion (require manual `promote()`); logs the refusal.
 - `best()`: deterministic `(metric value, run_id)` sort; `ValueError` on unknown metric. `list()`: `(mtime, run_id)` stable sort.
 - `record()`: OOF parquet via temp + `os.replace` (registry half of F-013); stores `scorecard` block.
 - `train_first_model.py`: `promote_if_better`; prints verdict + champion comparison.
@@ -92,11 +95,11 @@ config → data → splitter → models (CV OOF | full-history) → ensemble (we
 
 ### B4. Risk cache & I/O (F-008, F-011, F-012)
 - F-012: cache load catches `(OSError, ValueError, EOFError)`; both cache files (`.npy` + `.json`) written via temp + `os.replace`, metadata last.
-- F-008: `NeutralizationEngine(..., max_cache_bytes: int | None = None)` — default `DEFAULT_CACHE_MAX_BYTES = 2 GiB` (named constant); size log at init; **total-size LRU eviction (mtime-oldest first) on store**; no orphan inference/deletion (unsound under concurrency — consciously rejected). Config field `risk.cache_max_bytes` (optional).
+- F-008: `NeutralizationEngine(..., max_cache_bytes: int | None = None)` — default `DEFAULT_CACHE_MAX_BYTES = 2 GiB` (named constant); size log at init; **true LRU eviction** on store (mtime-oldest first; `os.utime` touches both files on every cache hit so mtime reflects last use, not just write time); no orphan inference/deletion (unsound under concurrency — consciously rejected). Config field `risk.cache_max_bytes` (optional).
 - F-011: zero-variance predictions → `neutralize_array` returns input unchanged; engine logs a warning with the era label; era count preserved downstream. Contract documented in ARCHITECTURE.md §2F + pinned by test.
 
 ### B5. Vectorization (F-005, F-010, F-027 + risk.py loop)
-- `_per_era_metric`, `per_era_bmc`, `per_era_cwmm`, `_resolve_overlap_eras`: single `df.partition_by(era_col, maintain_order=True)` pass, era→part lookup, identical dict outputs (203 tests are the oracle).
+- `_per_era_metric`, `per_era_bmc`, `per_era_cwmm`, `_resolve_overlap_eras`: single `df.partition_by(era_col, maintain_order=True)` pass, era→part lookup, identical dict outputs (203 tests are the oracle). **Ordering discipline:** `partition_by` yields eras in frame-appearance order, not numeric order — dict outputs are order-independent, but `_resolve_overlap_eras`'s returned list must be re-sorted numerically (`sorted_era_labels`) after partitioning so `per_era_bmc`/`per_era_cwmm` iteration order is unchanged.
 - `NeutralizationEngine.neutralize` era loop (risk.py:76): same `partition_by` treatment.
 - `feature_exposure_report` (F-005, pulled into the A3 commit): partition once; per-era **Pearson** correlation of prediction vs all features as one matrix op. **Definition change** (previously Numerai-CORR): documented in ARCHITECTURE.md; pre/post `max_feature_exposure` numbers incomparable → changelog note; determinism fixtures (`test_benchmark_slice1/3`) updated **deliberately** — commit message states the old→new hash pair (a silently regenerated hash fixture is indistinguishable from a regression); `benchmark_scores*.csv` regenerated under the new definition (at minimum a `--fast-mode` run in this branch).
 - F-027: `_sorted_labels` → public `sorted_era_labels`, `_clean_frame` → public `clean_frame` (module-level in evaluation.py); update `robustness.py` + tests; add to `__all__`.
@@ -153,17 +156,23 @@ risk:
   cache_max_bytes: null               # null -> DEFAULT_CACHE_MAX_BYTES (2 GiB)
 ensemble:
   method: ridge                       # ridge | non_negative
+evaluation:                           # existing section, one new field
+  validation_scorecard: true          # default true; synthetic/smoke tests set false
 # evaluation.metrics semantics: runner OOF path honors corr/fnc/sharpe;
-# 'mmc' requires the validation stage (else ValueError at run start).
+# 'mmc' requires validation_scorecard=true (else ValueError at run start).
 ```
+
+**Changelog notes (in the B5/regeneration commit):** (1) the new `risk`/`ensemble` sections change `dataclasses.asdict(config)` → every run_id changes for identical experiments (harmless — new runs, new ids; not a determinism regression); (2) the exposure-definition change makes pre/post `max_feature_exposure` numbers incomparable (see B5).
 
 ## 9. Test plan (new / updated)
 
 - F-019 fidelity: `loaded_predict` vs validation-stage predictions (Spearman ≈ 1.0).
-- B1: `promote_if_better` (better/worse/no-champion/corrupted-champion/legacy-refusal/unknown-metric/run-id-regex).
+- B1: `promote_if_better` (better/worse/no-champion/corrupted-champion/legacy-candidate-refusal/legacy-champion-displacement/unknown-metric/run-id-regex + **direction cases**: worse-on-`max_drawdown` and better-on-`max_drawdown`).
 - B3: null-target filter (rows dropped, fit succeeds; all-null → ValueError); purge-width assertion violation.
-- B4: cache corruption → recompute; eviction under tiny budget; zero-variance → unchanged + era preserved.
+- B4: cache corruption → recompute; eviction under tiny budget; **cached-path output == uncached-path output on the same era** (Gap 1); zero-variance → unchanged + era preserved.
 - B5: vectorized outputs identical to oracle contract (full suite); exposure values under Pearson definition; `sorted_era_labels`/`clean_frame` public helpers.
+- A3: purge-drop assertion (first `purge_eras` validation eras absent from the scorecard's era set + manifest field present); `validation_scorecard` true/false both exercised on synthetic fixtures.
+- A2: closure dual-era contract (era column present → per-era normalize; absent → single-era).
 - A4/B7: dashboard escaping + ranking; script contract smoke.
 - Determinism fixtures `test_benchmark_slice1/3`: deliberate old→new hash diff, stated in commit message.
 - F-020: `set_global_seeds` no longer touches env (assert env unchanged).
@@ -182,4 +191,6 @@ ensemble:
 - Exposure-definition change alters recorded scorecards/hashes — managed via deliberate fixture diffs + CSV regeneration (B5).
 - Validation-stage runtime cost until B5 lands — mitigated by pulling F-005 vectorization into the A3 commit.
 - Numerai hosted runtime library availability (numpy/scipy assumed; `_transforms` verified numpy/scipy-only) — the fidelity test + `register_pickle_by_value` keep drift impossible, but a runtime without scipy would fail at predict time; documented hazard.
+- GPU/CPU: full-history models (artifact + validation stage) are CPU-only by design, so the deployed models predict identically anywhere; OOF CV models may still be GPU-trained (per-device determinism only) — documented.
+- run_id scheme change from the new config sections (see §8 changelog notes) — expected, not a regression.
 - `official` backend speed — opt-in only.
