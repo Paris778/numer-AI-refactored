@@ -15,7 +15,7 @@ configs/*.yaml
 ExperimentConfig
      |
      v
-+---------------------------------------------------------------+
++----------------------------------------------------------------+
 | ExperimentRunner.run(deploy=False)          nmr/runner.py      |
 |                                                                |
 |  1. set_global_seeds(run.seed)      random/np                  |
@@ -31,7 +31,7 @@ ExperimentConfig
 |  6. per_era_corr() on scoring eras (final fold) → summarize()  |
 |  7. [deploy] full-history pipeline → serialize_predict()       |
 |         └── artifacts/runs/{run_id}/predict.pkl (+manifest)    |
-+---------------------------------------------------------------+
++----------------------------------------------------------------+
      |
      v  RunResult(run_id, oof, metrics, artifact, manifest)
 RunRegistry.record() ──> artifacts/registry/{run_id}/{run.json, oof.parquet}
@@ -67,11 +67,11 @@ Frozen dataclasses; `__post_init__` validates enums, non-negativity, and non-emp
 | `split: SplitConfig` | `scheme="walk_forward"`, `purge_eras=8`, `embargo_eras=4`, `n_folds=4` | scheme ∈ `("walk_forward", "anchor")` |
 | `model: ModelConfig` | `backend="lightgbm"`, `preset="fast"`, `params={}` | backend ∈ `("lightgbm", "xgboost")`, preset ∈ `("fast", "standard", "deep")` |
 | `evaluation: EvalConfig` | `backend="custom"`, `main_target="target"`, `metrics=("corr","mmc","fnc","sharpe")`, `validation_scorecard=True` | backend ∈ `("custom", "official")` |
-
-`metrics` semantics: CORR/FNC/sharpe-family are computed on the train OOF in `run()`; MMC/BMC/CWMM are validation-only (they need the meta model / benchmark columns that only the validation stage provides). `validation_scorecard=False` skips the validation stage entirely (no meta/benchmark assets required). `metrics` gates `run()` at start: requesting `mmc` while `validation_scorecard=False` raises `ValueError` before any training (MMC covers validation eras only, via the meta model).
 | `risk: RiskConfig` | `neutralization_proportion=1.0`, `cache_max_bytes=None` | proportion ∈ [0, 1]; `cache_max_bytes` ≥ 0 or None |
 | `ensemble: EnsembleConfig` | `method="ridge"` | method ∈ `("ridge", "non_negative")` |
 | `run: RunConfig` | `name="default"`, `seed=42`, `artifacts_dir=REPO_ROOT/"artifacts"` | — |
+
+`metrics` semantics: CORR/FNC/sharpe-family are computed on the train OOF in `run()`; MMC/BMC/CWMM are validation-only (they need the meta model / benchmark columns that only the validation stage provides). `validation_scorecard=False` skips the validation stage entirely (no meta/benchmark assets required). `metrics` gates `run()` at start: requesting `mmc` while `validation_scorecard=False` raises `ValueError` before any training (MMC covers validation eras only, via the meta model).
 
 `REPO_ROOT = Path(__file__).resolve().parent.parent`. Relative paths resolve against it. See [configs/example.yaml](configs/example.yaml) for the annotated schema and [configs/first_model.yaml](configs/first_model.yaml) for the current competitive config (4×20D targets, ridge ensemble, full neutralization, seed 20260713).
 
@@ -210,8 +210,8 @@ Flow: join predictions ∩ meta ∩ targets ∩ features on `[era]` or `[era, id
 `BenchmarkSuite` evaluates prediction sources through the same `evaluate_model` pipeline:
 
 - **Null baselines** — `NULL_BASELINES = ("constant-0.5", "uniform-random", "gaussian-random")` (seeded RNG).
-- **Classical baselines** (`run_classical_baselines`, `min_train_eras=10`, walk-forward era t−1 → t): trivial (row-mean of features), linear (`Ridge(alpha=1.0)`), tree (`LGBMRegressor(n_estimators=200, learning_rate=0.05, max_depth=5, num_leaves=15, colsample_bytree=0.1, subsample=0.8)`, lightgbm-only — a missing lightgbm propagates `ImportError`, no sklearn fallback). Walk-forward iteration logs INFO progress per era (`[walk_forward] ...`); tutorial id-column inference falls back to the first non-metric column with a WARNING log.
-- **Tutorial ingestion** — `TUTORIAL_NOTEBOOK_TO_MODEL_ID = {"1_hello_numerai.ipynb": "hello-numerai", "2_feature_neutralization.ipynb": "feature-neutralization", "example-model-sunshine.ipynb": "sunshine"}`; notebook anchor-string contract checks; `ingest_tutorial_prediction[_batch]` / `extract_oos_predictions` normalize arbitrary artifacts to `[era, id, prediction]`.
+- **Classical baselines** (`run_classical_baselines`, `min_train_eras=10`, walk-forward era t−1 → t): trivial (row-mean of features), linear (`Ridge(alpha=1.0)`), tree (`LGBMRegressor(n_estimators=200, learning_rate=0.05, max_depth=5, num_leaves=15, colsample_bytree=0.1, subsample=0.8)`, lightgbm-only — a missing lightgbm propagates `ImportError`, no sklearn fallback). Walk-forward iteration logs INFO progress per era (`[walk_forward] ...`).
+- **Tutorial ingestion** — `TUTORIAL_NOTEBOOK_TO_MODEL_ID = {"1_hello_numerai.ipynb": "hello-numerai", "2_feature_neutralization.ipynb": "feature-neutralization", "example-model-sunshine.ipynb": "sunshine"}`; notebook anchor-string contract checks; `ingest_tutorial_prediction[_batch]` / `extract_oos_predictions` normalize arbitrary artifacts to `[era, id, prediction]`. Id-column inference falls back to the first non-metric column with a WARNING log (`[tutorial] ...`).
 - **Gates** — `assert_null_floor(scorecards, tolerance=0.05)`: every null baseline must have |value| ≤ tolerance on rank_scalar, mean_payout, corr, mmc, fnc, corr_sharpe_ac (+bmc/cwmm if present). `assert_slice1_monotone`: null ≤ hello-numerai ≤ sunshine.
 - **Determinism** — `canonical_scorecards_bytes()`: drops all timing columns, JSON with sorted keys, `separators=(",", ":")`, NaN/Inf as string sentinels, keyed by model_id; `scorecards_sha256()` digests it.
 - **Output** — `scorecards_to_frame` / `write_scorecards_csv` (column inventory = `MetricScorecard.to_frame()` §K).

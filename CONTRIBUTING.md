@@ -43,7 +43,7 @@ All code must follow the eight non-negotiable principles in [`AGENTS.md`](AGENTS
 
 ## Testing & Verification
 
-Run the full suite after every change (203 tests; from the repo root):
+Run the full suite after every change (236 tests; from the repo root):
 
 ```powershell
 .\.venv\Scripts\python -m pytest -q
@@ -65,7 +65,7 @@ Before delivering completed work:
 
 ```powershell
 .\.venv\Scripts\python -m pytest -q                      # full suite, zero failures
-.\.venv\Scripts\python benchmark_runner.py --fast-mode   # real-data smoke run (writes artifacts/*_smoke.csv)
+.\.venv\Scripts\python benchmark_runner.py --fast-mode --output artifacts/benchmark_scores_smoke.csv --labels-output artifacts/benchmark_test_era_labels_smoke.csv   # real-data smoke run (writes artifacts/*_smoke.csv)
 ```
 
 A green unit run without the real-data smoke is not sufficient evidence for changes touching data loading, evaluation, scorecards, or the benchmark harness. Surface any pre-existing failures explicitly — never silently exclude them.

@@ -27,8 +27,13 @@ model:
 evaluation:
   backend: custom           # custom (fast) | official (numerai_tools oracle)
   main_target: target
+  # metrics on train OOF supports corr/fnc/sharpe; mmc requires the validation scorecard stage.
   metrics: [corr, mmc, fnc, sharpe]
+  validation_scorecard: true
+
+ensemble:
+  method: ridge             # ridge | non_negative
 
 risk:
-  neutralization_proportion: 1.0   # 0.0 (identity) .. 1.0 (full projection)
-  cache_max_bytes: null            # None = unbounded; >= 0 caps the pinv cache
+  neutralization_proportion: 1.0   # float in [0, 1]
+  cache_max_bytes: null            # null -> 2 GiB default

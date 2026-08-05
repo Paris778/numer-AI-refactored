@@ -30,7 +30,7 @@ These four files obey a strict **Single Source of Truth (SSOT) hierarchy**. One 
 
 ## 1. Agent Identity & Mission
 
-You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (203 tests). No lint/type-check tooling is configured — pytest is the sole automated gate.
+You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (236 tests). No lint/type-check tooling is configured — pytest is the sole automated gate, enforced by CI (`.github/workflows/ci.yml`).
 
 Your mission:
 
@@ -155,11 +155,11 @@ When modifying or generating code, enforce these seven invariants:
 .\.venv\Scripts\python -m pytest tests/test_benchmark_slice1.py -q                    # determinism hashes
 
 # Pre-sign-off gate (mandatory before delivering work)
-.\.venv\Scripts\python -m pytest -q                                                    # full 203-test suite
-.\.venv\Scripts\python benchmark_runner.py --fast-mode                                 # real-data smoke (writes artifacts/*_smoke.csv)
+.\.venv\Scripts\python -m pytest -q                                                    # full 236-test suite
+.\.venv\Scripts\python benchmark_runner.py --fast-mode --output artifacts/benchmark_scores_smoke.csv --labels-output artifacts/benchmark_test_era_labels_smoke.csv   # real-data smoke (writes artifacts/*_smoke.csv)
 ```
 
-Real-data tests require the `data/v5.2/` parquet assets (see [`README.md`](README.md#data-assets)). If they are missing, report which tests were skipped — never claim full verification.
+Real-data tests require the `data/v5.2/` parquet assets (see [`README.md`](README.md#data-assets)). If they are missing, report which tests were skipped — never claim full verification. CI (`.github/workflows/ci.yml`) runs this same fast gate on every push/PR (see [`CONTRIBUTING.md`](CONTRIBUTING.md#testing--verification)).
 </verification_gates>
 
 ---
@@ -179,7 +179,7 @@ These are real, verified issues — do not "fix" them silently as a side effect.
 Real v5.2 scorecard fixtures are flaky if rows are limited **before** establishing era overlap across validation/meta/benchmarks. Always build test payloads from overlap eras first (join/filter by shared eras), then limit/window. `NonVacuityError` fires when overlap < `MIN_OVERLAP_ERAS` (20).
 
 ### GPU-first model params with CPU fallback
-`ModelOrchestrator` tries GPU params (`device_type="gpu"` / `tree_method="gpu_hist"`) and silently falls back to CPU. Numeric results may differ slightly between GPU and CPU runs — determinism guarantees hold per-device, not across devices.
+`ModelOrchestrator` is GPU-first (`device_type="gpu"` / `tree_method="gpu_hist"`) with CPU fallback; a failed device attempt is logged with the exception type and the resolved device is recorded in the run manifest (`oof_device`). Numeric results may differ slightly between GPU and CPU runs — determinism guarantees hold per-device, not across devices.
 
 ### `embargo_eras` is structurally inert
 `SplitConfig.embargo_eras` is validated and accepted but currently unused by fold geometry (reserved for future two-sided schemes). Do not document or rely on it as an active safeguard; do not remove it without a schema decision.
