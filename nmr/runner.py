@@ -32,6 +32,7 @@ from nmr.ensemble import Ensembler
 from nmr.evaluation import EvaluationEngine, MetricSummary
 from nmr.models import ModelOrchestrator
 from nmr.risk import NeutralizationEngine
+from nmr.scorecard import MetricScorecard, evaluate_model
 from nmr.splitter import PurgedEraSplitter
 
 logger = logging.getLogger("nmr.runner")
@@ -46,6 +47,8 @@ class RunResult:
     metrics: MetricSummary
     artifact: DeploymentArtifact | None
     manifest: dict[str, Any]
+    scorecard: MetricScorecard | None = None
+    validation_predictions: pl.DataFrame | None = None
 
 
 class ExperimentRunner:
@@ -145,9 +148,8 @@ class ExperimentRunner:
         )
         oof = neutralized.select(["id", "era", "prediction"]).sort(["era", "id"])
 
-        artifact = None
-        if deploy:
-            logger.info("[run] serializing deploy artifact")
+        pipeline = None
+        if deploy or self._config.evaluation.validation_scorecard:
             pipeline = self._build_deploy_pipeline(
                 orchestrator=model_orchestrator,
                 train_df=train_df,
@@ -156,6 +158,23 @@ class ExperimentRunner:
                 weights=weights,
                 proportion=neutralization_proportion,
             )
+
+        scorecard = None
+        validation_predictions = None
+        validation_purge = None
+        if self._config.evaluation.validation_scorecard:
+            scorecard, validation_predictions, validation_purge = (
+                self._run_validation_stage(
+                    predict_fn=pipeline[0], feature_cols=feature_cols
+                )
+            )
+            logger.info("[run] validation scorecard ready: corr_sharpe_ac=%.5f",
+                        scorecard.corr_sharpe_ac.value)
+
+        artifact = None
+        if deploy:
+            logger.info("[run] serializing deploy artifact")
+            assert pipeline is not None  # built once above when deploy=True
             artifact = self._serialize_predict_artifact(
                 predict_fn=pipeline[0],
                 model_meta=pipeline[1],
@@ -177,6 +196,7 @@ class ExperimentRunner:
             "metrics": dataclasses.asdict(metrics),
             "code_fingerprint": self._code_fingerprint(),
             "environment": self._environment_fingerprint(),
+            "validation_purge_dropped_first_eras": validation_purge,
         }
 
         return RunResult(
@@ -185,6 +205,8 @@ class ExperimentRunner:
             metrics=metrics,
             artifact=artifact,
             manifest=manifest,
+            scorecard=scorecard,
+            validation_predictions=validation_predictions,
         )
 
     def _train_multi_target_oof(
@@ -228,6 +250,76 @@ class ExperimentRunner:
         assert stacked is not None
         logger.info("[train_multi_target_oof] stacked OOF shape: %s", stacked.shape)
         return stacked
+
+    def _run_validation_stage(
+        self, *, predict_fn, feature_cols: Sequence[str]
+    ) -> tuple[MetricScorecard, pl.DataFrame, int]:
+        data = self._config.data
+        agent = IngestionAgent(data)
+        target_cols = list(
+            dict.fromkeys([*self._config.data.targets, self._config.evaluation.main_target])
+        )
+        val_df = agent.load(
+            "validation", columns=["era", "id", *feature_cols, *target_cols]
+        )
+        meta_path = data.path("meta_model.parquet")
+        if not meta_path.exists():
+            raise FileNotFoundError(
+                f"validation_scorecard=true requires {meta_path}; disable the "
+                "validation stage or provide the meta model"
+            )
+        meta_model = pl.read_parquet(meta_path).select(["era", "id", "numerai_meta_model"])
+
+        bench_path = data.path("validation_benchmark_models.parquet")
+        benchmarks = (
+            pl.read_parquet(bench_path) if bench_path.exists() else None
+        )
+        if benchmarks is None:
+            logger.warning("[validation] benchmark models missing; BMC/horizon disabled")
+
+        purge = self._config.split.purge_eras
+        all_eras = sorted({int(e) for e in val_df.get_column("era").unique().to_list()})
+        if purge > 0:
+            keep = {str(e) for e in all_eras[purge:]}
+            val_df = val_df.filter(pl.col("era").is_in(keep))
+        logger.info(
+            "[validation] dropping first %d validation eras (20D-target overlap); "
+            "%d eras scored", purge, val_df.select(pl.col("era").n_unique()).item()
+        )
+
+        features_pd = val_df.select(["id", "era", *feature_cols]).to_pandas().set_index("id")
+        prediction_frame = predict_fn(features_pd)
+        preds = val_df.select(["era", "id"]).with_columns(
+            pl.Series("prediction", prediction_frame["prediction"].to_numpy())
+        )
+        scorecard = evaluate_model(
+            preds,
+            meta_model=meta_model,
+            benchmarks=benchmarks,
+            features=val_df.select(["era", "id", *feature_cols]),
+            targets=val_df.select(["era", "id", *target_cols]),
+            n_trials=1,
+            seed=self._config.run.seed,
+            horizon="20D",
+            main_target=self._config.evaluation.main_target,
+            benchmark_col=(
+                # First non-join column (same convention as benchmark_runner) —
+                # never positional index 2, which assumes column order.
+                next(
+                    (
+                        col
+                        for col in benchmarks.columns
+                        if col not in {"era", "id"}
+                    ),
+                    None,
+                )
+                if benchmarks is not None
+                else None
+            ),
+            backend=self._config.evaluation.backend,
+            model_id=self._run_id,
+        )
+        return scorecard, preds, purge
 
     def _build_deploy_pipeline(
         self,

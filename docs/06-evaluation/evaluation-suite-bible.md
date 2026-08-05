@@ -261,7 +261,7 @@ Run only on finalists. These can **veto** a model that ranks well on Tier 1, bec
 
 ### 7.1 Max Feature Exposure
 
-Largest absolute per-era correlation between the prediction and any single feature (`nmr/research.py::feature_exposure_report`). A model whose alpha is one feature in disguise is a time bomb when that feature regime turns.
+Largest absolute per-era **Pearson** correlation between the prediction and any single feature (`nmr/research.py::feature_exposure_report`; definition changed 2026-08-05 from the power-1.5 Numerai CORR — values are not comparable across that boundary, see ARCHITECTURE.md §L). A model whose alpha is one feature in disguise is a time bomb when that feature regime turns.
 
 ### 7.2 BMC — Benchmark Model Contribution
 

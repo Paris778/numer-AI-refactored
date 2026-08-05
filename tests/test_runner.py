@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 
+import numpy as np
 import pandas as pd
 import polars as pl
 
@@ -53,6 +54,38 @@ def _write_synthetic_data(root) -> None:
     (version_dir / "features.json").write_text(json.dumps(features), encoding="utf-8")
     _build_train_frame().write_parquet(version_dir / "train.parquet")
 
+    val_rows = []
+    for era in range(13, 19):
+        for idx in range(6):
+            # NOTE: features are shifted back into the training envelope
+            # ((era - 11) => train-era-2..7 feature values). The brief's raw
+            # `era * 0.03` formula puts every validation row outside the model's
+            # training range, so the (correct) full-history model extrapolates to
+            # a single constant leaf per era and full neutralization maps that to
+            # exactly 0.0 — making the F-019 fidelity test's Spearman rho
+            # undefined. Shifted features keep eras/assertions unchanged while
+            # yielding non-degenerate predictions.
+            f1 = ((era - 11) * 0.03) + (idx * 0.02)
+            f2 = ((era - 11) * -0.02) + (idx * 0.01)
+            val_rows.append(
+                {
+                    "era": str(era),
+                    "id": f"{era}_{idx}",
+                    "f1": f1,
+                    "f2": f2,
+                    "target": 0.6 * f1 - 0.3 * f2 + 0.05 * era,
+                    "target_alt": 0.2 * f1 + 0.7 * f2 - 0.04 * era,
+                }
+            )
+    val = pl.DataFrame(val_rows)
+    val.write_parquet(version_dir / "validation.parquet")
+    val.select(["era", "id"]).with_columns(
+        pl.lit(0.35).alias("numerai_meta_model")
+    ).write_parquet(version_dir / "meta_model.parquet")
+    val.select(["era", "id"]).with_columns(
+        pl.lit(0.2).alias("bench_cyrusd_20")
+    ).write_parquet(version_dir / "validation_benchmark_models.parquet")
+
 
 def _config(tmp_path) -> ExperimentConfig:
     data_root = tmp_path / "data"
@@ -72,7 +105,9 @@ def _config(tmp_path) -> ExperimentConfig:
             preset="fast",
             params={"n_estimators": 10, "learning_rate": 0.05, "min_data_in_leaf": 2},
         ),
-        evaluation=EvalConfig(backend="custom", main_target="target"),
+        evaluation=EvalConfig(
+            backend="custom", main_target="target", validation_scorecard=False
+        ),
         run=RunConfig(
             seed=17, artifacts_dir=tmp_path / "artifacts", name="runner-test"
         ),
@@ -134,3 +169,58 @@ def test_run_id_is_path_independent_and_seed_sensitive(tmp_path) -> None:
     )
     runner_seed_flip = ExperimentRunner(cfg_seed_flip)
     assert runner_seed_flip._run_id != runner_a._run_id
+
+
+def _validation_config(tmp_path) -> ExperimentConfig:
+    cfg = _config(tmp_path)
+    return ExperimentConfig(
+        data=cfg.data,
+        split=cfg.split,
+        model=cfg.model,
+        evaluation=EvalConfig(
+            backend="custom", main_target="target", validation_scorecard=True
+        ),
+        run=cfg.run,
+    )
+
+
+def test_validation_stage_produces_scorecard_and_purges_first_eras(tmp_path) -> None:
+    cfg = _validation_config(tmp_path)
+    result = ExperimentRunner(cfg).run(deploy=True)
+
+    assert result.scorecard is not None
+    assert result.scorecard.model_id == result.run_id
+    assert result.manifest["validation_purge_dropped_first_eras"] == cfg.split.purge_eras
+    assert result.validation_predictions is not None
+    scored_eras = set(result.validation_predictions.get_column("era").to_list())
+    assert "13" not in scored_eras  # purge_eras=1 -> era 13 dropped
+    assert "14" in scored_eras
+    assert result.artifact is not None
+
+
+def test_deployed_artifact_matches_validation_stage_predictions(tmp_path) -> None:
+    """F-019 fidelity: load_predict reproduces the scored validation pipeline."""
+    import pandas as pd
+    from scipy.stats import spearmanr
+
+    cfg = _validation_config(tmp_path)
+    result = ExperimentRunner(cfg).run(deploy=True)
+    assert result.artifact is not None and result.validation_predictions is not None
+
+    val = pl.read_parquet(cfg.data.path("validation.parquet")).filter(
+        pl.col("era") != "13"
+    )
+    features_pd = val.select(["id", "era", "f1", "f2"]).to_pandas().set_index("id")
+    loaded = load_predict(result.artifact.path)
+    out = loaded(features_pd)
+
+    expected = result.validation_predictions.sort("id")
+    actual = pl.from_pandas(out.reset_index().rename(columns={"index": "id"})).sort("id")
+    rho, _ = spearmanr(expected.get_column("prediction").to_numpy(),
+                       actual.get_column("prediction").to_numpy())
+    assert rho > 0.999
+    assert np.allclose(
+        expected.get_column("prediction").to_numpy(),
+        actual.get_column("prediction").to_numpy(),
+        atol=1e-12,
+    )

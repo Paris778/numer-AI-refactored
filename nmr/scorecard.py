@@ -306,6 +306,7 @@ def evaluate_model(
     horizon: Horizon = "20D",
     main_target: str = "target",
     benchmark_col: str | None = None,
+    backend: str = "custom",
     regime_labels: pl.DataFrame | None = None,
     perturbation: PerturbationResult | None = None,
     pf: float = 1.0,
@@ -390,7 +391,7 @@ def evaluate_model(
     if not feature_cols:
         raise ValueError("features must contain at least one feature column")
 
-    evaluator = EvaluationEngine("custom")
+    evaluator = EvaluationEngine(backend)
     t0 = time.perf_counter()
     corr_by_era = evaluator.per_era_corr(
         base,

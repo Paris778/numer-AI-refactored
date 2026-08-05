@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import webbrowser
 from pathlib import Path
@@ -24,20 +25,29 @@ def _load_registry_runs(registry_dir: Path) -> pd.DataFrame:
         model_cfg = cfg.get("model", {})
         run_cfg = cfg.get("run", {})
 
+        scorecard = payload.get("scorecard") or {}
+        sc_mean = scorecard.get("corr")
+        sc_std = scorecard.get("std_corr")
+        sc_sharpe = scorecard.get("corr_sharpe_ac")
+        sc_dd = scorecard.get("max_drawdown")
         rows.append(
             {
                 "model_id": payload.get("run_id", run_file.parent.name),
-                "source": "trained",
+                "source": "trained" if scorecard else "trained_legacy",
                 "run_name": run_cfg.get("name", "unknown"),
                 "feature_set": data_cfg.get("feature_set", "unknown"),
                 "backend": model_cfg.get("backend", "unknown"),
                 "preset": model_cfg.get("preset", "unknown"),
                 "n_targets": len(data_cfg.get("targets", [])),
                 "targets": ", ".join(data_cfg.get("targets", [])),
-                "mean": float(metrics.get("mean", 0.0)),
-                "std": float(metrics.get("std", 0.0)),
-                "sharpe": float(metrics.get("sharpe", 0.0)),
-                "max_drawdown": float(metrics.get("max_drawdown", 0.0)),
+                # Explicit None checks: a legitimate scorecard value of 0.0 must
+                # NOT fall through to the legacy OOF metric.
+                "mean": float(sc_mean if sc_mean is not None else metrics.get("mean", 0.0)),
+                "std": float(sc_std if sc_std is not None else metrics.get("std", 0.0)),
+                "sharpe": float(sc_sharpe if sc_sharpe is not None else metrics.get("sharpe", 0.0)),
+                "max_drawdown": float(
+                    sc_dd if sc_dd is not None else metrics.get("max_drawdown", 0.0)
+                ),
                 "artifact_path": payload.get("artifact_path"),
                 "run_dir": str(run_file.parent),
             }
@@ -102,20 +112,27 @@ def _format_value(value: float | None, fmt: str = ".5f") -> str:
     return f"{value:{fmt}}"
 
 
-def _build_html(df: pd.DataFrame, benchmark_path: Path, registry_dir: Path) -> str:
+def _build_html(
+    df: pd.DataFrame,
+    benchmark_path: Path,
+    registry_dir: Path,
+    legacy: pd.DataFrame,
+) -> str:
     """Render the leaderboard as a self-contained HTML page."""
     rows_html = ""
     for _, row in df.iterrows():
-        badge_class = "trained" if row["source"] == "trained" else "benchmark"
+        badge_class = (
+            "trained" if row["source"].startswith("trained") else "benchmark"
+        )
         rows_html += f"""
         <tr>
           <td class="rank">{int(row['rank'])}</td>
-          <td class="model-id" title="{row['model_id']}">{row['model_id'][:16]}</td>
-          <td><span class="badge {badge_class}">{row['source']}</span></td>
-          <td>{row['run_name']}</td>
-          <td>{row['feature_set']}</td>
-          <td>{row['backend']}</td>
-          <td>{row['preset']}</td>
+          <td class="model-id" title="{html.escape(str(row['model_id']))}">{html.escape(str(row['model_id']))[:16]}</td>
+          <td><span class="badge {badge_class}">{html.escape(str(row['source']))}</span></td>
+          <td>{html.escape(str(row['run_name']))}</td>
+          <td>{html.escape(str(row['feature_set']))}</td>
+          <td>{html.escape(str(row['backend']))}</td>
+          <td>{html.escape(str(row['preset']))}</td>
           <td>{int(row['n_targets'])}</td>
           <td class="num">{_format_value(row['mean'])}</td>
           <td class="num">{_format_value(row['std'])}</td>
@@ -123,6 +140,53 @@ def _build_html(df: pd.DataFrame, benchmark_path: Path, registry_dir: Path) -> s
           <td class="num">{_format_value(row['max_drawdown'])}</td>
         </tr>
         """
+
+    legacy_rows_html = ""
+    for _, row in legacy.iterrows():
+        badge_class = (
+            "trained" if row["source"].startswith("trained") else "benchmark"
+        )
+        legacy_rows_html += f"""
+        <tr>
+          <td class="model-id" title="{html.escape(str(row['model_id']))}">{html.escape(str(row['model_id']))[:16]}</td>
+          <td><span class="badge {badge_class}">{html.escape(str(row['source']))}</span></td>
+          <td>{html.escape(str(row['run_name']))}</td>
+          <td>{html.escape(str(row['feature_set']))}</td>
+          <td>{html.escape(str(row['backend']))}</td>
+          <td>{html.escape(str(row['preset']))}</td>
+          <td>{int(row['n_targets'])}</td>
+          <td class="num">{_format_value(row['mean'])}</td>
+          <td class="num">{_format_value(row['std'])}</td>
+          <td class="num sharpe">{_format_value(row['sharpe'])}</td>
+          <td class="num">{_format_value(row['max_drawdown'])}</td>
+        </tr>
+        """
+
+    legacy_section = ""
+    if len(legacy) > 0:
+        legacy_section = f"""
+    <h2 class="section-title">Legacy runs — train-OOF metrics (no validation scorecard)</h2>
+    <table>
+      <thead>
+        <tr>
+          <th>Model ID</th>
+          <th>Source</th>
+          <th>Name</th>
+          <th>Features</th>
+          <th>Backend</th>
+          <th>Preset</th>
+          <th>Targets</th>
+          <th class="num">Mean CORR</th>
+          <th class="num">Std</th>
+          <th class="num">Sharpe</th>
+          <th class="num">Max DD</th>
+        </tr>
+      </thead>
+      <tbody>
+        {legacy_rows_html}
+      </tbody>
+    </table>
+"""
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -171,6 +235,7 @@ def _build_html(df: pd.DataFrame, benchmark_path: Path, registry_dir: Path) -> s
     }}
     .stat-card .label {{ font-size: 0.8rem; color: var(--muted); text-transform: uppercase; }}
     .stat-card .value {{ font-size: 1.5rem; font-weight: 600; margin-top: 0.25rem; }}
+    .section-title {{ margin: 2rem 0 0.75rem; font-size: 1.1rem; color: var(--muted); }}
     table {{
       width: 100%;
       border-collapse: collapse;
@@ -215,7 +280,7 @@ def _build_html(df: pd.DataFrame, benchmark_path: Path, registry_dir: Path) -> s
 <body>
   <header>
     <h1>🏆 NumerAI Model Dashboard</h1>
-    <p>Trained runs from {registry_dir} plus benchmark models from {benchmark_path.name}</p>
+    <p>Trained runs from {html.escape(str(registry_dir))} plus benchmark models from {html.escape(str(benchmark_path.name))}</p>
   </header>
   <main>
     <div class="stats">
@@ -257,10 +322,11 @@ def _build_html(df: pd.DataFrame, benchmark_path: Path, registry_dir: Path) -> s
         {rows_html}
       </tbody>
     </table>
+    {legacy_section}
   </main>
   <footer>
-    Generated from repository root: {REPO_ROOT}<br>
-    Registry: {registry_dir} | Benchmarks: {benchmark_path}
+    Generated from repository root: {html.escape(str(REPO_ROOT))}<br>
+    Registry: {html.escape(str(registry_dir))} | Benchmarks: {html.escape(str(benchmark_path))}
   </footer>
 </body>
 </html>"""
@@ -281,11 +347,13 @@ def generate_dashboard(
     trained = _load_registry_runs(registry_dir)
     benchmarks = _load_benchmarks(benchmark_path)
     combined = pd.concat([trained, benchmarks], ignore_index=True)
-    ranked = _rank_models(combined)
+    comparable = combined[combined["source"] != "trained_legacy"].copy()
+    legacy = combined[combined["source"] == "trained_legacy"].copy()
+    ranked = _rank_models(comparable) if not comparable.empty else comparable
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(
-        _build_html(ranked, benchmark_path, registry_dir), encoding="utf-8"
+        _build_html(ranked, benchmark_path, registry_dir, legacy), encoding="utf-8"
     )
 
     if open_browser:

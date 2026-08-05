@@ -140,42 +140,56 @@ def feature_exposure_report(
     era_col: str = "era",
     pred_col: str = "prediction",
 ) -> pl.DataFrame:
+    """Per-era Pearson correlation of predictions vs each feature (vectorized).
+
+    Definition (documented in ARCHITECTURE.md §L): plain Pearson correlation of
+    the raw prediction and feature columns per era, then aggregated. This is the
+    community-standard exposure definition (it is NOT the power-1.5 Numerai
+    CORR used by per_era_corr). Values changed vs the pre-2026-08-05
+    implementation; recorded exposure numbers are not comparable across that
+    boundary.
+    """
     feature_list = list(feature_cols)
     if not feature_list:
         raise ValueError("feature_cols must contain at least one feature")
 
-    evaluator = EvaluationEngine("custom")
-    eras = sorted({str(value) for value in oof.get_column(era_col).to_list()}, key=int)
-    rows: list[dict[str, Any]] = []
-    for feature in feature_list:
-        per_era_values: list[float] = []
-        for era in eras:
-            era_df = oof.filter(pl.col(era_col) == era)
-            eval_df = era_df.select([pred_col, feature, era_col]).rename(
-                {feature: "target"}
-            )
-            corr_map = evaluator.per_era_corr(
-                eval_df,
-                pred_col=pred_col,
-                target_col="target",
-                era_col=era_col,
-            )
-            per_era_values.extend(float(value) for value in corr_map.values())
+    per_era: dict[str, np.ndarray] = {}
+    parts = oof.select([era_col, pred_col, *feature_list]).partition_by(
+        era_col, maintain_order=True
+    )
+    for part in parts:
+        era = str(part.get_column(era_col).to_list()[0])
+        clean = part.drop_nulls()
+        if clean.is_empty():
+            per_era[era] = np.zeros(len(feature_list), dtype=float)
+            continue
+        pred = clean.get_column(pred_col).cast(pl.Float64).to_numpy()
+        features = clean.select(feature_list).cast(pl.Float64).to_numpy()
+        per_era[era] = _pred_feature_pearson(pred, features)
 
-        values = np.asarray(per_era_values, dtype=float)
-        rows.append(
-            {
-                "feature": feature,
-                "mean_abs_exposure": (
-                    float(np.mean(np.abs(values))) if values.size else 0.0
-                ),
-                "max_abs_exposure": (
-                    float(np.max(np.abs(values))) if values.size else 0.0
-                ),
-            }
-        )
-
+    eras = sorted(per_era, key=int)
+    matrix = np.column_stack([per_era[era] for era in eras])
+    rows = [
+        {
+            "feature": feature,
+            "mean_abs_exposure": float(np.mean(np.abs(matrix[i]))),
+            "max_abs_exposure": float(np.max(np.abs(matrix[i]))),
+        }
+        for i, feature in enumerate(feature_list)
+    ]
     return pl.DataFrame(rows).sort("max_abs_exposure", descending=True)
+
+
+def _pred_feature_pearson(pred: np.ndarray, features: np.ndarray) -> np.ndarray:
+    pred_centered = pred - np.mean(pred)
+    pred_norm = float(np.linalg.norm(pred_centered))
+    if pred_norm == 0.0:
+        return np.zeros(features.shape[1], dtype=float)
+    feature_centered = features - np.mean(features, axis=0)
+    denoms = np.linalg.norm(feature_centered, axis=0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        corrs = (feature_centered.T @ pred_centered) / (denoms * pred_norm)
+    return np.where(np.isfinite(corrs), corrs, 0.0)
 
 
 def _held_out_metric(config: ExperimentConfig, *, metric_name: str) -> float:

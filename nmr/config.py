@@ -116,6 +116,7 @@ class EvalConfig:
     backend: str = "custom"
     main_target: str = "target"
     metrics: tuple[str, ...] = ("corr", "mmc", "fnc", "sharpe")
+    validation_scorecard: bool = True
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "metrics", tuple(self.metrics))

@@ -65,7 +65,9 @@ Frozen dataclasses; `__post_init__` validates enums, non-negativity, and non-emp
 | `data: DataConfig` | `version="v5.2"`, `feature_set="small"`, `targets=("target",)`, `data_dir=REPO_ROOT/"data"` | feature_set ∈ `("small", "medium", "all")` |
 | `split: SplitConfig` | `scheme="walk_forward"`, `purge_eras=8`, `embargo_eras=4`, `n_folds=4` | scheme ∈ `("walk_forward", "anchor")` |
 | `model: ModelConfig` | `backend="lightgbm"`, `preset="fast"`, `params={}` | backend ∈ `("lightgbm", "xgboost")`, preset ∈ `("fast", "standard", "deep")` |
-| `evaluation: EvalConfig` | `backend="custom"`, `main_target="target"`, `metrics=("corr","mmc","fnc","sharpe")` | backend ∈ `("custom", "official")` |
+| `evaluation: EvalConfig` | `backend="custom"`, `main_target="target"`, `metrics=("corr","mmc","fnc","sharpe")`, `validation_scorecard=True` | backend ∈ `("custom", "official")` |
+
+`metrics` semantics: CORR/FNC/sharpe-family are computed on the train OOF in `run()`; MMC/BMC/CWMM are validation-only (they need the meta model / benchmark columns that only the validation stage provides). `validation_scorecard=False` skips the validation stage entirely (no meta/benchmark assets required). `metrics` is validated at load time but not yet wired to gate the validation stage (e.g. `mmc` without `validation_scorecard` is accepted; the scoping guard is deferred).
 | `risk: RiskConfig` | `neutralization_proportion=1.0`, `cache_max_bytes=None` | proportion ∈ [0, 1]; `cache_max_bytes` ≥ 0 or None |
 | `run: RunConfig` | `name="default"`, `seed=42`, `artifacts_dir=REPO_ROOT/"artifacts"` | — |
 
@@ -181,7 +183,7 @@ Diagnostics on the series: `burn_rate` (fraction < 0), `cvar(q=0.05)` (mean of b
 
 ### K. Scorecard — `nmr/scorecard.py`
 
-`evaluate_model(predictions, *, meta_model, benchmarks, features, targets, n_trials, seed, horizon="20D", main_target="target", benchmark_col=None, regime_labels=None, perturbation=None, pf=1.0, clip=0.05, n_boot=1000, alpha=0.05, min_overlap_eras=20, model_id="model", ...) -> MetricScorecard`
+`evaluate_model(predictions, *, meta_model, benchmarks, features, targets, n_trials, seed, horizon="20D", main_target="target", benchmark_col=None, backend="custom", regime_labels=None, perturbation=None, pf=1.0, clip=0.05, n_boot=1000, alpha=0.05, min_overlap_eras=20, model_id="model", ...) -> MetricScorecard`
 
 Flow: join predictions ∩ meta ∩ targets ∩ features on `[era]` or `[era, id]` (optional left-join benchmarks) → per-era CORR/MMC/FNC (+BMC/CWMM when benchmark/meta available) → payout report → `MetricCell(value, ci_low, ci_high, n_eras)` bootstrap cells → feature-exposure, horizon-stability, regime, and perturbation diagnostics. Horizon targets inferred by regex `_([a-zA-Z0-9]+)(?:20|60)$` on `benchmark_col`, requiring both `target_{name}_20` and `target_{name}_60`.
 
@@ -191,7 +193,7 @@ Flow: join predictions ∩ meta ∩ targets ∩ features on `[era]` or `[era, id
 
 - `HyperparameterSweep(base_config, *, metric="sharpe").run(space, *, n_trials, seed) -> SweepResult(trials, best_params, best_value)` — Cartesian product of the space, shuffled, sampled to `n_trials`; each trial overrides `model.params` and evaluates on a purged held-out split (final ~20% of eras).
 - `neutralization_frontier(oof, *, feature_cols, proportions, ...) -> NeutralizationFrontier(proportions, metrics)` — sweeps neutralization proportion, per-era CORR + `MetricSummary` at each point.
-- `feature_exposure_report(oof, *, feature_cols, ...)` — per-feature mean/max absolute correlation with predictions.
+- `feature_exposure_report(oof, *, feature_cols, ...)` — per-feature mean/max absolute **Pearson correlation** with predictions, vectorized via one `partition_by(era)` pass + per-era matrix op (`_pred_feature_pearson`). Definition change dated 2026-08-05 (previously power-1.5 Numerai CORR per feature) — recorded exposure numbers are **not comparable** across that boundary.
 - `adversarial_perturbation(...) -> PerturbationResult(alpha, n_eras, ceiling_stability, manifold_stability, gap, effective_perturb_frac)` — cell-level ±1 bin flips (features are Int8 ∈ [0,4]) plus circular block swaps from train; per-era Spearman stability of predictions.
 - `time_horizon_stability(...) -> HorizonStabilityResult` — model vs benchmark AC-adjusted Sharpe on `_20` vs `_60` targets; decay and relative divergence.
 - `regime_conditioned_corr(...) -> dict[str, RegimeCorr]` — per-regime per-era CORR with block-bootstrap CIs.
@@ -209,7 +211,7 @@ Flow: join predictions ∩ meta ∩ targets ∩ features on `[era]` or `[era, id
 
 ### N. Runner, Registry, Submission, Deployment
 
-**`nmr/runner.py`** — stage order in §1 diagram. `RunResult(run_id, oof, metrics, artifact, manifest)`. `run_id` = SHA256 of `{config (data_dir/artifacts_dir stripped), data_version, code_fingerprint, environment_fingerprint}` where code fingerprint = SHA256 over sorted `nmr/*.py` names+contents and environment = Python + versions of numpy/polars/pandas/lightgbm/xgboost. `deploy=True` builds the deploy pipeline **once** (`_build_deploy_pipeline`: per-target all-eras CPU-only models + rank-gaussianize + learned weights + neutralize; no `splitter`), then `_serialize_predict_artifact(predict_fn, model_meta, artifact_path)` serializes it (never retrains) to `artifacts/runs/{run_id}/predict.pkl` + manifest. The artifact's `models` metadata carries `targets`/`weights`/`proportion`/`geometry="all_eras"`/`device="cpu"`/`feature_names`; the run manifest adds `pipeline_device="cpu"`.
+**`nmr/runner.py`** — stage order in §1 diagram. `RunResult(run_id, oof, metrics, artifact, manifest, scorecard=None, validation_predictions=None)`. `run_id` = SHA256 of `{config (data_dir/artifacts_dir stripped), data_version, code_fingerprint, environment_fingerprint}` where code fingerprint = SHA256 over sorted `nmr/*.py` names+contents and environment = Python + versions of numpy/polars/pandas/lightgbm/xgboost. The deploy pipeline is built **at most once** per run, when `deploy or evaluation.validation_scorecard` (`_build_deploy_pipeline`: per-target all-eras CPU-only models + rank-gaussianize + learned weights + neutralize; no `splitter`), and that single closure is shared by the validation stage and the deploy block — never retrained. The **validation stage** (`_run_validation_stage`) loads `validation.parquet` plus `meta_model.parquet` (required — missing ⇒ `FileNotFoundError`) and `validation_benchmark_models.parquet` (optional — BMC/horizon disabled when absent), drops the first `split.purge_eras` validation eras (20D-target overlap), scores the shared pipeline, and produces a full `MetricScorecard` with `benchmark_col` = first non-join benchmark column (same convention as `benchmark_runner`); the run manifest records `validation_purge_dropped_first_eras`. Then `_serialize_predict_artifact(predict_fn, model_meta, artifact_path)` serializes (never retrains) to `artifacts/runs/{run_id}/predict.pkl` + manifest. The artifact's `models` metadata carries `targets`/`weights`/`proportion`/`geometry="all_eras"`/`device="cpu"`/`feature_names`; the run manifest adds `pipeline_device="cpu"`.
 
 **`nmr/registry.py`** — `RunRegistry(root)`:
 

@@ -55,7 +55,7 @@ A **lean, deterministic research framework** for the [Numerai Classic tournament
 ├── notebooks/                 # researcher control plane (thin, zero business logic)
 ├── benchmark_runner.py        # CLI: score null/classical/benchmark baselines → CSV
 ├── train_first_model.py       # CLI: train, register, and promote the first model
-├── generate_dashboard.py      # CLI: ranked leaderboard → artifacts/dashboard.html
+├── generate_dashboard.py      # CLI: validation-scorecard leaderboard → artifacts/dashboard.html
 ├── pytest.ini                 # pythonpath = . (no install step needed)
 ├── requirements.txt           # runtime + dev dependencies
 ├── AGENTS.md                  # authoritative reference for AI coding agents
@@ -112,6 +112,8 @@ Real-data tests and `benchmark_runner.py` require these files; pure-unit tests d
 .\.venv\Scripts\python benchmark_runner.py --fast-mode
 .\.venv\Scripts\python generate_dashboard.py     # → artifacts/dashboard.html
 ```
+
+The dashboard ranks trained runs and benchmarks on the same validation-scorecard definitions (CORR/Sharpe from the `scorecard` block in `run.json`); runs without a validation scorecard are shown separately in a legacy (train-OOF metrics) section.
 
 Library usage:
 
