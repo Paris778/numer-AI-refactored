@@ -90,31 +90,10 @@ def _candidate_strategies(
     min_train_eras: int,
     fast_mode: bool,
 ) -> Iterator[StrategyContext]:
-    for idx, baseline in enumerate(
-        ("constant-0.5", "uniform-random", "gaussian-random")
+    for model_id, group, raw_preds, r_seed in suite.iter_baseline_predictions(
+        include_classical=not fast_mode, min_train_eras=min_train_eras
     ):
-        r_seed = seed + idx
-        yield StrategyContext(
-            baseline, "null", suite.null_prediction_frame(baseline, seed=r_seed), r_seed
-        )
-
-    yield StrategyContext(
-        "trivial", "classical", suite._trivial_prediction_frame(), seed + 3
-    )
-
-    if not fast_mode:
-        yield StrategyContext(
-            "linear",
-            "classical",
-            suite._walk_forward_model_predictions("linear", min_train_eras),
-            seed + 4,
-        )
-        yield StrategyContext(
-            "tree",
-            "classical",
-            suite._walk_forward_model_predictions("tree", min_train_eras),
-            seed + 5,
-        )
+        yield StrategyContext(model_id, group, raw_preds, r_seed)
 
     benchmark_cols = sorted([c for c in benchmarks.columns if c not in {"era", "id"}])
     for col in benchmark_cols:

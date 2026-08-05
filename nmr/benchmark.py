@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -152,28 +152,56 @@ class BenchmarkSuite:
         if id_col in self._join_keys:
             self._id_to_era = self._targets.select([id_col, era_col]).unique()
 
+    def iter_baseline_predictions(
+        self,
+        *,
+        include_classical: bool = False,
+        min_train_eras: int = 10,
+    ) -> Iterator[tuple[str, str, pl.DataFrame, int]]:
+        """Yield (model_id, group, raw_preds, seed) for null/trivial/classical baselines."""
+        base = self._eval_cfg.seed
+        for idx, baseline in enumerate(NULL_BASELINES):
+            r_seed = base + idx
+            yield (
+                baseline,
+                "null",
+                self.null_prediction_frame(baseline, seed=r_seed),
+                r_seed,
+            )
+        yield ("trivial", "classical", self._trivial_prediction_frame(), base + 3)
+        if include_classical:
+            yield (
+                "linear",
+                "classical",
+                self._walk_forward_model_predictions(
+                    model_name="linear", min_train_eras=min_train_eras
+                ),
+                base + 4,
+            )
+            yield (
+                "tree",
+                "classical",
+                self._walk_forward_model_predictions(
+                    model_name="tree", min_train_eras=min_train_eras
+                ),
+                base + 5,
+            )
+
     def run_classical_baselines(
         self,
         *,
         min_train_eras: int = 10,
     ) -> dict[str, MetricScorecard]:
         """Generate and score S11 classical rungs: trivial, linear, and tree."""
-
-        trivial = self._trivial_prediction_frame()
-        linear = self._walk_forward_model_predictions(
-            model_name="linear",
-            min_train_eras=min_train_eras,
-        )
-        tree = self._walk_forward_model_predictions(
-            model_name="tree",
-            min_train_eras=min_train_eras,
-        )
-
-        return {
-            "trivial": self.evaluate_predictions(trivial, model_id="trivial"),
-            "linear": self.evaluate_predictions(linear, model_id="linear"),
-            "tree": self.evaluate_predictions(tree, model_id="tree"),
-        }
+        out: dict[str, MetricScorecard] = {}
+        for model_id, group, raw_preds, _seed in self.iter_baseline_predictions(
+            include_classical=True, min_train_eras=min_train_eras
+        ):
+            if group != "classical":
+                continue
+            # Historical behavior: score with the suite's default seed (no seed= arg).
+            out[model_id] = self.evaluate_predictions(raw_preds, model_id=model_id)
+        return out
 
     def compute_book_orthogonality(
         self,
