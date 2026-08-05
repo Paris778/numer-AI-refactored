@@ -239,3 +239,68 @@ def test_neutralize_array_zero_variance_returns_unchanged() -> None:
     features = np.arange(10, dtype=float).reshape(5, 2)
     out = neutralize_array(pred, features, 1.0)
     assert np.array_equal(out, pred)
+
+
+def test_cache_corruption_recomputes(tmp_path) -> None:
+    df = _risk_frame().filter(pl.col("era") == "1")
+    engine = NeutralizationEngine(cache_dir=tmp_path)
+    engine.neutralize(df, pred_col="pred", feature_cols=["f1", "f2"], proportion=1.0)
+    npy_files = list(tmp_path.glob("*.npy"))
+    assert len(npy_files) == 1
+    npy_files[0].write_bytes(b"\x00" * 16)  # truncate/corrupt
+    result = engine.neutralize(
+        df, pred_col="pred", feature_cols=["f1", "f2"], proportion=1.0
+    )
+    assert np.all(np.isfinite(result.get_column("pred").to_numpy()))
+
+
+def test_cache_eviction_respects_budget(tmp_path) -> None:
+    """Two eras' cache entries; the budget fits only one -> the older is evicted."""
+    import os
+    import time
+
+    full_df = _risk_frame()  # eras "1" and "2"
+    engine = NeutralizationEngine(cache_dir=tmp_path, max_cache_bytes=900)
+    engine.neutralize(
+        full_df.filter(pl.col("era") == "1"),
+        pred_col="pred",
+        feature_cols=["f1", "f2"],
+        proportion=1.0,
+    )
+    # Backdate era 1's pair so the mtime-oldest eviction is deterministic even
+    # when writes land in the same filesystem clock tick: era 1's npy strictly
+    # older than its json, and both strictly older than era 2's pair.
+    era1_npy = next(tmp_path.glob("era_1_*.npy"))
+    era1_json = next(tmp_path.glob("era_1_*.json"))
+    old = time.time() - 3600.0
+    os.utime(era1_npy, (old, old))
+    os.utime(era1_json, (old + 1.0, old + 1.0))
+    engine.neutralize(
+        full_df.filter(pl.col("era") == "2"),
+        pred_col="pred",
+        feature_cols=["f1", "f2"],
+        proportion=1.0,
+    )
+    assert engine.cache_size_bytes() <= 900
+    survivors = [p.name for p in tmp_path.glob("*.npy")]
+    assert len(survivors) == 1
+    assert "era_2_" in survivors[0]  # mtime-oldest (era 1) evicted, era 2 survives
+
+
+def test_zero_variance_era_keeps_rows_and_is_logged(tmp_path, caplog) -> None:
+    df = pl.DataFrame(
+        {
+            "era": ["1", "1", "2", "2"],
+            "id": ["a", "b", "c", "d"],
+            "pred": [0.5, 0.5, 0.1, 0.9],
+            "f1": [1.0, 2.0, 3.0, 4.0],
+        }
+    )
+    import logging
+    engine = NeutralizationEngine(cache_dir=tmp_path)
+    with caplog.at_level(logging.WARNING, logger="nmr.risk"):
+        result = engine.neutralize(df, pred_col="pred", feature_cols=["f1"], proportion=1.0)
+    assert result.height == 4
+    era1 = result.filter(pl.col("era") == "1").get_column("pred").to_numpy()
+    assert np.array_equal(era1, np.array([0.5, 0.5]))
+    assert any("zero-variance" in record.message for record in caplog.records)

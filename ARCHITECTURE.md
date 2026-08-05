@@ -129,7 +129,7 @@ Shared by evaluation, ensemble, and submission:
 
 `neutralize(df, *, pred_col, feature_cols, era_col="era", proportion=1.0)` — per era: design `[features | 1]` (intercept-aware), `coeffs = pinv(design, rcond=1e-6) @ pred`, output `pred − proportion · (design @ coeffs)`. `proportion ∈ [0, 1]` (0 = identity, 1 = full). All values must be finite (else `ValueError`). The engine delegates the per-era solve to `_transforms.neutralize_array` (single source of truth, shared with the deployment closure); eras with zero-variance predictions are returned unchanged with a logged warning, and eras with `n_rows ≤ n_features + 1` warn that the fit is exact.
 
-Per-era pseudo-inverse cache: key = SHA256 of `{era, sorted feature_cols, row_count, row_ids_sha256, intercept: true}`; files `era_{label}_{key}.npy` + `.json` (metadata revalidated before loading).
+Per-era pseudo-inverse cache: key = SHA256 of `{era, sorted feature_cols, row_count, row_ids_sha256, intercept: true}`; files `era_{label}_{key}.npy` + `.json` (metadata revalidated before loading). The cache is bounded by `risk.cache_max_bytes` (default `DEFAULT_CACHE_MAX_BYTES = 2 GiB`) with mtime-oldest-first LRU eviction on store; every cache hit `os.utime`s both files so mtime reflects last use, not just write time, and a warning is logged if the cache stays over budget after a sweep. Cache writes are atomic (temp `.npy` + `os.replace`, metadata via `atomic_write_text`); a corrupt or truncated entry (`OSError`/`ValueError`/`EOFError` on load) is discarded and recomputed, so corruption self-heals.
 
 ### G. Modeling — `nmr/models.py`
 

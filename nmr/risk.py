@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -26,6 +27,8 @@ __all__ = ["NeutralizationEngine"]
 
 _INTERCEPT_AWARE = True
 
+DEFAULT_CACHE_MAX_BYTES = 2 * 2**30  # 2 GiB
+
 
 class NeutralizationEngine:
     """Per-era, intercept-aware neutralization with validated cache reuse."""
@@ -36,13 +39,22 @@ class NeutralizationEngine:
         cache_dir: Path | None = None,
         max_cache_bytes: int | None = None,
     ) -> None:
-        if max_cache_bytes is not None and max_cache_bytes < 0:
-            raise ValueError("max_cache_bytes must be >= 0 or None")
-        self._max_cache_bytes = max_cache_bytes
         self._cache_dir = (
             Path(cache_dir)
             if cache_dir is not None
             else REPO_ROOT / "artifacts" / "cache" / "neutralization"
+        )
+        self._max_cache_bytes = (
+            DEFAULT_CACHE_MAX_BYTES
+            if max_cache_bytes is None
+            else int(max_cache_bytes)
+        )
+        if self._max_cache_bytes < 0:
+            raise ValueError("max_cache_bytes must be >= 0")
+        total = self.cache_size_bytes()
+        logger.info(
+            "[neutralization] cache dir=%s max_bytes=%d current_bytes=%d",
+            self._cache_dir, self._max_cache_bytes, total,
         )
 
     def neutralize(
@@ -210,6 +222,37 @@ class NeutralizationEngine:
         base = self._cache_dir / f"era_{era_label}_{cache_key}"
         return base.with_suffix(".npy"), base.with_suffix(".json")
 
+    def cache_size_bytes(self) -> int:
+        if not self._cache_dir.exists():
+            return 0
+        return sum(
+            path.stat().st_size for path in self._cache_dir.iterdir() if path.is_file()
+        )
+
+    def _evict_to_budget(self) -> None:
+        if not self._cache_dir.exists():
+            return
+        files = sorted(
+            (p for p in self._cache_dir.iterdir() if p.is_file()),
+            key=lambda p: p.stat().st_mtime,
+        )
+        total = sum(p.stat().st_size for p in files)
+        for path in files:
+            if total <= self._max_cache_bytes:
+                break
+            try:
+                size = path.stat().st_size
+                path.unlink()
+                total -= size
+            except OSError:
+                continue
+        if total > self._max_cache_bytes:
+            logger.warning(
+                "[neutralization] cache still above budget (%d bytes); "
+                "raise risk.cache_max_bytes or clear artifacts/cache/neutralization",
+                total,
+            )
+
     def _load_cached_array(
         self,
         array_path: Path,
@@ -230,8 +273,13 @@ class NeutralizationEngine:
 
         try:
             array = np.load(array_path)
-        except OSError:
+        except (OSError, ValueError, EOFError):
             return None
+        try:
+            os.utime(array_path)
+            os.utime(metadata_path)
+        except OSError:
+            pass
         return np.asarray(array, dtype=float)
 
     def _store_cached_array(
@@ -242,12 +290,25 @@ class NeutralizationEngine:
         metadata: dict[str, object],
         array: np.ndarray,
     ) -> None:
+        from nmr._atomicio import atomic_write_text
+
         self._cache_dir.mkdir(parents=True, exist_ok=True)
-        np.save(array_path, np.asarray(array, dtype=float))
-        metadata_path.write_text(
-            json.dumps(metadata, sort_keys=True, indent=2),
-            encoding="utf-8",
+        # np.save appends `.npy` when the target name lacks it, so the temp
+        # file must keep the `.npy` suffix or the replace below would miss it.
+        tmp_array = array_path.with_name(
+            f"{array_path.stem}.tmp.{os.getpid()}{array_path.suffix}"
         )
+        try:
+            np.save(tmp_array, np.asarray(array, dtype=float))
+            os.replace(tmp_array, array_path)
+            atomic_write_text(
+                metadata_path,
+                json.dumps(metadata, sort_keys=True, indent=2),
+            )
+        finally:
+            if tmp_array.exists():
+                tmp_array.unlink()
+        self._evict_to_budget()
 
 
 def _design_matrix(features: np.ndarray) -> np.ndarray:
