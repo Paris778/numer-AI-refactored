@@ -32,6 +32,8 @@ __all__ = [
     "NonVacuityError",
     "MetricSummary",
     "EvaluationEngine",
+    "clean_frame",
+    "sorted_era_labels",
 ]
 
 _VALID_BACKENDS = ("custom", "official")
@@ -48,6 +50,33 @@ class MetricSummary:
     std: float
     sharpe: float
     max_drawdown: float
+
+
+def sorted_era_labels(labels: Sequence[str]) -> list[str]:
+    numeric_to_label: dict[int, str] = {}
+    for label in labels:
+        try:
+            numeric_label = int(label)
+        except ValueError as exc:
+            raise ValueError(
+                f"Non-numeric era label {label!r}; evaluation requires chronological eras"
+            ) from exc
+        numeric_to_label.setdefault(numeric_label, label)
+    return [numeric_to_label[num] for num in sorted(numeric_to_label)]
+
+
+def clean_frame(df: pl.DataFrame, columns: Sequence[str]) -> pl.DataFrame:
+    clean_df = df.select(list(columns)).drop_nulls()
+    if clean_df.is_empty():
+        return clean_df
+    mask = np.ones(clean_df.height, dtype=bool)
+    for col in columns:
+        values = clean_df.get_column(col).to_numpy()
+        if np.issubdtype(values.dtype, np.number):
+            mask &= np.isfinite(values)
+    if mask.all():
+        return clean_df
+    return clean_df.filter(pl.Series("mask", mask))
 
 
 class EvaluationEngine:
@@ -139,11 +168,16 @@ class EvaluationEngine:
             coverage_col=benchmark_col,
             min_overlap_eras=min_overlap_eras,
         )
+        parts_by_era = {
+            str(part.get_column(era_col).to_list()[0]): part
+            for part in df.partition_by(era_col, maintain_order=True)
+        }
 
         scores: dict[str, float] = {}
         for era in overlap_eras:
-            era_df = df.filter(pl.col(era_col) == era)
-            clean_df = self._clean_frame(era_df, [pred_col, benchmark_col, target_col])
+            clean_df = clean_frame(
+                parts_by_era[era], [pred_col, benchmark_col, target_col]
+            )
             score = self._mmc_single_era(
                 clean_df,
                 pred_col=pred_col,
@@ -169,11 +203,14 @@ class EvaluationEngine:
             coverage_col=meta_col,
             min_overlap_eras=min_overlap_eras,
         )
+        parts_by_era = {
+            str(part.get_column(era_col).to_list()[0]): part
+            for part in df.partition_by(era_col, maintain_order=True)
+        }
 
         scores: dict[str, float] = {}
         for era in overlap_eras:
-            era_df = df.filter(pl.col(era_col) == era)
-            clean_df = self._clean_frame(era_df, [pred_col, meta_col])
+            clean_df = clean_frame(parts_by_era[era], [pred_col, meta_col])
             score = self._cwmm_single_era(
                 clean_df,
                 pred_col=pred_col,
@@ -187,7 +224,7 @@ class EvaluationEngine:
             raise ValueError("per_era must contain at least one era score")
 
         ordered_values = np.array(
-            [per_era[era] for era in self._sorted_labels(per_era.keys())],
+            [per_era[era] for era in sorted_era_labels(per_era.keys())],
             dtype=float,
         )
         mean = float(np.mean(ordered_values))
@@ -214,32 +251,16 @@ class EvaluationEngine:
         required_cols: Sequence[str],
         score_fn,
     ) -> dict[str, float]:
-        eras = self._sorted_labels(df.get_column(era_col).to_list())
+        eras = sorted_era_labels(df.get_column(era_col).to_list())
+        parts_by_era = {
+            str(part.get_column(era_col).to_list()[0]): part
+            for part in df.partition_by(era_col, maintain_order=True)
+        }
         scores: dict[str, float] = {}
         for era in eras:
-            era_df = df.filter(pl.col(era_col) == era)
-            clean_df = self._clean_frame(era_df, required_cols)
+            clean_df = clean_frame(parts_by_era[era], required_cols)
             scores[era] = self._normalize_score(score_fn(clean_df))
         return scores
-
-    def _clean_frame(
-        self,
-        df: pl.DataFrame,
-        columns: Sequence[str],
-    ) -> pl.DataFrame:
-        clean_df = df.select(list(columns)).drop_nulls()
-        if clean_df.is_empty():
-            return clean_df
-
-        mask = np.ones(clean_df.height, dtype=bool)
-        for col in columns:
-            values = clean_df.get_column(col).to_numpy()
-            if np.issubdtype(values.dtype, np.number):
-                mask &= np.isfinite(values)
-
-        if mask.all():
-            return clean_df
-        return clean_df.filter(pl.Series("mask", mask))
 
     def _corr_single_era(
         self,
@@ -451,11 +472,15 @@ class EvaluationEngine:
         if min_overlap_eras < 1:
             raise ValueError("min_overlap_eras must be >= 1")
 
-        eras = self._sorted_labels(df.get_column(era_col).to_list())
+        eras = sorted_era_labels(df.get_column(era_col).to_list())
+        parts_by_era = {
+            str(part.get_column(era_col).to_list()[0]): part
+            for part in df.partition_by(era_col, maintain_order=True)
+        }
         overlap_eras: list[str] = []
         for era in eras:
             era_values = (
-                df.filter(pl.col(era_col) == era)
+                parts_by_era[era]
                 .select(pl.col(coverage_col).cast(pl.Float64, strict=False))
                 .drop_nulls()
                 .get_column(coverage_col)
@@ -472,18 +497,6 @@ class EvaluationEngine:
                 f"{len(overlap_eras)} eras; minimum required {min_overlap_eras}."
             )
         return overlap_eras
-
-    def _sorted_labels(self, labels: Sequence[str]) -> list[str]:
-        numeric_to_label: dict[int, str] = {}
-        for label in labels:
-            try:
-                numeric_label = int(label)
-            except ValueError as exc:
-                raise ValueError(
-                    f"Non-numeric era label {label!r}; evaluation requires chronological eras"
-                ) from exc
-            numeric_to_label.setdefault(numeric_label, label)
-        return [numeric_to_label[num] for num in sorted(numeric_to_label)]
 
     def _pearson_corr(self, left: np.ndarray, right: np.ndarray) -> float:
         left_centered = left - np.mean(left)

@@ -31,6 +31,8 @@ from .evaluation import (
     EvaluationEngine,
     MetricSummary,
     NonVacuityError,
+    clean_frame,
+    sorted_era_labels,
 )
 from .inference import (
     BootstrapCI,
@@ -107,6 +109,8 @@ __all__ = [
     "EvaluationEngine",
     "MIN_OVERLAP_ERAS",
     "NonVacuityError",
+    "clean_frame",
+    "sorted_era_labels",
     "SeriesStats",
     "BootstrapCI",
     "era_series_stats",

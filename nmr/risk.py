@@ -87,17 +87,20 @@ class NeutralizationEngine:
             raise ValueError(f"Missing required columns: {missing_cols}")
 
         work_df = df.with_row_index("__row_idx__")
-        eras = work_df.get_column(era_col).unique(maintain_order=True).to_list()
-        logger.info("[neutralize] neutralizing %d eras", len(eras))
+        logger.info(
+            "[neutralize] neutralizing %d eras",
+            len(work_df.get_column(era_col).unique()),
+        )
         parts: list[pl.DataFrame] = []
-
-        for idx, era in enumerate(eras, start=1):
-            if idx == 1 or idx == len(eras) or idx % 50 == 0:
-                logger.info("[neutralize] era %d/%d: %s", idx, len(eras), era)
-            era_df = work_df.filter(pl.col(era_col) == era)
+        era_parts = work_df.partition_by(era_col, maintain_order=True)
+        total = len(era_parts)
+        for idx, era_df in enumerate(era_parts, start=1):
+            era_label = str(era_df.get_column(era_col).to_list()[0])
+            if idx == 1 or idx == total or idx % 50 == 0:
+                logger.info("[neutralize] era %d/%d: %s", idx, total, era_label)
             neutralized = self._neutralize_era(
                 era_df,
-                era_label=str(era),
+                era_label=era_label,
                 pred_col=pred_col,
                 feature_cols=feature_list,
                 proportion=proportion,

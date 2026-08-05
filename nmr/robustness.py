@@ -15,7 +15,13 @@ import numpy as np
 import polars as pl
 
 from nmr._transforms import tie_kept_rank
-from nmr.evaluation import MIN_OVERLAP_ERAS, EvaluationEngine, NonVacuityError
+from nmr.evaluation import (
+    MIN_OVERLAP_ERAS,
+    EvaluationEngine,
+    NonVacuityError,
+    clean_frame,
+    sorted_era_labels,
+)
 from nmr.inference import ac_adjusted_sharpe, block_bootstrap_ci, resolve_block_len
 
 __all__ = [
@@ -317,14 +323,14 @@ def time_horizon_stability(
 
     # Resolve eras before scoring: unresolved null-target eras must not be
     # injected as synthetic 0.0 corr into horizon statistics.
-    all_eras = engine._sorted_labels(df.get_column(era_col).to_list())
+    all_eras = sorted_era_labels(df.get_column(era_col).to_list())
     resolved_eras: list[str] = []
     for era in all_eras:
         era_df = df.filter(pl.col(era_col) == era)
-        pred_20 = engine._clean_frame(era_df, [pred_col, target_20]).height
-        pred_60 = engine._clean_frame(era_df, [pred_col, target_60]).height
-        bench_20 = engine._clean_frame(era_df, [benchmark_col, target_20]).height
-        bench_60 = engine._clean_frame(era_df, [benchmark_col, target_60]).height
+        pred_20 = clean_frame(era_df, [pred_col, target_20]).height
+        pred_60 = clean_frame(era_df, [pred_col, target_60]).height
+        bench_20 = clean_frame(era_df, [benchmark_col, target_20]).height
+        bench_60 = clean_frame(era_df, [benchmark_col, target_60]).height
         if min(pred_20, pred_60, bench_20, bench_60) >= 2:
             resolved_eras.append(era)
 

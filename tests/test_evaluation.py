@@ -7,7 +7,12 @@ import math
 import polars as pl
 import pytest
 
-from nmr.evaluation import EvaluationEngine, MetricSummary
+from nmr.evaluation import (
+    EvaluationEngine,
+    MetricSummary,
+    clean_frame,
+    sorted_era_labels,
+)
 
 
 def test_summarize_known_values() -> None:
@@ -114,3 +119,34 @@ def test_empty_feature_cols_raise() -> None:
     df = pl.DataFrame({"era": ["1"], "pred": [0.1], "target": [0.2]})
     with pytest.raises(ValueError, match="feature_cols"):
         engine.per_era_fnc(df, pred_col="pred", feature_cols=[], target_col="target")
+
+
+def test_sorted_era_labels_sorts_numerically() -> None:
+    assert sorted_era_labels(["10", "2", "1"]) == ["1", "2", "10"]
+    with pytest.raises(ValueError):
+        sorted_era_labels(["a", "b"])
+
+
+def test_clean_frame_drops_nulls_and_nonfinite() -> None:
+    df = pl.DataFrame(
+        {
+            "era": ["1", "1", "1"],
+            "pred": [0.1, None, float("inf")],
+            "target": [1.0, 2.0, 3.0],
+        }
+    )
+    out = clean_frame(df, ["pred", "target"])
+    assert out.to_dicts() == [{"pred": 0.1, "target": 1.0}]
+
+
+def test_per_era_metric_handles_appearance_order_eras() -> None:
+    df = pl.DataFrame(
+        {
+            "era": ["5", "5", "2", "2"],  # appearance order != numeric order
+            "pred": [1.0, 2.0, 3.0, 4.0],
+            "target": [1.0, 2.0, 3.0, 4.0],
+        }
+    )
+    engine = EvaluationEngine("custom")
+    out = engine.per_era_corr(df, pred_col="pred", target_col="target")
+    assert list(out.keys()) == ["2", "5"]

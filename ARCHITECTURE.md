@@ -113,6 +113,8 @@ Shared by evaluation, ensemble, and submission:
 
 `EvaluationEngine(backend="custom")` — per-era metric dicts (`{era: score}`); `custom` = NumPy implementations below, `official` = `numerai_tools.scoring` delegation. `MIN_OVERLAP_ERAS = 20`; insufficient overlap raises `NonVacuityError(ValueError)`.
 
+Per-era engines partition the input frame exactly once (`partition_by(era_col, maintain_order=True)`) and iterate `sorted_era_labels(...)` order, keying partitions by era label — output dicts remain numerically era-ordered regardless of row appearance order. `sorted_era_labels(labels)` and `clean_frame(df, columns)` are public module-level helpers (no private cross-module access).
+
 | Metric | Custom algorithm (per era) |
 |---|---|
 | **CORR** `per_era_corr` | `Pearson( power_1_5(rank_gaussianize(pred)), power_1_5(target − mean(target)) )` |
@@ -121,7 +123,7 @@ Shared by evaluation, ensemble, and submission:
 | **BMC** `per_era_bmc` | MMC-form vs a benchmark column (`min_overlap_eras=20`) |
 | **CWMM** `per_era_cwmm` | MMC-form pred-vs-meta (no oracle counterpart) |
 
-`summarize(per_era) -> MetricSummary(mean, std, sharpe, max_drawdown)` — std ddof=0, `sharpe = mean/std` (0 if std=0), drawdown on cumulative sum. Degenerate eras (<2 rows, zero variance, non-finite) short-circuit to score 0.0 after `_clean_frame()` null/finite filtering.
+`summarize(per_era) -> MetricSummary(mean, std, sharpe, max_drawdown)` — std ddof=0, `sharpe = mean/std` (0 if std=0), drawdown on cumulative sum. Degenerate eras (<2 rows, zero variance, non-finite) short-circuit to score 0.0 after `clean_frame()` null/finite filtering.
 
 ### F. Neutralization — `nmr/risk.py`
 
