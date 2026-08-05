@@ -324,3 +324,31 @@ def test_backend_boundary_uses_named_feature_frames_consistently() -> None:
     assert prediction.height > 0
     assert model.seen_fit_columns == ["f3", "f1", "f2"]
     assert model.seen_predict_columns == ["f3", "f1", "f2"]
+
+
+def test_train_full_history_covers_all_eras_and_is_cpu_only() -> None:
+    df = _model_frame()
+    orchestrator = ModelOrchestrator(
+        ModelConfig(backend="lightgbm", preset="fast", params=_tiny_model_params()),
+        seed=5,
+    )
+    model = orchestrator.train_full_history(
+        df, feature_cols=["f1", "f2", "f3"], target_col="target"
+    )
+    assert model is not None
+    assert model.get_params()["device_type"] == "cpu"
+
+
+def test_train_full_history_drops_null_targets() -> None:
+    df = _model_frame(n_eras=4)
+    df = df.with_columns(
+        pl.when(pl.col("id") == "1_0").then(None).otherwise(pl.col("target")).alias("target")
+    )
+    orchestrator = ModelOrchestrator(
+        ModelConfig(backend="lightgbm", preset="fast", params=_tiny_model_params()),
+        seed=5,
+    )
+    model = orchestrator.train_full_history(
+        df, feature_cols=["f1", "f2", "f3"], target_col="target"
+    )
+    assert model is not None

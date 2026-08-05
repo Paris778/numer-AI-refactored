@@ -6,6 +6,7 @@ import numpy as np
 import polars as pl
 import pytest
 
+from nmr._transforms import neutralize_array
 from nmr.risk import NeutralizationEngine
 
 
@@ -217,3 +218,24 @@ def test_invalid_proportion_raises(tmp_path) -> None:
         engine.neutralize(
             _risk_frame(), pred_col="pred", feature_cols=["f1"], proportion=1.1
         )
+
+
+def test_neutralize_array_cached_matches_uncached(tmp_path) -> None:
+    df = _risk_frame().filter(pl.col("era") == "1")
+    engine = NeutralizationEngine(cache_dir=tmp_path)
+    # First call populates the cache; second hits it.
+    engine.neutralize(df, pred_col="pred", feature_cols=["f1", "f2"], proportion=1.0)
+    result = engine.neutralize(
+        df, pred_col="pred", feature_cols=["f1", "f2"], proportion=1.0
+    )
+    pred = df.get_column("pred").to_numpy()
+    features = df.select(["f1", "f2"]).to_numpy()
+    direct = neutralize_array(pred, features, 1.0, pseudo_inverse=None)
+    assert np.allclose(result.get_column("pred").to_numpy(), direct, atol=1e-12)
+
+
+def test_neutralize_array_zero_variance_returns_unchanged() -> None:
+    pred = np.full(5, 0.5)
+    features = np.arange(10, dtype=float).reshape(5, 2)
+    out = neutralize_array(pred, features, 1.0)
+    assert np.array_equal(out, pred)

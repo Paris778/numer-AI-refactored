@@ -152,6 +152,42 @@ class ModelOrchestrator:
         )
         return CVResult(oof=oof, models=tuple(models))
 
+    def train_full_history(
+        self,
+        df: pl.DataFrame,
+        *,
+        feature_cols: Sequence[str],
+        target_col: str,
+        era_col: str = "era",
+    ) -> object:
+        """Fit a single CPU-only model on every era (deployment/validation artifact).
+
+        CPU-only by design: determinism is per-device and the deployed model must
+        reproduce identically on any hosted runtime (which may lack a GPU).
+        """
+        train_df = df.filter(pl.col(era_col).is_not_null())
+        train_df = train_df.filter(
+            pl.col(target_col).is_not_null() & pl.col(target_col).is_finite()
+        )
+        dropped = df.height - train_df.height
+        if dropped:
+            logger.warning(
+                "[train_full_history] dropped %d rows with null/non-finite %s targets",
+                dropped,
+                target_col,
+            )
+        if train_df.is_empty():
+            raise ValueError("No usable training rows after null-target filtering")
+        model = self._fit_model(
+            features=self._feature_frame(train_df, feature_cols=feature_cols),
+            target=train_df.get_column(target_col).to_numpy(),
+            use_gpu=False,
+        )
+        logger.info(
+            "[train_full_history] %s: fitted on %d rows (all eras)", target_col, train_df.height
+        )
+        return model
+
     def _fit_predict_fold(
         self,
         df: pl.DataFrame,
@@ -200,8 +236,10 @@ class ModelOrchestrator:
         feature_frame = df.select(feature_cols).to_pandas()
         return feature_frame.loc[:, list(feature_cols)]
 
-    def _fit_model(self, *, features: pd.DataFrame, target: np.ndarray) -> object:
-        candidate_params = self._device_candidate_params()
+    def _fit_model(
+        self, *, features: pd.DataFrame, target: np.ndarray, use_gpu: bool = True
+    ) -> object:
+        candidate_params = self._device_candidate_params(use_gpu=use_gpu)
         last_error: Exception | None = None
 
         for params in candidate_params:
@@ -219,7 +257,9 @@ class ModelOrchestrator:
         prediction = model.predict(features)
         return np.asarray(prediction, dtype=float).reshape(-1)
 
-    def _device_candidate_params(self) -> list[dict[str, Any]]:
+    def _device_candidate_params(self, *, use_gpu: bool) -> list[dict[str, Any]]:
+        if not use_gpu:
+            return [self._resolved_params(use_gpu=False)]
         cpu_params = self._resolved_params(use_gpu=False)
         gpu_params = self._resolved_params(use_gpu=True)
         if gpu_params == cpu_params:

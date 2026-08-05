@@ -29,7 +29,7 @@ ExperimentConfig
 |  5. NeutralizationEngine.neutralize(proportion=1.0)            |
 |         └── per-era pinv cache: artifacts/cache/neutralization |
 |  6. EvaluationEngine.per_era_corr() → summarize()              |
-|  7. [deploy] anchor-fold model → serialize_predict()           |
+|  7. [deploy] full-history pipeline → serialize_predict()       |
 |         └── artifacts/runs/{run_id}/predict.pkl (+manifest)    |
 +---------------------------------------------------------------+
      |
@@ -66,6 +66,7 @@ Frozen dataclasses; `__post_init__` validates enums, non-negativity, and non-emp
 | `split: SplitConfig` | `scheme="walk_forward"`, `purge_eras=8`, `embargo_eras=4`, `n_folds=4` | scheme ∈ `("walk_forward", "anchor")` |
 | `model: ModelConfig` | `backend="lightgbm"`, `preset="fast"`, `params={}` | backend ∈ `("lightgbm", "xgboost")`, preset ∈ `("fast", "standard", "deep")` |
 | `evaluation: EvalConfig` | `backend="custom"`, `main_target="target"`, `metrics=("corr","mmc","fnc","sharpe")` | backend ∈ `("custom", "official")` |
+| `risk: RiskConfig` | `neutralization_proportion=1.0`, `cache_max_bytes=None` | proportion ∈ [0, 1]; `cache_max_bytes` ≥ 0 or None |
 | `run: RunConfig` | `name="default"`, `seed=42`, `artifacts_dir=REPO_ROOT/"artifacts"` | — |
 
 `REPO_ROOT = Path(__file__).resolve().parent.parent`. Relative paths resolve against it. See [configs/example.yaml](configs/example.yaml) for the annotated schema and [configs/first_model.yaml](configs/first_model.yaml) for the current competitive config (4×20D targets, ridge ensemble, full neutralization, seed 20260713).
@@ -101,6 +102,7 @@ Shared by evaluation, ensemble, and submission:
 | `rank_gaussianize(v)` | `gaussianize(tie_kept_rank(v))` |
 | `standardize_unit_variance(v)` | `v / std(v, ddof=0)`; zeros if std is 0/non-finite |
 | `rank_gaussianize_unit_variance(v)` | composition of the above |
+| `neutralize_array(pred, features, proportion=1.0, *, pseudo_inverse=None)` | `pred − proportion · design @ pinv(design, rcond=1e-6) @ pred`, design = `[features | 1]`; zero-variance pred returned unchanged |
 | `power_1_5(v)` | `sign(v) · |v|^1.5` |
 
 ### E. Evaluation Engine — `nmr/evaluation.py`
@@ -121,7 +123,7 @@ Shared by evaluation, ensemble, and submission:
 
 `NeutralizationEngine(cache_dir=REPO_ROOT/"artifacts"/"cache"/"neutralization")`.
 
-`neutralize(df, *, pred_col, feature_cols, era_col="era", proportion=1.0)` — per era: design `[features | 1]` (intercept-aware), `coeffs = pinv(design, rcond=1e-6) @ pred`, output `pred − proportion · (design @ coeffs)`. `proportion ∈ [0, 1]` (0 = identity, 1 = full). All values must be finite (else `ValueError`).
+`neutralize(df, *, pred_col, feature_cols, era_col="era", proportion=1.0)` — per era: design `[features | 1]` (intercept-aware), `coeffs = pinv(design, rcond=1e-6) @ pred`, output `pred − proportion · (design @ coeffs)`. `proportion ∈ [0, 1]` (0 = identity, 1 = full). All values must be finite (else `ValueError`). The engine delegates the per-era solve to `_transforms.neutralize_array` (single source of truth, shared with the deployment closure); eras with zero-variance predictions are returned unchanged with a logged warning, and eras with `n_rows ≤ n_features + 1` warn that the fit is exact.
 
 Per-era pseudo-inverse cache: key = SHA256 of `{era, sorted feature_cols, row_count, row_ids_sha256, intercept: true}`; files `era_{label}_{key}.npy` + `.json` (metadata revalidated before loading).
 
@@ -129,9 +131,10 @@ Per-era pseudo-inverse cache: key = SHA256 of `{era, sorted feature_cols, row_co
 
 `ModelOrchestrator(config: ModelConfig, *, seed=42)`:
 - `train_cross_validation(df, *, feature_cols, target_col, splitter, era_col) -> CVResult(oof, models)` — per fold: fit on train eras, predict val eras, stack OOF.
-- `train_anchor_fold(...) -> (model, val_predictions)` — single anchor fold, used for deployment.
+- `train_anchor_fold(...) -> (model, val_predictions)` — single anchor fold (research use; no longer used for deployment).
+- `train_full_history(df, *, feature_cols, target_col, era_col="era") -> model` — one CPU-only model fit on every era, with null/non-finite targets dropped (logged count; `ValueError` if nothing remains). Used by the deployment pipeline so the artifact reproduces identically on any hosted runtime.
 - Fold leakage-safety re-asserted at train time (`_assert_fold_is_leakage_safe`).
-- GPU-first (`device_type="gpu"` / `tree_method="gpu_hist"`) with automatic CPU fallback.
+- OOF-CV is GPU-first (`device_type="gpu"` / `tree_method="gpu_hist"`) with automatic CPU fallback; `train_full_history` is CPU-only by design.
 
 Canonical presets (`_CANONICAL_PRESETS`, mirroring Numerai's published benchmark params):
 
@@ -206,7 +209,7 @@ Flow: join predictions ∩ meta ∩ targets ∩ features on `[era]` or `[era, id
 
 ### N. Runner, Registry, Submission, Deployment
 
-**`nmr/runner.py`** — stage order in §1 diagram. `RunResult(run_id, oof, metrics, artifact, manifest)`. `run_id` = SHA256 of `{config (data_dir/artifacts_dir stripped), data_version, code_fingerprint, environment_fingerprint}` where code fingerprint = SHA256 over sorted `nmr/*.py` names+contents and environment = Python + versions of numpy/polars/pandas/lightgbm/xgboost. `deploy=True` trains an anchor fold, wraps a `predict()` closure with ordered feature names, and writes `artifacts/runs/{run_id}/predict.pkl` + manifest.
+**`nmr/runner.py`** — stage order in §1 diagram. `RunResult(run_id, oof, metrics, artifact, manifest)`. `run_id` = SHA256 of `{config (data_dir/artifacts_dir stripped), data_version, code_fingerprint, environment_fingerprint}` where code fingerprint = SHA256 over sorted `nmr/*.py` names+contents and environment = Python + versions of numpy/polars/pandas/lightgbm/xgboost. `deploy=True` builds the deploy pipeline **once** (`_build_deploy_pipeline`: per-target all-eras CPU-only models + rank-gaussianize + learned weights + neutralize; no `splitter`), then `_serialize_predict_artifact(predict_fn, model_meta, artifact_path)` serializes it (never retrains) to `artifacts/runs/{run_id}/predict.pkl` + manifest. The artifact's `models` metadata carries `targets`/`weights`/`proportion`/`geometry="all_eras"`/`device="cpu"`/`feature_names`; the run manifest adds `pipeline_device="cpu"`.
 
 **`nmr/registry.py`** — `RunRegistry(root)`:
 

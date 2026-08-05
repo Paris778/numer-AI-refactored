@@ -8,16 +8,24 @@ import json
 import logging
 import platform
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
 
+import cloudpickle
+import numpy as np
 import pandas as pd
 import polars as pl
 
-from nmr.config import ExperimentConfig, SplitConfig, set_global_seeds
+from nmr import _transforms
+from nmr._transforms import (
+    neutralize_array,
+    rank_gaussianize,
+    rank_gaussianize_unit_variance,
+)
+from nmr.config import ExperimentConfig, set_global_seeds
 from nmr.data import IngestionAgent
 from nmr.deployment import DeploymentArtifact, serialize_predict
 from nmr.ensemble import Ensembler
@@ -108,12 +116,15 @@ class ExperimentRunner:
         logger.info(
             "[run] neutralizing predictions with %d features", len(feature_cols)
         )
-        neutralized = NeutralizationEngine().neutralize(
+        neutralization_proportion = self._config.risk.neutralization_proportion
+        neutralized = NeutralizationEngine(
+            max_cache_bytes=self._config.risk.cache_max_bytes
+        ).neutralize(
             blended,
             pred_col="prediction",
             feature_cols=feature_cols,
             era_col="era",
-            proportion=1.0,
+            proportion=neutralization_proportion,
         )
 
         logger.info("[run] evaluating OOF predictions")
@@ -137,12 +148,20 @@ class ExperimentRunner:
         artifact = None
         if deploy:
             logger.info("[run] serializing deploy artifact")
-            artifact = self._serialize_predict_artifact(
-                model=model_orchestrator,
+            pipeline = self._build_deploy_pipeline(
+                orchestrator=model_orchestrator,
                 train_df=train_df,
                 feature_cols=feature_cols,
-                target_col=main_target,
-                splitter=splitter,
+                target_cols=target_cols,
+                weights=weights,
+                proportion=neutralization_proportion,
+            )
+            artifact = self._serialize_predict_artifact(
+                predict_fn=pipeline[0],
+                model_meta=pipeline[1],
+                artifact_path=(
+                    self._config.run.artifacts_dir / "runs" / self._run_id / "predict.pkl"
+                ),
             )
             logger.info("[run] artifact written to %s", artifact.path)
 
@@ -154,6 +173,7 @@ class ExperimentRunner:
             "feature_cols": list(feature_cols),
             "pred_cols": pred_cols,
             "weights": list(weights),
+            "pipeline_device": "cpu",
             "metrics": dataclasses.asdict(metrics),
             "code_fingerprint": self._code_fingerprint(),
             "environment": self._environment_fingerprint(),
@@ -209,38 +229,34 @@ class ExperimentRunner:
         logger.info("[train_multi_target_oof] stacked OOF shape: %s", stacked.shape)
         return stacked
 
-    def _serialize_predict_artifact(
+    def _build_deploy_pipeline(
         self,
         *,
-        model: ModelOrchestrator,
+        orchestrator: ModelOrchestrator,
         train_df: pl.DataFrame,
         feature_cols: Sequence[str],
-        target_col: str,
-        splitter: PurgedEraSplitter,
-    ) -> DeploymentArtifact:
-        del splitter
-        logger.info("[serialize_predict_artifact] training anchor fold for deployment")
-        anchor_splitter = PurgedEraSplitter(
-            SplitConfig(
-                scheme="anchor",
-                purge_eras=self._config.split.purge_eras,
-                embargo_eras=self._config.split.embargo_eras,
-                n_folds=1,
+        target_cols: Sequence[str],
+        weights: Sequence[float],
+        proportion: float,
+    ) -> tuple[Callable[[pd.DataFrame], pd.DataFrame], dict[str, object]]:
+        """Train per-target full-history models ONCE and return (predict, model_meta).
+
+        The closure's code path references only numpy/pandas plus the shared
+        transform helpers; cloudpickle.register_pickle_by_value(nmr._transforms)
+        embeds those helpers by value so the artifact loads without `nmr`.
+        """
+        logger.info("[build_deploy_pipeline] training full-history models (CPU-only)")
+        trained: dict[str, object] = {}
+        for target in target_cols:
+            trained[target] = orchestrator.train_full_history(
+                train_df,
+                feature_cols=feature_cols,
+                target_col=target,
+                era_col="era",
             )
-        )
-        t0 = time.time()
-        anchor_model, _ = model.train_anchor_fold(
-            train_df,
-            feature_cols=feature_cols,
-            target_col=target_col,
-            splitter=anchor_splitter,
-            era_col="era",
-        )
-        logger.info(
-            "[serialize_predict_artifact] anchor fold trained in %.1fs",
-            time.time() - t0,
-        )
         ordered_features = list(feature_cols)
+        target_order = list(target_cols)
+        weight_array = np.asarray(list(weights), dtype=float)
 
         def predict(
             live_features: pd.DataFrame,
@@ -248,17 +264,56 @@ class ExperimentRunner:
         ) -> pd.DataFrame:
             del live_benchmark_models
             frame = live_features.loc[:, ordered_features]
-            values = anchor_model.predict(frame)
-            return pd.DataFrame({"prediction": values}, index=live_features.index)
+            components = [
+                np.asarray(trained[t].predict(frame), dtype=float)
+                for t in target_order
+            ]
+            design = np.column_stack(components)
+            if "era" in live_features.columns:
+                era_values = live_features["era"].astype(str).to_numpy()
+            else:
+                era_values = np.full(len(live_features), "1")
+            feature_matrix = frame.to_numpy(dtype=float)
+            blended = np.empty(len(live_features), dtype=float)
+            for era in np.unique(era_values):
+                mask = era_values == era
+                block = design[mask]
+                normalized = np.column_stack(
+                    [
+                        rank_gaussianize_unit_variance(block[:, i])
+                        for i in range(block.shape[1])
+                    ]
+                )
+                combined = rank_gaussianize(normalized.dot(weight_array))
+                blended[mask] = neutralize_array(
+                    combined, feature_matrix[mask], proportion
+                )
+            return pd.DataFrame({"prediction": blended}, index=live_features.index)
 
-        artifact_path = (
-            self._config.run.artifacts_dir / "runs" / self._run_id / "predict.pkl"
-        )
+        meta = {
+            "targets": target_order,
+            "weights": [float(w) for w in weights],
+            "proportion": float(proportion),
+            "geometry": "all_eras",
+            "device": "cpu",
+            "feature_names": ordered_features,
+        }
+        return predict, meta
+
+    def _serialize_predict_artifact(
+        self,
+        *,
+        predict_fn: Callable[[pd.DataFrame], pd.DataFrame],
+        model_meta: dict[str, object],
+        artifact_path: Path,
+    ) -> DeploymentArtifact:
+        """Serialize the prebuilt pipeline closure. Does NOT retrain models."""
+        cloudpickle.register_pickle_by_value(_transforms)
         return serialize_predict(
-            predict,
+            predict_fn,
             path=artifact_path,
-            feature_names=ordered_features,
-            models=[self._config.model.backend, self._config.model.preset],
+            feature_names=list(model_meta["feature_names"]),
+            models=model_meta,
         )
 
     @staticmethod

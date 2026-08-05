@@ -87,3 +87,11 @@ def test_seed_determinism():
     set_global_seeds(123)
     second = (random.random(), float(np.random.rand()))
     assert first == second
+
+
+def test_risk_section_validates_proportion() -> None:
+    from nmr.config import RiskConfig
+    assert RiskConfig().neutralization_proportion == 1.0
+    assert RiskConfig(neutralization_proportion=0.0).neutralization_proportion == 0.0
+    with pytest.raises(ValueError):
+        RiskConfig(neutralization_proportion=1.5)

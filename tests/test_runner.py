@@ -70,7 +70,7 @@ def _config(tmp_path) -> ExperimentConfig:
         model=ModelConfig(
             backend="lightgbm",
             preset="fast",
-            params={"n_estimators": 1, "learning_rate": 0.05},
+            params={"n_estimators": 10, "learning_rate": 0.05, "min_data_in_leaf": 2},
         ),
         evaluation=EvalConfig(backend="custom", main_target="target"),
         run=RunConfig(
@@ -103,12 +103,14 @@ def test_runner_deploy_serializes_reloadable_predict(tmp_path) -> None:
     assert result.artifact is not None
     loaded_predict = load_predict(result.artifact.path)
     live_features = pd.DataFrame(
-        {"f1": [0.1, 0.2], "f2": [0.3, 0.4]},
-        index=["id_a", "id_b"],
+        {"f1": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6], "f2": [0.3, 0.4, 0.5, 0.6, 0.7, 0.8]},
+        index=[f"id_{i}" for i in range(6)],
     )
     prediction = loaded_predict(live_features)
     assert list(prediction.columns) == ["prediction"]
-    assert prediction.index.tolist() == ["id_a", "id_b"]
+    assert prediction.index.tolist() == [f"id_{i}" for i in range(6)]
+    assert prediction["prediction"].notna().all()
+    assert prediction["prediction"].nunique() > 1  # non-constant pipeline output
 
 
 def test_run_id_is_path_independent_and_seed_sensitive(tmp_path) -> None:

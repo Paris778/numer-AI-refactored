@@ -32,6 +32,7 @@ __all__ = [
     "SplitConfig",
     "ModelConfig",
     "EvalConfig",
+    "RiskConfig",
     "RunConfig",
     "ExperimentConfig",
     "load_config",
@@ -127,6 +128,20 @@ class EvalConfig:
 
 
 @dataclass(frozen=True)
+class RiskConfig:
+    """Risk transforms: neutralization strength and cache budget."""
+
+    neutralization_proportion: float = 1.0
+    cache_max_bytes: int | None = None
+
+    def __post_init__(self) -> None:
+        if not 0.0 <= self.neutralization_proportion <= 1.0:
+            raise ValueError("risk.neutralization_proportion must be in [0, 1]")
+        if self.cache_max_bytes is not None and self.cache_max_bytes < 0:
+            raise ValueError("risk.cache_max_bytes must be >= 0 or None")
+
+
+@dataclass(frozen=True)
 class RunConfig:
     """Run identity, determinism seed, and artifact output location."""
 
@@ -148,6 +163,7 @@ class ExperimentConfig:
     split: SplitConfig = field(default_factory=SplitConfig)
     model: ModelConfig = field(default_factory=ModelConfig)
     evaluation: EvalConfig = field(default_factory=EvalConfig)
+    risk: RiskConfig = field(default_factory=RiskConfig)
     run: RunConfig = field(default_factory=RunConfig)
 
 
@@ -156,6 +172,7 @@ _SECTIONS = {
     "split": SplitConfig,
     "model": ModelConfig,
     "evaluation": EvalConfig,
+    "risk": RiskConfig,
     "run": RunConfig,
 }
 

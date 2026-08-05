@@ -187,6 +187,9 @@ Real v5.2 scorecard fixtures are flaky if rows are limited **before** establishi
 ### `cloudpickle` deserialization executes arbitrary code
 `load_predict()` verifies a SHA256 manifest (corruption detection only, **not** authentication) then calls `cloudpickle.loads()`. Only load artifacts produced by this repo. Pin `cloudpickle==3.1.1` — Numerai's hosted runtime must unpickle what we pickle.
 
+### Deployment closure embeds `nmr._transforms` helpers by value
+`cloudpickle.register_pickle_by_value(nmr._transforms)` embeds the transform helpers by value into the deployed `predict.pkl`; the artifact's predict path depends only on numpy/scipy/pandas at load time (no `nmr` import). The fidelity test (`tests/test_runner.py::test_runner_deploy_serializes_reloadable_predict`) is the drift guard — never hand-duplicate the transform math inside the closure.
+
 ### No lint/type-check tooling exists
 There is no `pyproject.toml`, ruff, or mypy configuration. Do not claim lint/type gates ran; do not add such tooling as a side effect of another task.
 
@@ -200,7 +203,7 @@ The V1 repo is mined for logic only. Never import from it, never modify it, neve
 
 - Never commit secrets. Numerai API credentials (`numerapi`) load via `python-dotenv`; `.env` is git-ignored.
 - Deployment artifacts are trusted-source-only: the SHA256 sibling manifest detects accidental corruption, not tampering. Never auto-load `.pkl` files from outside `artifacts/`.
-- Registry and artifact writes must remain atomic (temp + fsync + `os.replace`) — partial state is a correctness and integrity hazard.
+- Registry JSON, artifact payload + manifest, OOF parquet, and the neutralization-cache pair all write via temp + fsync + `os.replace`.
 - Never print API keys, tokens, or `.env` contents in logs, notebooks, or test output.
 
 ---

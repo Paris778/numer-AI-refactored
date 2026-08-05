@@ -16,6 +16,8 @@ from typing import Any
 
 import cloudpickle
 
+from nmr._atomicio import atomic_write_bytes, atomic_write_text
+
 logger = logging.getLogger("nmr.deployment")
 
 __all__ = ["DeploymentArtifact", "load_predict", "serialize_predict"]
@@ -42,13 +44,9 @@ def serialize_predict(
     """
     artifact_path = Path(path)
     artifact_path.parent.mkdir(parents=True, exist_ok=True)
-
-    payload = {
-        "predict_fn": predict_fn,
-        "models": models,
-    }
+    payload = {"predict_fn": predict_fn, "models": models}
     payload_bytes = cloudpickle.dumps(payload)
-    artifact_path.write_bytes(payload_bytes)
+    atomic_write_bytes(artifact_path, payload_bytes)
     logger.info(
         "[serialize_predict] artifact written to %s (%d bytes)",
         artifact_path,
@@ -61,9 +59,9 @@ def serialize_predict(
         "sha256": _sha256_bytes(payload_bytes),
         "environment": _environment_fingerprint(),
     }
-    _manifest_path(artifact_path).write_text(
+    atomic_write_text(
+        _manifest_path(artifact_path),
         json.dumps(manifest, sort_keys=True, indent=2),
-        encoding="utf-8",
     )
     return DeploymentArtifact(path=artifact_path, manifest=manifest)
 

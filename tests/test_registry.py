@@ -49,12 +49,12 @@ def test_atomic_write_failure_keeps_previous_run_json(
     run_dir = registry.record(result)
     stable_json = (run_dir / "run.json").read_text(encoding="utf-8")
 
-    import nmr.registry as registry_module
+    import nmr._atomicio as atomicio_module
 
     def fail_replace(src, dst):
         raise OSError("simulated replace failure")
 
-    monkeypatch.setattr(registry_module.os, "replace", fail_replace)
+    monkeypatch.setattr(atomicio_module.os, "replace", fail_replace)
     with pytest.raises(OSError, match="simulated replace failure"):
         registry.record(result)
 

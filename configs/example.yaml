@@ -28,3 +28,7 @@ evaluation:
   backend: custom           # custom (fast) | official (numerai_tools oracle)
   main_target: target
   metrics: [corr, mmc, fnc, sharpe]
+
+risk:
+  neutralization_proportion: 1.0   # 0.0 (identity) .. 1.0 (full projection)
+  cache_max_bytes: null            # None = unbounded; >= 0 caps the pinv cache

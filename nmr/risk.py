@@ -18,6 +18,7 @@ import numpy as np
 import polars as pl
 
 from nmr.config import REPO_ROOT
+from nmr._transforms import neutralize_array
 
 logger = logging.getLogger("nmr.risk")
 
@@ -29,7 +30,15 @@ _INTERCEPT_AWARE = True
 class NeutralizationEngine:
     """Per-era, intercept-aware neutralization with validated cache reuse."""
 
-    def __init__(self, *, cache_dir: Path | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        cache_dir: Path | None = None,
+        max_cache_bytes: int | None = None,
+    ) -> None:
+        if max_cache_bytes is not None and max_cache_bytes < 0:
+            raise ValueError("max_cache_bytes must be >= 0 or None")
+        self._max_cache_bytes = max_cache_bytes
         self._cache_dir = (
             Path(cache_dir)
             if cache_dir is not None
@@ -100,20 +109,31 @@ class NeutralizationEngine:
     ) -> np.ndarray:
         pred = self._column_values(era_df, pred_col)
         features = self._feature_matrix(era_df, feature_cols)
-
         if np.std(pred) == 0.0:
-            return np.full_like(pred, np.nan, dtype=float)
+            logger.warning(
+                "[neutralize] era %s has zero-variance predictions; returning unchanged",
+                era_label,
+            )
+            return np.asarray(pred, dtype=float).copy()
+        if era_df.height <= len(list(feature_cols)) + 1:
+            logger.warning(
+                "[neutralize] era %s has %d rows <= %d features+intercept; "
+                "neutralization fits exactly and the output may be near-zero",
+                era_label,
+                era_df.height,
+                len(list(feature_cols)),
+            )
 
-        design = self._design_matrix(features)
+        design = _design_matrix(features)
         pseudo_inverse = self._load_or_compute_pseudo_inverse(
             era_df,
             era_label=era_label,
             feature_cols=feature_cols,
             design=design,
         )
-        coeffs = pseudo_inverse.dot(pred)
-        adjustment = design.dot(coeffs)
-        return pred - (proportion * adjustment)
+        return neutralize_array(
+            pred, features, proportion, pseudo_inverse=pseudo_inverse
+        )
 
     def _load_or_compute_pseudo_inverse(
         self,
@@ -138,7 +158,7 @@ class NeutralizationEngine:
         if cached is not None:
             return cached
 
-        pseudo_inverse = self._compute_pseudo_inverse(design)
+        pseudo_inverse = _compute_pseudo_inverse(design)
         self._store_cached_array(
             pseudo_inverse_path,
             metadata_path,
@@ -146,13 +166,6 @@ class NeutralizationEngine:
             array=pseudo_inverse,
         )
         return pseudo_inverse
-
-    def _compute_pseudo_inverse(self, design: np.ndarray) -> np.ndarray:
-        return np.asarray(np.linalg.pinv(design, rcond=1e-6), dtype=float)
-
-    def _design_matrix(self, features: np.ndarray) -> np.ndarray:
-        intercept = np.ones((features.shape[0], 1), dtype=float)
-        return np.hstack((features, intercept))
 
     def _column_values(self, df: pl.DataFrame, col: str) -> np.ndarray:
         values = df.get_column(col).cast(pl.Float64).to_numpy()
@@ -235,3 +248,11 @@ class NeutralizationEngine:
             json.dumps(metadata, sort_keys=True, indent=2),
             encoding="utf-8",
         )
+
+
+def _design_matrix(features: np.ndarray) -> np.ndarray:
+    return np.hstack((features, np.ones((features.shape[0], 1), dtype=float)))
+
+
+def _compute_pseudo_inverse(design: np.ndarray) -> np.ndarray:
+    return np.asarray(np.linalg.pinv(design, rcond=1e-6), dtype=float)

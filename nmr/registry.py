@@ -5,13 +5,12 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
-import os
-import tempfile
 from pathlib import Path
 from typing import Any
 
 import polars as pl
 
+from nmr._atomicio import atomic_write_text
 from nmr.runner import RunResult
 
 logger = logging.getLogger("nmr.registry")
@@ -75,18 +74,4 @@ class RunRegistry:
         return champion_path
 
     def _atomic_json_write(self, path: Path, payload: dict[str, Any]) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            delete=False,
-            dir=path.parent,
-            prefix=f"{path.name}.tmp.",
-            suffix=".json",
-        ) as tmp:
-            json.dump(payload, tmp, sort_keys=True, indent=2)
-            tmp.flush()
-            os.fsync(tmp.fileno())
-            temp_name = tmp.name
-
-        os.replace(temp_name, path)
+        atomic_write_text(path, json.dumps(payload, sort_keys=True, indent=2))
