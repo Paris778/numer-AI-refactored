@@ -49,6 +49,8 @@ Run the full suite after every change (203 tests; from the repo root):
 .\.venv\Scripts\python -m pytest -q
 ```
 
+CI (`.github/workflows/ci.yml`) runs `pytest -q` on Python 3.12 for every push/PR; real-data tests self-skip without `data/v5.2/`.
+
 Useful targeted runs while iterating:
 
 ```powershell
