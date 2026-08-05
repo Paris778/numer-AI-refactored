@@ -23,7 +23,8 @@ def main() -> int:
 
     registry = RunRegistry(cfg.run.artifacts_dir / "registry")
     run_dir = registry.record(result)
-    registry.promote(result.run_id)
+    champion_path, promoted = registry.promote_if_better(result.run_id)
+    print(f"promoted:    {promoted} (champion: {champion_path})")
 
     print("=" * 60)
     print("FIRST COMPETITIVE MODEL COMPLETE")

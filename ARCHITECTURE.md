@@ -36,6 +36,7 @@ ExperimentConfig
      v  RunResult(run_id, oof, metrics, artifact, manifest)
 RunRegistry.record() ──> artifacts/registry/{run_id}/{run.json, oof.parquet}
 RunRegistry.promote() ─> artifacts/registry/champion.json   (atomic pointer)
+RunRegistry.promote_if_better() ─> champion.json  (guarded: scorecard metric + direction)
      |
      v
 generate_dashboard.py ─> artifacts/dashboard.html  (ranked leaderboard)
@@ -220,11 +221,12 @@ artifacts/registry/
 ├── champion.json                 # {"run_id": "<sha256 hex>"}  (atomic pointer)
 └── {run_id}/
     ├── run.json                  # {run_id, metrics{mean,std,sharpe,max_drawdown},
-    │                             #  manifest, oof_path, artifact_path|null, artifact_manifest|null}
+    │                             #  manifest, scorecard{flat scalars}|null, oof_path,
+    │                             #  artifact_path|null, artifact_manifest|null}
     └── oof.parquet
 ```
 
-All JSON writes: temp file in parent dir → fsync → `os.replace()`. `record(result)` writes OOF then run.json; `best(metric="sharpe")` scans run.json files and returns the max; `promote(run_id)` validates existence then atomically rewrites champion.json.
+All JSON writes: temp file in parent dir → fsync → `os.replace()`; the OOF parquet likewise writes temp + `os.replace` (no fsync). `record(result)` writes OOF then run.json; when `result.scorecard` is present, run.json carries a `scorecard` block of flat scalar keys per `MetricScorecard.to_frame()` (values filtered to drop `timing_*`/`quality_metric*` keys). `best(metric="sharpe")` validates the metric against `MetricSummary` fields (`mean`, `std`, `sharpe`, `max_drawdown`; unknown ⇒ `ValueError`) and returns the max with a run_id tiebreak (deterministic); `list()` sorts by (mtime, run_id) — stable. `promote(run_id)` regex-validates `[0-9a-f]{64}` (path-traversal guard), validates existence, then atomically rewrites champion.json. `promote_if_better(run_id, metric="corr_sharpe_ac") -> tuple[Path, bool]` promotes only when the candidate's scorecard metric strictly beats the champion's, honoring direction (`_SCORECARD_METRIC_DIRECTION`: `max_drawdown`/`std_corr` are lower-is-better); a scorecard-bearing candidate may displace a scorecard-less (legacy) champion; legacy candidates (no scorecard) and unknown metrics raise `ValueError`; a missing/corrupted champion pointer is treated as no champion.
 
 **`nmr/submission.py`** — `build_submission(predictions, *, id_col="id", pred_col="prediction")`: validates id non-null/unique and predictions finite, converts to open-interval percentile ranks via `tie_kept_rank`, casts (`id` Utf8, `prediction` Float64), sorts by id. `validate_submission(submission, *, live_ids)`: delegates to `numerai_tools.submissions.validate_submission_numerai`, raises `ValueError` listing first 5 extra/missing ids. `write_submission` → CSV.
 
@@ -241,7 +243,7 @@ def predict(live_features: pd.DataFrame, live_benchmark_models: pd.DataFrame | N
 
 | Script | What it does |
 |---|---|
-| [train_first_model.py](train_first_model.py) | `load_config("configs/first_model.yaml")` → `ExperimentRunner.run(deploy=True)` → `RunRegistry.record` + `promote` → prints summary, writes `summary.json` |
+| [train_first_model.py](train_first_model.py) | `load_config("configs/first_model.yaml")` → `ExperimentRunner.run(deploy=True)` → `RunRegistry.record` + `promote_if_better` (prints promotion verdict) → prints summary, writes `summary.json` |
 | [benchmark_runner.py](benchmark_runner.py) | Flags: `--data-dir` (data/v5.2), `--output`, `--labels-output`, `--seed` (77), `--n-boot` (300), `--min-overlap-eras` (20), `--horizon` (20D/60D), `--min-train-eras` (10), `--log-level`, `--fast-mode` (n_boot=1, skips linear/tree). Loads validation/meta/benchmarks → `BenchmarkSuite` → scorecards CSV + per-era label profile CSV. Low-variance predictions (<1e-9) get a fallback scorecard. |
 | [generate_dashboard.py](generate_dashboard.py) | Aggregates registry runs + benchmark CSV → Sharpe-ranked dark-theme leaderboard at `artifacts/dashboard.html` |
 
@@ -288,7 +290,7 @@ nmr/__init__.py re-exports the public API of all modules (keep imports and __all
 | Trigger | Module / entry | Execution target |
 |---|---|---|
 | Run an experiment | `nmr.runner.ExperimentRunner.run(deploy=...)` | Full pipeline §1 |
-| Record / promote a run | `nmr.registry.RunRegistry.record / best / promote` | `artifacts/registry/` |
+| Record / promote a run | `nmr.registry.RunRegistry.record / best / promote / promote_if_better` | `artifacts/registry/` |
 | Score a prediction set | `nmr.scorecard.evaluate_model` | `MetricScorecard` |
 | Benchmark everything | `python benchmark_runner.py [--fast-mode]` | `artifacts/benchmark_scores.csv` |
 | First-model train + promote | `python train_first_model.py` | registry + champion |

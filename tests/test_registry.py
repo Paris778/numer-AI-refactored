@@ -10,6 +10,7 @@ import pytest
 from nmr.evaluation import MetricSummary
 from nmr.registry import RunRegistry
 from nmr.runner import RunResult
+from nmr.scorecard import MetricCell, MetricScorecard
 
 
 def _result(run_id: str, sharpe: float) -> RunResult:
@@ -28,9 +29,35 @@ def _result(run_id: str, sharpe: float) -> RunResult:
     )
 
 
+def _scorecard(sharpe_ac: float, *, max_drawdown: float = 0.1) -> MetricScorecard:
+    cell = lambda v: MetricCell(value=v, ci_low=None, ci_high=None, n_eras=10)
+    return MetricScorecard(
+        model_id="m", n_eras=10, rank_scalar=0.0, deflated_sharpe=0.0,
+        mean_payout=cell(0.0), corr=cell(0.0), mmc=cell(0.0), fnc=0.0,
+        corr_sharpe_ac=cell(sharpe_ac), cvar5=0.0, max_drawdown=max_drawdown,
+        burn_rate=0.0, mmc_sharpe_ac=0.0, sortino=0.0, calmar=0.0,
+        std_corr=0.1, max_burn_streak=0, time_to_recovery=0,
+        horizon_stability=None, horizon_reason=None, regime_corr=None,
+        regime_reason=None, perturbation=None, max_feature_exposure=0.0,
+        bmc=None, bmc_reason=None, cwmm=None, cwmm_reason=None,
+        book_correlation=None, metric_timing_seconds=None, eval_total_seconds=0.0,
+    )
+
+
+def _result_with_scorecard(
+    run_id: str, sharpe_ac: float, *, max_drawdown: float = 0.1
+) -> RunResult:
+    result = _result(run_id, sharpe=0.5)
+    return RunResult(
+        run_id=result.run_id, oof=result.oof, metrics=result.metrics,
+        artifact=result.artifact, manifest=result.manifest,
+        scorecard=_scorecard(sharpe_ac, max_drawdown=max_drawdown),
+    )
+
+
 def test_record_is_idempotent_and_writes_json_atomically(tmp_path) -> None:
     registry = RunRegistry(tmp_path)
-    result = _result("run-a", sharpe=0.7)
+    result = _result("a" * 64, sharpe=0.7)
 
     run_dir = registry.record(result)
     original = (run_dir / "run.json").read_text(encoding="utf-8")
@@ -45,7 +72,7 @@ def test_atomic_write_failure_keeps_previous_run_json(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     registry = RunRegistry(tmp_path)
-    result = _result("run-a", sharpe=0.7)
+    result = _result("a" * 64, sharpe=0.7)
     run_dir = registry.record(result)
     stable_json = (run_dir / "run.json").read_text(encoding="utf-8")
 
@@ -63,25 +90,101 @@ def test_atomic_write_failure_keeps_previous_run_json(
 
 def test_list_best_and_promote_are_deterministic_and_idempotent(tmp_path) -> None:
     registry = RunRegistry(tmp_path)
-    registry.record(_result("run-a", sharpe=0.3))
-    registry.record(_result("run-b", sharpe=0.8))
+    registry.record(_result("a" * 64, sharpe=0.3))
+    registry.record(_result("b" * 64, sharpe=0.8))
 
     listed = registry.list()
-    assert {entry["run_id"] for entry in listed} == {"run-a", "run-b"}
+    assert {entry["run_id"] for entry in listed} == {"a" * 64, "b" * 64}
 
     best = registry.best("sharpe")
     assert best is not None
-    assert best["run_id"] == "run-b"
+    assert best["run_id"] == "b" * 64
 
-    run_b_json_before = (tmp_path / "run-b" / "run.json").read_text(encoding="utf-8")
-    champion_path = registry.promote("run-b")
-    champion_again = registry.promote("run-b")
+    run_b_json_before = (tmp_path / ("b" * 64) / "run.json").read_text(
+        encoding="utf-8"
+    )
+    champion_path = registry.promote("b" * 64)
+    champion_again = registry.promote("b" * 64)
     assert champion_path == champion_again
-    assert json.loads(champion_path.read_text(encoding="utf-8")) == {"run_id": "run-b"}
+    assert json.loads(champion_path.read_text(encoding="utf-8")) == {
+        "run_id": "b" * 64
+    }
 
-    run_b_json_after = (tmp_path / "run-b" / "run.json").read_text(encoding="utf-8")
+    run_b_json_after = (tmp_path / ("b" * 64) / "run.json").read_text(
+        encoding="utf-8"
+    )
     assert run_b_json_before == run_b_json_after
 
 
 def test_best_returns_none_for_empty_registry(tmp_path) -> None:
     assert RunRegistry(tmp_path).best() is None
+
+
+def test_promote_if_better_promotes_only_strictly_better(tmp_path) -> None:
+    registry = RunRegistry(tmp_path)
+    registry.record(_result_with_scorecard("a" * 64, sharpe_ac=0.8))
+    registry.promote("a" * 64)
+
+    registry.record(_result_with_scorecard("b" * 64, sharpe_ac=0.9))
+    path, promoted = registry.promote_if_better("b" * 64)
+    assert promoted is True
+    assert json.loads(path.read_text(encoding="utf-8")) == {"run_id": "b" * 64}
+
+    registry.record(_result_with_scorecard("c" * 64, sharpe_ac=0.85))
+    _, promoted = registry.promote_if_better("c" * 64)
+    assert promoted is False
+    assert json.loads(path.read_text(encoding="utf-8")) == {"run_id": "b" * 64}
+
+
+def test_promote_if_better_direction_lower_is_better_for_drawdown(tmp_path) -> None:
+    registry = RunRegistry(tmp_path)
+    registry.record(_result_with_scorecard("a" * 64, sharpe_ac=0.5, max_drawdown=0.2))
+    registry.promote("a" * 64)
+
+    # Higher drawdown is WORSE on max_drawdown -> must not promote.
+    registry.record(_result_with_scorecard("b" * 64, sharpe_ac=0.5, max_drawdown=0.4))
+    _, promoted = registry.promote_if_better("b" * 64, metric="max_drawdown")
+    assert promoted is False
+
+    registry.record(_result_with_scorecard("c" * 64, sharpe_ac=0.5, max_drawdown=0.1))
+    _, promoted = registry.promote_if_better("c" * 64, metric="max_drawdown")
+    assert promoted is True
+
+
+def test_promote_if_better_legacy_champion_is_displaced(tmp_path) -> None:
+    registry = RunRegistry(tmp_path)
+    registry.record(_result("a" * 64, sharpe=0.9))  # no scorecard
+    registry.promote("a" * 64)
+
+    registry.record(_result_with_scorecard("b" * 64, sharpe_ac=0.4))
+    _, promoted = registry.promote_if_better("b" * 64)
+    assert promoted is True
+
+
+def test_promote_if_better_refuses_legacy_candidate(tmp_path) -> None:
+    registry = RunRegistry(tmp_path)
+    registry.record(_result_with_scorecard("a" * 64, sharpe_ac=0.8))
+    registry.promote("a" * 64)
+    registry.record(_result("b" * 64, sharpe=9.9))  # legacy candidate, no scorecard
+    with pytest.raises(ValueError, match="scorecard"):
+        registry.promote_if_better("b" * 64)
+
+
+def test_promote_rejects_non_hex_run_id(tmp_path) -> None:
+    registry = RunRegistry(tmp_path)
+    with pytest.raises(ValueError, match="run_id"):
+        registry.promote("../../etc/passwd")
+
+
+def test_promote_if_better_unknown_metric_raises(tmp_path) -> None:
+    registry = RunRegistry(tmp_path)
+    registry.record(_result_with_scorecard("a" * 64, sharpe_ac=0.8))
+    with pytest.raises(ValueError, match="metric"):
+        registry.promote_if_better("a" * 64, metric="nope")
+
+
+def test_best_validates_metric_name(tmp_path) -> None:
+    registry = RunRegistry(tmp_path)
+    registry.record(_result("a" * 64, sharpe=0.5))
+    with pytest.raises(ValueError, match="metric"):
+        registry.best("nope")
