@@ -201,7 +201,7 @@ The V1 repo is mined for logic only. Never import from it, never modify it, neve
 
 ## 9. Security Hard Constraints
 
-- Never commit secrets. Numerai API credentials (`numerapi`) load via `python-dotenv`; `.env` is git-ignored.
+- Never commit secrets. Numerai API credentials are used only in notebooks via `numerapi`; never hardcode or print them. `.env` is git-ignored and is never read by `nmr/`.
 - Deployment artifacts are trusted-source-only: the SHA256 sibling manifest detects accidental corruption, not tampering. Never auto-load `.pkl` files from outside `artifacts/`.
 - Registry JSON, artifact payload + manifest, OOF parquet, and the neutralization-cache pair all write via temp + fsync + `os.replace`.
 - Never print API keys, tokens, or `.env` contents in logs, notebooks, or test output.

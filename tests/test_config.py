@@ -103,3 +103,10 @@ def test_ensemble_section_validates_method() -> None:
     assert EnsembleConfig(method="non_negative").method == "non_negative"
     with pytest.raises(ValueError):
         EnsembleConfig(method="svm")
+
+
+def test_set_global_seeds_does_not_touch_hash_env() -> None:
+    import os
+    os.environ.pop("PYTHONHASHSEED", None)
+    set_global_seeds(42)
+    assert "PYTHONHASHSEED" not in os.environ

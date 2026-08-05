@@ -14,5 +14,4 @@ pyyaml
 cloudpickle==3.1.1
 numerai-tools
 ipykernel
-python-dotenv
 tqdm

@@ -78,7 +78,7 @@ set_global_seeds(cfg.run.seed)
 
 Sections: `run` (name, seed, artifacts dir) · `data` (version, feature set, targets) · `split` (scheme, purge/embargo, folds) · `model` (backend, preset, param overrides) · `evaluation` (backend, main target, metrics). The annotated schema lives in [configs/example.yaml](configs/example.yaml); exact fields, defaults, and valid values are specified in [`ARCHITECTURE.md`](ARCHITECTURE.md#a-configuration--nmrconfigpy).
 
-Numerai API credentials (for `numerapi` download/upload) load from a git-ignored `.env` via `python-dotenv` — no credentials are needed to run tests or train on already-downloaded data.
+Numerai API credentials (for `numerapi` download/upload) are used only in notebooks and loaded from a git-ignored `.env`; no credentials are needed to run tests or train on already-downloaded data.
 
 ---
 

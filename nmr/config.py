@@ -9,7 +9,6 @@ reproducible and makes invalid experiments fail loudly at load time.
 from __future__ import annotations
 
 import dataclasses
-import os
 import random
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -229,11 +228,13 @@ def load_config(path: str | Path) -> ExperimentConfig:
 
 
 def set_global_seeds(seed: int) -> None:
-    """Seed Python, NumPy, and the hash seed for reproducible runs.
+    """Seed Python and NumPy for reproducible runs.
 
-    Model backends (LightGBM/XGBoost) receive their seed via model params, not here.
+    Note: ``PYTHONHASHSEED`` is NOT set here — CPython fixes hash randomization
+    at interpreter startup, so a runtime assignment affects only subprocesses
+    (none are spawned). Model backends (LightGBM/XGBoost) receive their seed via
+    model params, not here.
     """
-    os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
     try:
         import numpy as np

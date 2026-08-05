@@ -18,7 +18,7 @@ ExperimentConfig
 +---------------------------------------------------------------+
 | ExperimentRunner.run(deploy=False)          nmr/runner.py      |
 |                                                                |
-|  1. set_global_seeds(run.seed)      PYTHONHASHSEED/random/np   |
+|  1. set_global_seeds(run.seed)      random/np                  |
 |  2. IngestionAgent.load("train")    lazy Polars, col pushdown  |
 |  3. per target in data.targets:                                |
 |       ModelOrchestrator.train_cross_validation()               |
@@ -59,7 +59,7 @@ benchmark_runner.py ──> BenchmarkSuite (nmr/benchmark.py)
 
 ### A. Configuration — `nmr/config.py`
 
-Frozen dataclasses; `__post_init__` validates enums, non-negativity, and non-emptiness. `load_config(path)` parses YAML, rejects unknown keys/sections. `set_global_seeds(seed)` sets `PYTHONHASHSEED`, `random.seed`, `np.random.seed`.
+Frozen dataclasses; `__post_init__` validates enums, non-negativity, and non-emptiness. `load_config(path)` parses YAML, rejects unknown keys/sections. `set_global_seeds(seed)` seeds `random` and `np.random` (it does not set `PYTHONHASHSEED` — hash randomization is fixed at interpreter startup).
 
 | Section | Fields (defaults) | Valid values |
 |---|---|---|
