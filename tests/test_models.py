@@ -5,9 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+import lightgbm as lgb
+import logging
 import numpy as np
 import polars as pl
 import pytest
+import xgboost as xgb
 
 from nmr.config import ModelConfig, SplitConfig
 from nmr.models import CVResult, ModelOrchestrator
@@ -158,14 +161,10 @@ def test_walk_forward_oof_covers_only_validation_eras_without_overlap(
 
     seen_eras: set[str] = set()
     for fold in folds:
-        train_nums = {int(era) for era in fold.train_eras}
-        val_nums = {int(era) for era in fold.val_eras}
-        purge_buffer = set(range(max(train_nums) + 1, min(val_nums)))
-
         assert seen_eras.isdisjoint(set(fold.val_eras))
-        assert train_nums.isdisjoint(val_nums)
-        assert train_nums.isdisjoint(purge_buffer)
-        assert val_nums.isdisjoint(purge_buffer)
+        assert {int(era) for era in fold.train_eras}.isdisjoint(
+            {int(era) for era in fold.val_eras}
+        )
 
         fold_predictions = result.oof.filter(pl.col("era").is_in(fold.val_eras))
         assert set(fold_predictions.get_column("era").to_list()) == set(fold.val_eras)
@@ -187,7 +186,8 @@ def test_cross_validation_routes_fold_local_train_and_validation_eras(
     )
     recorded_pairs: list[tuple[set[str], set[str]]] = []
 
-    def fake_fit_predict_fold(frame, *, fold, feature_cols, target_col, era_col):
+    def fake_fit_predict_fold(frame, *, fold, feature_cols, target_col, era_col, purge_eras):
+        del purge_eras
         train_eras = set(
             frame.filter(pl.col(era_col).is_in(fold.train_eras))
             .get_column(era_col)
@@ -225,12 +225,13 @@ def test_cross_validation_routes_fold_local_train_and_validation_eras(
 @dataclass
 class _FakeModel:
     params: dict[str, Any]
+    backend_error: type[Exception] = RuntimeError
 
     def fit(self, features, target):
         if self.params.get("device_type") == "gpu":
-            raise RuntimeError("GPU unavailable")
+            raise self.backend_error("GPU unavailable")
         if self.params.get("tree_method") == "gpu_hist":
-            raise RuntimeError("GPU unavailable")
+            raise self.backend_error("GPU unavailable")
         self._rows = len(features)
         return self
 
@@ -256,10 +257,10 @@ class _FeatureNameModel:
 
 
 @pytest.mark.parametrize(
-    ("backend", "attribute", "gpu_value", "cpu_value"),
+    ("backend", "attribute", "gpu_value", "cpu_value", "backend_error"),
     [
-        ("lightgbm", "LGBMRegressor", "gpu", "cpu"),
-        ("xgboost", "XGBRegressor", "gpu_hist", "hist"),
+        ("lightgbm", "LGBMRegressor", "gpu", "cpu", lgb.basic.LightGBMError),
+        ("xgboost", "XGBRegressor", "gpu_hist", "hist", xgb.core.XGBoostError),
     ],
 )
 def test_gpu_absent_falls_back_to_cpu_without_raising(
@@ -268,13 +269,14 @@ def test_gpu_absent_falls_back_to_cpu_without_raising(
     attribute: str,
     gpu_value: str,
     cpu_value: str,
+    backend_error: type[Exception],
 ) -> None:
     import nmr.models as models_module
 
     df = _model_frame()
 
     def factory(**params):
-        return _FakeModel(params=params)
+        return _FakeModel(params=params, backend_error=backend_error)
 
     module = models_module.lgb if backend == "lightgbm" else models_module.xgb
     monkeypatch.setattr(module, attribute, factory)
@@ -295,6 +297,7 @@ def test_gpu_absent_falls_back_to_cpu_without_raising(
     key = "device_type" if backend == "lightgbm" else "tree_method"
     assert params[key] != gpu_value
     assert params[key] == cpu_value
+    assert orchestrator.resolved_device == "cpu"
 
 
 def test_backend_boundary_uses_named_feature_frames_consistently() -> None:
@@ -352,3 +355,59 @@ def test_train_full_history_drops_null_targets() -> None:
         df, feature_cols=["f1", "f2", "f3"], target_col="target"
     )
     assert model is not None
+
+
+def test_fit_predict_fold_rejects_zero_purge_gap() -> None:
+    from nmr.splitter import Fold
+
+    df = _model_frame(n_eras=8)
+    orchestrator = ModelOrchestrator(
+        ModelConfig(backend="lightgbm", preset="fast", params=_tiny_model_params()),
+        seed=3,
+    )
+    violating = Fold(
+        index=0,
+        train_eras=tuple(str(e) for e in range(1, 5)),
+        val_eras=tuple(str(e) for e in range(5, 7)),  # gap = 1 <= purge_eras=1
+    )
+    with pytest.raises(ValueError, match="purge"):
+        orchestrator._fit_predict_fold(
+            df, fold=violating, feature_cols=["f1", "f2", "f3"],
+            target_col="target", era_col="era", purge_eras=1,
+        )
+
+
+def test_fit_predict_fold_drops_null_target_rows(caplog: pytest.LogCaptureFixture) -> None:
+    df = _model_frame(n_eras=6).with_columns(
+        pl.when(pl.col("id") == "1_0")
+        .then(None)
+        .otherwise(pl.col("target"))
+        .alias("target")
+    )
+    orchestrator = ModelOrchestrator(
+        ModelConfig(backend="lightgbm", preset="fast", params=_tiny_model_params()),
+        seed=3,
+    )
+    with caplog.at_level(logging.WARNING, logger="nmr.models"):
+        model, prediction = orchestrator.train_anchor_fold(
+            df,
+            feature_cols=["f1", "f2", "f3"],
+            target_col="target",
+            splitter=_anchor_splitter(),
+        )
+    assert model is not None
+    assert prediction.height > 0
+    assert any(
+        "dropped 1 rows with null/non-finite targets" in record.message
+        for record in caplog.records
+    )
+
+
+def test_fit_model_records_resolved_device() -> None:
+    orchestrator = ModelOrchestrator(
+        ModelConfig(backend="lightgbm", preset="fast", params=_tiny_model_params()),
+        seed=3,
+    )
+    df = _model_frame(n_eras=4)
+    orchestrator.train_full_history(df, feature_cols=["f1", "f2", "f3"], target_col="target")
+    assert orchestrator.resolved_device == "cpu"

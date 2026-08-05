@@ -69,6 +69,7 @@ class ModelOrchestrator:
     def __init__(self, config: ModelConfig, *, seed: int = 42) -> None:
         self._config = config
         self._seed = seed
+        self.resolved_device: str | None = None
 
     def train_anchor_fold(
         self,
@@ -92,6 +93,7 @@ class ModelOrchestrator:
             feature_cols=feature_cols,
             target_col=target_col,
             era_col=era_col,
+            purge_eras=splitter.purge_eras,
         )
 
     def train_cross_validation(
@@ -131,6 +133,7 @@ class ModelOrchestrator:
                 feature_cols=feature_cols,
                 target_col=target_col,
                 era_col=era_col,
+                purge_eras=splitter.purge_eras,
             )
             logger.info(
                 "[train_cross_validation] %s: fold %d/%d trained in %.1fs",
@@ -196,12 +199,25 @@ class ModelOrchestrator:
         feature_cols: Sequence[str],
         target_col: str,
         era_col: str,
+        purge_eras: int,
     ) -> tuple[object, pl.DataFrame]:
-        self._assert_fold_is_leakage_safe(fold)
+        self._assert_fold_is_leakage_safe(fold, purge_eras=purge_eras)
         train_df = df.filter(pl.col(era_col).is_in(fold.train_eras))
         val_df = df.filter(pl.col(era_col).is_in(fold.val_eras))
         if train_df.is_empty() or val_df.is_empty():
             raise ValueError(f"Degenerate training slice for fold {fold.index}")
+
+        train_df = train_df.filter(
+            pl.col(target_col).is_not_null() & pl.col(target_col).is_finite()
+        )
+        dropped = df.filter(pl.col(era_col).is_in(fold.train_eras)).height - train_df.height
+        if dropped:
+            logger.warning(
+                "[_fit_predict_fold] %s fold %d: dropped %d rows with null/non-finite targets",
+                target_col, fold.index, dropped,
+            )
+        if train_df.is_empty():
+            raise ValueError(f"No usable training rows for fold {fold.index} after null filtering")
 
         logger.info(
             "[_fit_predict_fold] %s fold %d: fitting model on %d rows",
@@ -241,14 +257,30 @@ class ModelOrchestrator:
     ) -> object:
         candidate_params = self._device_candidate_params(use_gpu=use_gpu)
         last_error: Exception | None = None
+        backend_errors = (
+            (ValueError, TypeError, lgb.basic.LightGBMError)
+            if self._config.backend == "lightgbm"
+            else (ValueError, TypeError, xgb.core.XGBoostError)
+        )
 
         for params in candidate_params:
             model = self._build_model(params)
             try:
                 model.fit(features, target)
-                return model
-            except Exception as exc:
+            except backend_errors as exc:
+                logger.warning(
+                    "[fit] %s fit failed (%s: %s); trying next candidate",
+                    self._config.backend, type(exc).__name__, exc,
+                )
                 last_error = exc
+                continue
+            self.resolved_device = (
+                "gpu"
+                if params.get("device_type") == "gpu"
+                or params.get("tree_method") == "gpu_hist"
+                else "cpu"
+            )
+            return model
 
         assert last_error is not None
         raise last_error
@@ -308,16 +340,20 @@ class ModelOrchestrator:
             return lgb.LGBMRegressor(**params)
         return xgb.XGBRegressor(**params)
 
-    def _assert_fold_is_leakage_safe(self, fold: Fold) -> None:
+    def _assert_fold_is_leakage_safe(self, fold: Fold, *, purge_eras: int) -> None:
         train_eras = {int(era) for era in fold.train_eras}
         val_eras = {int(era) for era in fold.val_eras}
         if train_eras & val_eras:
             raise ValueError(f"Fold {fold.index} reuses eras across train/val")
+        if not train_eras or not val_eras:
+            raise ValueError(f"Fold {fold.index} is degenerate")
 
         train_max = max(train_eras)
         val_min = min(val_eras)
-        purge_buffer = set(range(train_max + 1, val_min))
-        if train_eras & purge_buffer:
-            raise ValueError(f"Fold {fold.index} leaked purge buffer into training")
-        if val_eras & purge_buffer:
-            raise ValueError(f"Fold {fold.index} leaked purge buffer into validation")
+        if train_max >= val_min:
+            raise ValueError(f"Fold {fold.index} is not strictly time-ordered")
+        if val_min - train_max <= purge_eras:
+            raise ValueError(
+                f"Fold {fold.index} violates purge invariant: gap "
+                f"{val_min - train_max} <= purge_eras={purge_eras}"
+            )

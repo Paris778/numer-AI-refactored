@@ -86,7 +86,7 @@ Frozen dataclasses; `__post_init__` validates enums, non-negativity, and non-emp
 
 ### C. Validation Splitting — `nmr/splitter.py`
 
-`PurgedEraSplitter(split: SplitConfig).split(eras) -> list[Fold]`; `Fold(index, train_eras, val_eras)` frozen.
+`PurgedEraSplitter(split: SplitConfig).split(eras) -> list[Fold]`; `Fold(index, train_eras, val_eras)` frozen. `PurgedEraSplitter.purge_eras -> int` exposes `split.purge_eras` so consumers can re-assert the purge width at train time.
 
 Geometry: eras deduped and sorted numerically (non-numeric ⇒ `ValueError`). With `n = era_count`, `k = n_folds`:
 - `val_size = n // (k + 1)`; `prefix_size = n - k * val_size`; requires `prefix_size - purge_eras ≥ 1`.
@@ -137,8 +137,9 @@ Per-era pseudo-inverse cache: key = SHA256 of `{era, sorted feature_cols, row_co
 - `train_cross_validation(df, *, feature_cols, target_col, splitter, era_col) -> CVResult(oof, models)` — per fold: fit on train eras, predict val eras, stack OOF.
 - `train_anchor_fold(...) -> (model, val_predictions)` — single anchor fold (research use; no longer used for deployment).
 - `train_full_history(df, *, feature_cols, target_col, era_col="era") -> model` — one CPU-only model fit on every era, with null/non-finite targets dropped (logged count; `ValueError` if nothing remains). Used by the deployment pipeline so the artifact reproduces identically on any hosted runtime.
-- Fold leakage-safety re-asserted at train time (`_assert_fold_is_leakage_safe`).
-- OOF-CV is GPU-first (`device_type="gpu"` / `tree_method="gpu_hist"`) with automatic CPU fallback; `train_full_history` is CPU-only by design.
+- Fold leakage-safety re-asserted at train time (`_assert_fold_is_leakage_safe(fold, purge_eras=...)`): before fitting each fold it enforces no era reuse, non-empty sides, strict time-ordering, and `min(val) − max(train) > purge_eras` (gap ≤ `purge_eras` ⇒ `ValueError`).
+- `_fit_predict_fold` drops null/non-finite target rows from the train slice before fitting (logged dropped count; `ValueError` if nothing remains).
+- OOF-CV is GPU-first (`device_type="gpu"` / `tree_method="gpu_hist"`) with automatic CPU fallback: a failed device attempt is logged with `type(exc).__name__` + message (only backend errors — `ValueError`/`TypeError`/`LightGBMError`/`XGBoostError` — trigger fallback; anything else fails loudly), and `resolved_device` records which device actually fit (`"gpu"`/`"cpu"`, `None` before the first successful fit). The run manifest records it as `oof_device`. `train_full_history` is CPU-only by design.
 
 Canonical presets (`_CANONICAL_PRESETS`, mirroring Numerai's published benchmark params):
 

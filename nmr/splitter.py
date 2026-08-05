@@ -42,6 +42,10 @@ class PurgedEraSplitter:
     def __init__(self, split: SplitConfig) -> None:
         self._split = split
 
+    @property
+    def purge_eras(self) -> int:
+        return self._split.purge_eras
+
     def split(self, eras: Iterable[str]) -> list[Fold]:
         """Return leakage-safe folds for ``eras``.
 
