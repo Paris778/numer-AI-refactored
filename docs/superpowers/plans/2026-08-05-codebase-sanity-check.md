@@ -20,6 +20,7 @@
 - **Atomic writes:** registry JSON, artifact payload + manifest, OOF parquet, and the risk-cache pair all write via temp file + fsync + `os.replace`.
 - **SSOT same-commit:** any change that makes `AGENTS.md`/`ARCHITECTURE.md`/`CONTRIBUTING.md`/`README.md` stale requires updating that file in the same commit.
 - **Fail loud:** no silent `except Exception`; catch specific types; no silent substitutions.
+- **Test fixtures:** plan snippets reference existing helpers (`_risk_frame()`, `_model_frame(n_eras=...)`, `_tiny_model_params()`, `_anchor_splitter()`, `_result(run_id, sharpe=...)`, `_scorecard(...)`, `_train_frame()`). VERIFY each helper exists and matches the snippet's signature before writing a test — adapt the snippet to the file's actual helper if it differs. Never invent parallel helpers when an equivalent exists (e.g., `test_registry.py::_result` exists; `_scorecard` does not and must be created).
 - **Commit style:** one commit per task on branch `sanity-check`; message prefix matches repo convention (`fix:`, `feat:`, `docs:`).
 - **Python:** venv interpreter is `.venv\Scripts\python`; CI pins Python 3.12.
 
@@ -36,6 +37,10 @@
 - Produces: `BenchmarkSuite.iter_baseline_predictions(*, include_classical: bool = False, min_train_eras: int = 10) -> Iterator[tuple[str, str, pl.DataFrame, int]]` yielding `(model_id, group, raw_preds, seed)` in order: `NULL_BASELINES` (seed `base+idx`), `("trivial", "classical", …, base+3)`, and when `include_classical` also `("linear", …, base+4)` and `("tree", …, base+5)`; `base = self._eval_cfg.seed`.
 - Consumes: existing `null_prediction_frame`, `_trivial_prediction_frame`, `_walk_forward_model_predictions` (private methods remain, but only the generator and internal callers touch them).
 - Downstream: Task 10's script smoke test relies on `_candidate_strategies` calling only `iter_baseline_predictions`.
+
+**Seed-convention guardrails (do not regress):**
+- `run_classical_baselines` must preserve its historical behavior of scoring with the suite's default seed — call `self.evaluate_predictions(raw_preds, model_id=model_id)` **without** `seed=`; do NOT pass the generator's yielded seed (old code passed no seed → `run_seed = self._eval_cfg.seed`).
+- `benchmark_runner` benchmark-model rows keep the historical `seed + 6` convention (they feed bootstrap CIs — changing them silently shifts every benchmark-model scorecard).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -153,14 +158,13 @@ In `nmr/benchmark.py`, add the generator right after `run_classical_baselines` a
     ) -> dict[str, MetricScorecard]:
         """Generate and score S11 classical rungs: trivial, linear, and tree."""
         out: dict[str, MetricScorecard] = {}
-        for model_id, group, raw_preds, seed in self.iter_baseline_predictions(
+        for model_id, group, raw_preds, _seed in self.iter_baseline_predictions(
             include_classical=True, min_train_eras=min_train_eras
         ):
             if group != "classical":
                 continue
-            out[model_id] = self.evaluate_predictions(
-                raw_preds, model_id=model_id, seed=seed
-            )
+            # Historical behavior: score with the suite's default seed (no seed= arg).
+            out[model_id] = self.evaluate_predictions(raw_preds, model_id=model_id)
         return out
 ```
 
@@ -176,7 +180,6 @@ def _candidate_strategies(
     min_train_eras: int,
     fast_mode: bool,
 ) -> Iterator[StrategyContext]:
-    del seed  # seeds are carried by the suite's public generator
     for model_id, group, raw_preds, r_seed in suite.iter_baseline_predictions(
         include_classical=not fast_mode, min_train_eras=min_train_eras
     ):
@@ -185,10 +188,10 @@ def _candidate_strategies(
     benchmark_cols = sorted([c for c in benchmarks.columns if c not in {"era", "id"}])
     for col in benchmark_cols:
         preds = benchmarks.select(["era", "id", pl.col(col).alias("prediction")])
-        yield StrategyContext(col, "benchmark_model", preds, 0)
+        yield StrategyContext(col, "benchmark_model", preds, seed + 6)
 ```
 
-Note: the `seed` argument becomes unused in the script's helper — keep the parameter (call site passes it) but `del seed` documents the change. (Seed flow: the suite was constructed with `seed=args.seed`, so the generator's base seed equals the old convention.)
+The `seed` parameter stays live — benchmark-model rows keep the historical `seed + 6` (it feeds `evaluate_normalized_predictions(seed=...)` → bootstrap CIs). The suite was constructed with `seed=args.seed`, so the generator's base seed equals the old convention for null/trivial/classical rows.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -208,21 +211,24 @@ git commit -m "fix: restore benchmark runner integrity via public baseline gener
 ## Task 2: Deployed artifact = evaluated strategy (F-002, F-026, F-013-deployment, all-eras anchor, `neutralize_array`)
 
 **Files:**
+- Create: `nmr/_atomicio.py` (shared atomic write helpers — the field-tested `RunRegistry._atomic_json_write` pattern extracted to one implementation)
 - Modify: `nmr/_transforms.py` (add `neutralize_array`; move design-matrix construction here)
-- Modify: `nmr/risk.py` (`_neutralize_era` uses `neutralize_array` with cached pinv)
+- Modify: `nmr/risk.py` (`_neutralize_era` uses `neutralize_array` with cached pinv; underdetermined-era warning)
 - Modify: `nmr/config.py` (new `RiskConfig` section with `neutralization_proportion`)
 - Modify: `nmr/models.py` (add `train_full_history`, CPU-only, with null-target filter)
-- Modify: `nmr/deployment.py` (atomic payload + manifest writes)
-- Modify: `nmr/runner.py` (`_serialize_predict_artifact` rewrite; closure; `register_pickle_by_value`; manifest enrichment; run() uses configured proportion)
-- Modify: `tests/test_runner.py` (deploy test updated), `tests/test_risk.py` (add neutralize_array parity test), `tests/test_models.py` (add train_full_history test), `tests/test_config.py` (RiskConfig test)
+- Modify: `nmr/deployment.py` (atomic payload + manifest writes via `nmr._atomicio`)
+- Modify: `nmr/registry.py` (`_atomic_json_write` delegates to `nmr._atomicio.atomic_write_text`)
+- Modify: `nmr/runner.py` (`_build_deploy_pipeline` + `_serialize_predict_artifact(predict_fn, model_meta, artifact_path)` that only serializes; pipeline built exactly once in `run()`; `register_pickle_by_value`; manifest enrichment; run() uses configured proportion)
+- Modify: `tests/test_runner.py` (deploy test updated — 6-row fixture), `tests/test_risk.py` (add neutralize_array parity test), `tests/test_models.py` (add train_full_history test), `tests/test_config.py` (RiskConfig test)
 - Modify: `ARCHITECTURE.md` §2D/§2F/§2G/§2N, `AGENTS.md` §8 hazard note (same commit)
 
 **Interfaces:**
 - Produces:
-  - `nmr._transforms.neutralize_array(pred: np.ndarray, features: np.ndarray, proportion: float = 1.0, *, pseudo_inverse: np.ndarray | None = None) -> np.ndarray` — validates finite, zero-std returns `pred.copy()` unchanged, builds design `[features | 1]`, pinv via `np.linalg.pinv(design, rcond=1e-6)` when `pseudo_inverse is None`, returns `pred - proportion * (design @ coeffs)`.
+  - `nmr._atomicio.atomic_write_bytes(path, data: bytes) -> None` and `nmr._atomicio.atomic_write_text(path, text, *, encoding="utf-8") -> None` — temp file in the target directory, single write handle (write → flush → fsync → close → `os.replace`). Used by deployment (Task 2), registry (Task 4), risk cache (Task 7).
+  - `nmr._transforms.neutralize_array(pred: np.ndarray, features: np.ndarray, proportion: float = 1.0, *, pseudo_inverse: np.ndarray | None = None) -> np.ndarray` — validates finite, zero-std returns `pred.copy()` unchanged, builds design `[features | 1]`, pinv via `np.linalg.pinv(design, rcond=1e-6)` when `pseudo_inverse is None`, returns `pred - proportion * (design @ coeffs)`. **No logging inside** (it is embedded by value in the deployment closure — the engine logs instead).
   - `ModelOrchestrator.train_full_history(df, *, feature_cols, target_col, era_col="era") -> object` — fits one CPU-only model on all eras; null/non-finite targets filtered with logged drop count; `ValueError` if nothing remains.
   - `RiskConfig` (`neutralization_proportion: float = 1.0`, validated `0.0 <= p <= 1.0`) registered in `_SECTIONS` and `__all__`.
-  - `ExperimentRunner._serialize_predict_artifact(orchestrator, train_df, feature_cols, target_cols, weights, proportion, artifact_path) -> DeploymentArtifact` (no `splitter` param).
+  - `ExperimentRunner._serialize_predict_artifact(predict_fn, model_meta, artifact_path) -> DeploymentArtifact` — **serializes only**; the pipeline (models + closure) is built once in `run()` via `_build_deploy_pipeline(...)` and shared with the validation stage.
 - Consumes: Task 1's green state; existing `serialize_predict`, `rank_gaussianize`, `rank_gaussianize_unit_variance`.
 
 - [ ] **Step 1: Write the failing tests**
@@ -295,11 +301,49 @@ def test_risk_section_validates_proportion() -> None:
         RiskConfig(neutralization_proportion=1.5)
 ```
 
-Update `tests/test_runner.py::test_runner_deploy_serializes_reloadable_predict` — after the existing assertions, add:
+Update `tests/test_runner.py::test_runner_deploy_serializes_reloadable_predict` — the fixture must have **more rows than features+intercept** (2 features + intercept = 3 design columns; with ≤ 3 rows full neutralization fits exactly and the output is constant — `nunique() > 1` would fail forever):
 
 ```python
+def test_runner_deploy_serializes_reloadable_predict(tmp_path) -> None:
+    cfg = _config(tmp_path)
+    result = ExperimentRunner(cfg).run(deploy=True)
+
+    assert result.artifact is not None
+    loaded_predict = load_predict(result.artifact.path)
+    live_features = pd.DataFrame(
+        {"f1": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6], "f2": [0.3, 0.4, 0.5, 0.6, 0.7, 0.8]},
+        index=[f"id_{i}" for i in range(6)],
+    )
+    prediction = loaded_predict(live_features)
+    assert list(prediction.columns) == ["prediction"]
+    assert prediction.index.tolist() == [f"id_{i}" for i in range(6)]
     assert prediction["prediction"].notna().all()
     assert prediction["prediction"].nunique() > 1  # non-constant pipeline output
+```
+
+Plan note (document, don't test): full neutralization annihilates predictions whenever an era has `n_rows <= n_features + 1` (the least-squares fit is exact) — the engine logs a warning in that case (implemented below).
+
+Update `tests/test_registry.py::test_atomic_write_failure_keeps_previous_run_json` — because `_atomic_json_write` now delegates to `nmr._atomicio.atomic_write_text`, the failure-injection point moves to `nmr._atomicio.os.replace`:
+
+```python
+def test_atomic_write_failure_keeps_previous_run_json(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = RunRegistry(tmp_path)
+    result = _result("run-a", sharpe=0.7)
+    run_dir = registry.record(result)
+    stable_json = (run_dir / "run.json").read_text(encoding="utf-8")
+
+    import nmr._atomicio as atomicio_module
+
+    def fail_replace(src, dst):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(atomicio_module.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="simulated replace failure"):
+        registry.record(result)
+
+    assert (run_dir / "run.json").read_text(encoding="utf-8") == stable_json
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -367,6 +411,12 @@ Add `"neutralize_array"` to `_transforms.__all__`.
                 era_label,
             )
             return np.asarray(pred, dtype=float).copy()
+        if era_df.height <= len(list(feature_cols)) + 1:
+            logger.warning(
+                "[neutralize] era %s has %d rows <= %d features+intercept; "
+                "neutralization fits exactly and the output may be near-zero",
+                era_label, era_df.height, len(feature_list),
+            )
 
         design = _design_matrix(features)
         pseudo_inverse = self._load_or_compute_pseudo_inverse(
@@ -462,23 +512,66 @@ Then make `_fit_model` CPU-only-aware: `_fit_model` currently tries GPU first. `
 
 Call sites: `_fit_predict_fold` passes `use_gpu=True` (current behavior preserved); `train_full_history` passes `use_gpu=False`. `_device_candidate_params(use_gpu: bool) -> list[dict[str, Any]]` returns `[self._resolved_params(use_gpu=use_gpu)]` when `use_gpu=False`. (F-009 logging is Task 6 — keep `_fit_model`'s loop shape unchanged here beyond the flag.)
 
-**3e. `nmr/deployment.py`** — make `serialize_predict` atomic (temp + fsync + `os.replace` for both payload and manifest; payload first, manifest last):
+**3e. Create `nmr/_atomicio.py`** — one shared atomic-write implementation (the field-tested `RunRegistry._atomic_json_write` pattern), reused by deployment (this task), registry (Task 4), and the risk cache (Task 7). Single write handle (write → flush → fsync → close → `os.replace`) — a read-only reopen for fsync is unreliable on Windows:
 
 ```python
+"""Atomic file writes: temp file in the target directory + fsync + os.replace.
+
+This is the single implementation of the repo's atomic-write contract
+(AGENTS.md §9). Every registry JSON write, artifact payload/manifest write,
+OOF parquet write, and neutralization-cache write goes through these helpers.
+"""
+
+from __future__ import annotations
+
+import os
+import tempfile
+from pathlib import Path
+
+
+def atomic_write_bytes(path: str | Path, data: bytes) -> None:
+    """Write ``data`` to ``path`` atomically (temp + fsync + os.replace)."""
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        dir=target.parent, prefix=f"{target.name}.tmp.", suffix=".part"
+    )
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_name, target)
+    finally:
+        if os.path.exists(tmp_name):
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+
+
+def atomic_write_text(
+    path: str | Path, text: str, *, encoding: str = "utf-8"
+) -> None:
+    """Write ``text`` to ``path`` atomically (UTF-8 by default)."""
+    atomic_write_bytes(path, text.encode(encoding))
+```
+
+**3f. `nmr/deployment.py`** — make `serialize_predict` atomic via the shared helper (payload first, manifest last):
+
+```python
+    from nmr._atomicio import atomic_write_bytes, atomic_write_text
+
     artifact_path = Path(path)
     artifact_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"predict_fn": predict_fn, "models": models}
     payload_bytes = cloudpickle.dumps(payload)
-
-    tmp_payload = artifact_path.parent / f"{artifact_path.name}.tmp.{os.getpid()}"
-    try:
-        tmp_payload.write_bytes(payload_bytes)
-        with open(tmp_payload, "rb") as fh:
-            os.fsync(fh.fileno())
-        os.replace(tmp_payload, artifact_path)
-    finally:
-        if tmp_payload.exists():
-            tmp_payload.unlink()
+    atomic_write_bytes(artifact_path, payload_bytes)
+    logger.info(
+        "[serialize_predict] artifact written to %s (%d bytes)",
+        artifact_path,
+        len(payload_bytes),
+    )
 
     manifest = {
         "created_at": datetime.now(timezone.utc).isoformat(),
@@ -486,23 +579,23 @@ Call sites: `_fit_predict_fold` passes `use_gpu=True` (current behavior preserve
         "sha256": _sha256_bytes(payload_bytes),
         "environment": _environment_fingerprint(),
     }
-    manifest_path = _manifest_path(artifact_path)
-    tmp_manifest = manifest_path.parent / f"{manifest_path.name}.tmp.{os.getpid()}"
-    try:
-        tmp_manifest.write_text(
-            json.dumps(manifest, sort_keys=True, indent=2), encoding="utf-8"
-        )
-        with open(tmp_manifest, "rb") as fh:
-            os.fsync(fh.fileno())
-        os.replace(tmp_manifest, manifest_path)
-    finally:
-        if tmp_manifest.exists():
-            tmp_manifest.unlink()
+    atomic_write_text(
+        _manifest_path(artifact_path),
+        json.dumps(manifest, sort_keys=True, indent=2),
+    )
+    return DeploymentArtifact(path=artifact_path, manifest=manifest)
 ```
 
-(Keep the existing `logger.info` lines.)
+**3g. `nmr/registry.py`** — make `_atomic_json_write` delegate to the shared helper (keeps the existing test `test_atomic_write_failure_keeps_previous_run_json` green — it monkeypatches `nmr.registry.os.replace`):
 
-**3f. `nmr/runner.py`** — rewrite `_serialize_predict_artifact` and add the pipeline builder; add module-level imports `import cloudpickle`, `from nmr import _transforms`, `from nmr._transforms import neutralize_array, rank_gaussianize, rank_gaussianize_unit_variance`; add `_transforms` registration before serialization. Replace the method (lines 212-262) with:
+```python
+    def _atomic_json_write(self, path: Path, payload: dict[str, Any]) -> None:
+        atomic_write_text(path, json.dumps(payload, sort_keys=True, indent=2))
+```
+
+with `from nmr._atomicio import atomic_write_text` at the top of `nmr/registry.py` (the existing `tempfile`/`os` imports may become unused — remove them if so).
+
+**3h. `nmr/runner.py`** — add module-level imports `import cloudpickle`, `from nmr import _transforms`, `from nmr._transforms import neutralize_array, rank_gaussianize, rank_gaussianize_unit_variance`. `_build_deploy_pipeline` builds the closure (unchanged from the original design); `_serialize_predict_artifact` now **serializes only** — it takes the prebuilt pipeline and must never retrain models:
 
 ```python
     def _build_deploy_pipeline(
@@ -515,7 +608,7 @@ Call sites: `_fit_predict_fold` passes `use_gpu=True` (current behavior preserve
         weights: Sequence[float],
         proportion: float,
     ) -> tuple[Callable[[pd.DataFrame], pd.DataFrame], dict[str, object]]:
-        """Train per-target full-history models and return (predict, model_meta).
+        """Train per-target full-history models ONCE and return (predict, model_meta).
 
         The closure's code path references only numpy/pandas plus the shared
         transform helpers; cloudpickle.register_pickle_by_value(nmr._transforms)
@@ -578,38 +671,29 @@ Call sites: `_fit_predict_fold` passes `use_gpu=True` (current behavior preserve
     def _serialize_predict_artifact(
         self,
         *,
-        orchestrator: ModelOrchestrator,
-        train_df: pl.DataFrame,
-        feature_cols: Sequence[str],
-        target_cols: Sequence[str],
-        weights: Sequence[float],
-        proportion: float,
+        predict_fn: Callable[[pd.DataFrame], pd.DataFrame],
+        model_meta: dict[str, object],
+        artifact_path: Path,
     ) -> DeploymentArtifact:
-        predict_fn, model_meta = self._build_deploy_pipeline(
-            orchestrator=orchestrator,
-            train_df=train_df,
-            feature_cols=feature_cols,
-            target_cols=target_cols,
-            weights=weights,
-            proportion=proportion,
-        )
-        artifact_path = (
-            self._config.run.artifacts_dir / "runs" / self._run_id / "predict.pkl"
-        )
+        """Serialize the prebuilt pipeline closure. Does NOT retrain models."""
         cloudpickle.register_pickle_by_value(_transforms)
         return serialize_predict(
             predict_fn,
             path=artifact_path,
-            feature_names=list(feature_cols),
+            feature_names=list(model_meta["feature_names"]),
             models=model_meta,
         )
 ```
 
-In `run()`, change the deploy block and proportion source:
+(`model_meta` carries `feature_names` too — add `"feature_names": ordered_features` to the `meta` dict in `_build_deploy_pipeline`.)
+
+In `run()`, change the proportion source and the deploy block — the pipeline is built **exactly once** when deploy is requested (Task 3 will extend this to `deploy or validation_scorecard`):
 
 ```python
         neutralization_proportion = self._config.risk.neutralization_proportion
-        neutralized = NeutralizationEngine().neutralize(
+        neutralized = NeutralizationEngine(
+            max_cache_bytes=self._config.risk.cache_max_bytes
+        ).neutralize(
             blended,
             pred_col="prediction",
             feature_cols=feature_cols,
@@ -620,7 +704,7 @@ In `run()`, change the deploy block and proportion source:
         artifact = None
         if deploy:
             logger.info("[run] serializing deploy artifact")
-            artifact = self._serialize_predict_artifact(
+            pipeline = self._build_deploy_pipeline(
                 orchestrator=model_orchestrator,
                 train_df=train_df,
                 feature_cols=feature_cols,
@@ -628,10 +712,17 @@ In `run()`, change the deploy block and proportion source:
                 weights=weights,
                 proportion=neutralization_proportion,
             )
+            artifact = self._serialize_predict_artifact(
+                predict_fn=pipeline[0],
+                model_meta=pipeline[1],
+                artifact_path=(
+                    self._config.run.artifacts_dir / "runs" / self._run_id / "predict.pkl"
+                ),
+            )
             logger.info("[run] artifact written to %s", artifact.path)
 ```
 
-Add to the manifest dict: `"device": "cpu"` (full-history models are CPU-only), and keep `"weights": list(weights)`.
+Add to the manifest dict: `"pipeline_device": "cpu"` (the full-history models are CPU-only; the OOF-CV device is recorded separately in Task 6 as `"oof_device"`), and keep `"weights": list(weights)`.
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -764,12 +855,7 @@ def test_deployed_artifact_matches_validation_stage_predictions(tmp_path) -> Non
     out = loaded(features_pd)
 
     expected = result.validation_predictions.sort("id")
-    actual = (
-        out.reset_index()
-        .rename(columns={"index": "id"})
-        .to_polars()
-        .sort("id")
-    )
+    actual = pl.from_pandas(out.reset_index().rename(columns={"index": "id"})).sort("id")
     rho, _ = spearmanr(expected.get_column("prediction").to_numpy(),
                        actual.get_column("prediction").to_numpy())
     assert rho > 0.999
@@ -918,13 +1004,13 @@ In `run()` (after the OOF metric computation, before the deploy block), build th
         artifact = None
         if deploy:
             logger.info("[run] serializing deploy artifact")
+            assert pipeline is not None  # built once above when deploy=True
             artifact = self._serialize_predict_artifact(
-                orchestrator=model_orchestrator,
-                train_df=train_df,
-                feature_cols=feature_cols,
-                target_cols=target_cols,
-                weights=weights,
-                proportion=neutralization_proportion,
+                predict_fn=pipeline[0],
+                model_meta=pipeline[1],
+                artifact_path=(
+                    self._config.run.artifacts_dir / "runs" / self._run_id / "predict.pkl"
+                ),
             )
             logger.info("[run] artifact written to %s", artifact.path)
 ```
@@ -986,7 +1072,18 @@ Add the stage method and update the manifest:
             horizon="20D",
             main_target=self._config.evaluation.main_target,
             benchmark_col=(
-                benchmarks.columns[2] if benchmarks is not None and len(benchmarks.columns) > 2 else None
+                # First non-join column (same convention as benchmark_runner) —
+                # never positional index 2, which assumes column order.
+                next(
+                    (
+                        col
+                        for col in benchmarks.columns
+                        if col not in {"era", "id"}
+                    ),
+                    None,
+                )
+                if benchmarks is not None
+                else None
             ),
             backend=self._config.evaluation.backend,
             model_id=self._run_id,
@@ -1002,10 +1099,28 @@ Add the stage method and update the manifest:
 
 (only when the stage ran — include the key always, value `None` when skipped) and add imports: `from nmr.scorecard import MetricScorecard, evaluate_model`.
 
+Update the final `return RunResult(...)` in `run()` to pass the new fields explicitly (a frozen dataclass with defaults will silently omit them otherwise):
+
+```python
+        return RunResult(
+            run_id=self._run_id,
+            oof=oof,
+            metrics=metrics,
+            artifact=artifact,
+            manifest=manifest,
+            scorecard=scorecard,
+            validation_predictions=validation_predictions,
+        )
+```
+
 **3e. `generate_dashboard.py`** — trained rows read `run.json["scorecard"]`; legacy rows excluded from ranking; escape all interpolations. In `_load_registry_runs`, change the metrics source:
 
 ```python
         scorecard = payload.get("scorecard") or {}
+        sc_mean = scorecard.get("corr")
+        sc_std = scorecard.get("std_corr")
+        sc_sharpe = scorecard.get("corr_sharpe_ac")
+        sc_dd = scorecard.get("max_drawdown")
         rows.append(
             {
                 "model_id": payload.get("run_id", run_file.parent.name),
@@ -1016,11 +1131,13 @@ Add the stage method and update the manifest:
                 "preset": model_cfg.get("preset", "unknown"),
                 "n_targets": len(data_cfg.get("targets", [])),
                 "targets": ", ".join(data_cfg.get("targets", [])),
-                "mean": float(scorecard.get("corr") or metrics.get("mean", 0.0)),
-                "std": float(scorecard.get("std_corr") or metrics.get("std", 0.0)),
-                "sharpe": float(scorecard.get("corr_sharpe_ac") or metrics.get("sharpe", 0.0)),
+                # Explicit None checks: a legitimate scorecard value of 0.0 must
+                # NOT fall through to the legacy OOF metric.
+                "mean": float(sc_mean if sc_mean is not None else metrics.get("mean", 0.0)),
+                "std": float(sc_std if sc_std is not None else metrics.get("std", 0.0)),
+                "sharpe": float(sc_sharpe if sc_sharpe is not None else metrics.get("sharpe", 0.0)),
                 "max_drawdown": float(
-                    scorecard.get("max_drawdown") or metrics.get("max_drawdown", 0.0)
+                    sc_dd if sc_dd is not None else metrics.get("max_drawdown", 0.0)
                 ),
                 "artifact_path": payload.get("artifact_path"),
                 "run_dir": str(run_file.parent),
@@ -1048,6 +1165,8 @@ Expected: PASS (scorecard's `backend` default keeps existing tests green; exposu
 Then full suite: `.\.venv\Scripts\python -m pytest -q` — green.
 
 - [ ] **Step 5: Docs + commit**
+
+**Determinism-fixture discipline:** the exposure-definition change (F-005) alters `max_feature_exposure` and therefore any scorecard-derived hash/value fixture that pins exposure numbers. If `tests/test_benchmark_slice1.py`/`slice3.py`/`test_scorecard.py`/`test_research.py` pin such values, update them **deliberately** — the commit message must state the old→new hash/value pair (a silently regenerated fixture is indistinguishable from a determinism regression). The cross-process tests in slice1/slice3 compare two subprocess outputs against each other, so they survive the change untouched.
 
 - `ARCHITECTURE.md` §2A: add `validation_scorecard=True` row to the evaluation table; note `metrics` semantics (corr/fnc/sharpe on train OOF; mmc/bmc/cwmm validation-only). §L: replace the exposure bullet with "per-era Pearson correlation (vectorized; definition change dated 2026-08-05 — numbers not comparable with earlier runs)". §K: note `evaluate_model(..., backend="custom")`. §N: validation stage + `RunResult.scorecard`/`validation_predictions` + purge-drop + shared pipeline.
 - `README.md`: dashboard now ranks trained runs and benchmarks on the same validation-scorecard definitions; legacy runs shown separately.
@@ -1094,12 +1213,14 @@ def _scorecard(sharpe_ac: float, *, max_drawdown: float = 0.1) -> MetricScorecar
     )
 
 
-def _result_with_scorecard(run_id: str, sharpe_ac: float) -> RunResult:
+def _result_with_scorecard(
+    run_id: str, sharpe_ac: float, *, max_drawdown: float = 0.1
+) -> RunResult:
     result = _result(run_id, sharpe=0.5)
     return RunResult(
         run_id=result.run_id, oof=result.oof, metrics=result.metrics,
         artifact=result.artifact, manifest=result.manifest,
-        scorecard=_scorecard(sharpe_ac),
+        scorecard=_scorecard(sharpe_ac, max_drawdown=max_drawdown),
     )
 
 
@@ -1222,8 +1343,6 @@ Rewrite `record` (atomic parquet + scorecard block):
         tmp_oof = run_dir / f"{oof_path.name}.tmp.{os.getpid()}"
         try:
             result.oof.write_parquet(tmp_oof)
-            with open(tmp_oof, "rb") as fh:
-                os.fsync(fh.fileno())
             os.replace(tmp_oof, oof_path)
         finally:
             if tmp_oof.exists():
@@ -1536,16 +1655,9 @@ Add metrics wiring right after (still on the full `neutralized` frame):
             "corr": metrics.mean,
             "sharpe": metrics.sharpe,
         }
-        requested_metrics = set(self._config.evaluation.metrics)
-        if "mmc" in requested_metrics and not self._config.evaluation.validation_scorecard:
-            raise ValueError(
-                "evaluation.metrics includes 'mmc' but the validation scorecard stage "
-                "is disabled (evaluation.validation_scorecard=false). MMC requires the "
-                "meta model, which covers validation eras only."
-            )
-        if "fnc" in requested_metrics:
+        if "fnc" in set(self._config.evaluation.metrics):
             fnc_by_era = evaluator.per_era_fnc(
-                joined.filter(pl.col("era").is_in(set(scoring_eras))),
+                neutralized.filter(pl.col("era").is_in(set(scoring_eras))),
                 pred_col="prediction",
                 feature_cols=feature_cols,
                 target_col=main_target,
@@ -1554,7 +1666,22 @@ Add metrics wiring right after (still on the full `neutralized` frame):
             summary_metrics["fnc"] = evaluator.summarize(fnc_by_era).mean
 ```
 
-(`joined` still holds the pre-blend pred columns + features — confirm the filter works; `pred_col="prediction"` is NOT in `joined` — the FNC must run on the *blended+neutralized* frame. Fix: compute FNC on `neutralized` restricted to scoring eras instead — `neutralized` has `["id", "era", "prediction", ...features?]` — check: `neutralized` derives from `blended` (which came from `joined`) so it retains the feature columns. Use `neutralized.filter(...)`.)
+(`neutralized` derives from `blended`, which retains the feature columns — the FNC runs on the blended+neutralized frame restricted to scoring eras.)
+
+The MMC guard lives at the **top of `run()`** (before any training — the design requires failing before potentially hours of multi-target CV), not here:
+
+```python
+    def run(self, *, deploy: bool = False) -> RunResult:
+        requested_metrics = set(self._config.evaluation.metrics)
+        if "mmc" in requested_metrics and not self._config.evaluation.validation_scorecard:
+            raise ValueError(
+                "evaluation.metrics includes 'mmc' but the validation scorecard stage "
+                "is disabled (evaluation.validation_scorecard=false). MMC requires the "
+                "meta model, which covers validation eras only."
+            )
+        logger.info("[run] starting experiment run_id=%s", self._run_id)
+        ...
+```
 
 Update the manifest:
 
@@ -1564,6 +1691,30 @@ Update the manifest:
             "scoring_eras": scoring_eras,
             "summary_metrics": summary_metrics,
 ```
+
+**3c. `nmr/research.py` — wire the same strategy surface into HPO (F-006 completeness).** `_held_out_metric` currently hardcodes `method="ridge"` (line ~224) and `proportion=1.0` (line ~270), so the HPO sweep evaluates a *different strategy* than the runner deploys. Replace both with the configured values:
+
+```python
+    weights = ensembler.learn_weights(
+        joined_train.select(["era", *pred_cols, main_target]),
+        pred_cols=pred_cols,
+        target_col=main_target,
+        era_col="era",
+        method=config.ensemble.method,
+    )
+    ...
+    neutralized = NeutralizationEngine(
+        max_cache_bytes=config.risk.cache_max_bytes
+    ).neutralize(
+        blended,
+        pred_col="prediction",
+        feature_cols=feature_cols,
+        era_col="era",
+        proportion=config.risk.neutralization_proportion,
+    )
+```
+
+(`neutralization_frontier` sweeps proportions explicitly — it is intentionally NOT wired to `neutralization_proportion`.)
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -1609,7 +1760,7 @@ def test_fit_predict_fold_rejects_zero_purge_gap() -> None:
     violating = Fold(
         index=0,
         train_eras=tuple(str(e) for e in range(1, 5)),
-        val_eras=tuple(str(e) for e in range(5, 7)),  # gap = 0 <= purge_eras=1
+        val_eras=tuple(str(e) for e in range(5, 7)),  # gap = 1 <= purge_eras=1
     )
     with pytest.raises(ValueError, match="purge"):
         orchestrator._fit_predict_fold(
@@ -1723,7 +1874,7 @@ Expected: FAIL — `TypeError: _fit_predict_fold() got an unexpected keyword arg
 ```
 
 - Update the two call sites of `_fit_predict_fold`: `train_cross_validation` and `train_anchor_fold` pass `purge_eras=splitter.purge_eras`.
-- `_fit_model` — narrow exceptions and log; record device:
+- `_fit_model` — narrow exceptions (single clause; `lightgbm`/`xgboost` are already top-level imports in this module) and record the resolved device:
 
 ```python
     def _fit_model(
@@ -1731,34 +1882,27 @@ Expected: FAIL — `TypeError: _fit_predict_fold() got an unexpected keyword arg
     ) -> object:
         candidate_params = self._device_candidate_params(use_gpu=use_gpu)
         last_error: Exception | None = None
+        backend_errors = (
+            (ValueError, TypeError, lgb.basic.LightGBMError)
+            if self._config.backend == "lightgbm"
+            else (ValueError, TypeError, xgb.core.XGBoostError)
+        )
 
         for params in candidate_params:
             model = self._build_model(params)
             try:
                 model.fit(features, target)
-            except (ValueError, TypeError) as exc:
+            except backend_errors as exc:
                 logger.warning(
                     "[fit] %s fit failed (%s: %s); trying next candidate",
                     self._config.backend, type(exc).__name__, exc,
                 )
                 last_error = exc
                 continue
-            except Exception as exc:  # backend-specific errors
-                backend_error = (
-                    getattr(lgb.basic, "LightGBMError", type(None))
-                    if self._config.backend == "lightgbm"
-                    else getattr(xgb.core, "XGBoostError", type(None))
-                )
-                if backend_error is not None and isinstance(exc, backend_error):
-                    logger.warning(
-                        "[fit] %s fit failed (%s: %s); trying next candidate",
-                        self._config.backend, type(exc).__name__, exc,
-                    )
-                    last_error = exc
-                    continue
-                raise
             self.resolved_device = (
-                "gpu" if params.get("device_type") == "gpu" or params.get("tree_method") == "gpu_hist"
+                "gpu"
+                if params.get("device_type") == "gpu"
+                or params.get("tree_method") == "gpu_hist"
                 else "cpu"
             )
             return model
@@ -1781,6 +1925,7 @@ Expected: FAIL — `TypeError: _fit_predict_fold() got an unexpected keyword arg
 ```
 
 - Update `train_full_history` (Task 2) to call `self._fit_model(..., use_gpu=False)` — adjust its current call.
+- Wire the resolved OOF device into the run manifest: in `nmr/runner.py`, after `run()`'s training completes (the OOF CV models), add `"oof_device": model_orchestrator.resolved_device` to the manifest dict (Task 2 already records `"pipeline_device": "cpu"` for the full-history models — this is the separate OOF-CV device, per the design's stated intent).
 
 - [ ] **Step 4: Run tests to verify they pass**
 
@@ -1829,10 +1974,17 @@ def test_cache_corruption_recomputes(tmp_path) -> None:
 
 
 def test_cache_eviction_respects_budget(tmp_path) -> None:
-    df = _risk_frame().filter(pl.col("era") == "1")
-    engine = NeutralizationEngine(cache_dir=tmp_path, max_cache_bytes=4_000)
-    engine.neutralize(df, pred_col="pred", feature_cols=["f1", "f2"], proportion=1.0)
-    assert engine.cache_size_bytes() <= 4_000
+    """Two eras' cache entries; the budget fits only one -> the older is evicted."""
+    full_df = _risk_frame()  # eras "1" and "2"
+    engine = NeutralizationEngine(cache_dir=tmp_path, max_cache_bytes=900)
+    engine.neutralize(
+        full_df, pred_col="pred", feature_cols=["f1", "f2"], proportion=1.0
+    )
+    assert len(list(tmp_path.glob("*.npy"))) == 2  # one per era, pre-eviction
+    assert engine.cache_size_bytes() <= 900
+    survivors = [p.name for p in tmp_path.glob("*.npy")]
+    assert len(survivors) == 1
+    assert "era_2_" in survivors[0]  # mtime-oldest (era 1) evicted, era 2 survives
 
 
 def test_zero_variance_era_keeps_rows_and_is_logged(tmp_path, caplog) -> None:
@@ -1942,7 +2094,7 @@ DEFAULT_CACHE_MAX_BYTES = 2 * 2**30  # 2 GiB
         return np.asarray(array, dtype=float)
 ```
 
-(Add `import os` to risk.py.) `_store_cached_array` — atomic, then evict:
+(Add `import os` to risk.py.) `_store_cached_array` — atomic (temp + `os.replace` for the array; the shared helper for metadata), then evict:
 
 ```python
     def _store_cached_array(
@@ -1953,27 +2105,24 @@ DEFAULT_CACHE_MAX_BYTES = 2 * 2**30  # 2 GiB
         metadata: dict[str, object],
         array: np.ndarray,
     ) -> None:
+        from nmr._atomicio import atomic_write_text
+
         self._cache_dir.mkdir(parents=True, exist_ok=True)
         tmp_array = array_path.with_name(f"{array_path.name}.tmp.{os.getpid()}")
-        tmp_metadata = metadata_path.with_name(f"{metadata_path.name}.tmp.{os.getpid()}")
         try:
             np.save(tmp_array, np.asarray(array, dtype=float))
-            with open(tmp_array, "rb") as fh:
-                os.fsync(fh.fileno())
             os.replace(tmp_array, array_path)
-
-            tmp_metadata.write_text(
-                json.dumps(metadata, sort_keys=True, indent=2), encoding="utf-8"
+            atomic_write_text(
+                metadata_path,
+                json.dumps(metadata, sort_keys=True, indent=2),
             )
-            with open(tmp_metadata, "rb") as fh:
-                os.fsync(fh.fileno())
-            os.replace(tmp_metadata, metadata_path)
         finally:
-            for tmp in (tmp_array, tmp_metadata):
-                if tmp.exists():
-                    tmp.unlink()
+            if tmp_array.exists():
+                tmp_array.unlink()
         self._evict_to_budget()
 ```
+
+(No fsync on the `.npy` temp — cache corruption self-heals by recompute; the atomicity contract is the temp + `os.replace` pattern. Cache entries are keyed by content hash, so a torn file can never be mistaken for another era's entry.)
 
 In `nmr/config.py` — wire `cache_max_bytes` where the engine is constructed in the runner (`nmr/runner.py`):
 
@@ -2527,7 +2676,7 @@ Then full suite: `.\.venv\Scripts\python -m pytest -q` — green.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add nmr/config.py requirements.txt tests/test_config.py AGENTS.md
+git add nmr/config.py requirements.txt tests/test_config.py AGENTS.md README.md
 git commit -m "fix: drop inert PYTHONHASHSEED assignment and unused dotenv dep (F-020, F-025)"
 ```
 
@@ -2550,7 +2699,18 @@ Expected: `['sorted_era_labels', 'clean_frame']` — the methods need no export;
 
 - [ ] **Step 2: Update configs/example.yaml**
 
-Append the new optional sections:
+Merge the new fields into the EXISTING sections — the file already has `evaluation:`; appending a second `evaluation:` block would silently shadow the first (`yaml.safe_load` keeps only the last duplicate key):
+
+```yaml
+# existing evaluation section, add one field:
+evaluation:
+  backend: custom           # custom (fast) | official (numerai_tools oracle)
+  main_target: target
+  metrics: [corr, mmc, fnc, sharpe]
+  validation_scorecard: true
+```
+
+and append the two NEW sections after it:
 
 ```yaml
 ensemble:
@@ -2559,12 +2719,6 @@ ensemble:
 risk:
   neutralization_proportion: 1.0   # float in [0, 1]
   cache_max_bytes: null             # null -> 2 GiB default
-
-evaluation:
-  backend: custom           # custom (fast) | official (numerai_tools oracle)
-  main_target: target
-  metrics: [corr, mmc, fnc, sharpe]
-  validation_scorecard: true
 ```
 
 (Add a comment: `metrics` on train OOF supports `corr`/`fnc`/`sharpe`; `mmc` requires the validation scorecard stage.)
@@ -2587,7 +2741,7 @@ Verify every §2A–§2O subsection matches the code after Tasks 1-11. Specifica
 
 - README: update the dashboard description and the config surface mention; replace "203 tests" with the actual count.
 - CONTRIBUTING: verify the CI line from Task 10; replace "203 tests" with the actual count.
-- Get the count: `.\.venv\Scripts\python -m pytest --collect-only -q | tail -1` → use that number in all three files (edit once, then confirm grep finds no other stale "203").
+- Get the count: `.\.venv\Scripts\python -m pytest --collect-only -q 2>&1 | tail -n 1` (Git Bash; in PowerShell use `| Select-Object -Last 1`). The last line reports `N tests collected` — use that number in all three files (edit once, then confirm `grep -rn "203" AGENTS.md README.md CONTRIBUTING.md` finds no stale count).
 
 - [ ] **Step 6: Verification gates**
 
