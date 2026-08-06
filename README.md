@@ -48,7 +48,7 @@ A **lean, deterministic research framework** for the [Numerai Classic tournament
 ├── configs/                   # experiment configs (YAML)
 │   ├── example.yaml           # annotated full schema
 │   └── first_model.yaml       # current competitive config (4×20D-target ensemble)
-├── tests/                     # 307 unit / parity / determinism / real-data tests
+├── tests/                     # 307 tests (unit / parity / determinism / real-data tests)
 ├── data/                      # local Numerai v5.2 assets (parquets git-ignored)
 ├── artifacts/                 # runs, registry, caches, benchmark CSVs (generated)
 ├── docs/                      # curated Numerai knowledge base — start at docs/DOCS_README.md

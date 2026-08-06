@@ -9,6 +9,9 @@ Checks:
   T4  AGENTS.md stays within its 32 KiB byte budget
   T5  every knowledge file under docs/ is referenced from a nav doc
   T6  no stale references to renamed/deleted files
+
+Checks scan whole files including fenced code blocks — extra phantom anchors
+can only make T2 more lenient, never false-fail; this is intentional.
 """
 
 from __future__ import annotations
@@ -16,7 +19,6 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
-import unicodedata
 from pathlib import Path
 
 from nmr.config import REPO_ROOT
@@ -61,9 +63,10 @@ TEST_COUNT_CLAIM = re.compile(r"(?<![\d.])(\d+)[ \t-]tests?\b")
 
 # --- helpers -----------------------------------------------------------------
 
+# GitHub keeps Unicode letters (do not NFKD); subscript digits like `₅` (category No) are not matched by Python `\w` and stay approximate — acceptable, nothing links to them today.
 def _gh_slug(heading: str) -> str:
-    """GitHub-compatible anchor slug: NFKD, lowercase, strip non-word chars, spaces -> '-'."""
-    text = unicodedata.normalize("NFKD", heading).lower()
+    """GitHub-compatible anchor slug: lowercase, strip non-word chars, spaces -> '-'."""
+    text = heading.lower()
     text = re.sub(r"[^\w\s-]", "", text)
     return text.replace(" ", "-")
 
