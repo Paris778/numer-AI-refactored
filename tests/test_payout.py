@@ -280,3 +280,19 @@ def test_ratio_and_input_boundaries() -> None:
         cvar([1.0], q=1.0)
     with pytest.raises(ValueError, match="finite"):
         sortino([0.1, 0.2], target=float("nan"))
+
+
+def test_as_finite_1d_rejects_2d_and_empty_inputs() -> None:
+    with pytest.raises(ValueError, match="1-D"):
+        burn_rate(np.ones((2, 2)))
+    with pytest.raises(ValueError, match="1-D"):
+        max_drawdown(np.ones((2, 2)))
+    with pytest.raises(ValueError, match="non-empty"):
+        calmar(np.array([]))
+
+
+def test_payout_report_rejects_non_finite_mmc_on_aligned_eras() -> None:
+    corr = {"0001": 0.1, "0002": 0.2}
+    mmc = {"0001": 0.05, "0002": float("nan")}
+    with pytest.raises(ValueError, match="mmc_by_era must contain only finite"):
+        payout_report(corr, mmc, horizon="20D", n_trials=1, seed=1)

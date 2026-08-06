@@ -7,6 +7,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 import pytest
 from numerai_tools.scoring import correlation_contribution
@@ -403,3 +404,77 @@ print(json.dumps(row, sort_keys=True, default=str))
     run1 = subprocess.run(cmd, capture_output=True, text=True, check=True)
     run2 = subprocess.run(cmd, capture_output=True, text=True, check=True)
     assert run1.stdout.strip() == run2.stdout.strip()
+
+
+def test_evaluate_model_input_validation_branches() -> None:
+    predictions, meta_model, benchmarks, features, targets = _tiny_inputs()
+    base = dict(
+        meta_model=meta_model,
+        benchmarks=benchmarks,
+        features=features,
+        targets=targets,
+        n_trials=1,
+        seed=7,
+        min_overlap_eras=5,
+    )
+
+    with pytest.raises(ValueError, match="must be a polars DataFrame"):
+        evaluate_model(predictions.to_pandas(), **base)
+    with pytest.raises(ValueError, match="Missing required columns"):
+        evaluate_model(
+            predictions.rename({"prediction": "other"}),
+            **{**base, "pred_col": "prediction"},
+        )
+    with pytest.raises(ValueError, match="Missing required columns"):
+        evaluate_model(
+            predictions.rename({"era": "round"}),
+            **{**base, "era_col": "era"},
+        )
+    with pytest.raises(ValueError, match="at least one feature column"):
+        evaluate_model(
+            predictions,
+            **{
+                **base,
+                "features": features.select(["era", "id"]),
+            },
+        )
+
+
+def test_evaluate_model_regime_labels_populate_scorecard() -> None:
+    predictions, meta_model, benchmarks, features, targets = _tiny_inputs()
+    regimes = pl.DataFrame(
+        {"era": [f"{i:04d}" for i in range(1, 21)], "regime": ["bull"] * 20}
+    )
+    score = evaluate_model(
+        predictions,
+        meta_model=meta_model,
+        benchmarks=None,
+        features=features,
+        targets=targets,
+        n_trials=1,
+        seed=7,
+        min_overlap_eras=5,
+        regime_labels=regimes,
+    )
+    assert score.regime_corr is not None
+    row = score.to_frame().to_dicts()[0]
+    assert row["regime_count"] == 1
+    assert row["regime_corr_json"] is not None
+
+
+def test_evaluate_model_auto_selects_benchmark_column() -> None:
+    predictions, meta_model, benchmarks, features, targets = _tiny_inputs()
+    score = evaluate_model(
+        predictions,
+        meta_model=meta_model,
+        benchmarks=benchmarks,
+        features=features,
+        targets=targets,
+        n_trials=1,
+        seed=7,
+        min_overlap_eras=5,
+        benchmark_col=None,  # must auto-select the first non-join column
+    )
+    assert score.bmc is not None
+    assert score.bmc.n_eras >= 5
+    assert np.isfinite(score.bmc.value)

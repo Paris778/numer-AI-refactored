@@ -220,6 +220,89 @@ def test_invalid_proportion_raises(tmp_path) -> None:
         )
 
 
+def test_proportion_midpoint_property(tmp_path) -> None:
+    """neutralize(0.5) is exactly the midpoint of pred and neutralize(1.0)."""
+    df = _risk_frame()
+    engine = NeutralizationEngine(cache_dir=tmp_path)
+    full = engine.neutralize(
+        df, pred_col="pred", feature_cols=["f1", "f2"], proportion=1.0
+    ).get_column("pred").to_numpy()
+    half = engine.neutralize(
+        df, pred_col="pred", feature_cols=["f1", "f2"], proportion=0.5
+    ).get_column("pred").to_numpy()
+    raw = df.get_column("pred").to_numpy()
+    assert np.allclose(half, 0.5 * (raw + full), atol=1e-12)
+
+
+def test_neutralize_validation_branches(tmp_path) -> None:
+    engine = NeutralizationEngine(cache_dir=tmp_path)
+    df = _risk_frame()
+
+    with pytest.raises(ValueError, match="feature_cols"):
+        engine.neutralize(df, pred_col="pred", feature_cols=[], proportion=1.0)
+    with pytest.raises(ValueError, match="Missing required columns"):
+        engine.neutralize(
+            df, pred_col="missing_pred", feature_cols=["f1"], proportion=1.0
+        )
+    with pytest.raises(ValueError, match="finite"):
+        engine.neutralize(
+            df.with_columns(pl.lit(float("nan")).alias("pred")),
+            pred_col="pred",
+            feature_cols=["f1"],
+            proportion=1.0,
+        )
+    with pytest.raises(ValueError, match="finite"):
+        engine.neutralize(
+            df.with_columns(pl.lit(float("inf")).alias("f1")),
+            pred_col="pred",
+            feature_cols=["f1", "f2"],
+            proportion=1.0,
+        )
+
+
+def test_cache_max_bytes_validation() -> None:
+    with pytest.raises(ValueError, match="max_cache_bytes"):
+        NeutralizationEngine(cache_dir=None, max_cache_bytes=-1)
+
+
+def test_cache_size_zero_when_dir_missing(tmp_path) -> None:
+    engine = NeutralizationEngine(cache_dir=tmp_path / "does-not-exist")
+    assert engine.cache_size_bytes() == 0
+
+
+def test_neutralize_without_id_column_is_deterministic(tmp_path) -> None:
+    """Frames without an 'id' column take the __row_idx__ cache-metadata path."""
+    df = _risk_frame().select(["era", "pred", "f1", "f2"])
+    engine = NeutralizationEngine(cache_dir=tmp_path)
+    first = engine.neutralize(
+        df, pred_col="pred", feature_cols=["f1", "f2"], proportion=0.7
+    )
+    second = engine.neutralize(
+        df, pred_col="pred", feature_cols=["f1", "f2"], proportion=0.7
+    )
+    assert first.equals(second)
+    assert list(first.columns) == ["era", "pred", "f1", "f2"]
+
+
+def test_eviction_over_budget_warning_when_unlink_fails(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    import logging
+
+    df = _risk_frame().filter(pl.col("era") == "1")
+    engine = NeutralizationEngine(cache_dir=tmp_path, max_cache_bytes=1)
+
+    def fail_unlink(self):
+        raise OSError("simulated unlink failure")
+
+    monkeypatch.setattr(type(tmp_path / "x"), "unlink", fail_unlink, raising=False)
+    with caplog.at_level(logging.WARNING, logger="nmr.risk"):
+        engine.neutralize(
+            df, pred_col="pred", feature_cols=["f1", "f2"], proportion=1.0
+        )
+    assert any("still above budget" in record.message for record in caplog.records)
+
+
 def test_neutralize_array_cached_matches_uncached(tmp_path) -> None:
     df = _risk_frame().filter(pl.col("era") == "1")
     engine = NeutralizationEngine(cache_dir=tmp_path)

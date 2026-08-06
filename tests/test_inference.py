@@ -243,3 +243,65 @@ def test_horizon_floor_is_used_in_adjusted_sharpe() -> None:
     by_horizon = ac_adjusted_sharpe(x, horizon="60D")
     by_explicit_k = ac_adjusted_sharpe(x, bandwidth=expected_k)
     assert by_horizon == pytest.approx(by_explicit_k, abs=1e-12)
+
+
+def test_ac_adjusted_sharpe_zero_variance_returns_zero() -> None:
+    assert ac_adjusted_sharpe(np.full(10, 3.0), bandwidth=2) == pytest.approx(0.0)
+
+
+def test_block_bootstrap_ci_rejects_3d_input() -> None:
+    with pytest.raises(ValueError, match="1-D or 2-D"):
+        block_bootstrap_ci(
+            np.ones((4, 2, 2)), np.mean, block_len=1, n_boot=10, seed=1
+        )
+
+
+def test_block_bootstrap_ci_parameter_guards() -> None:
+    data = np.array([1.0, 2.0, 3.0])
+    with pytest.raises(ValueError, match="n_boot"):
+        block_bootstrap_ci(data, np.mean, block_len=1, n_boot=0, seed=1)
+    with pytest.raises(ValueError, match="alpha"):
+        block_bootstrap_ci(data, np.mean, block_len=1, n_boot=10, seed=1, alpha=1.0)
+    with pytest.raises(ValueError, match="min_valid_frac"):
+        block_bootstrap_ci(
+            data, np.mean, block_len=1, n_boot=10, seed=1, min_valid_frac=0.0
+        )
+
+
+def test_resolve_block_len_and_bandwidth_n_guards() -> None:
+    with pytest.raises(ValueError, match="n must be >= 1"):
+        resolve_block_len(0, "20D")
+    with pytest.raises(ValueError, match="n must be >= 2"):
+        resolve_bandwidth(1, "20D")
+
+
+def test_deflated_sharpe_rejects_invalid_trials_var() -> None:
+    with pytest.raises(ValueError, match="trials_sr_var must be finite and > 0"):
+        deflated_sharpe(
+            sharpe=0.5,
+            n_trials=5,
+            n_obs=60,
+            skew=0.0,
+            kurt=3.0,
+            trials_sr_var=0.0,
+        )
+    with pytest.raises(ValueError, match="must be finite"):
+        deflated_sharpe(
+            sharpe=float("nan"),
+            n_trials=1,
+            n_obs=60,
+            skew=0.0,
+            kurt=3.0,
+        )
+
+
+def test_block_bootstrap_ci_rejects_non_finite_point_estimate() -> None:
+    always_nan = lambda x: float("nan")
+    with pytest.raises(ValueError, match="non-finite point estimate"):
+        block_bootstrap_ci(
+            np.array([1.0, 2.0, 3.0, 4.0]),
+            always_nan,
+            block_len=1,
+            n_boot=10,
+            seed=1,
+        )

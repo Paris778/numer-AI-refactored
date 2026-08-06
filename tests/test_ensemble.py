@@ -204,3 +204,148 @@ def test_learn_weights_non_negative_returns_non_negative_tuple() -> None:
 
     assert len(weights) == 2
     assert all(weight >= -1e-12 for weight in weights)
+
+
+def test_learn_weights_ridge_satisfies_normal_equations() -> None:
+    """The ridge solution must satisfy (X^T X + I) w = X^T y exactly."""
+    df = _ensemble_frame().with_columns(
+        [
+            (pl.col("target") + 0.02 * pl.col("pred_a")).alias("pred_good"),
+            (-pl.col("target") + 0.01 * pl.col("pred_c")).alias("pred_bad"),
+        ]
+    )
+    ensembler = Ensembler()
+    weights = ensembler.learn_weights(
+        df,
+        pred_cols=["pred_good", "pred_bad"],
+        target_col="target",
+        method="ridge",
+    )
+
+    # Rebuild the same rank-normalized design the learner uses.
+    clean = df.select(["era", "pred_good", "pred_bad", "target"]).drop_nulls()
+    normalized = ensembler.rank_normalize(clean, pred_cols=["pred_good", "pred_bad"])
+    design = normalized.select(["pred_good", "pred_bad"]).cast(pl.Float64).to_numpy()
+    target = normalized.get_column("target").cast(pl.Float64).to_numpy()
+
+    gram = design.T @ design + np.eye(design.shape[1])
+    rhs = design.T @ target
+    residual = gram @ np.asarray(weights) - rhs
+    assert np.allclose(residual, 0.0, atol=1e-8)
+
+
+def test_learn_weights_ridge_minimizes_ridge_objective() -> None:
+    df = _ensemble_frame().with_columns(
+        [
+            (pl.col("target") + 0.02 * pl.col("pred_a")).alias("pred_good"),
+            (-pl.col("target") + 0.01 * pl.col("pred_c")).alias("pred_bad"),
+        ]
+    )
+    ensembler = Ensembler()
+    weights = np.asarray(
+        ensembler.learn_weights(
+            df,
+            pred_cols=["pred_good", "pred_bad"],
+            target_col="target",
+            method="ridge",
+        )
+    )
+
+    clean = df.select(["era", "pred_good", "pred_bad", "target"]).drop_nulls()
+    normalized = ensembler.rank_normalize(clean, pred_cols=["pred_good", "pred_bad"])
+    design = normalized.select(["pred_good", "pred_bad"]).cast(pl.Float64).to_numpy()
+    target = normalized.get_column("target").cast(pl.Float64).to_numpy()
+
+    def objective(w: np.ndarray) -> float:
+        return float(np.sum((design @ w - target) ** 2) + np.sum(w**2))
+
+    assert objective(weights) <= objective(np.array([0.0, 0.0])) + 1e-9
+    assert objective(weights) <= objective(np.array([1.0, -1.0])) + 1e-9
+
+
+def test_learn_weights_nnls_matches_scipy_directly() -> None:
+    from scipy.optimize import nnls as scipy_nnls
+
+    df = _ensemble_frame().with_columns(
+        [
+            (pl.col("target") + 0.02 * pl.col("pred_a")).alias("pred_good"),
+            (0.5 * pl.col("target") + 0.01 * pl.col("pred_b")).alias("pred_ok"),
+        ]
+    )
+    ensembler = Ensembler()
+    weights = ensembler.learn_weights(
+        df,
+        pred_cols=["pred_good", "pred_ok"],
+        target_col="target",
+        method="non_negative",
+    )
+
+    clean = df.select(["era", "pred_good", "pred_ok", "target"]).drop_nulls()
+    normalized = ensembler.rank_normalize(clean, pred_cols=["pred_good", "pred_ok"])
+    design = normalized.select(["pred_good", "pred_ok"]).cast(pl.Float64).to_numpy()
+    target = normalized.get_column("target").cast(pl.Float64).to_numpy()
+
+    expected, _ = scipy_nnls(design, target)
+    assert np.allclose(weights, expected, atol=1e-8)
+
+
+def test_blend_single_second_weight_reduces_to_second_column() -> None:
+    df = _ensemble_frame()
+    ensembler = Ensembler()
+    blended = ensembler.blend(df, pred_cols=["pred_a", "pred_c"], weights=[0.0, 1.0])
+
+    expected_parts: list[np.ndarray] = []
+    for era in ["1", "2", "3"]:
+        era_values = df.filter(pl.col("era") == era).get_column("pred_c").to_numpy()
+        expected_parts.append(rank_gaussianize(era_values))
+    expected = np.concatenate(expected_parts)
+    assert np.allclose(
+        blended.get_column("prediction").to_numpy(),
+        expected,
+        atol=1e-12,
+        rtol=0.0,
+    )
+
+
+def test_blend_default_matches_explicit_uniform_weights() -> None:
+    df = _ensemble_frame()
+    ensembler = Ensembler()
+    default = ensembler.blend(df, pred_cols=["pred_a", "pred_c"])
+    explicit = ensembler.blend(df, pred_cols=["pred_a", "pred_c"], weights=[0.5, 0.5])
+    assert np.allclose(
+        default.get_column("prediction").to_numpy(),
+        explicit.get_column("prediction").to_numpy(),
+        atol=1e-12,
+        rtol=0.0,
+    )
+
+
+def test_learn_weights_validation_branches() -> None:
+    ensembler = Ensembler()
+    df = _ensemble_frame()
+
+    with pytest.raises(ValueError, match="at least one prediction"):
+        ensembler.rank_normalize(df, pred_cols=[])
+    with pytest.raises(ValueError, match="no usable rows"):
+        ensembler.learn_weights(
+            df.with_columns(pl.lit(None).alias("pred_a")),
+            pred_cols=["pred_a", "pred_b"],
+            target_col="target",
+        )
+    with pytest.raises(ValueError, match="no finite rows"):
+        ensembler.learn_weights(
+            df.with_columns(pl.lit(float("nan")).alias("target")),
+            pred_cols=["pred_a", "pred_b"],
+            target_col="target",
+        )
+    with pytest.raises(ValueError, match="method must be"):
+        ensembler.learn_weights(
+            df,
+            pred_cols=["pred_a", "pred_b"],
+            target_col="target",
+            method="svm",
+        )
+    with pytest.raises(ValueError, match="weights must be finite"):
+        ensembler.blend(
+            df, pred_cols=["pred_a", "pred_b"], weights=[0.5, float("nan")]
+        )
