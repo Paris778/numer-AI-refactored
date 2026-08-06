@@ -17,3 +17,6 @@ artifacts/**
 !artifacts/
 !artifacts/**/
 !artifacts/**/.gitkeep
+# pytest coverage artifact
+.coverage
+htmlcov/
