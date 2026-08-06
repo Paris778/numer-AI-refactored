@@ -163,6 +163,15 @@ Start with the agent reading order in `docs/DOCS_README.md` §1; the 15-minute v
 
 Never invent a `numerai_tools` / `numerapi` signature — open the installed source: `.venv/Lib/site-packages/numerai_tools/scoring.py` (the parity oracle), `numerai_tools/submissions.py` (submission contract), `numerapi/base_api.py` (live API). Versions pinned in `requirements.txt` (numerai-tools 0.5.3, numerapi 2.22.0).
 
+**First-session orientation (10 minutes):**
+
+1. `.\.venv\Scripts\python -m pytest -q` — establish the green baseline (the test count is CI-enforced against this file's claims).
+2. `nmr/__init__.py` — the public API surface (imports + `__all__`); nothing outside it is public.
+3. `configs/first_model.yaml` — the current competitive config; `configs/example.yaml` — annotated schema.
+4. `ARCHITECTURE.md` §1 (pipeline diagram) and §3 (module dependency graph) — the system map.
+
+**The tests are the executable spec.** Before touching a metric or formula, read `tests/test_parity.py` + `tests/test_risk_parity.py`; before touching scorecards, `tests/test_scorecard.py`; before benchmark gates, `tests/test_benchmark_*.py`. The tests encode the contracts prose can only summarize.
+
 ---
 
 <verification_gates>

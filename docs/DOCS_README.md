@@ -110,6 +110,7 @@ Interpretation for this repository:
 - `05-notebooks/1_hello_numerai.ipynb`
 - `05-notebooks/2_feature_neutralization.ipynb`
 - `05-notebooks/3_target_ensemble.ipynb`
+- `05-notebooks/example-model-sunshine.ipynb` (community example: multi-target + 25% neutralization + model upload)
 
 ### Tier T2: High-value context and heuristics
 
