@@ -56,7 +56,7 @@ _EXTERNAL = ("http://", "https://", "mailto:")
 MARKDOWN_LINK = re.compile(r"\[[^\]]*\]\(([^)]+)\)")
 BACKTICK_TOKEN = re.compile(r"`([^`]*)`")
 HEADING = re.compile(r"^#{1,6}\s+(.*?)\s*#*\s*$", re.MULTILINE)
-TEST_COUNT_CLAIM = re.compile(r"\b(\d+)[-\s]tests?\b")
+TEST_COUNT_CLAIM = re.compile(r"(?<![\d.])(\d+)[ \t-]tests?\b")
 
 
 # --- helpers -----------------------------------------------------------------
