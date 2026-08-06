@@ -156,10 +156,10 @@ A curated, tiered Numerai knowledge base with a deterministic reading path:
 - [docs/01-canon/](docs/01-canon/overview.md) — canonical tournament truth: data, scoring (CORR/MMC/BMC/FNC), submissions, staking
 - [docs/02-strategy/](docs/02-strategy/strategy-bible.md) — strategy bible, community wisdom, target-ensembling math
 - [docs/03-reference/](docs/03-reference/numerai-tools.md) — `numerapi` and `numerai-tools` API references
-- [docs/04-research/](docs/04-research/research-program.md) — research program, advanced ideas, neural-network / tabular-DL notes
+- [docs/04-research/](docs/04-research/research-program.md) — research program + consolidated research-ideas file (incl. neural-network directions), deep tabular-DL survey
 - [docs/05-notebooks/](docs/05-notebooks/) — onboarding notebooks (hello-numerai, neutralization, target ensembles, sunshine example)
 - [docs/06-evaluation/](docs/06-evaluation/evaluation-suite-bible.md) — **the evaluation spec of record**: how this repo judges a model; the benchmark null-floor / S11 ladder is [benchmark-line-in-the-sand.md](docs/06-evaluation/benchmark-line-in-the-sand.md)
-- [docs/99-archive/](docs/99-archive/) — archived, low-priority reference (bounties, general ML cookbook, grandmaster seasons); raw source originals preserved unmodified under `docs/99-archive/raw-source/`
+- [docs/99-archive/](docs/99-archive/) — archived, low-priority reference (bounty/security pointer, grandmaster-seasons summary, super-research prompt); raw source originals preserved unmodified under `docs/99-archive/raw-source/`
 
 The authoritative map — importance tiers, per-file table, and reading recipes — lives in [docs/DOCS_README.md](docs/DOCS_README.md); the bullets above are a directory summary, not the map itself.
 

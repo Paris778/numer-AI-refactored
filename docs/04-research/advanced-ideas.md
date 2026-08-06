@@ -1,3 +1,7 @@
+# Advanced Research Ideas
+
+> **Note (2026-08-06):** This file merges the former `advanced-ideas.md` and `neural-networks.md` into a single ideas file. Part I covers tree-level upgrades and tabular-DL meta-models; Part II covers neural-network-specific directions (super-models, MMC-driven residuals, era-conditioning, self-supervised learning). These are idea-generation documents (AI-assisted; procedures not results) — validate anything before acting on it.
+
 You’re already doing the “obvious good stuff” (multi-target LGBM ensemble, SNNR‑based target selection, embargoed validation), so real gains now probably require either: (a) smarter boosting / objective design, or (b) using recent tabular DL as a meta‑layer or representation learner on top of your trees.
 
 Below are concrete research‑driven directions, each tied to recent work and to how you’d actually plug it into your current Numerai stack.
@@ -195,3 +199,63 @@ Given your current notebook (small feature set, strong multi‑target LGBM ensem
 1. **Serious Bayesian HPO for LGBM** on your top 3–5 targets with an era‑Sharpe objective (this is “easy wins”). [arxiv](https://arxiv.org/abs/2305.17094)
 2. **Build a simple tabular transformer meta‑model** that ingests (features + your per‑target LGBM predictions) and predicts the main target, trained under your existing era‑aware CV; treat it as an extra model in your ensemble first. [arxiv](https://arxiv.org/pdf/2401.15238.pdf)
 3. **Experiment with a custom tree objective**: pairwise ranking inside eras, or a loss that upweights extreme bins and approximates numerai‑corr. Use this on just one or two target models to gauge uplift.
+
+---
+
+## Part II — Neural-Network-Specific Directions
+
+### 1. Non-tree multi-target "super-models"
+
+Instead of more trees, treat your current LGBM ensemble as a *feature generator* for a higher-capacity model:
+
+- Train a multi-output neural net (MLP or tabular transformer) that predicts all 20D and 60D targets jointly from features *and* from your existing LGBM predictions as inputs; this gives you shared representations across targets plus a learned non-linear combiner of your trees.
+- Distill your best tree ensemble into this NN (teacher–student): first fit NN to mimic tree predictions, then fine-tune it on targets with a loss that's a weighted sum of "match trees" and "improve CORR/MMC vs target".
+- In production, the NN becomes the single uploaded model; trees stay offline as part of the pretraining regime.
+
+### 2. Direct MMC / uniqueness-driven residual models
+
+Use Numerai's meta/benchmark predictions as *inputs* and explicitly train for uniqueness:
+
+- Download meta-model and benchmark predictions and build a *residual model*: predict r = t − α·m̂ where m̂ is the meta or benchmark prediction, and α is fit per-era (or globally) so the residual is orthogonal on average; then submit r̂ + α·m̂ after re-ranking.
+- Train a model on the residual target with a loss that combines standard numerai-corr with a penalty on correlation to m̂ (or to the benchmark ensemble), effectively turning MMC/BMC into a differentiable regularizer.
+- Push further with *adversarial orthogonalization*: a small discriminator tries to reconstruct meta-model predictions from your predictions, and your main model is trained to make that discriminator fail, increasing MMC while preserving CORR.
+
+### 3. Era-conditional mixture-of-experts
+
+Instead of one global model, build era-conditional experts:
+
+- Cluster eras using unsupervised learning on era-level statistics (e.g., mean/variance of each feature, or a low-dimensional embedding from an autoencoder trained on feature distributions per era) to identify latent regimes.
+- Train separate models (tree or NN) per regime cluster plus one global model; at prediction time, a lightweight gating function maps each live era into a mixture over regime clusters and blends the experts' predictions before ranking.
+- Enforce robustness by training each expert only on eras *earlier* than the eras it predicts (cluster, then walk-forward inside each cluster).
+
+### 4. Self-supervised representation learning on features
+
+Leverage the massive unlabeled structure with self-supervised objectives, then plug into your existing LGBMs:
+
+- Train a denoising autoencoder or contrastive model on the feature matrix only (no targets), per era or globally, to learn a low-dimensional latent; use those latents as additional features to your tree ensemble or NN.
+- Design augmentations that respect bin structure: random masking/dropout of features, small jitter within bins, or shuffling features within a feature-group (intelligence/serenity/etc.) while keeping era and target aligned.
+- A more radical option: train a conditional generative model p(features | target bin) and use its learned internal representation or log-likelihood ("surprisal") as meta-features feeding your downstream model.
+
+### 5. Era-invariance and adversarial robustness
+
+Try to *remove* the model's ability to overfit specific eras while keeping signal on targets:
+
+- Add an adversarial head that predicts era from your model's penultimate representation; train the main model to predict target while the adversary is trained to predict era, with a gradient reversal layer so the representation becomes era-invariant.
+- Combine with group-wise neutralization: periodically neutralize your predictions (or intermediate representation) to high-variance features or specific feature groups, and include a penalty on the post-neutralization CORR drop in your loss.
+- Goal: raw predictions that are already "low-exposure / era-stable", so the final neutralization step is gentle and doesn't nuke most of the edge.
+
+### 6. Novel stacking and meta-learning over your LGBMs
+
+Given you already have several LGBM ensembles, treat them as diverse base learners and get more sophisticated with the meta layer:
+
+- Rather than static rank-averaging, train a *meta-learner* (small NN or ridge/elastic net) on validation that takes as input: base-model predictions, era-level diagnostics (volatility of each base model, feature-exposure summaries, recent rolling CORR), and outputs meta-weights per era.
+- To avoid overfitting validation, learn meta-weights via nested walk-forward: for each validation era, fit meta-weights only on prior eras, then score out-of-sample.
+- Add constraints/penalties on meta-weights so the resulting meta-prediction has bounded correlation with benchmark/meta-model, explicitly trading off raw CORR vs uniqueness.
+
+### 7. Multi-objective loss approximating payout
+
+Move away from "maximize CORR only" and bake a RAPS-like proxy into the objective:
+
+- On each mini-batch of eras, compute approximate per-era numerai-corr, then compute batch Sharpe and a differentiable drawdown proxy (e.g., squared negative changes in cumulative CORR) and use a loss like −Sharpe + λ·drawdown.
+- Optionally add a term approximating MMC/BMC by correlating your batch predictions with precomputed meta/benchmark predictions and penalizing high correlation.
+- More natural with differentiable models (NN/transformer), but you can approximate some of it in tree ensembles with custom objectives that overweight tails or specific target bins (e.g., over-reward getting extreme bins correct), which tends to help payout under Numerai's nonlinear scoring.

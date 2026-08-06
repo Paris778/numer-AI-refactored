@@ -30,6 +30,8 @@ Several structural implications arise:
 
 These constraints strongly favor models that can: (1) leverage synthetic priors to learn generic tabular inductive biases, (2) scale in-context computation (TabFMs and ICL), and (3) incorporate retrieval of similar historical patterns without re-training (TabR-style architectures).
 
+A key structural argument for relevance: GBDTs have no memory of the feature space across eras, whereas in-context and retrieval-augmented learners can dynamically adapt to the spatial distribution of each era — precisely the property that makes tabular foundation models and TabR-style retrieval a natural fit for era-structured, ID-anonymized data such as Numerai's.
+
 ***
 
 ## 2. Literature Taxonomy: Tabular ML 2023–2026

@@ -12,8 +12,8 @@ Numerai exposes an obfuscated equity dataset with weekly "era" timestamps, integ
 
 The documentation provides:
 
-- Canonical feature sets: `small` (~100 features), `medium` (~400), and `all` (~2000), ordered by importance and redundancy.[1]
-- A suite of auxiliary targets (e.g., `target_ender20`, `target_victor20`, `target_xerxes20`, `target_teager2b20`, `target_cyrus20`) suitable for target ensembling.[1]
+- Canonical feature sets: `small` (42 features), `medium` (780), and `all` (2748) in v5.2 `features.json` — sizes drift across versions, so always read `features.json`, not this doc.
+- A suite of auxiliary targets (e.g., `target_ender_20`, `target_victor_20`, `target_xerxes_20`, `target_teager2b_20`, `target_cyrusd_20`) suitable for target ensembling.[1]
 - Evaluation and neutralization utilities in `numerai-tools` to compute per-era CORR, MMC, BMC, FNC, and to neutralize predictions against features.[3][1]
 
 The `Models` and `Golden Bible` documents also describe Numerai’s own benchmark models, which are primarily deep LightGBM regressors trained with walk-forward, era-aware splits and 8-era purges for 20D targets. These serve as both performance references and potential ensemble partners.[2][1]
@@ -60,7 +60,7 @@ Baseline experiments should use:
 
 - Data version: `v5.2` (current recommended).[1]
 - Feature set: `small` for fast iteration; `medium` and `all` for performance stages.[1]
-- Main target: the guide notes `target_ender20` as the canonical main target, with the statement that the current main live target is `target_cyrus20`; the implementation should read `features.json` and follow the documented `MAINTARGET` constant to avoid hard-coding.[1]
+- Main target: read `features.json` (key `targets`) — the canonical alias is `target`; 20D/60D variants are named `target_{name}_{20|60}` (e.g. `target_ender_20`, `target_victor_20`). Do not hard-code a specific main target name.[1]
 
 ### Baseline LightGBM Configuration
 
@@ -101,7 +101,7 @@ The initial exploration phase should test diverse yet tractable model families a
 1. **Single-target gradient-boosted trees**
    - Variants of LightGBM on `MAINTARGET` with different feature sets and depths.
 2. **Multi-target LightGBM ensembles**
-   - Separate models per 20D target (e.g., `ender20`, `victor20`, `xerxes20`, `teager2b20`), ensembled via rank-averaging.[1]
+   - Separate models per 20D target (e.g., `ender_20`, `victor_20`, `xerxes_20`, `teager2b_20`), ensembled via rank-averaging.[1]
 3. **Optionally, 60D horizon stabilizers**
    - Additional models on 60D targets to smooth regimes and reduce drawdown when ensembled.[1]
 4. **Post-processing and neutralization variants**
@@ -161,8 +161,8 @@ Actual ranking must be based on measured metrics; the above is a hypothesis grou
 ### Core Training Setup
 
 1. **Data**
-   - Use v5.2 `train.parquet` with `all` feature set and the four recommended 20D targets defined in `TARGET_CANDIDATES` (e.g., `target_ender20`, `target_victor20`, `target_xerxes20`, `target_teager2b20`).[1]
-   - Optionally include one or two 60D targets (e.g., `target_jerome60`) for E8-like experiments.[1]
+   - Use v5.2 `train.parquet` with `all` feature set and the four recommended 20D targets defined in `TARGET_CANDIDATES` (e.g., `target_ender_20`, `target_victor_20`, `target_xerxes_20`, `target_teager2b_20`).[1]
+   - Optionally include one or two 60D targets (e.g., `target_jeremy_60`) for E8-like experiments.[1]
 
 2. **Walk-Forward Training**
    - Implement the 156-era chunk walk-forward with 8-era purge (20D) as described in the Models benchmark section.[2]
@@ -228,15 +228,15 @@ The strongest approach is to:
 
 ```python
 from numerapi import NumerAPI
-from numeraitools.scoring import numeraicorr, correlation_contribution, neutralize
+from numerai_tools.scoring import numerai_corr, correlation_contribution, neutralize
 
 DATAVERSION = "v5.2"
-MAINTARGET = "target_ender20"  # or from features.json
+MAINTARGET = "target"  # canonical alias; read from features.json
 TARGET_CANDIDATES = [
-    "target_ender20",
-    "target_victor20",
-    "target_xerxes20",
-    "target_teager2b20",
+    "target_ender_20",
+    "target_victor_20",
+    "target_xerxes_20",
+    "target_teager2b_20",
 ]
 
 # 1. Load data and features
@@ -276,7 +276,7 @@ valid["ensemble_neutral"] = (
 
 # 5. Evaluation
 per_era_corr = valid.groupby("era").apply(
-    lambda d: numeraicorr(d["ensemble_neutral"], d[MAINTARGET])
+    lambda d: numerai_corr(d["ensemble_neutral"], d[MAINTARGET])
 )
 ```
 
@@ -332,7 +332,7 @@ Once runs are complete, the engineer can produce a ranked markdown table, for ex
 ### Key Risks and Assumptions
 
 - **Data-availability and compute:** The deep multi-target ensemble assumes that training 4+ deep LightGBM models on the full v5.2 `all` feature set is feasible within local or cloud compute budgets; the Numerai upload environment itself is constrained but training can occur offline.[2]
-- **Target drift and regime changes:** The relative merits of auxiliary targets (e.g., `victor20` vs `xerxes20`) may evolve over time; the proposed target set is based on current documentation and may require periodic re-evaluation.[1]
+- **Target drift and regime changes:** The relative merits of auxiliary targets (e.g., `victor_20` vs `xerxes_20`) may evolve over time; the proposed target set is based on current documentation and may require periodic re-evaluation.[1]
 - **Neutralization trade-offs:** Over-aggressive neutralization can remove genuine signal along with risk, dropping mean CORR; the proposed 50–75% range is heuristic and must be tuned using validation metrics and diagnostic plots.[1]
 - **Benchmark reliance:** Benchmark-augmented ensembles (E6/E7) risk overfitting to Numerai’s own models; they should be kept as validation tools or low-weight components unless clear, stable utility gains are demonstrated.[2][1]
 

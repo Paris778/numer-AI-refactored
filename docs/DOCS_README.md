@@ -122,14 +122,13 @@ Interpretation for this repository:
 - `03-reference/numerapi.md`
 - `03-reference/numerai-tools.md`
 - `02-strategy/target-ensembling-math.md`
-- `04-research/advanced-ideas.md`
-- `04-research/neural-networks.md`
+- `04-research/advanced-ideas.md` (merged with former `neural-networks.md`, 2026-08-06)
+- `04-research/State-of-the-Art Deep Learning for Obfuscated, Non-Stationary Tabular Regression.md`
 
 ### Tier T4: Archive / non-essential for modeling core
 
-- `99-archive/bounties.md`
-- `99-archive/grandmasters-seasons.md`
-- `99-archive/general-ml-cookbook.md`
+- `99-archive/bounties.md` (pointer only, trimmed 2026-08-06)
+- `99-archive/grandmasters-seasons.md` (summary only, trimmed 2026-08-06)
 - `99-archive/super-research.prompt.md`
 
 ## 5) Full File Map
@@ -152,8 +151,8 @@ Interpretation for this repository:
 | `03-reference/numerapi.md` | T3 | NumerAPI practical reference | `numerapi_reference.md` + `API/` docs |
 | `03-reference/numerai-tools.md` | T3 | numerai_tools scoring/ref utility map | `numerai_tools_reference.md` |
 | `04-research/research-program.md` | T2 | Main advanced research playbook | `llm_reports/perplexity_deep_research.md` |
-| `04-research/advanced-ideas.md` | T3 | Experimental ideas backlog | `llm_reports/perplexity_deep_research_ideas.md` |
-| `04-research/neural-networks.md` | T3 | NN-specific advanced exploration | `llm_reports/perplexity_deep_research_NN.md` |
+| `04-research/advanced-ideas.md` | T3 | Research ideas: tree-level upgrades + NN directions (merged with former `neural-networks.md`, 2026-08-06) | `llm_reports/perplexity_deep_research_ideas.md` + `perplexity_deep_research_NN.md` |
+| `04-research/State-of-the-Art Deep Learning for Obfuscated, Non-Stationary Tabular Regression.md` | T3 | Deep tabular-DL survey: TabFM/ICL, TabR, neutralization-aware objectives, CPCV blueprint | deep-research survey (references in-file) |
 | `05-notebooks/*` | T1 | Executable onboarding and examples | `onboarding_notebooks/` + `community_models_and_notebooks/` |
 | `06-evaluation/evaluation-suite-bible.md` | T0 | Evaluation suite spec of record (metrics, math, build slices E1–E6) | this build |
 | `99-archive/*` | T4 | Peripheral or low-priority context | archive sources |
@@ -164,7 +163,7 @@ Interpretation for this repository:
 - `02-strategy/strategy-bible.md` intentionally deduplicates overlapping guidance from two source bibles.
 - `03-reference/numerapi.md` is a practical consolidated surface, not a full generated API spec.
 - `04-research` is useful but speculative. Do not treat as protocol truth.
-- The `Source` column in section 5 names the original files. Every original is preserved unmodified in `99-archive/raw-source/` (with normalized lowercase names, e.g. `Golden Bible.txt` -> `golden-bible.txt`). Nothing was deleted; low-value material was relocated, not destroyed.
+- The `Source` column in section 5 names the original files. Every original is preserved unmodified in `99-archive/raw-source/` (with normalized lowercase names, e.g. `Golden Bible.txt` -> `golden-bible.txt`). The original reorganization deleted nothing (low-value material was relocated, not destroyed). The 2026-08-06 trim removed two superseded files (`04-research/the-state-of-the-art.md`, `99-archive/general-ml-cookbook.md`) and merged `04-research/neural-networks.md` into `04-research/advanced-ideas.md`.
 
 ## 7) Minimal Traversal Recipes
 
