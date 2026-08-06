@@ -168,34 +168,11 @@ Interpretation for this repository:
 
 ## 7) Minimal Traversal Recipes
 
-### A) Scoring comprehension only
+Subsets of the §1 fast-start order, for focused goals:
 
-Read:
-
-1. `01-canon/scoring/00-definitions.md`
-2. `01-canon/scoring/01-correlation.md`
-3. `01-canon/scoring/02-mmc-bmc.md`
-4. `01-canon/scoring/03-fnc.md`
-5. `01-canon/staking.md`
-
-### B) Data-to-submission full lifecycle
-
-Read:
-
-1. `01-canon/data.md`
-2. `01-canon/models.md`
-3. `01-canon/submissions.md`
-4. `01-canon/staking.md`
-5. `03-reference/numerapi.md`
-
-### C) Robust modeling intuition
-
-Read:
-
-1. `02-strategy/strategy-bible.md`
-2. `02-strategy/community-wisdom.md`
-3. `02-strategy/why-it-works.md`
-4. `04-research/research-program.md`
+- **Scoring comprehension:** `01-canon/scoring/00-definitions.md` → `01-canon/scoring/01-correlation.md` → `01-canon/scoring/02-mmc-bmc.md` → `01-canon/scoring/03-fnc.md` → `01-canon/staking.md`
+- **Data-to-submission lifecycle:** `01-canon/data.md` → `01-canon/models.md` → `01-canon/submissions.md` → `01-canon/staking.md` → `03-reference/numerapi.md`
+- **Robust modeling intuition:** `02-strategy/strategy-bible.md` → `02-strategy/community-wisdom.md` → `02-strategy/why-it-works.md` → `04-research/research-program.md`
 
 ## 8) Scope Boundary
 
