@@ -178,7 +178,7 @@ $$
 $$
 
 - $\text{pf}$ = payout factor (default $1.0$; configurable to model real stake-threshold throttling, see `../01-canon/staking.md`).
-- Weights $0.75 / 2.25$ and the $\pm 0.05$ clip match the current canonical payout (see `../README.md`).
+- Weights $0.75 / 2.25$ and the $\pm 0.05$ clip match the current canonical payout (see `../DOCS_README.md`).
 - **Mean payout proxy** $\bar\pi = \tfrac{1}{n}\sum_e \pi_e$ is the raw scalar; the **reported rank scalar** is $\bar\pi$ wrapped by the inference layer: report $(\bar\pi,\ \text{CI}_{95\%}(\bar\pi),\ \text{DSR})$. **We rank on the deflated, CI-aware payout proxy.**
 - **Clipped vs unclipped — a hard rule for the DSR.** The economic point estimates (mean payout $\bar\pi$, burn rate, CVaR, drawdown) use the **clipped** series $\pi_e$, because $\pm0.05$ is what you are actually paid. But the **Deflated Sharpe Ratio must be computed entirely on the *unclipped* raw series** $\pi_{\text{raw},e} = \text{pf}\cdot(0.75\,\text{CORR}_e + 2.25\,\text{MMC}_e)$ — its $\widehat{SR}$, $\gamma_3$, **and** $\gamma_4$ together, consistently from the same distribution. The clip masses probability at $\pm0.05$, truncating the tails and biasing sample kurtosis, which violates the continuity assumption underlying the Bailey–López de Prado framework and would make the rank scalar fluctuate erratically. **Do not** mix a clipped-series Sharpe with unclipped moments in the same DSR denominator — that combines moments from two different distributions and is its own error. Unclipped end-to-end for the DSR; clipped for the economic headline.
 - **Edge cases:** degenerate predictions (constant) ⇒ $\text{CORR}_e=0$, $\text{MMC}_e=0$ ⇒ $\pi_e=0$. Empty/!=overlap eras are excluded and `n_eras` is surfaced.
@@ -375,7 +375,7 @@ Verified against `../../data/v5.2/features.json` and the v5.2 parquet on 2026-06
 - **Eras:** dtype `String`, values `"0001" .. "0574"` (574 eras). Train, validation, live splits in `data/v5.2/`.
 - **Live target:** `live.parquet` carries an **all-null** target column (the future is unknown). Never score on it.
 - **Coverage overlaps:** validation eras overlap the `meta_model.parquet` / `*_benchmark_models.parquet` eras; **train eras do not.** Therefore BMC/CWMM (§7.2–7.3) are computable only on the validation∩meta/benchmark intersection — always report `n_eras` of that overlap.
-- **Purge convention:** 8 eras (20D) / 16 eras (60D) for walk-forward seams; 4/16 is the theoretical minimum (see `../README.md` §3).
+- **Purge convention:** 8 eras (20D) / 16 eras (60D) for walk-forward seams; 4/16 is the theoretical minimum (see `../DOCS_README.md` §3).
 
 ---
 
