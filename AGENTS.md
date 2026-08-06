@@ -53,7 +53,7 @@ Every stochastic operation must be seeded through config (`run.seed` → `set_gl
 Every custom metric implementation (CORR, MMC, FNC, neutralization) must match `numerai_tools.scoring` in a parity test (`tests/test_parity.py`, `tests/test_risk_parity.py`), or it is suspect. Fast custom path for research; official path for audit. Never change a metric without updating its parity test.
 
 ### 4. Leakage Is a Correctness Bug
-Targets are forward-looking and overlapping. Random row-level CV is forbidden. All validation is era-grouped with purge: **8 eras for 20D targets, 16 for 60D** (operational benchmark convention; see [docs/README.md](docs/README.md) §3). Fold leakage-safety is asserted in code (`_assert_fold_is_leakage_safe`) — never weaken these assertions.
+Targets are forward-looking and overlapping. Random row-level CV is forbidden. All validation is era-grouped with purge: **8 eras for 20D targets, 16 for 60D** (operational benchmark convention; see [docs/DOCS_README.md](docs/DOCS_README.md) §3). Fold leakage-safety is asserted in code (`_assert_fold_is_leakage_safe`) — never weaken these assertions.
 
 ### 5. Fail Early, Fail Loudly — No Hidden Defaults
 Configs validate at load time (`load_config` rejects unknown keys/sections and invalid enum values). Degenerate inputs raise (`ValueError`, `NonVacuityError`) rather than silently returning defaults. Catch specific exception types only. Unknown/missing values propagate as `None` or raise — never silently coerce to `0`.
@@ -138,8 +138,28 @@ When modifying or generating code, enforce these seven invariants:
 | Change perturbation/horizon/regime diagnostics | `nmr/robustness.py` |
 | Change benchmark baselines / gates | `nmr/benchmark.py` + `benchmark_runner.py` |
 | Add/remove a public API symbol | `nmr/__init__.py` — imports **and** `__all__` |
-| Understand tournament rules & scoring | `docs/README.md` → `docs/01-canon/` (canonical laws) |
+| Understand tournament rules & scoring | `docs/DOCS_README.md` → `docs/01-canon/` (canonical laws) |
 | Understand how models are judged | `docs/06-evaluation/evaluation-suite-bible.md` (evaluation spec of record) |
+
+### Knowledge base map (docs/)
+
+The `docs/` tree is a curated Numerai domain library; `docs/DOCS_README.md` is its master map (importance tiers, per-file table, reading recipes). Task-oriented pointers into it:
+
+| When you... | Read first |
+|---|---|
+| Touch CORR / MMC / FNC / BMC metric formulas | `docs/01-canon/scoring/00-definitions.md` → `docs/01-canon/scoring/01-correlation.md` / `02-mmc-bmc.md` / `03-fnc.md` |
+| Change neutralization | `docs/01-canon/models.md` (official `neutralize()` code) + `docs/05-notebooks/2_feature_neutralization.ipynb` |
+| Change ensembling | `docs/02-strategy/target-ensembling-math.md` + `docs/05-notebooks/3_target_ensemble.ipynb` |
+| Change the payout proxy | `docs/01-canon/staking.md` (0.75/2.25 weights, ±5% clip, stake thresholds) |
+| Change model presets / params | `docs/01-canon/models.md` (benchmark walk-forward: 8-era purge for 20D, 16 for 60D; standard/deep params) |
+| Touch submission or deployment | `docs/01-canon/submissions.md` + `docs/02-strategy/strategy-bible.md` §8 (deployment contract) |
+| Change benchmark gates | `docs/06-evaluation/benchmark-line-in-the-sand.md` (null floor + S11 ladder) |
+| Change evaluation semantics | `docs/06-evaluation/evaluation-suite-bible.md` (evaluation spec of record) |
+| Use `numerapi` / `numerai_tools` | `docs/03-reference/numerapi.md` + `docs/03-reference/numerai-tools.md` |
+| Plan research work | `docs/04-research/research-program.md`, `docs/04-research/advanced-ideas.md`, `docs/04-research/neural-networks.md` |
+| Seek domain intuition | `docs/02-strategy/strategy-bible.md` + `docs/02-strategy/why-it-works.md` |
+
+Start with the agent reading order in `docs/DOCS_README.md` §1; the 15-minute version is §2–§3.
 
 ---
 

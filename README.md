@@ -51,7 +51,7 @@ A **lean, deterministic research framework** for the [Numerai Classic tournament
 ├── tests/                     # 301 unit / parity / determinism / real-data tests
 ├── data/                      # local Numerai v5.2 assets (parquets git-ignored)
 ├── artifacts/                 # runs, registry, caches, benchmark CSVs (generated)
-├── docs/                      # curated Numerai knowledge base — start at docs/README.md
+├── docs/                      # curated Numerai knowledge base — start at docs/DOCS_README.md
 ├── notebooks/                 # researcher control plane (thin, zero business logic)
 ├── benchmark_runner.py        # CLI: score null/classical/benchmark baselines → CSV
 ├── train_first_model.py       # CLI: train, register, and promote the first model
@@ -149,16 +149,19 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md#testing--verification) for the full work
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) — pipeline topology, metric formulas, artifact schemas
 - [`CONTRIBUTING.md`](CONTRIBUTING.md) — development workflow, test commands, review checklist
 
-### Domain knowledge base ([docs/](docs/README.md))
+### Domain knowledge base ([docs/](docs/DOCS_README.md))
 
 A curated, tiered Numerai knowledge base with a deterministic reading path:
 
 - [docs/01-canon/](docs/01-canon/overview.md) — canonical tournament truth: data, scoring (CORR/MMC/BMC/FNC), submissions, staking
 - [docs/02-strategy/](docs/02-strategy/strategy-bible.md) — strategy bible, community wisdom, target-ensembling math
 - [docs/03-reference/](docs/03-reference/numerai-tools.md) — `numerapi` and `numerai-tools` API references
-- [docs/04-research/](docs/04-research/research-program.md) — research program, advanced ideas
-- [docs/05-notebooks/](docs/05-notebooks/) — onboarding notebooks (hello-numerai, neutralization, target ensembles)
-- [docs/06-evaluation/](docs/06-evaluation/evaluation-suite-bible.md) — **the evaluation spec of record**: how this repo judges a model
+- [docs/04-research/](docs/04-research/research-program.md) — research program, advanced ideas, neural-network / tabular-DL notes
+- [docs/05-notebooks/](docs/05-notebooks/) — onboarding notebooks (hello-numerai, neutralization, target ensembles, sunshine example)
+- [docs/06-evaluation/](docs/06-evaluation/evaluation-suite-bible.md) — **the evaluation spec of record**: how this repo judges a model; the benchmark null-floor / S11 ladder is [benchmark-line-in-the-sand.md](docs/06-evaluation/benchmark-line-in-the-sand.md)
+- [docs/99-archive/](docs/99-archive/) — archived, low-priority reference (bounties, general ML cookbook, grandmaster seasons); raw source originals preserved unmodified under `docs/99-archive/raw-source/`
+
+The authoritative map — importance tiers, per-file table, and reading recipes — lives in [docs/DOCS_README.md](docs/DOCS_README.md); the bullets above are a directory summary, not the map itself.
 
 ### Other
 

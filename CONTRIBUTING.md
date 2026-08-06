@@ -12,7 +12,7 @@ All code must follow the eight non-negotiable principles in [`AGENTS.md`](AGENTS
 
 1. Read [`AGENTS.md`](AGENTS.md) — the authoritative source for principles, invariants, and hazards.
 2. Read [`ARCHITECTURE.md`](ARCHITECTURE.md) — pipeline topology, formulas, and module specs.
-3. Skim [docs/README.md](docs/README.md) — the Numerai domain knowledge base (canonical laws, scoring, purge/embargo conventions).
+3. Skim [docs/DOCS_README.md](docs/DOCS_README.md) — the Numerai domain knowledge base (canonical laws, scoring, purge/embargo conventions, tiered reading paths). For domain intuition, [docs/02-strategy/strategy-bible.md](docs/02-strategy/strategy-bible.md) and the [docs/05-notebooks/](docs/05-notebooks/) tutorials; before touching any metric or evaluation code, read [docs/06-evaluation/evaluation-suite-bible.md](docs/06-evaluation/evaluation-suite-bible.md) — the evaluation spec of record.
 4. Activate the venv and install dependencies:
 
    ```powershell

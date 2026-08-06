@@ -93,7 +93,7 @@ Geometry: eras deduped and sorted numerically (non-numeric ⇒ `ValueError`). Wi
 - **walk_forward** fold *i*: val = `eras[prefix + i·val_size : prefix + (i+1)·val_size]`, train = `eras[: val_start - purge_eras]`.
 - **anchor**: single fold with `k=1` geometry — one train prefix, one validation window.
 
-Invariants validated on every fold: `max(train) < min(val)`, exactly `purge_eras` eras excluded between them, no era reuse, disjoint validation windows. `embargo_eras` is accepted but **structurally inert** (see [`AGENTS.md`](AGENTS.md#8-critical-operational-hazards)).
+Invariants validated on every fold: `max(train) < min(val)`, exactly `purge_eras` eras excluded between them, no era reuse, disjoint validation windows. `embargo_eras` is accepted but **structurally inert** (see [`AGENTS.md`](AGENTS.md#8-critical-operational-hazards)). Purge/embargo convention (8/16 operational vs 4/16 minimum): [docs/DOCS_README.md](docs/DOCS_README.md) §3; official benchmark walk-forward table (156-era blocks): [docs/01-canon/models.md](docs/01-canon/models.md).
 
 ### D. Transforms — `nmr/_transforms.py`
 
@@ -108,6 +108,8 @@ Shared by evaluation, ensemble, and submission:
 | `rank_gaussianize_unit_variance(v)` | composition of the above |
 | `neutralize_array(pred, features, proportion=1.0, *, pseudo_inverse=None)` | `pred − proportion · design @ pinv(design, rcond=1e-6) @ pred`, design = `[features | 1]`; zero-variance pred returned unchanged |
 | `power_1_5(v)` | `sign(v) · |v|^1.5` |
+
+All transforms follow the canonical definitions in [docs/01-canon/scoring/00-definitions.md](docs/01-canon/scoring/00-definitions.md).
 
 ### E. Evaluation Engine — `nmr/evaluation.py`
 
@@ -124,6 +126,8 @@ Per-era engines partition the input frame exactly once (`partition_by(era_col, m
 | **CWMM** `per_era_cwmm` | MMC-form pred-vs-meta (no oracle counterpart) |
 
 `summarize(per_era) -> MetricSummary(mean, std, sharpe, max_drawdown)` — std ddof=0, `sharpe = mean/std` (0 if std=0), drawdown on cumulative sum. Degenerate eras (<2 rows, zero variance, non-finite) short-circuit to score 0.0 after `clean_frame()` null/finite filtering.
+
+Metric definitions follow the canonical tournament spec: CORR → [docs/01-canon/scoring/01-correlation.md](docs/01-canon/scoring/01-correlation.md); MMC/BMC → [docs/01-canon/scoring/02-mmc-bmc.md](docs/01-canon/scoring/02-mmc-bmc.md); FNC → [docs/01-canon/scoring/03-fnc.md](docs/01-canon/scoring/03-fnc.md). The repo's judging rules are the evaluation spec of record: [docs/06-evaluation/evaluation-suite-bible.md](docs/06-evaluation/evaluation-suite-bible.md).
 
 ### F. Neutralization — `nmr/risk.py`
 
@@ -152,6 +156,8 @@ Canonical presets (`_CANONICAL_PRESETS`, mirroring Numerai's published benchmark
 | deep | 30 000 | 0.001 | 10 | 1 024 | 0.1 | `min_data_in_leaf=10000` |
 
 LightGBM adds `objective="regression"`, `random_state=seed`, `n_jobs=1`, `deterministic=True`, `force_col_wise=True`. XGBoost translates `num_leaves→max_leaves`, `min_data_in_leaf→min_child_weight`, adds `reg:squarederror` + `seed`. `ModelConfig.params` overrides presets key-by-key.
+
+Presets mirror Numerai's published benchmark params and walk-forward purge convention in [docs/01-canon/models.md](docs/01-canon/models.md).
 
 ### H. Ensembling — `nmr/ensemble.py`
 
@@ -188,6 +194,8 @@ clipped = clip(raw, −0.05, +0.05)
 
 Diagnostics on the series: `burn_rate` (fraction < 0), `cvar(q=0.05)` (mean of bottom 5%), `sortino` (downside-deviation ratio), `max_drawdown` (cumsum vs running max), `calmar` (mean/MDD), `max_burn_streak` (longest consecutive negative run), `time_to_recovery` (longest underwater period). `payout_report(...) -> PayoutResult` bundles all of these plus `BootstrapCI` on mean payout, deflated Sharpe, and AC-adjusted MMC Sharpe.
 
+Payout weights, ±5% clip, and stake thresholds follow [docs/01-canon/staking.md](docs/01-canon/staking.md).
+
 ### K. Scorecard — `nmr/scorecard.py`
 
 `evaluate_model(predictions, *, meta_model, benchmarks, features, targets, n_trials, seed, horizon="20D", main_target="target", benchmark_col=None, backend="custom", regime_labels=None, perturbation=None, pf=1.0, clip=0.05, n_boot=1000, alpha=0.05, min_overlap_eras=20, model_id="model", ...) -> MetricScorecard`
@@ -195,6 +203,8 @@ Diagnostics on the series: `burn_rate` (fraction < 0), `cvar(q=0.05)` (mean of b
 Flow: join predictions ∩ meta ∩ targets ∩ features on `[era]` or `[era, id]` (optional left-join benchmarks) → per-era CORR/MMC/FNC (+BMC/CWMM when benchmark/meta available) → payout report → `MetricCell(value, ci_low, ci_high, n_eras)` bootstrap cells → feature-exposure, horizon-stability, regime, and perturbation diagnostics. Horizon targets inferred by regex `_([a-zA-Z0-9]+)(?:20|60)$` on `benchmark_col`, requiring both `target_{name}_20` and `target_{name}_60`.
 
 `MetricScorecard` (frozen, 31 fields) includes `rank_scalar`, `deflated_sharpe`, `mean_payout/corr/mmc/corr_sharpe_ac/bmc/cwmm` cells, `fnc`, `cvar5`, `max_drawdown`, `burn_rate`, `sortino`, `calmar`, `max_feature_exposure`, robustness sub-results, and `metric_timing_seconds` + `eval_total_seconds` instrumentation. `to_frame()` flattens to a single-row Polars frame (cells expand to `{name}`, `{name}_ci_low`, `{name}_ci_high`, `{name}_n_eras`; timings become `timing_*` columns + `quality_metric_timings_json` / `quality_metric_total_seconds`). **Timing columns are excluded from canonical hashing** (§M).
+
+The evaluation spec of record (metrics, gates, build slices E1–E6) is [docs/06-evaluation/evaluation-suite-bible.md](docs/06-evaluation/evaluation-suite-bible.md).
 
 ### L. Research & Robustness — `nmr/research.py`, `nmr/robustness.py`
 
@@ -215,6 +225,8 @@ Flow: join predictions ∩ meta ∩ targets ∩ features on `[era]` or `[era, id
 - **Gates** — `assert_null_floor(scorecards, tolerance=0.05)`: every null baseline must have |value| ≤ tolerance on rank_scalar, mean_payout, corr, mmc, fnc, corr_sharpe_ac (+bmc/cwmm if present). `assert_slice1_monotone`: null ≤ hello-numerai ≤ sunshine.
 - **Determinism** — `canonical_scorecards_bytes()`: drops all timing columns, JSON with sorted keys, `separators=(",", ":")`, NaN/Inf as string sentinels, keyed by model_id; `scorecards_sha256()` digests it.
 - **Output** — `scorecards_to_frame` / `write_scorecards_csv` (column inventory = `MetricScorecard.to_frame()` §K).
+
+Benchmark ladder rationale (null floor, S11 rungs, hard gates): [docs/06-evaluation/benchmark-line-in-the-sand.md](docs/06-evaluation/benchmark-line-in-the-sand.md).
 
 ### N. Runner, Registry, Submission, Deployment
 
