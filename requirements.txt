@@ -1,4 +1,4 @@
-numerapi
+numerapi==2.22.0
 pytest
 pytest-cov
 pandas
@@ -12,6 +12,6 @@ scipy
 numpy
 pyyaml
 cloudpickle==3.1.1
-numerai-tools
+numerai-tools==0.5.3
 ipykernel
 tqdm

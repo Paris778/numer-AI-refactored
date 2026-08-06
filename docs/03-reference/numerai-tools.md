@@ -98,6 +98,22 @@ This reference keeps only Classic-relevant utilities.
 - most scoring methods require sorted indices and no NaNs
 - `validate_values` enforces near-exclusive `(0, 1)` style predictions with non-zero variance
 
+## Golden Sources of Truth (verified against numerai-tools 0.5.3)
+
+The installed package is the ultimate authority on API surface — open the source before guessing signatures:
+`.venv/Lib/site-packages/numerai_tools/scoring.py` (scoring oracle) and `.venv/Lib/site-packages/numerai_tools/submissions.py` (submission contract). Version pinned in `requirements.txt`.
+
+Implementation facts verified in 0.5.3 (relevant to parity and submission code):
+
+- `numerai_tools/__init__.py` is **empty** — no top-level exports; always `from numerai_tools.scoring import ...`.
+- Most scoring functions **assert sorted indices and no NaNs** (`rank_series`, `gaussian`, `power`, `neutralize`, `filter_sort_index` family).
+- `correlation_contribution` (MMC): targets in [0, 1] are scaled by **×4** before centering; predictions are orthogonalized to the meta model via `orthogonalize` (fast vector projection); the score is `(centered_target @ neutral_preds) / n`. See `docs/06-evaluation/evaluation-suite-bible.md` §5.2 for the parity rule.
+- `numerai_corr` (CORR): `target_pow15=True` by default; set `False` when passing raw returns.
+- `neutralize` uses `np.linalg.lstsq(rcond=1e-6)` with an intercept column of 1s (not `pinv`); the repo's `nmr/_transforms.neutralize_array` uses `pinv(design, rcond=1e-6)` — equivalent in exact arithmetic, numerically different (parity tests bound the gap). It also sets zero-std columns to NaN; the repo returns them unchanged (documented divergence).
+- `power` asserts the sign-preserving transform keeps ≥ 0.9 correlation with the input.
+- `clean_submission(..., rank_and_fill=True)` = tie-kept rank then fill NaN with 0.5 — Numerai's own pre-scoring prep.
+- `validate_values` enforces predictions in (0, 1) (boundary-tolerant), non-zero std, no NaNs.
+
 ## Usage Boundary
 - use `numerai_tools` for offline Classic scoring, neutralization, and pre-upload validation
 - use `numerapi` for live API operations (download/upload/account/staking)

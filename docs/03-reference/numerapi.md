@@ -29,6 +29,11 @@ Use numerai_tools for local scoring math and validation utilities.
 - numerapi.utils (request, parsing, download helpers)
 - numerapi.cli (command-line wrapper)
 
+## Versions & Source (verified against numerapi 2.22.0)
+
+- Pinned in `requirements.txt`. The real GraphQL implementations live in `numerapi/base_api.py` (`Api`); `numerapi/numerapi.py` adds the Classic conveniences (`NumerAPI`); `numerapi/__init__.py` exports `NumerAPI`, `SignalsAPI`, `CryptoAPI`.
+- Open the installed source (`.venv/Lib/site-packages/numerapi/…`) before guessing method signatures or edge behavior — numerapi behavior varies by version.
+
 ## Authentication
 
 Token format:
