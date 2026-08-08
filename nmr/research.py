@@ -18,6 +18,7 @@ from nmr.config import ExperimentConfig, set_global_seeds
 from nmr.data import IngestionAgent
 from nmr.ensemble import Ensembler
 from nmr.evaluation import EvaluationEngine, MetricSummary
+from nmr.inference import ac_adjusted_sharpe
 from nmr.models import ModelOrchestrator
 from nmr.risk import NeutralizationEngine
 from nmr.splitter import PurgedEraSplitter
@@ -201,6 +202,19 @@ def _pred_feature_pearson(pred: np.ndarray, features: np.ndarray) -> np.ndarray:
     return np.where(np.isfinite(corrs), corrs, 0.0)
 
 
+def _per_era_ac_sharpe(per_era: dict[str, float], *, horizon: str = "20D") -> float:
+    """Autocorrelation-adjusted Sharpe of a per-era metric series.
+
+    Chronological order is mandatory for autocorrelation: ``per_era``'s
+    insertion order follows the frame's lexicographic era sort ("1","10","11",...)
+    which would corrupt the AC computation. Sort era keys numerically
+    (scorecard._sorted_numeric_keys idiom); era labels are numeric strings.
+    """
+    sorted_keys = sorted(per_era, key=int)
+    series = [per_era[k] for k in sorted_keys]
+    return ac_adjusted_sharpe(series, horizon=horizon)
+
+
 def _held_out_metric(config: ExperimentConfig, *, metric_name: str) -> float:
     set_global_seeds(config.run.seed)
     agent = IngestionAgent(config.data)
@@ -301,6 +315,8 @@ def _held_out_metric(config: ExperimentConfig, *, metric_name: str) -> float:
         target_col=main_target,
         era_col="era",
     )
+    if metric_name == "corr_sharpe_ac":
+        return _per_era_ac_sharpe(per_era, horizon="20D")
     summary = evaluator.summarize(per_era)
     if not hasattr(summary, metric_name):
         raise ValueError(f"Unknown metric {metric_name!r}")

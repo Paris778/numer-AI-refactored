@@ -6,6 +6,7 @@ import json
 
 import numpy as np
 import polars as pl
+import pytest
 
 from nmr.config import (
     DataConfig,
@@ -16,9 +17,12 @@ from nmr.config import (
     SplitConfig,
 )
 from nmr.evaluation import EvaluationEngine
+from nmr.inference import ac_adjusted_sharpe
 from nmr.research import (
     HyperparameterSweep,
+    _held_out_metric,
     _held_out_partition,
+    _per_era_ac_sharpe,
     feature_exposure_report,
     neutralization_frontier,
 )
@@ -163,3 +167,45 @@ def test_feature_exposure_report_empty_oof_returns_zero_exposures() -> None:
     assert report.get_column("feature").to_list() == ["f1"]
     assert report.get_column("mean_abs_exposure").to_list() == [0.0]
     assert report.get_column("max_abs_exposure").to_list() == [0.0]
+
+
+def test_per_era_ac_sharpe_sorts_eras_chronologically() -> None:
+    # Eras 1..12: insertion order deliberately shuffled; the numeric sort must
+    # recover the chronological series ("1","2",...,"12", NOT lexicographic
+    # "1","10","11","12","2",...).
+    values = {str(era): 0.05 * (era % 7) - 0.1 for era in range(1, 13)}
+    items = list(values.items())
+    rng = np.random.default_rng(3)
+    idx = rng.permutation(len(items))
+    shuffled = dict(items[int(i)] for i in idx)
+
+    got = _per_era_ac_sharpe(shuffled, horizon="20D")
+    chronological = [values[str(era)] for era in sorted(range(1, 13))]
+    expected = ac_adjusted_sharpe(chronological, horizon="20D")
+    assert got == expected
+
+
+def test_per_era_ac_sharpe_differs_from_lexicographic_order() -> None:
+    # Prove the sort matters: a lexicographic series gives a different AC value.
+    values = {str(era): 0.05 * (era % 7) - 0.1 for era in range(1, 13)}
+    lexicographic = [values[k] for k in sorted(values)]  # "1","10","11","12","2",...
+    assert _per_era_ac_sharpe(values, horizon="20D") != ac_adjusted_sharpe(
+        lexicographic, horizon="20D"
+    )
+
+
+def test_per_era_ac_sharpe_requires_two_eras() -> None:
+    with pytest.raises(ValueError, match="at least 2"):
+        _per_era_ac_sharpe({"1": 0.1}, horizon="20D")
+
+
+def test_held_out_metric_supports_corr_sharpe_ac(tmp_path) -> None:
+    cfg = _write_data(tmp_path)  # existing fixture: vtest, fast preset, small trees
+    value = _held_out_metric(cfg, metric_name="corr_sharpe_ac")
+    assert np.isfinite(value)
+
+
+def test_held_out_metric_still_rejects_unknown_metric(tmp_path) -> None:
+    cfg = _write_data(tmp_path)
+    with pytest.raises(ValueError, match="Unknown metric"):
+        _held_out_metric(cfg, metric_name="bogus_metric")
