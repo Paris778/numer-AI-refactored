@@ -414,3 +414,154 @@ def feature_summary(
             }
         )
     return pl.DataFrame(rows)
+
+
+@dataclass(frozen=True)
+class FeatureCorrResult:
+    """Era-averaged feature correlation structure."""
+
+    matrix: np.ndarray  # float32 (N, N) symmetric
+    feature_order: tuple[str, ...]
+    top_pairs: pl.DataFrame
+    summary: dict
+
+
+def _rank_gaussianize_chunk(
+    chunk: pl.DataFrame,
+    feature_list: Sequence[str],
+    era_col: str,
+) -> np.ndarray | None:
+    """Complete-case per-era rank-gaussianized feature matrix, or None."""
+    clean = chunk.select([era_col, *feature_list]).drop_nulls()
+    if clean.height < 2:
+        return None
+    out = np.empty((clean.height, len(feature_list)), dtype=np.float64)
+    for j, feature in enumerate(feature_list):
+        col = clean.get_column(feature).cast(pl.Float64).to_numpy()
+        ranks = scipy.stats.rankdata(col, method="average")
+        out[:, j] = scipy.stats.norm.ppf(ranks / (col.size + 1))
+    return out
+
+
+def feature_correlation_structure(
+    chunks: Iterable[pl.DataFrame],
+    feature_cols: Sequence[str],
+    era_col: str = "era",
+) -> FeatureCorrResult:
+    """Equal-era-weighted mean feature correlation matrix.
+
+    Per era: complete-case rows only, rank-gaussianized per feature, then the
+    full correlation matrix; matrices are summed and divided by the era count.
+    Degenerate columns (zero variance) contribute 0.0.
+    """
+    feature_list = list(feature_cols)
+    if not feature_list:
+        raise ValueError("feature_cols must contain at least one feature")
+    n = len(feature_list)
+    acc = np.zeros((n, n), dtype=np.float64)
+    n_eras = 0
+    for chunk in chunks:
+        gauss = _rank_gaussianize_chunk(chunk, feature_list, era_col)
+        if gauss is None:
+            continue
+        with np.errstate(invalid="ignore", divide="ignore"):
+            mat = np.corrcoef(gauss, rowvar=False)
+        mat = np.where(np.isfinite(mat), mat, 0.0)
+        acc += mat
+        n_eras += 1
+    if n_eras == 0:
+        raise ValueError("no usable eras in feature_correlation_structure input")
+    mean_mat = (acc / n_eras).astype(np.float32)
+
+    iu = np.triu_indices(n, k=1)
+    abs_vals = np.abs(mean_mat[iu])
+    order = np.argsort(abs_vals)[::-1][:100]
+    top_rows = [
+        {
+            "feature_a": feature_list[iu[0][k]],
+            "feature_b": feature_list[iu[1][k]],
+            "mean_corr": float(mean_mat[iu[0][k], iu[1][k]]),
+        }
+        for k in order
+    ]
+    summary = {
+        "mean_abs_corr": float(abs_vals.mean()) if abs_vals.size else 0.0,
+        "p50_abs_corr": float(np.percentile(abs_vals, 50)) if abs_vals.size else 0.0,
+        "p90_abs_corr": float(np.percentile(abs_vals, 90)) if abs_vals.size else 0.0,
+        "n_pairs": int(abs_vals.size),
+    }
+    return FeatureCorrResult(
+        matrix=mean_mat,
+        feature_order=tuple(feature_list),
+        top_pairs=pl.DataFrame(
+            top_rows,
+            schema={
+                "feature_a": pl.Utf8,
+                "feature_b": pl.Utf8,
+                "mean_corr": pl.Float64,
+            },
+        ),
+        summary=summary,
+    )
+
+
+def within_set_redundancy(
+    result: FeatureCorrResult,
+    sets: Mapping[str, Sequence[str]],
+) -> pl.DataFrame:
+    """Per-feature-set pairwise |corr| summary, indexed from the full matrix."""
+    index = {f: i for i, f in enumerate(result.feature_order)}
+    rows = []
+    for name in sorted(sets):
+        members = [f for f in sets[name] if f in index]
+        if len(members) < 2:
+            rows.append(
+                {
+                    "feature_set": name,
+                    "n_features": len(members),
+                    "mean_abs_corr": None,
+                    "median_abs_corr": None,
+                    "max_abs_corr": None,
+                    "n_pairs": 0,
+                }
+            )
+            continue
+        idx = [index[f] for f in members]
+        sub = result.matrix[np.ix_(idx, idx)]
+        iu = np.triu_indices(len(idx), k=1)
+        abs_vals = np.abs(sub[iu])
+        rows.append(
+            {
+                "feature_set": name,
+                "n_features": len(members),
+                "mean_abs_corr": float(abs_vals.mean()),
+                "median_abs_corr": float(np.median(abs_vals)),
+                "max_abs_corr": float(abs_vals.max()),
+                "n_pairs": int(abs_vals.size),
+            }
+        )
+    return pl.DataFrame(rows)
+
+
+def cross_set_membership(sets: Mapping[str, Sequence[str]]) -> dict:
+    """Set sizes and pairwise empirical subset relations."""
+    names = sorted(sets)
+    set_rows = [
+        {"feature_set": name, "n_features": len(set(sets[name]))} for name in names
+    ]
+    rel_rows = []
+    for a in names:
+        for b in names:
+            if a == b:
+                continue
+            rel_rows.append(
+                {
+                    "a": a,
+                    "b": b,
+                    "a_subset_of_b": set(sets[a]).issubset(set(sets[b])),
+                }
+            )
+    return {
+        "sets": pl.DataFrame(set_rows),
+        "subset_relations": pl.DataFrame(rel_rows),
+    }

@@ -2257,7 +2257,7 @@ def test_cross_set_membership_subset_relations() -> None:
         "all": ["a", "b", "c", "d"],
     }
     out = cross_set_membership(sets)
-    assert out["sets"]["n_features"].to_list() == [2, 3, 4]
+    assert out["sets"]["n_features"].to_list() == [4, 3, 2]  # name-sorted
     relations = out["subset_relations"]
     rel = {
         (r["a"], r["b"]): r["a_subset_of_b"] for r in relations.iter_rows(named=True)
@@ -2326,7 +2326,8 @@ def feature_correlation_structure(
         gauss = _rank_gaussianize_chunk(chunk, feature_list, era_col)
         if gauss is None:
             continue
-        mat = np.corrcoef(gauss, rowvar=False)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            mat = np.corrcoef(gauss, rowvar=False)
         mat = np.where(np.isfinite(mat), mat, 0.0)
         acc += mat
         n_eras += 1

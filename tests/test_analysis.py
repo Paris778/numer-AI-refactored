@@ -343,3 +343,106 @@ def test_feature_summary_requires_era_and_features() -> None:
         feature_summary([pl.DataFrame({"era": ["0001"], "f1": [1.0]})], ["f1", "missing"])
     with pytest.raises(ValueError):
         feature_summary([pl.DataFrame({"x": [1.0]})], ["f1"])
+
+
+from nmr.analysis import (
+    FeatureCorrResult,
+    cross_set_membership,
+    feature_correlation_structure,
+    within_set_redundancy,
+)
+
+
+def test_feature_correlation_structure_equal_era_weight() -> None:
+    # era sizes differ: 0001 has 10 rows, 0002 has 4 rows; both have
+    # f1~f2 near-perfectly correlated and f1~f3 anti-correlated
+    rng = np.random.default_rng(9)
+
+    def _era(era: str, n: int) -> pl.DataFrame:
+        base = rng.normal(size=n)
+        return pl.DataFrame(
+            {
+                "era": [era] * n,
+                "f1": base,
+                "f2": base + rng.normal(scale=0.01, size=n),
+                "f3": -base,
+            }
+        )
+
+    chunks = [_era("0001", 10), _era("0002", 4)]
+    result = feature_correlation_structure(chunks, ["f1", "f2", "f3"])
+    assert isinstance(result, FeatureCorrResult)
+    assert result.matrix.shape == (3, 3)
+    mat = result.matrix
+    assert np.allclose(mat[0, 1], 1.0, atol=1e-3)
+    assert np.allclose(mat[0, 2], -1.0, atol=1e-3)
+    assert np.allclose(mat, mat.T, atol=1e-12)  # symmetric
+    assert result.feature_order == ("f1", "f2", "f3")
+    assert result.top_pairs.columns == ["feature_a", "feature_b", "mean_corr"]
+
+
+def test_feature_correlation_structure_zero_variance_era() -> None:
+    chunks = [
+        pl.DataFrame(
+            {"era": ["0001"] * 3, "f1": [1.0, 2.0, 3.0], "f2": [1.0, 1.0, 1.0]}
+        ),
+        pl.DataFrame(
+            {"era": ["0002"] * 3, "f1": [1.0, 2.0, 3.0], "f2": [4.0, 5.0, 6.0]}
+        ),
+    ]
+    result = feature_correlation_structure(chunks, ["f1", "f2"])
+    # era 0001 f2 has zero variance -> 0.0 correlation; era 0002 -> ~1.0;
+    # equal era weight -> ~0.5
+    assert np.isclose(result.matrix[0, 1], 0.5, atol=1e-6)
+
+
+def test_feature_correlation_structure_no_eras_raises() -> None:
+    with pytest.raises(ValueError):
+        feature_correlation_structure(
+            [pl.DataFrame({"era": ["0001"], "f1": [1.0]})], ["f1"]
+        )
+
+
+def test_within_set_redundancy() -> None:
+    rng = np.random.default_rng(13)
+    chunks = [
+        pl.DataFrame(
+            {
+                "era": [f"{e + 1:04d}"] * 8,
+                "fa": rng.normal(size=8),
+                "fb": rng.normal(size=8),
+                "fc": rng.normal(size=8),
+            }
+        )
+        for e in range(3)
+    ]
+    result = feature_correlation_structure(chunks, ["fa", "fb", "fc"])
+    sets = {"pair": ["fa", "fb"], "solo": ["fa"], "all3": ["fa", "fb", "fc"]}
+    out = within_set_redundancy(result, sets)
+    assert out["feature_set"].to_list() == ["all3", "pair", "solo"]  # sorted
+    row_solo = out.filter(pl.col("feature_set") == "solo").row(0, named=True)
+    assert row_solo["n_pairs"] == 0
+    assert row_solo["mean_abs_corr"] is None
+    row_pair = out.filter(pl.col("feature_set") == "pair").row(0, named=True)
+    assert row_pair["n_pairs"] == 1
+    assert np.isclose(
+        row_pair["mean_abs_corr"], float(np.abs(result.matrix[0, 1])), atol=1e-12
+    )
+
+
+def test_cross_set_membership_subset_relations() -> None:
+    sets = {
+        "small": ["a", "b"],
+        "medium": ["a", "b", "c"],
+        "all": ["a", "b", "c", "d"],
+    }
+    out = cross_set_membership(sets)
+    assert out["sets"]["n_features"].to_list() == [4, 3, 2]  # name-sorted
+    relations = out["subset_relations"]
+    rel = {
+        (r["a"], r["b"]): r["a_subset_of_b"] for r in relations.iter_rows(named=True)
+    }
+    assert rel[("small", "medium")] is True
+    assert rel[("small", "all")] is True
+    assert rel[("medium", "all")] is True
+    assert rel[("all", "small")] is False
