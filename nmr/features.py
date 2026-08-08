@@ -60,6 +60,39 @@ _SCREEN_COLUMNS = (
 )
 
 
+def _per_era_pearson(
+    frame: pl.DataFrame,
+    feature_cols: Sequence[str],
+    target_col: str,
+    era_col: str,
+) -> tuple[dict[str, np.ndarray], set[str]]:
+    """Per-era Pearson CORR of each feature vs ``target_col``, keyed by era label.
+
+    Returns ``(corrs_by_era, degenerate_eras)``. A degenerate era (fewer than
+    2 non-null rows, or a constant target) contributes a zero vector and its
+    label is recorded in ``degenerate_eras``. This is the single implementation
+    of per-era feature-target correlation: both ``feature_stability_screen``
+    and ``nmr.analysis.feature_ic_by_era`` route through it.
+    """
+    feature_list = list(feature_cols)
+    per_era: dict[str, np.ndarray] = {}
+    degenerate: set[str] = set()
+    for part in frame.select([era_col, target_col, *feature_list]).partition_by(
+        era_col, maintain_order=True
+    ):
+        era = str(part.get_column(era_col).to_list()[0])
+        clean = part.drop_nulls()
+        target = clean.get_column(target_col).cast(pl.Float64).to_numpy()
+        zero_target_variance = target.size > 0 and bool(np.all(target == target[0]))
+        if clean.height < 2 or target.size == 0 or zero_target_variance:
+            per_era[era] = np.zeros(len(feature_list), dtype=float)
+            degenerate.add(era)
+            continue
+        features = clean.select(feature_list).cast(pl.Float64).to_numpy()
+        per_era[era] = _feature_target_pearson(features, target)
+    return per_era, degenerate
+
+
 def feature_stability_screen(
     frame: pl.DataFrame,
     *,
@@ -89,18 +122,7 @@ def feature_stability_screen(
     if missing:
         raise ValueError(f"frame missing required columns: {sorted(missing)}")
 
-    per_era: dict[str, np.ndarray] = {}
-    for part in frame.select([era_col, target_col, *feature_list]).partition_by(
-        era_col, maintain_order=True
-    ):
-        era = str(part.get_column(era_col).to_list()[0])
-        clean = part.drop_nulls()
-        if clean.height < 2:
-            per_era[era] = np.zeros(len(feature_list), dtype=float)
-            continue
-        target = clean.get_column(target_col).cast(pl.Float64).to_numpy()
-        features = clean.select(feature_list).cast(pl.Float64).to_numpy()
-        per_era[era] = _feature_target_pearson(features, target)
+    per_era, _ = _per_era_pearson(frame, feature_list, target_col, era_col)
 
     if not per_era:
         return pl.DataFrame(

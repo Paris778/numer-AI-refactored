@@ -88,10 +88,10 @@ def test_per_era_pearson_shapes_and_values() -> None:
 def test_per_era_pearson_degenerate_eras() -> None:
     frame = pl.DataFrame(
         {
-            "era": ["0001", "0001", "0002", "0002", "0002"],
+            "era": ["0001", "0002", "0002", "0002", "0002"],
             "feature_alpha": [1.0, 2.0, 1.0, 1.0, 1.0],
             "feature_beta": [3.0, 4.0, 5.0, 5.0, 5.0],
-            "target": [0.1, 0.2, 1.0, 1.0, 1.0],
+            "target": [0.1, 1.0, 1.0, 1.0, 1.0],
         }
     )
     corrs, degenerate = _per_era_pearson(
