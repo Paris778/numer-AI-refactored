@@ -62,6 +62,7 @@ from .meta import (
     promotion_verdict,
 )
 from .models import CVResult, ModelOrchestrator
+from .opt import bayesian_sweep
 from .payout import (
     PayoutResult,
     PayoutSeries,
@@ -113,6 +114,7 @@ __all__ = [
     "ingest_tutorial_prediction_batch",
     "assert_null_floor",
     "assert_slice1_monotone",
+    "bayesian_sweep",
     "canonical_scorecards_bytes",
     "scorecards_sha256",
     "CampaignLog",

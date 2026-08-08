@@ -155,7 +155,7 @@ Canonical presets (`_CANONICAL_PRESETS`, mirroring Numerai's published benchmark
 | standard | 20 000 | 0.001 | 6 | 64 | 0.1 | — |
 | deep | 30 000 | 0.001 | 10 | 1 024 | 0.1 | `min_data_in_leaf=10000` |
 
-LightGBM adds `objective="regression"`, `random_state=seed`, `n_jobs=1`, `deterministic=True`, `force_col_wise=True`. XGBoost translates `num_leaves→max_leaves`, `min_data_in_leaf→min_child_weight`, adds `reg:squarederror` + `seed`. `ModelConfig.params` overrides presets key-by-key.
+LightGBM adds `objective="regression"`, `random_state=seed`, `n_jobs=1`, `deterministic=True`, `force_col_wise=True`. XGBoost translates `num_leaves→max_leaves`, `min_data_in_leaf→min_child_weight`, adds `reg:squarederror` + `seed`. `ModelConfig.params` overrides presets key-by-key. `resolve_model_params(preset, params)` is the single source of truth for that resolution (`model.params` wins over `_CANONICAL_PRESETS[preset]`); `ModelOrchestrator._resolved_params` delegates to it, as does the Bayesian sweep baseline anchor (§S).
 
 Presets mirror Numerai's published benchmark params and walk-forward purge convention in [docs/01-canon/models.md](docs/01-canon/models.md).
 
@@ -209,6 +209,7 @@ The evaluation spec of record (metrics, gates, build slices E1–E6) is [docs/06
 ### L. Research & Robustness — `nmr/research.py`, `nmr/robustness.py`
 
 - `HyperparameterSweep(base_config, *, metric="sharpe").run(space, *, n_trials, seed) -> SweepResult(trials, best_params, best_value)` — Cartesian product of the space, shuffled, sampled to `n_trials`; each trial overrides `model.params` and evaluates on a purged held-out split (final ~20% of eras).
+- `_held_out_metric(config, *, metric_name) -> float` — the shared held-out evaluation behind `HyperparameterSweep` and `bayesian_sweep` (§S): trains multi-target OOF on the train partition, learns ensemble weights, anchor-fits on train, then blends + neutralizes the held-out partition and computes per-era CORR. Metric set: `mean`/`std`/`sharpe`/`max_drawdown` via `MetricSummary` attributes, plus `corr_sharpe_ac` via `_per_era_ac_sharpe(per_era, horizon="20D")` (metric-resolution contract: §S); unknown names raise `ValueError`.
 - `neutralization_frontier(oof, *, feature_cols, proportions, ...) -> NeutralizationFrontier(proportions, metrics)` — sweeps neutralization proportion, per-era CORR + `MetricSummary` at each point.
 - `feature_exposure_report(oof, *, feature_cols, ...)` — per-feature mean/max absolute **Pearson correlation** with predictions, vectorized via one `partition_by(era)` pass + per-era matrix op (`_pred_feature_pearson`). Definition change dated 2026-08-05 (previously power-1.5 Numerai CORR per feature) — recorded exposure numbers are **not comparable** across that boundary.
 - `adversarial_perturbation(...) -> PerturbationResult(alpha, n_eras, ceiling_stability, manifold_stability, gap, effective_perturb_frac)` — cell-level ±1 bin flips (features are Int8 ∈ [0,4]) plus circular block swaps from train; per-era Spearman stability of predictions.
@@ -313,6 +314,21 @@ A campaign is a named batch of experiment configs whose runs share a hypothesis;
 
 CLI contract (`run_campaign.py`, zero business logic): `--config` (repeatable, required), `--name` (required), `--registry` (default `artifacts/registry`), `--campaigns-dir` (default `artifacts/campaigns`), `--deploy` (passes `deploy=True` to `ExperimentRunner.run`), `--dry-run` (prints computed `run_id`s without training or writing — the registry is not even constructed). Per config: an invalid config is logged and recorded as `status="error"` with the message; an already-recorded `run_id` is `"skipped"`; a successful run is recorded via `RunRegistry.record` as `"recorded"`. Prints one `status<TAB>config_path<TAB>run_id` line per run; exits `0` when no run failed, `1` otherwise (`--dry-run` always exits `0`).
 
+### S. Bayesian HPO — `nmr/opt.py`
+
+`bayesian_sweep` is the single Optuna-integration point (user-granted dependency, pinned `optuna==4.9.0` in `requirements.txt`, imported only here). Spaces are declarative dicts; the objective is harness-internal (`research._held_out_metric`, §L); sweeps are seeded, single-threaded, and deterministic per environment.
+
+`bayesian_sweep(base_config, space, *, n_trials, seed, metric="sharpe", n_startup_trials=10, enqueue_base_config=True, n_jobs=1) -> SweepResult`
+
+- **Space schema.** `space` maps a parameter name to a spec dict with `kind` ∈ `("float", "int", "categorical")`. Float/int specs take `low`/`high` (both required, `low ≤ high`) plus optional `log` (requires `low > 0`) and, for ints, `step` (positive int, mutually exclusive with `log`). Categorical specs take `choices` — a non-empty list of JSON primitives (`str`/`int`/`float`/`bool`). Unknown spec keys, invalid kinds or bounds, or non-primitive choices raise `ValueError` **before any trial** (an empty space raises too).
+- **Metric resolution.** `metric` ∈ `("mean", "std", "sharpe", "max_drawdown", "corr_sharpe_ac")`; anything else raises `ValueError` at call time. `mean`/`std`/`sharpe`/`max_drawdown` come from `MetricSummary` attributes of the per-era CORR summary; `corr_sharpe_ac` comes from `research._per_era_ac_sharpe(per_era, horizon="20D")`, which sorts era keys numerically (`sorted(per_era, key=int)`) before AC adjustment — the frame's lexicographic era order (`"1","10","11",…`) would corrupt the autocorrelation.
+- **Baseline anchor.** With `enqueue_base_config=True` (default), the study enqueues the resolved baseline before `optimize`: `resolve_model_params(base_config.model.preset, base_config.model.params)` (§G) intersected with the space keys — so **Trial 0 is the resolved baseline** (preset defaults overridden by `model.params`), unless no space key overlaps the resolved params.
+- **Parameter resolution.** Each trial overrides `model.params` via `_override_config(base_config, params)`; `model.params` wins over `_CANONICAL_PRESETS[preset]` key-by-key, and `resolve_model_params` is the single source of truth for that resolution (§G — this satisfies its ARCHITECTURE.md §S docstring reference).
+- **Determinism contract.** Seeded TPE sampler (`TPESampler(seed=..., n_startup_trials=...)` — deterministic-by-default since Optuna 4.x, which removed the 3.x `deterministic` flag; verified on 4.9.0) with in-memory storage. `n_jobs` must be `1` (`ValueError` otherwise): parallel trials break TPE determinism. Reproducibility is **per environment** (same caveat as GPU vs CPU OOF divergence, §6) and rests on the `optuna==4.9.0` pin — `optuna` is not part of the run_id environment fingerprint (`_environment_fingerprint` covers numpy/polars/pandas/lightgbm/xgboost only), so changing the pin changes the search without the fingerprint flagging it.
+- **Error handling.** Any objective exception (from `_held_out_metric`) raises `optuna.exceptions.TrialPruned` — never dummy numerics — and `gc.collect()` runs per trial. `SweepResult` is constructed post-hoc from `study.trials`: `trial_id`, `params_json` (sorted keys), `metric_value` (`t.value` for `COMPLETE` trials, else `None`), `metric`; rows sorted by `metric_value` desc with `trial_id` tiebreak, nulls last. If no trial completed, `best_params={}` and `best_value=nan`.
+
+`SweepResult` is the shared frozen dataclass (§L): `trials: pl.DataFrame`, `best_params: dict[str, Any]`, `best_value: float`.
+
 ---
 
 ## 3. Module Dependency Graph
@@ -333,6 +349,7 @@ inference.py (leaf — NumPy/SciPy only)
 meta.py      ──> evaluation, inference
 payout.py    ──> inference
 research.py  ──> config, data, models, splitter, risk, evaluation
+opt.py       ──> config (ExperimentConfig), models (resolve_model_params), research (_held_out_metric, _override_config, SweepResult)
 robustness.py──> inference, _transforms
 scorecard.py ──> evaluation, inference, payout, research, robustness
 benchmark.py ──> scorecard, evaluation, data

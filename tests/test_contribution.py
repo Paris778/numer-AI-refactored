@@ -367,3 +367,10 @@ def test_public_api_includes_harness_symbols() -> None:
     ):
         assert name in nmr.__all__
         assert getattr(nmr, name) is not None
+
+
+def test_public_api_includes_bayesian_sweep() -> None:
+    import nmr
+
+    assert "bayesian_sweep" in nmr.__all__
+    assert nmr.bayesian_sweep is not None

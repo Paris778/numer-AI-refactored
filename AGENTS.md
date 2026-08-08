@@ -30,7 +30,7 @@ These four files obey a strict **Single Source of Truth (SSOT) hierarchy**. One 
 
 ## 1. Agent Identity & Mission
 
-You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (387 tests). No lint/type-check tooling is configured — pytest is the sole automated gate, enforced by CI (`.github/workflows/ci.yml`).
+You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (388 tests). No lint/type-check tooling is configured — pytest is the sole automated gate, enforced by CI (`.github/workflows/ci.yml`).
 
 Your mission:
 
@@ -79,7 +79,7 @@ If a request violates any of these, **decline the violating component** and offe
 - 🚫 **Never** include wall-clock timings, absolute paths, or environment-variable state in canonical hashes.
 - 🚫 **Never** import from or modify `../numer-AI/` (read-only legacy — mine it for logic, never import it).
 - 🚫 **Never** introduce unrelated refactoring, cosmetic tweaks, or scope creep.
-- 🚫 **Never** add third-party dependencies when the stdlib, NumPy/SciPy, or Polars can do the job.
+- 🚫 **Never** add third-party dependencies when the stdlib, NumPy/SciPy, or Polars can do the job. **EXCEPTION (user-granted 2026-08-08): Optuna** (pinned in `requirements.txt`) for the HPO path — imported only in `nmr/opt.py`; parallel trial execution is forbidden (`n_jobs=1`).
 - 🚫 **Never** suppress or silently swallow exceptions.
 
 ---
@@ -137,6 +137,7 @@ When modifying or generating code, enforce these seven invariants:
 | Change payout proxy / downside metrics | `nmr/payout.py` |
 | Change scorecard fields / evaluation flow | `nmr/scorecard.py` — `MetricScorecard`, `evaluate_model` |
 | Change HPO sweeps / neutralization frontier | `nmr/research.py` |
+| Change HPO search strategy | `nmr/opt.py` — `bayesian_sweep` (Optuna, user-granted dep) |
 | Change perturbation/horizon/regime diagnostics | `nmr/robustness.py` |
 | Change benchmark baselines / gates | `nmr/benchmark.py` + `benchmark_runner.py` |
 | Change campaign orchestration | `nmr/campaign.py` + `run_campaign.py` (spec: `ARCHITECTURE.md` §R) |
@@ -189,7 +190,7 @@ Never invent a `numerai_tools` / `numerapi` signature — open the installed sou
 .\.venv\Scripts\python -m pytest tests/test_benchmark_slice1.py -q                    # determinism hashes
 
 # Pre-sign-off gate (mandatory before delivering work)
-.\.venv\Scripts\python -m pytest -q                                                    # full 387-test suite
+.\.venv\Scripts\python -m pytest -q                                                    # full 388-test suite
 .\.venv\Scripts\python benchmark_runner.py --fast-mode --output artifacts/benchmark_scores_smoke.csv --labels-output artifacts/benchmark_test_era_labels_smoke.csv   # real-data smoke (writes artifacts/*_smoke.csv)
 ```
 
