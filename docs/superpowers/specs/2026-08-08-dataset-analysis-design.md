@@ -249,3 +249,22 @@ Reads the dumps → renders `docs/04-research/dataset-analysis-YYYY-MM.md` (YYYY
 - **numerapi API drift** (version format, dataset listing) — malformed version strings raise loudly rather than being silently mishandled; policy tuples are intersected with the live listing.
 - **LLM report readability** — no charts by design; dense tables + schema blocks are the contract; dumps carry full precision.
 - **Phase-0 refactor risk** — `_per_era_pearson` extraction must not change `feature_stability_screen` output; existing screen tests are the guard.
+
+---
+
+## Addendum — v5.3 migration (2026-08-08, user decision)
+
+While executing Phase 4 (production run), the refresh script's version alert fired:
+**Numerai now ships v5.3** (`all` = v5.2's 2748 + new `quantum` family of 807;
+`small`/`medium` and all other sets identical; same 41 targets). The user chose a
+**full v5.3 migration** over analyzing v5.2:
+
+- `CURRENT_DATA_VERSION` / `DataConfig.version` / `robustness.data_version` /
+  `configs/*.yaml` all pinned to `v5.3` (drift-guard test enforces consistency).
+- Real-data tests and docs updated to `data/v5.3/`.
+- The analysis pipeline is version-agnostic (`resolve_feature_sets` reads
+  `features.json` dynamically), so no module logic changed; only the version pin.
+- The deliverable report documents v5.3 (3555-feature `all` universe).
+
+Design sections above that say "v5.2" describe the version pinned at design time;
+the mechanics are identical for v5.3.

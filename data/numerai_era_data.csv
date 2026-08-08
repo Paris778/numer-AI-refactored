@@ -5,3 +5,6 @@ date,dataset,start_era,end_era,round_id
 2026-06-20,train,0001,0574,
 2026-06-20,validation,0575,1208,
 2026-06-20,live,X,X,1294.0
+2026-08-08,train,0001,0574,
+2026-08-08,validation,0575,1231,
+2026-08-08,live,X,X,1329.0

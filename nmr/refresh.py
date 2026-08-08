@@ -24,7 +24,7 @@ __all__ = [
 
 # The data version this repo's pipeline targets. Drift-guarded by a test
 # asserting equality with configs/first_model.yaml's data.version.
-CURRENT_DATA_VERSION = "v5.2"
+CURRENT_DATA_VERSION = "v5.3"
 
 # Files that change only when Numerai ships a new data version.
 STATIC_FILES = ("features.json", "train.parquet", "train_benchmark_models.parquet")
@@ -55,7 +55,7 @@ def _parse_version(v: str) -> tuple[int, int]:
     if match is None:
         raise ValueError(
             f"Unrecognized dataset version {v!r}: expected 'v<major>.<minor>' "
-            "(e.g. 'v5.2'); patch components are not supported"
+            "(e.g. 'v5.3'); patch components are not supported"
         )
     return int(match.group(1)), int(match.group(2))
 

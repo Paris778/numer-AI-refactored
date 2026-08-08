@@ -28,7 +28,7 @@ A **lean, deterministic research framework** for the [Numerai Classic tournament
 ├── nmr/                       # the framework package — the ONLY tested boundary
 │   ├── __init__.py            # public API surface (keep imports + __all__ in sync)
 │   ├── config.py              # typed frozen YAML config, seeding, path resolution
-│   ├── data.py                # IngestionAgent — lazy Polars scans over data/v5.2
+│   ├── data.py                # IngestionAgent — lazy Polars scans over data/v5.3
 │   ├── splitter.py            # PurgedEraSplitter — leakage-safe era folds
 │   ├── _transforms.py         # shared rank / gaussianize / power-1.5 transforms
 │   ├── evaluation.py          # dual-backend CORR/MMC/FNC/BMC/CWMM metric engine
@@ -53,7 +53,7 @@ A **lean, deterministic research framework** for the [Numerai Classic tournament
 │   ├── example.yaml           # annotated full schema
 │   └── first_model.yaml       # current competitive config (4×20D-target ensemble)
 ├── tests/                     # 488 tests (unit / parity / determinism / real-data tests)
-├── data/                      # local Numerai v5.2 assets (parquets git-ignored)
+├── data/                      # local Numerai v5.3 assets (parquets git-ignored)
 ├── artifacts/                 # runs, registry, caches, campaigns, benchmark CSVs (generated)
 ├── docs/                      # curated Numerai knowledge base — start at docs/DOCS_README.md
 ├── notebooks/                 # researcher control plane (thin, zero business logic)
@@ -91,7 +91,7 @@ Numerai API credentials (for `numerapi` download/upload) are used only in notebo
 
 ## Data Assets
 
-The framework expects Numerai **v5.2** assets in `data/v5.2/` (downloadable via `refresh_data.py`; see [Refreshing data](#refreshing-data)):
+The framework expects Numerai **v5.3** assets in `data/v5.3/` (downloadable via `refresh_data.py`; see [Refreshing data](#refreshing-data)):
 
 | File | Purpose |
 |---|---|

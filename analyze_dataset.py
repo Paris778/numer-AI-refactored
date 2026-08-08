@@ -221,11 +221,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             pl.concat([s.collect() for s in sources], how="align")
             .join(target_side, on=["era", "id"], how="inner")
         )
-        bench_cols = [
-            c
-            for c in bench_frame.columns
-            if c.startswith("benchmark_") or "meta" in c.lower()
-        ]
+        excluded = {"era", "id", "data_type", *target_columns}
+        bench_cols = [c for c in bench_frame.columns if c not in excluded]
         if bench_cols:
             bench_rows = analysis.benchmark_era_corr(
                 bench_frame, bench_cols, target_columns[0]

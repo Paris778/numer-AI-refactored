@@ -8,7 +8,7 @@ run:
   seed: 42
 
 data:
-  version: v5.2
+  version: v5.3
   feature_set: small        # small | medium | all
   feature_subset: null      # optional: any name in features.json (e.g. 'sunshine');
                             # overrides feature_set for this experiment

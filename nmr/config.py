@@ -51,7 +51,7 @@ def _resolve_path(p: str | Path) -> Path:
 class DataConfig:
     """Dataset selection: version, feature set, and target columns."""
 
-    version: str = "v5.2"
+    version: str = "v5.3"
     feature_set: str = "small"
     feature_subset: str | None = None
     targets: tuple[str, ...] = ("target",)

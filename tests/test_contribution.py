@@ -66,16 +66,16 @@ def _coverage_frame(n_covered: int) -> pl.DataFrame:
     return pl.DataFrame(rows)
 
 
-_REAL_VALIDATION = Path("data/v5.2/validation.parquet")
-_REAL_BENCHMARKS = Path("data/v5.2/validation_benchmark_models.parquet")
+_REAL_VALIDATION = Path("data/v5.3/validation.parquet")
+_REAL_BENCHMARKS = Path("data/v5.3/validation_benchmark_models.parquet")
 
 
 @pytest.mark.skipif(
     not (_REAL_VALIDATION.exists() and _REAL_BENCHMARKS.exists()),
-    reason="v5.2 validation+benchmark inputs not on disk; skipped in CI",
+    reason="v5.3 validation+benchmark inputs not on disk; skipped in CI",
 )
 def test_per_era_bmc_oracle_parity_on_real_v52() -> None:
-    data_cfg = DataConfig(version="v5.2", feature_set="small", targets=("target",))
+    data_cfg = DataConfig(version="v5.3", feature_set="small", targets=("target",))
     agent = IngestionAgent(data_cfg)
     feature_cols = agent.features("small")[:3]
 
@@ -85,12 +85,12 @@ def test_per_era_bmc_oracle_parity_on_real_v52() -> None:
         .join(
             pl.scan_parquet(
                 data_cfg.path("validation_benchmark_models.parquet")
-            ).select(["era", "id", "v52_lgbm_cyrusd20"]),
+            ).select(["era", "id", "v53_lgbm_ender20"]),
             on=["era", "id"],
             how="inner",
         )
         .filter(
-            pl.col("v52_lgbm_cyrusd20").cast(pl.Float64, strict=False).is_not_null()
+            pl.col("v53_lgbm_ender20").cast(pl.Float64, strict=False).is_not_null()
         )
     )
 
@@ -127,13 +127,13 @@ def test_per_era_bmc_oracle_parity_on_real_v52() -> None:
     custom_scores = custom.per_era_bmc(
         df,
         pred_col="pred",
-        benchmark_col="v52_lgbm_cyrusd20",
+        benchmark_col="v53_lgbm_ender20",
         target_col="target",
     )
     official_scores = official.per_era_bmc(
         df,
         pred_col="pred",
-        benchmark_col="v52_lgbm_cyrusd20",
+        benchmark_col="v53_lgbm_ender20",
         target_col="target",
     )
 
@@ -145,14 +145,14 @@ def test_per_era_bmc_oracle_parity_on_real_v52() -> None:
     one_era = next(iter(custom_scores))
     era_df = (
         df.filter(pl.col("era") == one_era)
-        .select(["pred", "v52_lgbm_cyrusd20", "target"])
+        .select(["pred", "v53_lgbm_ender20", "target"])
         .drop_nulls()
     )
     pdf = era_df.to_pandas()
     direct = float(
         correlation_contribution(
             pdf[["pred"]],
-            pdf["v52_lgbm_cyrusd20"].rename("v52_lgbm_cyrusd20"),
+            pdf["v53_lgbm_ender20"].rename("v53_lgbm_ender20"),
             pdf["target"].rename("target"),
         )["pred"]
     )

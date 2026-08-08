@@ -1,7 +1,7 @@
 """Tests for nmr.data.IngestionAgent — hermetic, CI-safe, no git-ignored data.
 
 All tests use a synthetic dataset constructed in ``tmp_path``. The one test
-that touches ``data/v5.2/`` is guarded by ``@pytest.mark.skipif`` and will be
+that touches ``data/v5.3/`` is guarded by ``@pytest.mark.skipif`` and will be
 skipped in CI where the file is absent.
 """
 
@@ -352,16 +352,16 @@ class TestConvenienceDelegates:
         assert "feature_c" in names
 
 
-_REAL_TRAIN = Path("data/v5.2/train.parquet")
-_REAL_FEATURES_JSON = Path("data/v5.2/features.json")
+_REAL_TRAIN = Path("data/v5.3/train.parquet")
+_REAL_FEATURES_JSON = Path("data/v5.3/features.json")
 
 
 @pytest.mark.skipif(
     not (_REAL_TRAIN.exists() and _REAL_FEATURES_JSON.exists()),
-    reason="v5.2 dataset not on disk (git-ignored); skipped in CI",
+    reason="v5.3 dataset not on disk (git-ignored); skipped in CI",
 )
 def test_real_v52_smoke() -> None:
-    cfg = DataConfig(version="v5.2", feature_set="small", targets=("target",))
+    cfg = DataConfig(version="v5.3", feature_set="small", targets=("target",))
     ag = IngestionAgent(cfg)
 
     assert ag._metadata is None

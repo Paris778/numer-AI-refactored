@@ -109,16 +109,16 @@ def test_cached_reuse_across_predictions_matches_fresh_oracle(tmp_path) -> None:
     assert np.allclose(actual, expected, atol=NEUTRALIZE_ATOL, rtol=0.0, equal_nan=True)
 
 
-_REAL_VALIDATION = Path("data/v5.2/validation.parquet")
-_REAL_FEATURES = Path("data/v5.2/features.json")
+_REAL_VALIDATION = Path("data/v5.3/validation.parquet")
+_REAL_FEATURES = Path("data/v5.3/features.json")
 
 
 @pytest.mark.skipif(
     not (_REAL_VALIDATION.exists() and _REAL_FEATURES.exists()),
-    reason="v5.2 validation/features inputs not on disk; skipped in CI",
+    reason="v5.3 validation/features inputs not on disk; skipped in CI",
 )
 def test_real_v52_validation_slice_matches_oracle(tmp_path) -> None:
-    data_cfg = DataConfig(version="v5.2", feature_set="small", targets=("target",))
+    data_cfg = DataConfig(version="v5.3", feature_set="small", targets=("target",))
     agent = IngestionAgent(data_cfg)
     feature_cols = agent.features("small")[:5]
     eras = (

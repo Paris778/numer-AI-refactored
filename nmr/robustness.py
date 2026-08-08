@@ -238,7 +238,7 @@ def adversarial_perturbation(
     era_col: str = "era",
     alpha: float = 0.1,
     seed: int,
-    data_version: str = "v5.2",
+    data_version: str = "v5.3",
 ) -> PerturbationResult:
     if not (0.1 <= alpha <= 0.25):
         raise ValueError("alpha must satisfy 0.1 <= alpha <= 0.25")

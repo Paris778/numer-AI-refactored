@@ -10,7 +10,7 @@ import render_dataset_report
 def _fixture() -> dict:
     return {
         "manifest": {
-            "data_version": "v5.2",
+            "data_version": "v5.3",
             "feature_set": "small",
             "feature_count": 2,
             "target_count": 1,
@@ -94,7 +94,7 @@ def test_render_report_escapes_markdown_special_chars() -> None:
 
 def test_main_rejects_version_mismatch(tmp_path) -> None:
     (tmp_path / "manifest.json").write_text(
-        json.dumps({"data_version": "v5.3", "feature_count": 2}), encoding="utf-8"
+        json.dumps({"data_version": "v5.4", "feature_count": 2}), encoding="utf-8"
     )
     rc = render_dataset_report.main(
         ["--dumps-dir", str(tmp_path), "--output", str(tmp_path / "out.md")]

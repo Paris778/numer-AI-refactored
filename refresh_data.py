@@ -169,7 +169,7 @@ def _refresh(
         os.close(fd)  # Windows: release the handle so os.replace/unlink can work
         tmp = Path(tmp_name)
         try:
-            napi.download_dataset(f"{version}/{name}", dest_path=tmp)  # type: ignore[attr-defined]
+            napi.download_dataset(f"{version}/{name}", dest_path=str(tmp))  # type: ignore[attr-defined]
             _validate_and_swap(name, tmp, target)
         finally:
             if tmp.exists():

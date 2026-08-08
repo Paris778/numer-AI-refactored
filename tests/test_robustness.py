@@ -24,7 +24,7 @@ from nmr.robustness import (
 def _extract_feature_sets() -> dict[str, list[str]]:
     import json
 
-    payload = json.loads(Path("data/v5.2/features.json").read_text(encoding="utf-8"))
+    payload = json.loads(Path("data/v5.3/features.json").read_text(encoding="utf-8"))
     return payload["feature_sets"]
 
 
@@ -64,13 +64,13 @@ def _real_eval_train_payload(
 
     # Keep memory bounded: sample deterministically in lazy mode before collect.
     sampled = (
-        pl.scan_parquet("data/v5.2/validation.parquet")
+        pl.scan_parquet("data/v5.3/validation.parquet")
         .select(["era", *feature_cols])
         .limit(max_eval_rows)
         .collect()
     )
     train = (
-        pl.scan_parquet("data/v5.2/train.parquet")
+        pl.scan_parquet("data/v5.3/train.parquet")
         .select(feature_cols)
         .limit(max_train_rows)
         .collect()
@@ -134,11 +134,11 @@ def test_adversarial_perturbation_boundaries_and_determinism() -> None:
 
 @pytest.mark.skipif(
     not (
-        Path("data/v5.2/validation.parquet").exists()
-        and Path("data/v5.2/train.parquet").exists()
-        and Path("data/v5.2/features.json").exists()
+        Path("data/v5.3/validation.parquet").exists()
+        and Path("data/v5.3/train.parquet").exists()
+        and Path("data/v5.3/features.json").exists()
     ),
-    reason="v5.2 robustness inputs not on disk; skipped in CI",
+    reason="v5.3 robustness inputs not on disk; skipped in CI",
 )
 def test_adversarial_perturbation_real_data_non_noop_and_range() -> None:
     eval_df, train_df, feature_cols, blocks = _real_eval_train_payload()
@@ -606,14 +606,14 @@ def test_regime_conditioned_corr_ci_delegation_and_nonvacuity() -> None:
 
 @pytest.mark.skipif(
     not (
-        Path("data/v5.2/validation.parquet").exists()
-        and Path("data/v5.2/validation_benchmark_models.parquet").exists()
+        Path("data/v5.3/validation.parquet").exists()
+        and Path("data/v5.3/validation_benchmark_models.parquet").exists()
     ),
-    reason="v5.2 validation+benchmark inputs not on disk; skipped in CI",
+    reason="v5.3 validation+benchmark inputs not on disk; skipped in CI",
 )
 def test_time_horizon_stability_real_v52_overlap() -> None:
     eras = (
-        pl.scan_parquet("data/v5.2/validation.parquet")
+        pl.scan_parquet("data/v5.3/validation.parquet")
         .select("era")
         .unique(maintain_order=True)
         .head(30)
@@ -623,7 +623,7 @@ def test_time_horizon_stability_real_v52_overlap() -> None:
     )
 
     validation = (
-        pl.scan_parquet("data/v5.2/validation.parquet")
+        pl.scan_parquet("data/v5.3/validation.parquet")
         .select(
             [
                 "era",
@@ -641,8 +641,8 @@ def test_time_horizon_stability_real_v52_overlap() -> None:
         .collect()
     )
     bench = (
-        pl.scan_parquet("data/v5.2/validation_benchmark_models.parquet")
-        .select(["era", "id", "v52_lgbm_cyrusd20", "v52_lgbm_cyrusd60"])
+        pl.scan_parquet("data/v5.3/validation_benchmark_models.parquet")
+        .select(["era", "id", "v53_lgbm_ender20", "v53_lgbm_ender60"])
         .filter(pl.col("era").is_in(eras))
         .group_by("era", maintain_order=True)
         .head(80)
@@ -659,13 +659,13 @@ def test_time_horizon_stability_real_v52_overlap() -> None:
             - 0.2 * pl.col("feature_bridal_fingered_pensioner").cast(pl.Float64)
         ).alias("pred")
     ).select(
-        ["era", "pred", "v52_lgbm_cyrusd20", "target_cyrusd_20", "target_cyrusd_60"]
+        ["era", "pred", "v53_lgbm_ender20", "target_cyrusd_20", "target_cyrusd_60"]
     )
 
     result = time_horizon_stability(
         df,
         pred_col="pred",
-        benchmark_col="v52_lgbm_cyrusd20",
+        benchmark_col="v53_lgbm_ender20",
         target_name="cyrusd",
     )
     assert result.n_eras >= MIN_OVERLAP_ERAS

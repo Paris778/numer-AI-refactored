@@ -1058,7 +1058,7 @@ def _refresh(
         os.close(fd)  # Windows: release the handle so os.replace/unlink can work
         tmp = Path(tmp_name)
         try:
-            napi.download_dataset(f"{version}/{name}", dest_path=tmp)  # type: ignore[attr-defined]
+            napi.download_dataset(f"{version}/{name}", dest_path=str(tmp))  # type: ignore[attr-defined]  # numerapi requires a str path
             _validate_and_swap(name, tmp, target)
         finally:
             if tmp.exists():
@@ -3245,11 +3245,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             pl.concat([s.collect() for s in sources], how="align")
             .join(target_side, on=["era", "id"], how="inner")
         )
-        bench_cols = [
-            c
-            for c in bench_frame.columns
-            if c.startswith("benchmark_") or "meta" in c.lower()
-        ]
+        excluded = {"era", "id", "data_type", *target_columns}
+        bench_cols = [c for c in bench_frame.columns if c not in excluded]
         if bench_cols:
             bench_rows = analysis.benchmark_era_corr(
                 bench_frame, bench_cols, target_columns[0]
@@ -3778,3 +3775,22 @@ Write the review-format summary (Task Summary, Affected Files, Architecture, Tes
 - **Placeholder scan:** no TBD/TODO; every code step contains full code. The Task 4 `--live-only` ledger edge is resolved in the code itself (ranges read from disk, ledger written only when all three parquets exist) — no fix-note needed.
 - **Type consistency:** `_per_era_pearson` returns `(dict, set)` everywhere it is consumed (Tasks 1, 8, 12); `FeatureCorrResult` fields used consistently (Task 10 ↔ Task 14); `feature_ic_by_era` schema `(era, feature, ic, degenerate)` consumed by Task 11; dump filenames in Task 14 match the Task 15 loader list; `render_report`'s 12 keyword parameters match the `main()` loader and the test fixture exactly.
 - **Known deltas from spec (intentional):** `_per_era_pearson` returns a tuple (spec said dict) to carry the degenerate-era set; `era_structure` sorts by int-cast era labels; Task 4 default refresh re-downloads expanding files on round advance (the spec's `--live-only` is the escape hatch); the report's `## 5/6` section content is assembled from the spec's §5.2 with feature sets folded into §1.
+
+---
+
+## Addendum — v5.3 migration (2026-08-08, user decision)
+
+While executing Phase 4 (production run), the refresh script's version alert fired:
+**Numerai now ships v5.3** (`all` = v5.2's 2748 + new `quantum` family of 807;
+`small`/`medium` and all other sets identical; same 41 targets). The user chose a
+**full v5.3 migration** over analyzing v5.2:
+
+- `CURRENT_DATA_VERSION` / `DataConfig.version` / `robustness.data_version` /
+  `configs/*.yaml` all pinned to `v5.3` (drift-guard test enforces consistency).
+- Real-data tests and docs updated to `data/v5.3/`.
+- The analysis pipeline is version-agnostic (`resolve_feature_sets` reads
+  `features.json` dynamically), so no module logic changed; only the version pin.
+- The deliverable report documents v5.3 (3555-feature `all` universe).
+
+Design sections above that say "v5.2" describe the version pinned at design time;
+the mechanics are identical for v5.3.

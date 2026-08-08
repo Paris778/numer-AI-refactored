@@ -13,8 +13,8 @@ import analyze_dataset
 
 @pytest.fixture
 def fake_data(tmp_path: Path) -> Path:
-    """A minimal v5.2 data dir: features.json + tiny train/validation parquets."""
-    d = tmp_path / "data" / "v5.2"
+    """A minimal v5.3 data dir: features.json + tiny train/validation parquets."""
+    d = tmp_path / "data" / "v5.3"
     d.mkdir(parents=True)
     (d / "features.json").write_text(
         json.dumps(
@@ -89,7 +89,7 @@ def test_analyze_writes_all_dumps(tmp_path: Path, fake_data: Path) -> None:
     for name in expected:
         assert (out / name).exists(), name
     manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["data_version"] == "v5.2"
+    assert manifest["data_version"] == "v5.3"
     assert manifest["feature_count"] == 2
     assert "generated_at" in manifest
     overview = json.loads((out / "overview.json").read_text(encoding="utf-8"))

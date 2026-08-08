@@ -1,4 +1,4 @@
-"""Data layer — lazy, schema-aware Polars ingestion for Numerai v5.2+ data.
+"""Data layer — lazy, schema-aware Polars ingestion for Numerai v5.3+ data.
 
 ``IngestionAgent`` is the single access point for all splits. It enforces:
 

@@ -588,14 +588,14 @@ def test_analysis_symbols_exported() -> None:
 def test_real_feature_sets_nesting() -> None:
     """Cheap real-data guard (reads features.json only).
 
-    Empirically (v5.2): medium is a subset of all, and small is a curated set
+    Empirically (v5.3): medium is a subset of all, and small is a curated set
     that is a subset of all but NOT of medium (only 11/42 small features are
     in medium). Assert the true invariants; the report reports relations
     empirically via cross_set_membership.
     """
-    features_json = REPO_ROOT / "data" / "v5.2" / "features.json"
+    features_json = REPO_ROOT / "data" / "v5.3" / "features.json"
     if not features_json.exists():
-        pytest.skip("data/v5.2/features.json absent in this checkout")
+        pytest.skip("data/v5.3/features.json absent in this checkout")
     raw = json.loads(features_json.read_text(encoding="utf-8"))
     sets = raw["feature_sets"]
     small = set(sets["small"])

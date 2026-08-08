@@ -326,11 +326,11 @@ def test_scorecard_degenerate_predictions_no_nan() -> None:
 
 @pytest.mark.skipif(
     not (
-        Path("data/v5.2/validation.parquet").exists()
-        and Path("data/v5.2/validation_benchmark_models.parquet").exists()
-        and Path("data/v5.2/meta_model.parquet").exists()
+        Path("data/v5.3/validation.parquet").exists()
+        and Path("data/v5.3/validation_benchmark_models.parquet").exists()
+        and Path("data/v5.3/meta_model.parquet").exists()
     ),
-    reason="v5.2 inputs not on disk; skipped in CI",
+    reason="v5.3 inputs not on disk; skipped in CI",
 )
 def test_scorecard_real_v52_determinism_cross_process() -> None:
     code = r"""

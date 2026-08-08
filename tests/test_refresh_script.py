@@ -23,7 +23,7 @@ class FakeNapi:
     ) -> None:
         self.round_num = round_num
         self.datasets = datasets or [
-            f"v5.2/{name}"
+            f"v5.3/{name}"
             for name in (
                 "features.json",
                 "train.parquet",
@@ -167,7 +167,7 @@ def test_none_round_aborts(data_dir: Path, _fake_napi: FakeNapi) -> None:
 
 
 def test_check_only_newer_version_exit_3(data_dir: Path, _fake_napi: FakeNapi) -> None:
-    _fake_napi.datasets.append("v5.3/live.parquet")
+    _fake_napi.datasets.append("v5.4/live.parquet")
     rc = refresh_data.main(
         ["--data-dir", str(data_dir), "--era-csv", str(_era_csv(data_dir)), "--check-only"]
     )
@@ -187,7 +187,7 @@ def test_check_only_all_current_exit_0(data_dir: Path, _fake_napi: FakeNapi) -> 
 
 
 def test_strict_newer_version_aborts(data_dir: Path, _fake_napi: FakeNapi) -> None:
-    _fake_napi.datasets.append("v5.3/live.parquet")
+    _fake_napi.datasets.append("v5.4/live.parquet")
     rc = refresh_data.main(
         ["--data-dir", str(data_dir), "--era-csv", str(_era_csv(data_dir)), "--strict"]
     )

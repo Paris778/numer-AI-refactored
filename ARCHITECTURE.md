@@ -63,7 +63,7 @@ Frozen dataclasses; `__post_init__` validates enums, non-negativity, and non-emp
 
 | Section | Fields (defaults) | Valid values |
 |---|---|---|
-| `data: DataConfig` | `version="v5.2"`, `feature_set="small"`, `feature_subset=None`, `targets=("target",)`, `data_dir=REPO_ROOT/"data"` | feature_set ∈ `("small", "medium", "all")`; feature_subset: any `features.json` set name or `None` (validated at ingestion, §P) |
+| `data: DataConfig` | `version="v5.3"`, `feature_set="small"`, `feature_subset=None`, `targets=("target",)`, `data_dir=REPO_ROOT/"data"` | feature_set ∈ `("small", "medium", "all")`; feature_subset: any `features.json` set name or `None` (validated at ingestion, §P) |
 | `split: SplitConfig` | `scheme="walk_forward"`, `purge_eras=8`, `embargo_eras=4`, `n_folds=4` | scheme ∈ `("walk_forward", "anchor")` |
 | `model: ModelConfig` | `backend="lightgbm"`, `preset="fast"`, `params={}` | backend ∈ `("lightgbm", "xgboost", "catboost")`, preset ∈ `("fast", "standard", "deep")` |
 | `evaluation: EvalConfig` | `backend="custom"`, `main_target="target"`, `metrics=("corr","mmc","fnc","sharpe")`, `validation_scorecard=True` | backend ∈ `("custom", "official")` |
@@ -81,7 +81,7 @@ Frozen dataclasses; `__post_init__` validates enums, non-negativity, and non-emp
 
 - `scan(split, *, subset=None, targets=None, columns=None) -> pl.LazyFrame` — lazy scan with column pushdown; `load()` collects; `train()/validation()/live()` shortcuts.
 - Split files: `{"train": "train.parquet", "validation": "validation.parquet", "live": "live.parquet"}`; meta columns `("era", "id")`.
-- `feature_sets` / `features(subset)` / `available_targets()` read `data/v5.2/features.json` (defensive copies).
+- `feature_sets` / `features(subset)` / `available_targets()` read `data/v5.3/features.json` (defensive copies).
 - Deterministic column order: `era · id · features(subset) · targets`. Requested targets are validated against `features.json` then intersected with the physical schema. Schema reads are metadata-only and cached per split. Missing split file ⇒ `FileNotFoundError` on first access.
 
 ### C. Validation Splitting — `nmr/splitter.py`
@@ -263,7 +263,7 @@ def predict(live_features: pd.DataFrame, live_benchmark_models: pd.DataFrame | N
 | Script | What it does |
 |---|---|
 | [train_first_model.py](train_first_model.py) | `load_config("configs/first_model.yaml")` → `ExperimentRunner.run(deploy=True)` → `RunRegistry.record` + `promote_if_better` (prints promotion verdict) → prints summary, writes `summary.json` |
-| [benchmark_runner.py](benchmark_runner.py) | Flags: `--data-dir` (data/v5.2), `--output`, `--labels-output`, `--seed` (77), `--n-boot` (300), `--min-overlap-eras` (20), `--horizon` (20D/60D), `--min-train-eras` (10), `--log-level`, `--fast-mode` (n_boot=1, skips linear/tree). Loads validation/meta/benchmarks → `BenchmarkSuite` → scorecards CSV + per-era label profile CSV. Low-variance predictions (<1e-9) get a fallback scorecard. |
+| [benchmark_runner.py](benchmark_runner.py) | Flags: `--data-dir` (data/v5.3), `--output`, `--labels-output`, `--seed` (77), `--n-boot` (300), `--min-overlap-eras` (20), `--horizon` (20D/60D), `--min-train-eras` (10), `--log-level`, `--fast-mode` (n_boot=1, skips linear/tree). Loads validation/meta/benchmarks → `BenchmarkSuite` → scorecards CSV + per-era label profile CSV. Low-variance predictions (<1e-9) get a fallback scorecard. |
 | [generate_dashboard.py](generate_dashboard.py) | Aggregates registry runs + benchmark CSV → Sharpe-ranked dark-theme leaderboard at `artifacts/dashboard.html` |
 | [dashboard_app.py](dashboard_app.py) | Streamlit+Plotly interactive dashboard over registry scorecards, benchmark CSV, campaign logs, and `fleet_summary` (§Q); read-only; launch: `streamlit run dashboard_app.py`. Pure shaping helpers are unit-tested (tests/test_scripts.py). |
 | [run_campaign.py](run_campaign.py) | Run a named batch of configs and record trial lineage (see §R) |
@@ -399,7 +399,7 @@ missing. `--live-only` skips expanding files. Writes are atomic via `_atomicio`.
 ## 4. Configuration & Data Registry
 
 - One typed config object (`ExperimentConfig`) parameterizes everything; nothing else reads YAML. Schema in §2A; live examples in [configs/](configs/).
-- Dataset: Numerai **v5.2** parquet assets under `data/v5.2/` (train/validation/live, meta_model, benchmark models, example preds, `features.json`). Asset inventory and download expectations live in [`README.md`](README.md#data-assets).
+- Dataset: Numerai **v5.3** parquet assets under `data/v5.3/` (train/validation/live, meta_model, benchmark models, example preds, `features.json`). Asset inventory and download expectations live in [`README.md`](README.md#data-assets).
 - Feature sets from `features.json`: `small` (benchmark tutorial convention: 42-column `feature_sets.small`), `medium`, `all`; every named set is resolvable via `nmr.features.resolve_feature_sets` (§P). `data.feature_subset` optionally overrides `feature_set` — schema in §2A, semantics in §P.
 
 ---

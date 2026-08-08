@@ -22,7 +22,7 @@ All code must follow the eight non-negotiable principles in [`AGENTS.md`](AGENTS
 
    No install step for the package itself — `pythonpath = .` in [pytest.ini](pytest.ini) makes `nmr` importable from the repo root.
 
-5. Ensure the `data/v5.2/` parquet assets are present (see [`README.md`](README.md#data-assets)) — real-data tests and the benchmark runner require them.
+5. Ensure the `data/v5.3/` parquet assets are present (see [`README.md`](README.md#data-assets)) — real-data tests and the benchmark runner require them.
 
 ### Making changes
 
@@ -34,7 +34,7 @@ All code must follow the eight non-negotiable principles in [`AGENTS.md`](AGENTS
 ### ⚠️ Critical footguns
 
 - **New scorecard/instrumentation fields can break determinism tests.** Anything containing wall-clock time or absolute paths must be excluded from `canonical_scorecards_bytes()` and run-id payloads, or cross-process determinism tests will fail intermittently.
-- **Real-v5.2 test fixtures: establish era overlap before limiting rows.** Join/filter validation, meta-model, and benchmark frames by shared eras *first*, then window/limit — otherwise fixtures flake with `NonVacuityError` or empty joins (benchmark train parquet has no rows for the first ~30 train eras).
+- **Real-v5.3 test fixtures: establish era overlap before limiting rows.** Join/filter validation, meta-model, and benchmark frames by shared eras *first*, then window/limit — otherwise fixtures flake with `NonVacuityError` or empty joins (benchmark train parquet has no rows for the first ~30 train eras).
 - **Run pytest from the repo root.** `pythonpath = .` is relative; running from a subdirectory breaks `import nmr`.
 - **`standard` / `deep` presets train for hours.** Use the `fast` preset, small feature set, or truncated era windows in tests; never let a test depend on a long training run.
 - **There is no ruff/mypy config.** pytest is the only automated gate — do not invent lint commands in docs or CI, and do not add tooling as a side effect of another task.
@@ -49,7 +49,7 @@ Run the full suite after every change (488 tests; from the repo root):
 .\.venv\Scripts\python -m pytest -q
 ```
 
-CI (`.github/workflows/ci.yml`) runs `pytest -q` on Python 3.12 for every push/PR; real-data tests self-skip without `data/v5.2/`.
+CI (`.github/workflows/ci.yml`) runs `pytest -q` on Python 3.12 for every push/PR; real-data tests self-skip without `data/v5.3/`.
 
 Useful targeted runs while iterating:
 
@@ -77,7 +77,7 @@ A green unit run without the real-data smoke is not sufficient evidence for chan
 - PRs must pass the full pytest suite.
 - Include tests covering the happy path, error paths, degenerate inputs (zero-variance eras, <2 rows, non-finite values), and — for anything hashed or serialized — cross-process determinism.
 - Keep commits focused; each commit tells a coherent story.
-- **No secrets in commits.** `.env` (numerapi credentials) is `.gitignore`d. Never commit `data/v5.2/` parquet assets or regenerated `artifacts/` outputs unless the change is specifically about them.
+- **No secrets in commits.** `.env` (numerapi credentials) is `.gitignore`d. Never commit `data/v5.3/` parquet assets or regenerated `artifacts/` outputs unless the change is specifically about them.
 
 ---
 

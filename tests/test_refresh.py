@@ -12,8 +12,8 @@ from nmr.refresh import (
 )
 
 
-def test_current_version_is_v5_2() -> None:
-    assert CURRENT_DATA_VERSION == "v5.2"
+def test_current_version_is_v5_3() -> None:
+    assert CURRENT_DATA_VERSION == "v5.3"
 
 
 def test_parse_version_valid() -> None:

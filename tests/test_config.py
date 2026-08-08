@@ -21,7 +21,7 @@ from nmr.config import (
 def test_load_example_config(example_config_path):
     cfg = load_config(example_config_path)
     assert isinstance(cfg, ExperimentConfig)
-    assert cfg.data.version == "v5.2"
+    assert cfg.data.version == "v5.3"
     assert cfg.data.feature_set == "small"
     assert cfg.data.targets == ("target",)
     assert cfg.split.scheme == "walk_forward"
@@ -77,7 +77,7 @@ def test_unknown_section_raises(tmp_path):
 def test_data_path_resolution():
     path = DataConfig().path("train.parquet")
     assert path.name == "train.parquet"
-    assert "v5.2" in str(path)
+    assert "v5.3" in str(path)
     assert path.is_relative_to(REPO_ROOT)
 
 

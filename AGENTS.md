@@ -198,7 +198,7 @@ Never invent a `numerai_tools` / `numerapi` signature — open the installed sou
 .\.venv\Scripts\python benchmark_runner.py --fast-mode --output artifacts/benchmark_scores_smoke.csv --labels-output artifacts/benchmark_test_era_labels_smoke.csv   # real-data smoke (writes artifacts/*_smoke.csv)
 ```
 
-Real-data tests require the `data/v5.2/` parquet assets (see [`README.md`](README.md#data-assets)). If they are missing, report which tests were skipped — never claim full verification. CI (`.github/workflows/ci.yml`) runs this same fast gate on every push/PR (see [`CONTRIBUTING.md`](CONTRIBUTING.md#testing--verification)).
+Real-data tests require the `data/v5.3/` parquet assets (see [`README.md`](README.md#data-assets)). If they are missing, report which tests were skipped — never claim full verification. CI (`.github/workflows/ci.yml`) runs this same fast gate on every push/PR (see [`CONTRIBUTING.md`](CONTRIBUTING.md#testing--verification)).
 </verification_gates>
 
 ---
@@ -212,10 +212,10 @@ These are real, verified issues — do not "fix" them silently as a side effect.
 `MetricScorecard.metric_timing_seconds` and `timing_*` / `quality_metric_*_seconds` columns capture wall-clock durations that differ across processes. `canonical_scorecards_bytes()` deliberately strips them. Any new instrumentation field must also be excluded from canonical serialization, or cross-process determinism tests (`test_benchmark_slice1.py`, `test_benchmark_slice3.py`, `test_scorecard.py`) will fail non-deterministically.
 
 ### Benchmark parquet gap in early train eras
-`data/v5.2/train_benchmark_models.parquet` has **no rows for the first ~30 train eras**. Benchmark-backed BMC/benchmark-corr checks on early-era slices will produce empty joins — use validation data or a later overlapping era window.
+`data/v5.3/train_benchmark_models.parquet` has **no rows for the first ~30 train eras**. Benchmark-backed BMC/benchmark-corr checks on early-era slices will produce empty joins — use validation data or a later overlapping era window.
 
 ### Era-overlap-before-limit rule for real-data fixtures
-Real v5.2 scorecard fixtures are flaky if rows are limited **before** establishing era overlap across validation/meta/benchmarks. Always build test payloads from overlap eras first (join/filter by shared eras), then limit/window. `NonVacuityError` fires when overlap < `MIN_OVERLAP_ERAS` (20).
+Real v5.3 scorecard fixtures are flaky if rows are limited **before** establishing era overlap across validation/meta/benchmarks. Always build test payloads from overlap eras first (join/filter by shared eras), then limit/window. `NonVacuityError` fires when overlap < `MIN_OVERLAP_ERAS` (20).
 
 ### GPU-first model params with CPU fallback
 `ModelOrchestrator` is GPU-first (`device_type="gpu"` / `tree_method="gpu_hist"`) with CPU fallback; a failed device attempt is logged with the exception type and the resolved device is recorded in the run manifest (`oof_device`). Numeric results may differ slightly between GPU and CPU runs — determinism guarantees hold per-device, not across devices.
@@ -253,7 +253,7 @@ The V1 repo is mined for logic only. Never import from it, never modify it, neve
 <execution_safeguards>
 ## 10. Agent Execution & Shell Safeguards
 
-- 🚫 **Prohibited Commands:** Never execute `git push --force`, `git reset --hard` (without explicit user instruction), or recursive deletes on `data/`, `artifacts/registry/`, or `docs/`. Never delete `data/v5.2/` parquet assets — they are multi-GB local downloads not recoverable from git.
+- 🚫 **Prohibited Commands:** Never execute `git push --force`, `git reset --hard` (without explicit user instruction), or recursive deletes on `data/`, `artifacts/registry/`, or `docs/`. Never delete `data/v5.3/` parquet assets — they are multi-GB local downloads not recoverable from git.
 - 🚫 **Environment Protection:** Never read, output, or write raw secret values (`.env`, numerapi keys) to logs or files.
 - ⏱️ **Execution Timeouts:** Full-preset training (`standard`/`deep`, 20k–30k trees) can run for hours. For verification use the `fast` preset, `--fast-mode` on the benchmark runner, or truncated era windows. If a command exceeds 300 seconds unexpectedly, terminate and inspect output.
 - 🧹 **Artifact Hygiene:** `artifacts/cache/`, `artifacts/runs/`, and `artifacts/registry/` are machine-generated. Clearing the neutralization cache is safe (it repopulates); clearing the registry destroys run history — ask first.
