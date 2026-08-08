@@ -2804,8 +2804,14 @@ def test_analysis_symbols_exported() -> None:
         assert hasattr(nmr, name), name
 
 
-def test_real_feature_sets_small_subset_medium_subset_all() -> None:
-    """Cheap real-data guard: canonical sets nest (reads features.json only)."""
+def test_real_feature_sets_nesting() -> None:
+    """Cheap real-data guard (reads features.json only).
+
+    Empirically (v5.2): medium is a subset of all, and small is a curated set
+    that is a subset of all but NOT of medium (only 11/42 small features are
+    in medium). Assert the true invariants; the report reports relations
+    empirically via cross_set_membership.
+    """
     features_json = REPO_ROOT / "data" / "v5.2" / "features.json"
     if not features_json.exists():
         pytest.skip("data/v5.2/features.json absent in this checkout")
@@ -2814,7 +2820,9 @@ def test_real_feature_sets_small_subset_medium_subset_all() -> None:
     small = set(sets["small"])
     medium = set(sets["medium"])
     all_ = set(sets["all"])
-    assert small <= medium <= all_
+    assert medium <= all_
+    assert small <= all_
+    assert len(small & medium) < len(small)  # curated set, not a medium subset
 ```
 
 - [ ] **Step 2: Run test to verify it fails**

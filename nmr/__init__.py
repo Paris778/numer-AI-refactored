@@ -6,6 +6,22 @@ are a thin control plane; all logic lives here and is covered by `tests/`.
 
 from __future__ import annotations
 
+from .analysis import (
+    FeatureCorrResult,
+    SplitStats,
+    benchmark_era_corr,
+    cross_set_membership,
+    describe_splits,
+    era_structure,
+    feature_correlation_structure,
+    feature_ic_by_era,
+    feature_ic_screen,
+    feature_summary,
+    regime_analysis,
+    target_correlation_matrix,
+    target_profile,
+    within_set_redundancy,
+)
 from .benchmark import (
     NULL_BASELINES,
     TUTORIAL_NOTEBOOK_TO_MODEL_ID,
@@ -109,6 +125,20 @@ from .splitter import Fold, PurgedEraSplitter
 from .submission import build_submission, validate_submission, write_submission
 
 __all__ = [
+    "FeatureCorrResult",
+    "SplitStats",
+    "benchmark_era_corr",
+    "cross_set_membership",
+    "describe_splits",
+    "era_structure",
+    "feature_correlation_structure",
+    "feature_ic_by_era",
+    "feature_ic_screen",
+    "feature_summary",
+    "regime_analysis",
+    "target_correlation_matrix",
+    "target_profile",
+    "within_set_redundancy",
     "ExperimentConfig",
     "load_config",
     "set_global_seeds",

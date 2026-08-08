@@ -127,7 +127,7 @@ Typed, deterministic, era-aware, tested. No I/O (frames in, frames/dicts out), n
 | `feature_summary(chunks: Iterable[pl.DataFrame], feature_cols, era_col) -> pl.DataFrame` | Per-feature pooled mean/std/skew/kurtosis/min/max/missing-rate via **Welford + Terriberry**; caller drives chunking (era-sorted ascending). Zero-variance-era counting lives in the IC path, not here |
 | `feature_correlation_structure(chunks: Iterable[pl.DataFrame], feature_cols, era_col) -> FeatureCorrResult` | Per-era rank-gaussianize → per-era corr matrix → equal-weighted average. `FeatureCorrResult(matrix: np.ndarray float32 N×N, top_pairs: pl.DataFrame, summary: dict)`. Caller-driven era chunks (same contract as `feature_summary`). |
 | `within_set_redundancy(result: FeatureCorrResult, sets) -> pl.DataFrame` | Per feature set: mean pairwise \|corr\|, median, max — indexes the full matrix |
-| `cross_set_membership(sets) -> pl.DataFrame` | Set sizes, overlap counts, empirical subset relations (small ⊂ medium ⊂ all) |
+| `cross_set_membership(sets) -> pl.DataFrame` | Set sizes, overlap counts, empirical subset relations (computed, not assumed — real v5.2: `medium ⊆ all` holds, while `small` is a curated 42-feature set that is a subset of `all` but not of `medium`) |
 | `regime_analysis(ic_by_era: pl.DataFrame) -> dict` | Per-era mean feature IC; quartile (25/50/75) + decile regime bands; crash/hot era lists; IC persistence (adjacent-era IC-vector rank corr); rolling IC volatility |
 | `benchmark_era_corr(...) -> dict` | Per-era CORR of each benchmark model + meta-model vs reference target → achievable floors/ceilings |
 
