@@ -77,7 +77,16 @@ from .payout import (
     time_to_recovery,
 )
 from .registry import RunRegistry
-from .refresh import CURRENT_DATA_VERSION, detect_newer_version
+from .refresh import (
+    CURRENT_DATA_VERSION,
+    EXPANDING_FILES,
+    LIVE_FRESH_FILES,
+    STATIC_FILES,
+    build_era_manifest,
+    classify_refresh_plan,
+    detect_newer_version,
+    needs_live_refresh,
+)
 from .research import (
     HyperparameterSweep,
     NeutralizationFrontier,
@@ -129,6 +138,7 @@ __all__ = [
     "Ensembler",
     "CVResult",
     "CURRENT_DATA_VERSION",
+    "EXPANDING_FILES",
     "ModelOrchestrator",
     "MetricSummary",
     "EvaluationEngine",
@@ -147,7 +157,12 @@ __all__ = [
     "block_bootstrap_ci",
     "ac_adjusted_sharpe",
     "deflated_sharpe",
+    "LIVE_FRESH_FILES",
+    "STATIC_FILES",
+    "build_era_manifest",
+    "classify_refresh_plan",
     "detect_newer_version",
+    "needs_live_refresh",
     "PairedResult",
     "fleet_summary",
     "paired_era_comparison",
