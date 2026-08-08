@@ -91,3 +91,7 @@ def test_dashboard_ranks_trained_and_benchmark_on_same_sharpe() -> None:
     )
     ranked = generate_dashboard._rank_models(pd.concat([trained, benchmark], ignore_index=True))
     assert ranked.iloc[0]["model_id"] == "trained_a"
+
+
+def test_run_campaign_imports_as_control_plane() -> None:
+    import run_campaign  # noqa: F401  (import-time smoke)

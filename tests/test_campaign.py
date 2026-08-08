@@ -80,3 +80,92 @@ def test_write_campaign_log_is_idempotent(tmp_path) -> None:
     p1 = write_campaign_log(log, tmp_path / "out")
     p2 = write_campaign_log(log, tmp_path / "out")
     assert p1.read_text(encoding="utf-8") == p2.read_text(encoding="utf-8")
+
+
+import subprocess
+import sys
+
+import pytest
+
+import run_campaign
+from nmr.runner import ExperimentRunner, RunResult
+from nmr.evaluation import MetricSummary
+
+
+def _stub_run(tmp_path, monkeypatch) -> None:
+    import polars as pl
+
+    def fake_run(self, *, deploy: bool = False) -> RunResult:
+        return RunResult(
+            run_id="a" * 64,
+            oof=pl.DataFrame({"id": ["x"], "era": ["1"], "prediction": [0.5]}),
+            metrics=MetricSummary(mean=0.1, std=0.2, sharpe=0.5, max_drawdown=0.05),
+            artifact=None,
+            manifest={"run_id": "a" * 64, "oof_device": "cpu"},
+        )
+
+    monkeypatch.setattr(ExperimentRunner, "run", fake_run)
+    monkeypatch.setattr(
+        ExperimentRunner,
+        "compute_run_id",
+        staticmethod(lambda config: "a" * 64),
+    )
+
+
+def test_run_campaign_main_records_and_writes_log(tmp_path, monkeypatch) -> None:
+    cfg = _write_config(tmp_path, "a.yaml", "run:\n  name: x\n")
+    _stub_run(tmp_path, monkeypatch)
+    registry_dir = tmp_path / "registry"
+    campaigns_dir = tmp_path / "campaigns"
+    rc = run_campaign.main([
+        "--config", str(cfg), "--name", "camp",
+        "--registry", str(registry_dir), "--campaigns-dir", str(campaigns_dir),
+    ])
+    assert rc == 0
+    assert (registry_dir / ("a" * 64) / "run.json").exists()
+    logs = list(campaigns_dir.glob("*.json"))
+    assert len(logs) == 1
+    payload = json.loads(logs[0].read_text(encoding="utf-8"))
+    assert payload["runs"][0]["status"] == "recorded"
+    assert payload["runs"][0]["run_id"] == "a" * 64
+
+
+def test_run_campaign_dry_run_writes_nothing(tmp_path, monkeypatch) -> None:
+    cfg = _write_config(tmp_path, "a.yaml", "run:\n  name: x\n")
+    _stub_run(tmp_path, monkeypatch)
+    rc = run_campaign.main([
+        "--config", str(cfg), "--name", "camp",
+        "--registry", str(tmp_path / "registry"),
+        "--campaigns-dir", str(tmp_path / "campaigns"),
+        "--dry-run",
+    ])
+    assert rc == 0
+    assert not (tmp_path / "registry").exists()
+    assert not (tmp_path / "campaigns").exists()
+
+
+def test_run_campaign_error_records_and_returns_1(tmp_path, monkeypatch) -> None:
+    cfg = _write_config(tmp_path, "a.yaml", "run:\n  name: x\n")
+    _stub_run(tmp_path, monkeypatch)
+
+    def boom(self, *, deploy: bool = False):
+        raise RuntimeError("training failed")
+
+    monkeypatch.setattr(ExperimentRunner, "run", boom)
+    rc = run_campaign.main([
+        "--config", str(cfg), "--name", "camp",
+        "--registry", str(tmp_path / "registry"),
+        "--campaigns-dir", str(tmp_path / "campaigns"),
+    ])
+    assert rc == 1
+    logs = list((tmp_path / "campaigns").glob("*.json"))
+    assert len(logs) == 1
+    payload = json.loads(logs[0].read_text(encoding="utf-8"))
+    assert payload["runs"][0]["status"] == "error"
+    assert "training failed" in payload["runs"][0]["error"]
+
+
+def test_run_campaign_rejects_no_configs(tmp_path, monkeypatch, capsys) -> None:
+    _stub_run(tmp_path, monkeypatch)
+    with pytest.raises(SystemExit):
+        run_campaign.main(["--name", "camp"])

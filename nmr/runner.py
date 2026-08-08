@@ -470,6 +470,11 @@ class ExperimentRunner:
         return hashlib.sha256(encoded).hexdigest()
 
     @staticmethod
+    def compute_run_id(config: ExperimentConfig) -> str:
+        """Public accessor for the canonical run id (used by campaign tooling)."""
+        return ExperimentRunner._compute_run_id(config)
+
+    @staticmethod
     def _code_fingerprint() -> str:
         package_dir = Path(__file__).resolve().parent
         digest = hashlib.sha256()

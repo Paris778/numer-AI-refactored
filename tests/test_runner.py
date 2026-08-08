@@ -298,3 +298,12 @@ def test_feature_subset_changes_run_id_and_uses_subset_features(tmp_path) -> Non
     subset = ExperimentRunner(subset_cfg)
     assert plain._run_id != subset._run_id
     assert subset.run(deploy=False).manifest["feature_cols"] == ["f1", "f2"]
+
+
+def test_compute_run_id_public_accessor_matches_private(tmp_path) -> None:
+    cfg = _config(tmp_path)
+    assert ExperimentRunner.compute_run_id(cfg) == ExperimentRunner(cfg)._run_id
+    assert (
+        ExperimentRunner.compute_run_id(cfg)
+        == ExperimentRunner.compute_run_id(cfg)
+    )
