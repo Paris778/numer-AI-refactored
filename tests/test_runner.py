@@ -307,3 +307,38 @@ def test_compute_run_id_public_accessor_matches_private(tmp_path) -> None:
         ExperimentRunner.compute_run_id(cfg)
         == ExperimentRunner.compute_run_id(cfg)
     )
+
+
+def test_runner_catboost_end_to_end(tmp_path) -> None:
+    """CatBoost end-to-end: deterministic run, deploy roundtrip, oof_device.
+
+    NOTE: unlike the lightgbm deploy test, the live features must lie inside
+    the training envelope (f2 in [-0.24, 0.03]) and the model needs >10
+    iterations. With the out-of-envelope f2 of [0.3, 0.4, 0.5], a shallow
+    CatBoost model collapses to a single extrapolation leaf per target, which
+    rank-gaussianization maps to exactly 0.0 (nunique()==1) — the same
+    degeneracy the shifted validation fixture below guards against. At
+    n_estimators=30+ (cliff at 25) the full-history model splits the envelope
+    and the loaded pipeline emits genuinely non-constant predictions.
+    """
+    cfg = _config(tmp_path)
+    catboost_cfg = ExperimentConfig(
+        data=cfg.data, split=cfg.split,
+        model=ModelConfig(backend="catboost", preset="fast",
+                          params={"n_estimators": 40, "learning_rate": 0.05}),
+        evaluation=cfg.evaluation, run=cfg.run,
+    )
+    runner = ExperimentRunner(catboost_cfg)
+    first = runner.run(deploy=True)
+    second = ExperimentRunner(catboost_cfg).run(deploy=False)
+    assert first.run_id == second.run_id
+    assert first.oof.equals(second.oof)
+    assert first.manifest["oof_device"] == "cpu"
+    assert first.artifact is not None
+    loaded = load_predict(first.artifact.path)
+    live_features = pd.DataFrame(
+        {"f1": [0.1, 0.2, 0.3], "f2": [-0.1, -0.05, 0.0]}, index=["a", "b", "c"]
+    )
+    pred = loaded(live_features)
+    assert pred["prediction"].notna().all()
+    assert pred["prediction"].nunique() > 1  # non-constant pipeline output
