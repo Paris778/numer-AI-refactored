@@ -52,7 +52,7 @@ def test_invalid_feature_set_raises():
 
 def test_invalid_model_backend_raises():
     with pytest.raises(ValueError):
-        ModelConfig(backend="catboost")
+        ModelConfig(backend="bogus")
 
 
 def test_invalid_split_scheme_raises():
@@ -128,3 +128,18 @@ def test_feature_subset_must_be_non_empty_when_provided():
 
     with _pytest.raises(ValueError, match="feature_subset"):
         DataConfig(feature_subset="")
+
+
+def test_catboost_backend_is_valid():
+    from nmr.config import ModelConfig
+
+    assert ModelConfig(backend="catboost").backend == "catboost"
+
+
+def test_invalid_backend_still_raises():
+    from nmr.config import ModelConfig
+
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="backend"):
+        ModelConfig(backend="bogus")

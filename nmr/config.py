@@ -20,7 +20,7 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 VALID_FEATURE_SETS = ("small", "medium", "all")
-VALID_MODEL_BACKENDS = ("lightgbm", "xgboost")
+VALID_MODEL_BACKENDS = ("lightgbm", "xgboost", "catboost")
 VALID_MODEL_PRESETS = ("fast", "standard", "deep")
 VALID_EVAL_BACKENDS = ("custom", "official")
 VALID_SPLIT_SCHEMES = ("walk_forward", "anchor")

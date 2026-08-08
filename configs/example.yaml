@@ -22,7 +22,7 @@ split:
   n_folds: 4
 
 model:
-  backend: lightgbm         # lightgbm | xgboost
+  backend: lightgbm         # lightgbm | xgboost | catboost
   preset: fast              # fast | standard | deep
   params: {}                # explicit overrides on top of the preset
 
