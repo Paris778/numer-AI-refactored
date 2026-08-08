@@ -8,11 +8,9 @@ deterministic per environment.
 
 from __future__ import annotations
 
-import dataclasses
 import gc
 import json
 import logging
-from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -61,12 +59,19 @@ def _parse_space(space: dict[str, dict[str, Any]]) -> list[_SpaceParam]:
             low, high = spec.get("low"), spec.get("high")
             if low is None or high is None or low > high:
                 raise ValueError(f"parameter {name!r}: low/high bounds invalid")
-            log = bool(spec.get("log", False))
+            raw_log = spec.get("log", False)
+            if not isinstance(raw_log, bool):
+                raise ValueError(f"parameter {name!r}: 'log' must be a boolean")
+            log = raw_log
             if log and low <= 0:
                 raise ValueError(
                     f"parameter {name!r}: 'low' must be > 0 when log=True, got {low}"
                 )
             step = spec.get("step")
+            if kind == "float" and step is not None:
+                raise ValueError(
+                    f"parameter {name!r}: 'step' is only valid for int params"
+                )
             if step is not None and (not isinstance(step, int) or step < 1):
                 raise ValueError(f"parameter {name!r}: step must be a positive int")
             if log and step is not None:
@@ -169,8 +174,13 @@ def bayesian_sweep(
                 "metric": metric,
             }
         )
-    trial_df = pl.DataFrame(rows).sort(
-        ["metric_value", "trial_id"], descending=[True, False], nulls_last=True
+    # Explicit Float64: when every trial fails, `rows` has only None metric
+    # values and polars infers the column as Null dtype — diverging from
+    # HyperparameterSweep.run's always-Float64 SweepResult contract.
+    trial_df = (
+        pl.DataFrame(rows)
+        .with_columns(pl.col("metric_value").cast(pl.Float64))
+        .sort(["metric_value", "trial_id"], descending=[True, False], nulls_last=True)
     )
     best = study.best_trial if len(study.best_trials) > 0 else None
     return SweepResult(

@@ -80,7 +80,7 @@ Mapping to Optuna:
 - `categorical`: `trial.suggest_categorical(name, choices)` — non-empty list of JSON-primitive values (see below).
 
 Validation errors (each raises `ValueError` with a matchable message, ALL before any trial runs):
-- Structural: unknown kind; missing/unknown keys; `low > high`; `step < 1` or non-int; `log` not boolean; empty space; `n_trials < 1`; `n_startup_trials < 1`; `n_jobs != 1`; metric not in `{mean, std, sharpe, max_drawdown, corr_sharpe_ac}`.
+- Structural: unknown kind; missing/unknown keys; `low > high`; `step < 1` or non-int; `step` on float specs; `log` not boolean; empty space; `n_trials < 1`; `n_startup_trials < 1`; `n_jobs != 1`; metric not in `{mean, std, sharpe, max_drawdown, corr_sharpe_ac}`.
 - **Log-scale positivity (review 2.2):** if `log=True`, require `low > 0` for both `float` and `int` — fail early, before any trial starts (`suggest_*` would otherwise raise inside the first trial): `if spec.get("log", False) and spec["low"] <= 0: raise ValueError(f"Key '{key}': 'low' must be > 0 when log=True")`.
 - **Categorical primitives (review 2.3):** choices must be JSON-serializable primitives to preserve the `params_json` round-trip contract (`json.dumps`/`json.loads` would otherwise mutate tuples into lists, breaking equality): `if not all(isinstance(c, (str, int, float, bool)) for c in choices): raise ValueError(f"Key '{key}': categorical choices must be str/int/float/bool")`. Empty choices also raise.
 

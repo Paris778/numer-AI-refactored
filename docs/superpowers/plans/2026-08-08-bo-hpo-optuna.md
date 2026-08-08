@@ -393,12 +393,19 @@ def _parse_space(space: dict[str, dict[str, Any]]) -> list[_SpaceParam]:
             low, high = spec.get("low"), spec.get("high")
             if low is None or high is None or low > high:
                 raise ValueError(f"parameter {name!r}: low/high bounds invalid")
-            log = bool(spec.get("log", False))
+            raw_log = spec.get("log", False)
+            if not isinstance(raw_log, bool):
+                raise ValueError(f"parameter {name!r}: 'log' must be a boolean")
+            log = raw_log
             if log and low <= 0:
                 raise ValueError(
                     f"parameter {name!r}: 'low' must be > 0 when log=True, got {low}"
                 )
             step = spec.get("step")
+            if kind == "float" and step is not None:
+                raise ValueError(
+                    f"parameter {name!r}: 'step' is only valid for int params"
+                )
             if step is not None and (not isinstance(step, int) or step < 1):
                 raise ValueError(f"parameter {name!r}: step must be a positive int")
             if log and step is not None:

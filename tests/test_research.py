@@ -30,12 +30,19 @@ from nmr.risk import NeutralizationEngine
 
 
 def _train_frame() -> pl.DataFrame:
+    # 25 eras -> held-out = round(0.2*25) = 5 eras (20D AC bandwidth floor is 4,
+    # cap n-1, so >= 5 held-out eras are required). Features are bounded periodic
+    # functions of era so held-out eras sit inside the train feature envelope; a
+    # monotone-in-era feature would drive every held-out row into one tree leaf ->
+    # per-era-constant predictions -> zero CORR, which vacuously passes the
+    # corr_sharpe_ac end-to-end tests. The (era % 3)-scaled sin(idx) term makes the
+    # per-era CORR genuinely vary across held-out eras (verified non-constant).
     rows: list[dict[str, float | str]] = []
-    for era in range(1, 21):
+    for era in range(1, 26):
         for idx in range(8):
-            f1 = 0.02 * era + 0.01 * idx
-            f2 = -0.01 * era + 0.015 * idx
-            target = 0.7 * f1 - 0.4 * f2 + 0.05 * np.sin(idx)
+            f1 = 0.35 + 0.12 * np.sin(0.3 * era) + 0.02 * idx
+            f2 = 0.10 + 0.08 * np.cos(0.25 * era) + 0.015 * idx
+            target = 0.7 * f1 - 0.4 * f2 + (0.01 + 0.02 * (era % 3)) * np.sin(idx)
             target_alt = 0.4 * f1 + 0.6 * f2 - 0.03 * np.cos(idx)
             rows.append(
                 {
@@ -199,10 +206,24 @@ def test_per_era_ac_sharpe_requires_two_eras() -> None:
         _per_era_ac_sharpe({"1": 0.1}, horizon="20D")
 
 
-def test_held_out_metric_supports_corr_sharpe_ac(tmp_path) -> None:
-    cfg = _write_data(tmp_path)  # existing fixture: vtest, fast preset, small trees
+def test_held_out_metric_supports_corr_sharpe_ac(tmp_path, monkeypatch) -> None:
+    from nmr import research
+
+    captured: dict[str, dict[str, float]] = {}
+    orig = research._per_era_ac_sharpe
+
+    def recording(per_era, *, horizon="20D"):
+        captured["per_era"] = per_era
+        return orig(per_era, horizon=horizon)
+
+    monkeypatch.setattr(research, "_per_era_ac_sharpe", recording)
+    cfg = _write_data(tmp_path)
     value = _held_out_metric(cfg, metric_name="corr_sharpe_ac")
+    series = np.asarray(list(captured["per_era"].values()), dtype=float)
     assert np.isfinite(value)
+    assert value != 0.0            # real AC path ran, not the std==0 short-circuit
+    assert series.size >= 5        # 20D bandwidth floor: >= 5 held-out eras
+    assert np.std(series) > 0.0    # per-era corr genuinely varies
 
 
 def test_held_out_metric_still_rejects_unknown_metric(tmp_path) -> None:

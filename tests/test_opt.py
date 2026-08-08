@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 
+import numpy as np
 import optuna
 import polars as pl
 import pytest
@@ -58,6 +59,9 @@ def test_parse_space_int_step() -> None:
         ({"a": {"kind": "int", "low": 1}}, "low"),
         ({"a": {"kind": "int", "low": 0, "high": 10, "log": True}}, "low"),
         ({"a": {"kind": "int", "low": 1, "high": 10, "step": 2.5}}, "step"),
+        ({"a": {"kind": "float", "low": 1.0, "high": 2.0, "log": "yes"}}, "log"),
+        ({"a": {"kind": "int", "low": 1, "high": 10, "log": 0}}, "log"),
+        ({"a": {"kind": "float", "low": 1.0, "high": 2.0, "step": 2}}, "step"),
     ],
 )
 def test_parse_space_validation_errors(space, match) -> None:
@@ -103,38 +107,42 @@ def _sweep_config(tmp_path, *, n_train_eras: int = 12):
     train_rows = []
     for era in range(1, n_train_eras + 1):
         for idx in range(6):
-            f1 = (era * 0.03) + (idx * 0.02)
-            f2 = (era * -0.02) + (idx * 0.01)
+            f1 = 0.35 + 0.12 * np.sin(0.3 * era) + 0.02 * idx
+            f2 = 0.10 + 0.08 * np.cos(0.25 * era) + 0.015 * idx
             train_rows.append(
                 {
                     "era": str(era),
                     "id": f"{era}_{idx}",
                     "f1": f1,
                     "f2": f2,
-                    "target": 0.6 * f1 - 0.3 * f2 + 0.05 * era,
-                    "target_alt": 0.2 * f1 + 0.7 * f2 - 0.04 * era,
+                    "target": 0.6 * f1 - 0.3 * f2 + (0.01 + 0.02 * (era % 3)) * np.sin(idx),
+                    "target_alt": 0.2 * f1 + 0.7 * f2 - 0.03 * np.cos(idx),
                 }
             )
     pl.DataFrame(train_rows).write_parquet(version_dir / "train.parquet")
 
     # Validation/meta/benchmark frames: unused by _held_out_metric (it loads only
     # "train"), kept for parity with the test_runner vtest layout. Features are
-    # shifted back into the training envelope ((era - (n_train_eras - 1)) maps the
-    # first validation era to train-era-2 feature values, matching test_runner).
+    # bounded periodic functions of era, so val features evaluated at
+    # (era - (n_train_eras - 1)) stay inside the train feature envelope. The
+    # (era % 3)-scaled sin(idx) target term makes the per-era held-out CORR vary
+    # across eras — a constant per-era CORR would vacuously pass the
+    # corr_sharpe_ac end-to-end test via the std==0 short-circuit.
     val_rows = []
     shift = n_train_eras - 1
     for era in range(n_train_eras + 1, n_train_eras + 7):
         for idx in range(6):
-            f1 = ((era - shift) * 0.03) + (idx * 0.02)
-            f2 = ((era - shift) * -0.02) + (idx * 0.01)
+            f1 = 0.35 + 0.12 * np.sin(0.3 * (era - shift)) + 0.02 * idx
+            f2 = 0.10 + 0.08 * np.cos(0.25 * (era - shift)) + 0.015 * idx
             val_rows.append(
                 {
                     "era": str(era),
                     "id": f"{era}_{idx}",
                     "f1": f1,
                     "f2": f2,
-                    "target": 0.6 * f1 - 0.3 * f2 + 0.05 * era,
-                    "target_alt": 0.2 * f1 + 0.7 * f2 - 0.04 * era,
+                    "target": 0.6 * f1 - 0.3 * f2
+                    + (0.01 + 0.02 * ((era - shift) % 3)) * np.sin(idx),
+                    "target_alt": 0.2 * f1 + 0.7 * f2 - 0.03 * np.cos(idx),
                 }
             )
     val = pl.DataFrame(val_rows)
@@ -218,16 +226,30 @@ def test_bayesian_sweep_rejects_parallel_trials(tmp_path) -> None:
                        n_trials=2, seed=7, n_jobs=2)
 
 
-def test_bayesian_sweep_supports_corr_sharpe_ac_metric(tmp_path) -> None:
+def test_bayesian_sweep_supports_corr_sharpe_ac_metric(tmp_path, monkeypatch) -> None:
+    from nmr import research
     from nmr.opt import bayesian_sweep
 
+    captured: dict[str, dict[str, float]] = {}
+    orig = research._per_era_ac_sharpe
+
+    def recording(per_era, *, horizon="20D"):
+        captured["per_era"] = per_era
+        return orig(per_era, horizon=horizon)
+
+    monkeypatch.setattr(research, "_per_era_ac_sharpe", recording)
     # 30 train eras -> held-out = round(0.2*30) = 6 eras; the 20D AC bandwidth
     # floor (4) needs >= 5 eras, so the default 12-era fixture would raise.
     cfg = _sweep_config(tmp_path, n_train_eras=30)
     space = {"learning_rate": {"kind": "float", "low": 0.01, "high": 0.1, "log": True}}
     result = bayesian_sweep(cfg, space, n_trials=2, seed=7, metric="corr_sharpe_ac")
     assert result.trials.get_column("metric").to_list() == ["corr_sharpe_ac"] * 2
-    assert result.trials.get_column("metric_value").is_finite().all()
+    values = result.trials.get_column("metric_value")
+    assert values.is_finite().all()
+    assert (values != 0.0).all()          # every trial took the real AC path
+    series = np.asarray(list(captured["per_era"].values()), dtype=float)
+    assert series.size >= 5               # 20D bandwidth floor: >= 5 held-out eras
+    assert np.std(series) > 0.0           # per-era corr genuinely varies
 
 
 def test_bayesian_sweep_failed_trial_recorded_and_continues(tmp_path) -> None:
@@ -255,6 +277,62 @@ def test_bayesian_sweep_metrics_reject_unknown(tmp_path) -> None:
     with pytest.raises(ValueError, match="metric"):
         bayesian_sweep(cfg, {"num_leaves": {"kind": "int", "low": 4, "high": 32}},
                        n_trials=2, seed=7, metric="corr")
+
+
+def test_bayesian_sweep_disables_baseline_anchor(tmp_path, monkeypatch) -> None:
+    # Spec contract: with enqueue_base_config=False the resolved baseline is NOT
+    # enqueued — trial 0 must be TPE-suggested, not the anchor. Guards the
+    # `if enqueue_base_config:` wiring (a regression here would silently make
+    # every sweep trial 0 the baseline again).
+    from nmr.opt import bayesian_sweep
+    from nmr.models import resolve_model_params
+
+    cfg = _sweep_config(tmp_path)
+    # Baseline num_leaves (fast preset = 31) lies outside this space, so any
+    # enqueued anchor would be visible in trial 0; a TPE-suggested trial 0 can
+    # never equal 31.
+    space = {"num_leaves": {"kind": "int", "low": 4, "high": 8}}
+    enqueue_calls: list[dict] = []
+    orig_enqueue = optuna.Study.enqueue_trial
+
+    def recording(self, params, *args, **kwargs):
+        enqueue_calls.append(dict(params))
+        orig_enqueue(self, params, *args, **kwargs)
+
+    monkeypatch.setattr(optuna.Study, "enqueue_trial", recording)
+    result = bayesian_sweep(cfg, space, n_trials=3, seed=7, n_startup_trials=2,
+                            enqueue_base_config=False)
+    assert enqueue_calls == []                     # anchor never enqueued
+    resolved = resolve_model_params(cfg.model.preset, cfg.model.params)
+    trial0 = json.loads(
+        result.trials.filter(pl.col("trial_id") == 0).get_column("params_json")[0]
+    )
+    assert trial0["num_leaves"] != resolved["num_leaves"]   # not the baseline
+
+
+def test_bayesian_sweep_sampled_params_respect_space(tmp_path) -> None:
+    # Spec contract: every SUGGESTED trial param must lie inside the space —
+    # floats within [low, high], ints within [low, high] and on the step
+    # lattice, categoricals within choices. enqueue_base_config=False keeps
+    # every trial sampled (an anchored baseline can legitimately fall off the
+    # step lattice, so it is excluded here).
+    from nmr.opt import bayesian_sweep
+
+    cfg = _sweep_config(tmp_path)
+    space = {
+        "learning_rate": {"kind": "float", "low": 0.01, "high": 0.1, "log": True},
+        "num_leaves": {"kind": "int", "low": 4, "high": 32, "step": 4},
+        "boosting": {"kind": "categorical", "choices": ["gbdt", "dart"]},
+    }
+    result = bayesian_sweep(cfg, space, n_trials=8, seed=7, n_startup_trials=2,
+                            enqueue_base_config=False)
+    for row in result.trials.get_column("params_json"):
+        params = json.loads(row)
+        assert 0.01 <= params["learning_rate"] <= 0.1
+        num_leaves = params["num_leaves"]
+        assert 4 <= num_leaves <= 32
+        assert (num_leaves - 4) % 4 == 0           # step=4 respected
+        assert params["boosting"] in ("gbdt", "dart")
 
 
 def test_bayesian_sweep_forwards_n_startup_trials_to_sampler(
