@@ -15,5 +15,7 @@ cloudpickle==3.1.1
 numerai-tools==0.5.3
 optuna==4.9.0
 catboost==1.2.10
+streamlit==1.61.1
+plotly==6.6.0
 ipykernel
 tqdm
