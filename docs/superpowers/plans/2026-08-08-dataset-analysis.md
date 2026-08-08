@@ -2476,8 +2476,8 @@ def _ic_by_era_series(n_eras: int = 30) -> pl.DataFrame:
     for e in range(n_eras):
         era = f"{e + 1:04d}"
         mean_ic = -0.05 + 0.10 * e / max(n_eras - 1, 1)
-        for f in ["fa", "fb", "fc"]:
-            rows.append({"era": era, "feature": f, "ic": float(mean_ic)})
+        for f, offset in [("fa", 0.01), ("fb", 0.0), ("fc", -0.01)]:
+            rows.append({"era": era, "feature": f, "ic": float(mean_ic + offset)})
     return pl.DataFrame(rows)
 
 
@@ -2600,7 +2600,7 @@ def regime_analysis(ic_by_era: pl.DataFrame) -> dict:
     rolling = sig.select(
         pl.col("era"),
         pl.col("mean_ic")
-        .rolling_std(window_size=IC_VOL_WINDOW, min_periods=2)
+        .rolling_std(window_size=IC_VOL_WINDOW, min_samples=2)
         .alias("rolling_std"),
     )
 

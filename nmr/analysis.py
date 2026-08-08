@@ -565,3 +565,88 @@ def cross_set_membership(sets: Mapping[str, Sequence[str]]) -> dict:
         "sets": pl.DataFrame(set_rows),
         "subset_relations": pl.DataFrame(rel_rows),
     }
+
+
+def regime_analysis(ic_by_era: pl.DataFrame) -> dict:
+    """Deterministic, percentile-based regime analysis of per-era feature IC.
+
+    Crash/hot use decile thresholds (``REGIME_LOW_PCT`` / ``REGIME_HIGH_PCT``);
+    the regime column uses quartile bands. ``ic_persistence`` is the mean
+    adjacent-era Spearman rank correlation of per-era feature IC vectors.
+    """
+    required = {"era", "feature", "ic"}
+    missing = required - set(ic_by_era.columns)
+    if missing:
+        raise ValueError(f"ic_by_era missing required columns: {sorted(missing)}")
+
+    sig = (
+        ic_by_era.group_by("era")
+        .agg(
+            pl.col("ic").mean().alias("mean_ic"),
+            pl.col("ic").std().alias("ic_std"),
+            pl.col("feature").count().alias("n_features"),
+        )
+        .sort("era")
+    )
+    mean_ics = sig.get_column("mean_ic").to_numpy()
+    n = len(mean_ics)
+    ranks = np.argsort(np.argsort(mean_ics))
+    pct = 100.0 * ranks / (n - 1) if n > 1 else np.array([50.0])
+
+    q1 = float(np.percentile(mean_ics, 25.0))
+    q3 = float(np.percentile(mean_ics, 75.0))
+    low_thr = float(np.percentile(mean_ics, REGIME_LOW_PCT))
+    high_thr = float(np.percentile(mean_ics, REGIME_HIGH_PCT))
+
+    regime = np.where(pct <= 25.0, "low", np.where(pct >= 75.0, "high", "normal"))
+    crash = pct <= REGIME_LOW_PCT
+    hot = pct >= REGIME_HIGH_PCT
+    sig = sig.with_columns(
+        pl.Series("pct_rank", pct),
+        pl.Series("regime", regime),
+        pl.Series("crash", crash),
+        pl.Series("hot", hot),
+    )
+
+    eras = sig.get_column("era").to_list()
+    crash_eras = [e for e, c in zip(eras, crash) if c]
+    hot_eras = [e for e, h in zip(eras, hot) if h]
+
+    # adjacent-era IC-vector Spearman
+    pivot = ic_by_era.pivot(on="feature", index="era", values="ic").sort("era")
+    feature_names = [c for c in pivot.columns if c != "era"]
+    matrix = pivot.select(feature_names).to_numpy()
+    matrix = np.nan_to_num(matrix, nan=0.0)
+    ranks_mat = np.apply_along_axis(scipy.stats.rankdata, 1, matrix)
+    adj = [
+        float(np.corrcoef(ranks_mat[t], ranks_mat[t - 1])[0, 1])
+        for t in range(1, ranks_mat.shape[0])
+    ]
+    persistence = {
+        "mean": float(np.mean(adj)) if adj else 0.0,
+        "std": float(np.std(adj, ddof=0)) if adj else 0.0,
+        "n_adjacent": len(adj),
+    }
+
+    rolling = sig.select(
+        pl.col("era"),
+        pl.col("mean_ic")
+        .rolling_std(window_size=IC_VOL_WINDOW, min_samples=2)
+        .alias("rolling_std"),
+    )
+
+    return {
+        "regime_thresholds": {
+            "low_pct": REGIME_LOW_PCT,
+            "high_pct": REGIME_HIGH_PCT,
+            "q1": q1,
+            "q3": q3,
+            "mean_ic_low": low_thr,
+            "mean_ic_high": high_thr,
+        },
+        "era_signal": sig,
+        "crash_eras": crash_eras,
+        "hot_eras": hot_eras,
+        "ic_persistence": persistence,
+        "rolling_vol": rolling,
+    }

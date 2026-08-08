@@ -446,3 +446,67 @@ def test_cross_set_membership_subset_relations() -> None:
     assert rel[("small", "all")] is True
     assert rel[("medium", "all")] is True
     assert rel[("all", "small")] is False
+
+
+from nmr.analysis import (
+    IC_VOL_WINDOW,
+    REGIME_HIGH_PCT,
+    REGIME_LOW_PCT,
+    regime_analysis,
+)
+
+
+def _ic_by_era_series(n_eras: int = 30) -> pl.DataFrame:
+    # era mean_ic ramps upward so quartile/decile bands are well-separated
+    rows = []
+    for e in range(n_eras):
+        era = f"{e + 1:04d}"
+        mean_ic = -0.05 + 0.10 * e / max(n_eras - 1, 1)
+        for f, offset in [("fa", 0.01), ("fb", 0.0), ("fc", -0.01)]:
+            rows.append({"era": era, "feature": f, "ic": float(mean_ic + offset)})
+    return pl.DataFrame(rows)
+
+
+def test_regime_analysis_bands_and_flags() -> None:
+    out = regime_analysis(_ic_by_era_series(30))
+    assert REGIME_LOW_PCT == 10.0
+    assert REGIME_HIGH_PCT == 90.0
+    assert IC_VOL_WINDOW == 20
+    sig = out["era_signal"]
+    assert "regime" in sig.columns and "crash" in sig.columns and "hot" in sig.columns
+    first = sig.row(0, named=True)
+    last = sig.row(sig.height - 1, named=True)
+    assert first["regime"] == "low"
+    assert first["crash"] is True
+    assert last["regime"] == "high"
+    assert last["hot"] is True
+    th = out["regime_thresholds"]
+    assert th["mean_ic_low"] <= th["q1"] <= th["q3"] <= th["mean_ic_high"]
+    assert out["crash_eras"] == ["0001", "0002", "0003"]
+    assert out["hot_eras"] == [f"{e:04d}" for e in range(28, 31)]
+
+
+def test_regime_analysis_persistence_rank_stable_series() -> None:
+    # feature IC ranks constant across eras -> adjacent Spearman = 1.0
+    rows = []
+    for e in range(5):
+        era = f"{e + 1:04d}"
+        for f, ic in [("fa", 0.1), ("fb", 0.05), ("fc", 0.0)]:
+            rows.append({"era": era, "feature": f, "ic": ic})
+    out = regime_analysis(pl.DataFrame(rows))
+    assert np.isclose(out["ic_persistence"]["mean"], 1.0, atol=1e-12)
+    assert out["ic_persistence"]["n_adjacent"] == 4
+
+
+def test_regime_analysis_deterministic() -> None:
+    ic = _ic_by_era_series(25)
+    out1 = regime_analysis(ic)
+    out2 = regime_analysis(ic)
+    assert out1["era_signal"].equals(out2["era_signal"])
+    assert out1["crash_eras"] == out2["crash_eras"]
+    assert out1["ic_persistence"] == out2["ic_persistence"]
+
+
+def test_regime_analysis_requires_columns() -> None:
+    with pytest.raises(ValueError):
+        regime_analysis(pl.DataFrame({"era": ["0001"], "ic": [0.1]}))
