@@ -25,6 +25,7 @@ import json
 from collections.abc import Sequence
 from pathlib import Path
 
+import pandas as pd
 import plotly.express as px
 import polars as pl
 import streamlit as st
@@ -99,7 +100,10 @@ def load_registry_frame(registry_dir: Path) -> pl.DataFrame:
     """
     rows: list[dict] = []
     for run_file in sorted(registry_dir.glob("*/run.json")):
-        payload = json.loads(run_file.read_text(encoding="utf-8"))
+        try:
+            payload = json.loads(run_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue  # corrupt run.json degrades gracefully (same as _load_registry_entries)
         metrics = payload.get("metrics") or {}
         manifest = payload.get("manifest") or {}
         cfg = manifest.get("config") or {}
@@ -162,8 +166,9 @@ def load_benchmarks(path: Path) -> pl.DataFrame:
     Mirrors ``generate_dashboard._load_benchmarks`` column semantics:
     ``strategy_group`` -> ``run_name``, ``horizon_target_name`` -> ``targets``,
     ``corr`` / ``corr_sharpe_ac`` / ``std_corr`` / ``max_drawdown`` keep their
-    names, everything else is ``source="benchmark"``. A missing file yields an
-    empty frame.
+    names, ``corr_sharpe_ac_ci_low`` / ``corr_sharpe_ac_ci_high`` are carried
+    through when present (None when absent), everything else is
+    ``source="benchmark"``. A missing file yields an empty frame.
     """
     if not path.exists():
         return _EMPTY_LEADERBOARD
@@ -189,8 +194,8 @@ def load_benchmarks(path: Path) -> pl.DataFrame:
             "corr_ci_low": None,
             "corr_ci_high": None,
             "corr_sharpe_ac": row.get("corr_sharpe_ac"),
-            "corr_sharpe_ac_ci_low": None,
-            "corr_sharpe_ac_ci_high": None,
+            "corr_sharpe_ac_ci_low": row.get("corr_sharpe_ac_ci_low"),
+            "corr_sharpe_ac_ci_high": row.get("corr_sharpe_ac_ci_high"),
             "max_drawdown": row.get("max_drawdown", 0.0),
             "std_corr": row.get("std_corr", 0.0),
             "deflated_sharpe": None,
@@ -225,10 +230,13 @@ def load_campaigns(campaigns_dir: Path) -> pl.DataFrame:
 
     rows: list[dict] = []
     for log_file in sorted(campaigns_dir.glob("*.json")):
-        payload = json.loads(log_file.read_text(encoding="utf-8"))
+        try:
+            payload = json.loads(log_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue  # corrupt campaign log degrades gracefully (skipped)
         campaign_id = payload.get("campaign_id") or log_file.stem
         name = payload.get("name")
-        for run in payload.get("runs", []):
+        for run in payload.get("runs") or []:
             rows.append(
                 {
                     "campaign_id": campaign_id,
@@ -330,36 +338,74 @@ def _load_registry_entries(registry_dir: Path) -> list[dict]:
     return entries
 
 
-def render_leaderboard(leaderboard: pl.DataFrame, champion: str | None) -> None:
-    """Bar chart of ``corr_sharpe_ac`` with CI error bars + sortable dataframe.
+def _bar_label(source: str, run_name: str, model_id: str | None) -> str:
+    """Unique, readable per-bar key for the leaderboard chart.
 
-    CI bounds are absolute (``corr_sharpe_ac_ci_low``/``_ci_high``); Plotly
-    error bars need per-bar magnitudes, so the deltas are derived here.
-    Benchmark rows have no CI bounds — NaN deltas drop the error bars. The
-    champion run (when present in the frame) is hatched via ``pattern_shape``.
+    Registry runs share ``run_name`` (their config name) across reruns of the
+    same config, so ``run_name`` alone cannot key the bars — the real registry
+    holds two ``first-competitive-lgbm-small`` runs that would draw overlapping
+    bars at one x-tick. Trained runs key as ``run_name · short run_id``; the
+    readable name stays in the label and in the hover data. Benchmark rows have
+    no ``run_id`` — their ``model_id`` is the strategy name, already unique per
+    row.
     """
-    if leaderboard.height == 0:
-        st.info("No runs to display — train one with `train_first_model.py`.")
-        return
+    model_id = model_id or "?"
+    if source == "benchmark":
+        return f"{run_name} · {model_id}"
+    return f"{run_name} · {model_id[:8]}"
+
+
+def _shaped_leaderboard_pdf(
+    leaderboard: pl.DataFrame, champion: str | None
+) -> pd.DataFrame:
+    """Sort + champion flag + CI error-bar deltas + unique bar labels (pure).
+
+    Pure frame-shaping for :func:`render_leaderboard`, isolated so tests can
+    exercise the unique-label logic without a Streamlit runtime. CI bounds are
+    absolute (``corr_sharpe_ac_ci_low``/``_ci_high``); Plotly error bars need
+    per-bar magnitudes, so the deltas are derived here. Rows without CI bounds
+    get NaN deltas, which drop the error bars.
+    """
     pdf = leaderboard.sort(_BAR_METRIC, descending=True, nulls_last=True).to_pandas()
     pdf["champion"] = pdf["model_id"] == champion
     pdf["ci_plus"] = pdf["corr_sharpe_ac_ci_high"] - pdf["corr_sharpe_ac"]
     pdf["ci_minus"] = pdf["corr_sharpe_ac"] - pdf["corr_sharpe_ac_ci_low"]
+    pdf["label"] = [
+        _bar_label(source, run_name, model_id)
+        for source, run_name, model_id in zip(
+            pdf["source"], pdf["run_name"], pdf["model_id"]
+        )
+    ]
+    return pdf
+
+
+def render_leaderboard(leaderboard: pl.DataFrame, champion: str | None) -> None:
+    """Bar chart of ``corr_sharpe_ac`` with CI error bars + sortable dataframe.
+
+    Bars key on a unique ``label`` (``run_name · short run_id`` for trained
+    runs, ``run_name · model_id`` for benchmarks) so reruns of one config never
+    overlap; the readable name stays in the label and hover data. The champion
+    run (when present in the frame) is hatched via ``pattern_shape``.
+    """
+    if leaderboard.height == 0:
+        st.info("No runs to display — train one with `train_first_model.py`.")
+        return
+    pdf = _shaped_leaderboard_pdf(leaderboard, champion)
     fig = px.bar(
         pdf,
-        x="run_name",
+        x="label",
         y=_BAR_METRIC,
         color="source",
         error_y="ci_plus",
         error_y_minus="ci_minus",
         pattern_shape="champion",
         pattern_shape_map={True: "/", False: ""},
-        hover_data=["model_id", "backend", "preset", "corr", "max_drawdown"],
+        hover_data=["run_name", "model_id", "backend", "preset", "corr", "max_drawdown"],
         title="CORR Sharpe (auto-correlated)",
     )
     fig.update_layout(legend_title_text="")
     st.plotly_chart(fig)
-    st.dataframe(pdf.drop(columns=["champion", "ci_plus", "ci_minus"]))
+    st.dataframe(pdf.drop(columns=["champion", "ci_plus", "ci_minus", "label"]))
 
 
 def _render_run_manifest(manifest: dict) -> None:
@@ -390,7 +436,8 @@ def render_run_detail(leaderboard: pl.DataFrame) -> None:
     row.
     """
     for row in leaderboard.sort(_BAR_METRIC, descending=True, nulls_last=True).to_dicts():
-        label = f"{row['model_id'][:16]}… — {row['run_name']} ({row['source']})"
+        model_id = row["model_id"] or "?"  # null-safe: model_id may be None (benchmark rows)
+        label = f"{model_id[:16]}… — {row['run_name']} ({row['source']})"
         with st.expander(label):
             payload = _read_run_payload(Path(row["run_dir"]))
             if payload is None:
@@ -503,6 +550,10 @@ def main() -> None:
     )
     n_trials = st.sidebar.number_input(
         "Fleet DSR n_trials", min_value=1, value=1, step=1
+    )
+    st.sidebar.caption(
+        "n_trials is recorded as policy context; the stored DSR was computed "
+        "with n_trials=1 at scorecard time."
     )
     dsr_confidence = st.sidebar.number_input(
         "DSR confidence", min_value=0.01, max_value=0.99, value=0.95, step=0.01

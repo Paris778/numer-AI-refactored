@@ -159,16 +159,49 @@ def test_registry_frame_zero_value_not_treated_as_legacy(tmp_path) -> None:
     assert frame.row(0, named=True)["corr"] == 0.0
 
 
+def test_leaderboard_bar_labels_unique_on_run_name_collision(tmp_path) -> None:
+    # Real-data collision: both registry runs share run_name
+    # "first-competitive-lgbm-small" (their config name), so run_name alone
+    # cannot key the bars — px.bar would draw two overlapping bars at one
+    # x-tick. Labels must be unique per run while keeping the readable name.
+    a = _registry_entry("a" * 64)
+    b = _registry_entry("b" * 64, scorecard=False)
+    for entry in (a, b):
+        entry["manifest"]["config"]["run"] = {"name": "same-config-name"}
+    _write_registry(tmp_path, [a, b])
+    frame = dashboard_app.load_registry_frame(tmp_path)
+    assert frame.height == 2
+    assert frame.get_column("run_name").n_unique() == 1   # collision is real
+    pdf = dashboard_app._shaped_leaderboard_pdf(frame, champion=None)
+    labels = pdf["label"].tolist()
+    assert len(labels) == 2
+    assert len(set(labels)) == 2                          # unique bar keys
+    assert all("same-config-name" in label for label in labels)  # readable name kept
+
+
 def test_benchmarks_and_merge(tmp_path) -> None:
     bench_path = tmp_path / "benchmark_scores.csv"
     bench_path.write_text(
-        "model_id,corr,corr_sharpe_ac,std_corr,max_drawdown,strategy_group,horizon_target_name\n"
-        "bench_a,0.05,0.5,0.3,0.2,linear,cyrusd\n",
+        "model_id,corr,corr_sharpe_ac,corr_sharpe_ac_ci_low,corr_sharpe_ac_ci_high,std_corr,max_drawdown,strategy_group,horizon_target_name\n"
+        "bench_a,0.05,0.5,0.4,0.6,0.3,0.2,linear,cyrusd\n",
         encoding="utf-8",
     )
     benchmarks = dashboard_app.load_benchmarks(bench_path)
     assert benchmarks.height == 1
     assert benchmarks.row(0, named=True)["source"] == "benchmark"
+    assert benchmarks.row(0, named=True)["corr_sharpe_ac_ci_low"] == 0.4
+    assert benchmarks.row(0, named=True)["corr_sharpe_ac_ci_high"] == 0.6
+    # Absent CI columns fall back to None (real CSVs carry them, so None must
+    # remain the behavior only when the data is genuinely missing).
+    bench_no_ci = tmp_path / "benchmark_no_ci.csv"
+    bench_no_ci.write_text(
+        "model_id,corr,corr_sharpe_ac,std_corr,max_drawdown,strategy_group,horizon_target_name\n"
+        "bench_b,0.05,0.5,0.3,0.2,linear,cyrusd\n",
+        encoding="utf-8",
+    )
+    no_ci = dashboard_app.load_benchmarks(bench_no_ci).row(0, named=True)
+    assert no_ci["corr_sharpe_ac_ci_low"] is None
+    assert no_ci["corr_sharpe_ac_ci_high"] is None
     assert dashboard_app.load_benchmarks(tmp_path / "missing.csv").height == 0
 
     _write_registry(tmp_path, [_registry_entry("d" * 64)])
@@ -207,6 +240,29 @@ def test_robustness_matrix_and_champion(tmp_path) -> None:
     assert dashboard_app.champion_run_id(tmp_path) is None      # no champion.json
     (tmp_path / "champion.json").write_text(json.dumps({"run_id": "f" * 64}), encoding="utf-8")
     assert dashboard_app.champion_run_id(tmp_path) == "f" * 64
+
+
+def test_champion_run_id_corrupt_json_returns_none(tmp_path) -> None:
+    (tmp_path / "champion.json").write_text("{not json", encoding="utf-8")
+    assert dashboard_app.champion_run_id(tmp_path) is None
+
+
+def test_load_registry_frame_empty_dir_returns_schema_frame(tmp_path) -> None:
+    frame = dashboard_app.load_registry_frame(tmp_path)
+    assert frame.height == 0
+    assert frame.schema == dashboard_app._LEADERBOARD_SCHEMA
+
+
+def test_campaigns_null_runs_returns_empty_frame(tmp_path) -> None:
+    campaigns_dir = tmp_path / "campaigns"
+    campaigns_dir.mkdir()
+    (campaigns_dir / "null-runs.json").write_text(
+        json.dumps({"campaign_id": "null-runs", "name": "camp", "runs": None}),
+        encoding="utf-8",
+    )
+    frame = dashboard_app.load_campaigns(campaigns_dir)
+    assert frame.height == 0
+    assert frame.schema == dashboard_app._CAMPAIGN_SCHEMA
 
 
 def test_dashboard_app_imports_without_launching() -> None:

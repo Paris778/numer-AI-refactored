@@ -2,7 +2,7 @@
 
 A **lean, deterministic research framework** for the [Numerai Classic tournament](https://numer.ai), built as a single tested Python package (`nmr/`). It takes a typed YAML config through data ingestion, era-purged cross-validation, multi-target LightGBM/XGBoost/CatBoost training, rank-domain ensembling, feature neutralization, oracle-parity evaluation, and out the other end produces a registry-tracked, cloudpickled `predict()` artifact ready for hosted upload.
 
-**Stack:** Python 3.11+ · Polars · LightGBM / XGBoost / CatBoost · NumPy / SciPy / scikit-learn · `numerai-tools` · `numerapi` · cloudpickle · pytest (409 tests)
+**Stack:** Python 3.11+ · Polars · LightGBM / XGBoost / CatBoost · NumPy / SciPy / scikit-learn · `numerai-tools` · `numerapi` · cloudpickle · pytest (413 tests)
 
 > **For AI coding agents:** [`AGENTS.md`](AGENTS.md) is the authoritative source of truth for principles, invariants, and operational hazards — read it first. System internals live in [`ARCHITECTURE.md`](ARCHITECTURE.md). Humans contributing code should read [`CONTRIBUTING.md`](CONTRIBUTING.md). This README is a human-facing overview and setup guide; when documents disagree, trust `AGENTS.md` and the code.
 
@@ -52,7 +52,7 @@ A **lean, deterministic research framework** for the [Numerai Classic tournament
 ├── configs/                   # experiment configs (YAML)
 │   ├── example.yaml           # annotated full schema
 │   └── first_model.yaml       # current competitive config (4×20D-target ensemble)
-├── tests/                     # 409 tests (unit / parity / determinism / real-data tests)
+├── tests/                     # 413 tests (unit / parity / determinism / real-data tests)
 ├── data/                      # local Numerai v5.2 assets (parquets git-ignored)
 ├── artifacts/                 # runs, registry, caches, campaigns, benchmark CSVs (generated)
 ├── docs/                      # curated Numerai knowledge base — start at docs/DOCS_README.md
