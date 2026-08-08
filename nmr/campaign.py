@@ -75,11 +75,11 @@ def _file_sha256(path: Path) -> str:
 
 
 def campaign_id(name: str, config_paths: Sequence[str | Path]) -> str:
-    """Deterministic, path-independent campaign id (64-char hex).
+    """Deterministic, order-independent and path-independent campaign id.
 
-    Hashes the name plus the per-file content SHA256 digests in the given
-    order (order-sensitive), so moving or renaming config files does not
-    change the campaign identity.
+    Hashes the name plus the sorted per-file content SHA256 digests, so moving
+    or renaming config files does not change the campaign identity, and
+    re-invoking the campaign with reordered configs does not fork the id.
     """
     if not name:
         raise ValueError("campaign name must be non-empty")
@@ -89,7 +89,7 @@ def campaign_id(name: str, config_paths: Sequence[str | Path]) -> str:
         _file_sha256(Path(path)) for path in config_paths
     ]
     payload = json.dumps(
-        {"name": name, "configs": digests}, sort_keys=True
+        {"name": name, "configs": sorted(digests)}, sort_keys=True
     ).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
 

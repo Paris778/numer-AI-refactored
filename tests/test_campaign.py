@@ -28,7 +28,7 @@ def test_campaign_id_is_deterministic_and_path_independent(tmp_path) -> None:
     c = _write_config(tmp_path, "c.yaml", "run:\n  name: x\n")  # same content as a
 
     assert campaign_id("camp", [a, b]) == campaign_id("camp", [a, b])
-    assert campaign_id("camp", [a, b]) != campaign_id("camp", [b, a])  # order matters
+    assert campaign_id("camp", [a, b]) == campaign_id("camp", [b, a])  # order-independent: identity is the set of configs
     assert campaign_id("camp", [a, b]) != campaign_id("other", [a, b])
     # identical content, different file name -> identical id (path-independent)
     assert campaign_id("camp", [a, b]) == campaign_id("camp", [c, b])
