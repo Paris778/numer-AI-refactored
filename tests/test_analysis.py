@@ -203,7 +203,7 @@ def _ic_frame() -> pl.DataFrame:
 
 def test_feature_ic_by_era_long_form() -> None:
     frame = _ic_frame()
-    out = feature_ic_by_era(frame, ["feature_alpha", "feature_beta"], "target")
+    out = feature_ic_by_era(frame.partition_by("era", maintain_order=True), ["feature_alpha", "feature_beta"], "target")
     assert out.columns == ["era", "feature", "ic", "degenerate"]
     assert out.height == 4 * 2
     assert out["feature"].n_unique() == 2
@@ -223,7 +223,7 @@ def test_feature_ic_by_era_degenerate_flag() -> None:
             "target": [0.1, 1.0, 1.0, 1.0, 1.0],
         }
     )
-    out = feature_ic_by_era(frame, ["feature_alpha", "feature_beta"], "target")
+    out = feature_ic_by_era(frame.partition_by("era", maintain_order=True), ["feature_alpha", "feature_beta"], "target")
     assert out.filter(pl.col("era") == "0001")["degenerate"].all()  # <2 rows
     assert out.filter(pl.col("era") == "0002")["degenerate"].all()  # const target
     assert (out.filter(pl.col("era") == "0001")["ic"] == 0.0).all()  # zero vectors
@@ -231,7 +231,7 @@ def test_feature_ic_by_era_degenerate_flag() -> None:
 
 def test_feature_ic_screen_multi_target() -> None:
     frame = _ic_frame()
-    out = feature_ic_screen(frame, ["feature_alpha", "feature_beta"], ["target"])
+    out = feature_ic_screen(frame.partition_by("era", maintain_order=True), ["feature_alpha", "feature_beta"], ["target"])
     assert out.columns == [
         "feature",
         "target",
@@ -248,7 +248,7 @@ def test_feature_ic_screen_multi_target() -> None:
 
 def test_feature_ic_screen_empty_targets_raises() -> None:
     with pytest.raises(ValueError):
-        feature_ic_screen(_ic_frame(), ["feature_alpha"], [])
+        feature_ic_screen(_ic_frame().partition_by("era", maintain_order=True), ["feature_alpha"], [])
 
 
 from nmr.analysis import feature_summary

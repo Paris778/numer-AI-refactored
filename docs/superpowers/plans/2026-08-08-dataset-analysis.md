@@ -3794,3 +3794,20 @@ While executing Phase 4 (production run), the refresh script's version alert fir
 
 Design sections above that say "v5.2" describe the version pinned at design time;
 the mechanics are identical for v5.3.
+
+### Addendum 2 — chunk-driven feature pipeline (2026-08-08)
+
+At v5.3 scale (3,555-feature `all`, 6.85M rows), Design A's single full-frame
+collection is infeasible (~97 GB). The feature pipeline was refactored to stream
+eras via batched lazy scans (`analyze_dataset._iter_era_chunks`): each analysis
+holds at most one era (~20 MB) plus accumulators.
+
+- `nmr/features.py`: `_per_era_pearson_chunks` (era-chunk core; the frame-based
+  `_per_era_pearson` delegates) + extracted `_aggregate_screen` (shared by the
+  frame screen and the chunk screen).
+- `nmr/analysis.py`: `feature_ic_by_era` / `feature_ic_screen` now take era-chunk
+  iterables. `feature_summary` / `feature_correlation_structure` already did.
+- `analyze_dataset.py`: target analysis uses a small collected frame (era +
+  targets only); all feature analyses stream. Benchmark column detection is
+  schema-robust (excludes `era`/`id`/`data_type`/targets; v5.3 renames
+  `benchmark_*` → `v53_lgbm_*`).

@@ -10,7 +10,7 @@ the fingerprint is fully determined by config (including
 from __future__ import annotations
 
 import json
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from pathlib import Path
 
 import numpy as np
@@ -60,26 +60,27 @@ _SCREEN_COLUMNS = (
 )
 
 
-def _per_era_pearson(
-    frame: pl.DataFrame,
+def _per_era_pearson_chunks(
+    chunks: Iterable[pl.DataFrame],
     feature_cols: Sequence[str],
     target_col: str,
     era_col: str,
 ) -> tuple[dict[str, np.ndarray], set[str]]:
-    """Per-era Pearson CORR of each feature vs ``target_col``, keyed by era label.
+    """Per-era Pearson CORR of each feature vs ``target_col`` from era chunks.
 
-    Returns ``(corrs_by_era, degenerate_eras)``. A degenerate era (fewer than
-    2 non-null rows, or a constant target) contributes a zero vector and its
-    label is recorded in ``degenerate_eras``. This is the single implementation
-    of per-era feature-target correlation: both ``feature_stability_screen``
-    and ``nmr.analysis.feature_ic_by_era`` route through it.
+    Each chunk is one era. Returns ``(corrs_by_era, degenerate_eras)``. A
+    degenerate era (fewer than 2 non-null rows, or a constant target)
+    contributes a zero vector and its label is recorded in ``degenerate_eras``.
+    This is the single implementation of per-era feature-target correlation:
+    the frame-based ``_per_era_pearson``, ``feature_stability_screen``, and
+    ``nmr.analysis`` all route through it.
     """
     feature_list = list(feature_cols)
     per_era: dict[str, np.ndarray] = {}
     degenerate: set[str] = set()
-    for part in frame.select([era_col, target_col, *feature_list]).partition_by(
-        era_col, maintain_order=True
-    ):
+    for part in chunks:
+        if era_col not in part.columns:
+            raise ValueError(f"chunk missing required column {era_col!r}")
         era = str(part.get_column(era_col).to_list()[0])
         clean = part.drop_nulls()
         target = clean.get_column(target_col).cast(pl.Float64).to_numpy()
@@ -91,6 +92,24 @@ def _per_era_pearson(
         features = clean.select(feature_list).cast(pl.Float64).to_numpy()
         per_era[era] = _feature_target_pearson(features, target)
     return per_era, degenerate
+
+
+def _per_era_pearson(
+    frame: pl.DataFrame,
+    feature_cols: Sequence[str],
+    target_col: str,
+    era_col: str,
+) -> tuple[dict[str, np.ndarray], set[str]]:
+    """Frame-based convenience wrapper over :func:`_per_era_pearson_chunks`."""
+    feature_list = list(feature_cols)
+    return _per_era_pearson_chunks(
+        frame.select([era_col, target_col, *feature_list]).partition_by(
+            era_col, maintain_order=True
+        ),
+        feature_list,
+        target_col,
+        era_col,
+    )
 
 
 def feature_stability_screen(
@@ -123,7 +142,21 @@ def feature_stability_screen(
         raise ValueError(f"frame missing required columns: {sorted(missing)}")
 
     per_era, _ = _per_era_pearson(frame, feature_list, target_col, era_col)
+    return _aggregate_screen(per_era, feature_list, min_mean_corr, max_abs_decay)
 
+
+def _aggregate_screen(
+    per_era: dict[str, np.ndarray],
+    feature_list: Sequence[str],
+    min_mean_corr: float,
+    max_abs_decay: float,
+) -> pl.DataFrame:
+    """Aggregate per-era CORR vectors into the screen's summary columns.
+
+    Shared by the frame-based :func:`feature_stability_screen` and the
+    chunk-based screen path used by ``nmr.analysis``. See
+    :func:`feature_stability_screen` for column semantics.
+    """
     if not per_era:
         return pl.DataFrame(
             {name: [] for name in _SCREEN_COLUMNS}

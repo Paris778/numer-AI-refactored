@@ -12,7 +12,7 @@ import json
 import os
 import sys
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -24,6 +24,8 @@ from nmr.config import DataConfig
 from nmr.data import IngestionAgent
 from nmr.features import resolve_feature_sets
 from nmr.refresh import CURRENT_DATA_VERSION
+
+_ERA_BATCH = 40  # eras scanned per lazy pass (bounded transient memory)
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -71,7 +73,11 @@ def _era_chunks(
     columns: Sequence[str],
     max_eras: int | None,
 ) -> list[pl.DataFrame]:
-    """Collect era-partitioned chunks from the requested splits (Design A)."""
+    """Collect era-partitioned chunks from the requested splits.
+
+    For small column sets (meta/era/targets). Feature-heavy analyses use
+    ``_iter_era_chunks`` instead — never materialize the full feature frame.
+    """
     frames = [agent.scan(split, columns=columns).collect() for split in splits]
     if max_eras is not None:
         frames = [
@@ -81,6 +87,44 @@ def _era_chunks(
         raise ValueError("no split frames to analyze")
     combined = pl.concat(frames)
     return combined.partition_by("era", maintain_order=True)
+
+
+def _iter_era_chunks(
+    agent: IngestionAgent,
+    splits: Sequence[str],
+    columns: Sequence[str],
+    max_eras: int | None,
+) -> Iterator[pl.DataFrame]:
+    """Yield one era at a time from batched lazy scans (bounded memory).
+
+    The full feature universe (v5.3 ``all`` = 3555 columns) cannot be collected
+    as one frame (~100 GB); this streams era batches via predicate pushdown,
+    so each analysis holds at most one era plus accumulators. Deterministic:
+    eras are yielded in ascending integer order.
+    """
+    era_sets: list[set[str]] = []
+    for split in splits:
+        labels = agent.scan(split, columns=["era"]).collect().get_column("era").to_list()
+        era_sets.append(set(labels))
+    all_eras = sorted(set().union(*era_sets), key=int)
+    if max_eras is not None:
+        all_eras = [e for e in all_eras if int(e) <= max_eras]
+
+    for start in range(0, len(all_eras), _ERA_BATCH):
+        batch = all_eras[start : start + _ERA_BATCH]
+        parts = []
+        for split in splits:
+            part = (
+                agent.scan(split, columns=columns)
+                .filter(pl.col("era").is_in(batch))
+                .collect()
+            )
+            if part.height:
+                parts.append(part)
+        if not parts:
+            continue
+        combined = pl.concat(parts)
+        yield from combined.partition_by("era", maintain_order=True)
 
 
 def _resolve_reference_targets(
@@ -136,42 +180,59 @@ def main(argv: Sequence[str] | None = None) -> int:
         out / "era_structure.parquet",
     )
 
-    # full frame (Design A, single collection) for screen + IC + regimes
-    full = _era_chunks(
-        agent, splits, ["era", "id", *feature_cols, *target_columns], args.max_eras
+    # target analysis on a small collected frame (era + targets only)
+    target_frame = pl.concat(
+        _era_chunks(agent, splits, ["era", *target_columns], args.max_eras)
     )
-    full_frame = pl.concat(full)
-
     _atomic_write_json(
         {
-            t: analysis.target_profile(full_frame, [t]).row(0, named=True)
+            t: analysis.target_profile(target_frame, [t]).row(0, named=True)
             for t in target_columns
         },
         out / "targets.json",
     )
     _atomic_write_parquet(
-        analysis.target_correlation_matrix(full_frame, target_columns),
+        analysis.target_correlation_matrix(target_frame, target_columns),
         out / "target_corr.parquet",
     )
-    ic_by_era = analysis.feature_ic_by_era(full_frame, feature_cols, target_columns[0])
+
+    # feature analyses stream eras (bounded memory; never collect all features)
+    feature_columns = ["era", *feature_cols, *target_columns]
+    ic_by_era = analysis.feature_ic_by_era(
+        _iter_era_chunks(agent, splits, feature_columns, args.max_eras),
+        feature_cols,
+        target_columns[0],
+    )
     _atomic_write_parquet(ic_by_era, out / "feature_ic_by_era.parquet")
+    screens = [
+        analysis.feature_ic_screen(
+            _iter_era_chunks(agent, splits, feature_columns, args.max_eras),
+            feature_cols,
+            [t],
+        )
+        for t in target_columns
+    ]
     _atomic_write_parquet(
-        analysis.feature_ic_screen(full_frame, feature_cols, target_columns),
-        out / "feature_ic_screen.parquet",
+        pl.concat(screens), out / "feature_ic_screen.parquet"
     )
     _atomic_write_parquet(
-        analysis.feature_summary(full, feature_cols),
+        analysis.feature_summary(
+            _iter_era_chunks(agent, splits, feature_columns, args.max_eras),
+            feature_cols,
+        ),
         out / "feature_summary.parquet",
     )
 
     # correlation structure: medium full matrix + selected-set summary
-    if set(medium_cols) <= set(feature_cols):
-        medium_chunks = full
-    else:
-        medium_chunks = _era_chunks(agent, splits, ["era", *medium_cols], args.max_eras)
-    medium_result = analysis.feature_correlation_structure(medium_chunks, medium_cols)
+    medium_result = analysis.feature_correlation_structure(
+        _iter_era_chunks(agent, splits, ["era", *medium_cols], args.max_eras),
+        medium_cols,
+    )
     _atomic_write_parquet(medium_result.top_pairs, out / "feature_corr_medium.parquet")
-    selected_result = analysis.feature_correlation_structure(full, feature_cols)
+    selected_result = analysis.feature_correlation_structure(
+        _iter_era_chunks(agent, splits, feature_columns, args.max_eras),
+        feature_cols,
+    )
     selected_summary = dict(selected_result.summary)
     selected_summary["top_pairs"] = selected_result.top_pairs.to_dicts()
     _atomic_write_json(selected_summary, out / "feature_corr_all_summary.json")

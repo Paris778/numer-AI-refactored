@@ -15,6 +15,8 @@ import numpy as np
 import polars as pl
 import scipy.stats
 
+from nmr.features import DEFAULT_MAX_ABS_DECAY, DEFAULT_MIN_MEAN_CORR
+
 __all__ = [
     "SplitStats",
     "describe_splits",
@@ -229,20 +231,20 @@ def target_correlation_matrix(
 
 
 def feature_ic_by_era(
-    frame: pl.DataFrame,
+    chunks: Iterable[pl.DataFrame],
     feature_cols: Sequence[str],
     target_col: str,
     era_col: str = "era",
 ) -> pl.DataFrame:
-    """Per-era per-feature IC long-form, via ``_per_era_pearson``.
+    """Per-era per-feature IC long-form, via ``_per_era_pearson_chunks``.
 
-    Degenerate eras (per the screen convention) carry ``ic = 0.0`` and
-    ``degenerate = True``; all other rows carry ``degenerate = False``.
+    Each chunk must be one era (era-partitioned). Degenerate eras carry
+    ``ic = 0.0`` and ``degenerate = True``; all other rows ``False``.
     """
-    from nmr.features import _per_era_pearson
+    from nmr.features import _per_era_pearson_chunks
 
     feature_list = list(feature_cols)
-    corrs, degenerate = _per_era_pearson(frame, feature_list, target_col, era_col)
+    corrs, degenerate = _per_era_pearson_chunks(chunks, feature_list, target_col, era_col)
     rows = [
         {
             "era": era,
@@ -265,26 +267,30 @@ def feature_ic_by_era(
 
 
 def feature_ic_screen(
-    frame: pl.DataFrame,
+    chunks: Iterable[pl.DataFrame],
     feature_cols: Sequence[str],
     targets: Sequence[str],
     era_col: str = "era",
+    min_mean_corr: float = DEFAULT_MIN_MEAN_CORR,
+    max_abs_decay: float = DEFAULT_MAX_ABS_DECAY,
 ) -> pl.DataFrame:
     """Aggregated feature-target screen, one block per reference target.
 
-    Thin wrapper over ``feature_stability_screen`` (the single screen
-    implementation) that tags each block with its target.
+    Chunk-driven (each chunk is one era) so the full feature universe can be
+    screened without materializing the whole frame; the aggregation math is
+    the shared ``nmr.features._aggregate_screen`` (same as the frame-based
+    ``feature_stability_screen``).
     """
-    from nmr.features import feature_stability_screen
+    from nmr.features import _aggregate_screen, _per_era_pearson_chunks
 
     if not targets:
         raise ValueError("targets must contain at least one target column")
-    blocks = [
-        feature_stability_screen(
-            frame, feature_cols=feature_cols, target_col=t, era_col=era_col
-        ).with_columns(pl.lit(t).alias("target"))
-        for t in targets
-    ]
+    feature_list = list(feature_cols)
+    blocks = []
+    for t in targets:
+        corrs, _ = _per_era_pearson_chunks(chunks, feature_list, t, era_col)
+        screen = _aggregate_screen(corrs, feature_list, min_mean_corr, max_abs_decay)
+        blocks.append(screen.with_columns(pl.lit(t).alias("target")))
     return pl.concat(blocks).select(
         [
             "feature",
