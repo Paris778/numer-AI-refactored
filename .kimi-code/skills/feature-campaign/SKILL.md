@@ -1,0 +1,38 @@
+---
+name: feature-campaign
+description: Use when designing a feature-subset experiment campaign for the nmr framework — comparing data.feature_subset candidates, screening features for cross-era/cross-regime stability, or Pareto-selecting feature sets against the champion
+type: prompt
+disableModelInvocation: false
+---
+
+# Feature Campaigns (S1)
+
+**Core principle:** one campaign = one named batch of configs sharing a hypothesis, differing only in `data.feature_subset`; every subset is a pure function of `features.json` + the stability screen; the human picks the winner.
+
+## When to Use
+- Comparing named feature sets (small/medium/all, personality families, v2/v3 equivalents) on real data.
+- Screening candidate features for stability before committing a config.
+- Fleet runs via `run_campaign.py`, then Pareto selection against the champion.
+
+## Protocol
+
+1. **Discover** — `resolve_feature_sets(Path("data/v5.2/features.json"))` returns `dict[str, list[str]]` in deterministic order. `small`=42, `medium`=780, `all`=2748, plus personality families (intelligence, charisma, strength, dexterity, constitution, wisdom, agility, serenity, sunshine, rain, midnight, faith, ...) and v2/v3 equivalents. Enumerate from `features.json` — never hardcode the list.
+2. **Screen** — `feature_stability_screen(frame, *, feature_cols, target_col, era_col="era", min_mean_corr=DEFAULT_MIN_MEAN_CORR, max_abs_decay=DEFAULT_MAX_ABS_DECAY)` computes per-feature `mean_corr`, `corr_std`, `decay_slope`, `cross_regime_variance`, `n_eras`, `stable`; keep winners via `select_stable_features(screen, *, min_mean_corr, max_abs_decay) -> list[str]` (sorted). Defaults `0.01` / `0.001`. Formulas: ARCHITECTURE.md §P. This is nmr business logic — call it, never re-implement in scripts/notebooks. (The `DEFAULT_*` constants are module-level in `nmr/features.py`, not package-root exports.)
+3. **Generate candidates** — subset definitions must be pure functions of `features.json` + screen output: same inputs ⇒ same subset. A different subset is a different experiment by design: the run_id fingerprint covers config (incl. `data.feature_subset`) + data_version + `nmr/*.py` + environment (ARCHITECTURE.md §P).
+4. **Materialize + evaluate** — one YAML per candidate (e.g. `configs/campaigns/<name>/...`), each with `data.feature_subset: <set>`; subset wins over `feature_set` (`resolved_feature_set` = subset if set). Dry-run first: `python run_campaign.py --config a.yaml --config b.yaml --name <campaign> --dry-run` (prints run_ids, writes nothing), then run for real. The log lands atomically at `artifacts/campaigns/<campaign_id>.json` with per-config run_ids and statuses (`recorded`/`skipped`/`error`).
+5. **Select** — `fleet_summary(RunRegistry("artifacts/registry").list(), *, n_trials, dsr_confidence=0.95)`; Pareto-filter Sharpe vs feature count, penalize high `max_feature_exposure`; present ranked configs for **human review**. Never auto-promote.
+
+## Hard Rules
+- [ ] `purge_eras >= 8` (20D targets) / `>= 16` (60D) — protocol-enforced; the code only checks the configured gap, it does not block weakening.
+- [ ] Subsets are pure functions of `features.json` + screen output.
+- [ ] No business logic in configs/scripts/notebooks — call the nmr functions.
+- [ ] Never call `RunRegistry.promote`/`promote_if_better` — promotion is a human decision.
+
+## Common Mistakes
+| Mistake | Fix |
+|---|---|
+| Hardcoding set names | `resolve_feature_sets(features.json)` |
+| Pooled (non-era) stability screening | Use `feature_stability_screen` (per-era internally) |
+| Forgetting subset wins over `feature_set` | Set `data.feature_subset`; keep `feature_set` as fallback |
+| Skipping `--dry-run` | Run_ids are cheap; training is not |
+| Auto-promoting the fleet winner | Verdict → human, always |
