@@ -32,6 +32,10 @@ def resolve_feature_sets(features_json: Path) -> dict[str, list[str]]:
     """
     path = Path(features_json)
     raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"{path}: top-level JSON must be an object containing 'feature_sets'"
+        )
     sets = raw.get("feature_sets")
     if not isinstance(sets, dict) or not sets:
         raise ValueError(f"{path}: 'feature_sets' must be a non-empty mapping")
@@ -143,7 +147,7 @@ def select_stable_features(
     max_abs_decay: float,
 ) -> list[str]:
     """Return the sorted stable feature names passing both thresholds."""
-    required = {"feature", "mean_corr", "decay_slope", "stable", "n_eras"}
+    required = {"feature", "mean_corr", "decay_slope", "n_eras"}
     missing = required - set(screen.columns)
     if missing:
         raise ValueError(f"screen missing required columns: {sorted(missing)}")

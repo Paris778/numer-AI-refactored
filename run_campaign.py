@@ -70,6 +70,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if run_id in existing:
             logger.info("[campaign] %s already recorded; skipping", run_id)
+            existing.add(run_id)
             runs.append(CampaignRun(str(path), run_id=run_id, status="skipped"))
             continue
 
@@ -77,6 +78,7 @@ def main(argv: list[str] | None = None) -> int:
             assert registry is not None  # constructed whenever not args.dry_run
             result = ExperimentRunner(cfg).run(deploy=args.deploy)
             registry.record(result)
+            existing.add(result.run_id)
             runs.append(CampaignRun(str(path), run_id=result.run_id, status="recorded"))
             logger.info("[campaign] recorded %s -> %s", path, result.run_id)
         except Exception as exc:

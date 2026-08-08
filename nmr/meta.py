@@ -134,8 +134,10 @@ def promotion_verdict(
     """Significance-aware promotion decision on registry entries.
 
     Compares CI-bearing scorecard cells: candidate ``ci_low > champion
-    ci_high`` (higher-is-better) -> ``"promote"``; the mirror -> ``"hold"``;
-    any overlap, missing CI, or missing champion scorecard -> ``"caution"``.
+    ci_high`` (higher-is-better) -> ``"promote"``; the mirror -> ``"hold"``.
+    With no champion, or a champion lacking the scorecard metric (an
+    unmeasurable champion is treated like no champion), -> ``"promote"``.
+    Missing CIs on either side, or any CI overlap, -> ``"caution"``.
     This is an advisory verdict only — it never writes the registry.
     """
     if metric not in _VERDICT_DIRECTIONS:

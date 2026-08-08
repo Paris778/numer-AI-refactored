@@ -52,9 +52,22 @@ def test_paired_comparison_sign_using_prediction_means() -> None:
 
 
 def test_paired_comparison_bootstrap_deterministic_under_seed() -> None:
-    a, b = _frame(), _frame()
-    r1 = paired_era_comparison(a, b, metric_fn=_era_index_metric, seed=11, n_boot=200)
-    r2 = paired_era_comparison(a, b, metric_fn=_era_index_metric, seed=11, n_boot=200)
+    def mean_pred(frame: pl.DataFrame) -> dict[str, float]:
+        out: dict[str, float] = {}
+        for era in frame.get_column("era").unique().to_list():
+            out[str(era)] = float(
+                frame.filter(pl.col("era") == era).get_column("prediction").mean()
+            )
+        return out
+
+    a = _frame()  # per-era prediction mean 0.45
+    # Era-dependent shift -> per-era diffs (a - b) VARY across eras (-1, -2, ...),
+    # so the block-bootstrap resample genuinely exercises the seeded RNG.
+    b = a.with_columns(
+        (pl.col("prediction") + pl.col("era").cast(pl.Int64)).alias("prediction")
+    )
+    r1 = paired_era_comparison(a, b, metric_fn=mean_pred, seed=11, n_boot=200)
+    r2 = paired_era_comparison(a, b, metric_fn=mean_pred, seed=11, n_boot=200)
     assert r1 == r2  # same seed -> identical CI (cross-process determinism)
 
 
@@ -144,6 +157,14 @@ def test_verdict_cautions_when_ci_unavailable() -> None:
 def test_verdict_promotes_without_champion() -> None:
     candidate = _entry("d" * 64, value=0.25, lo=0.20, hi=0.30)
     assert promotion_verdict(candidate, None) == "promote"
+
+
+def test_verdict_promotes_when_champion_lacks_scorecard() -> None:
+    candidate = _entry("d" * 64, value=0.25, lo=0.20, hi=0.30)
+    no_scorecard = {"run_id": "c" * 64}  # champion entry with no scorecard at all
+    empty_scorecard = _entry("c" * 64)  # scorecard present but metric missing
+    assert promotion_verdict(candidate, no_scorecard) == "promote"
+    assert promotion_verdict(candidate, empty_scorecard) == "promote"
 
 
 def test_verdict_lower_is_better_for_max_drawdown() -> None:

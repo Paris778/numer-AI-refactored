@@ -63,6 +63,17 @@ def test_resolve_feature_sets_rejects_missing_or_empty_feature_sets(tmp_path) ->
         resolve_feature_sets(tmp_path / "notmap.json")
 
 
+def test_resolve_feature_sets_rejects_non_dict_top_level(tmp_path) -> None:
+    (tmp_path / "list.json").write_text(
+        json.dumps(["f1", "f2"]), encoding="utf-8"
+    )
+    (tmp_path / "string.json").write_text(json.dumps("oops"), encoding="utf-8")
+    with pytest.raises(ValueError, match="feature_sets"):
+        resolve_feature_sets(tmp_path / "list.json")
+    with pytest.raises(ValueError, match="feature_sets"):
+        resolve_feature_sets(tmp_path / "string.json")
+
+
 def _screen_frame() -> pl.DataFrame:
     """f_good: per-era CORR ~ +1 with zero decay; f_bad: CORR ~ -1 decaying to 0."""
     rows: list[dict] = []
