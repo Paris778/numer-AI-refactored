@@ -51,12 +51,24 @@ def paired_era_comparison(
 
     ``metric_fn`` maps an OOF frame to ``{era: metric}`` (e.g. a closure over
     ``EvaluationEngine().per_era_corr`` with explicit pred/target/era columns).
-    Positive ``mean_diff`` means A is better. Eras are intersected on the
+    Positive ``mean_diff`` means A is better. Both frames must contain the
+    ``era_col`` column; a missing one raises ``ValueError`` naming the
+    offending frame(s). Eras are intersected on the
     numeric era index; fewer than ``min_overlap_eras`` overlapping eras raises
     :class:`NonVacuityError`. A device mismatch is reported (GPU vs CPU OOF
     values are not comparable — see AGENTS.md operational hazards), never
     silently corrected.
     """
+    missing_frames = [
+        name
+        for name, frame in (("oof_a", oof_a), ("oof_b", oof_b))
+        if era_col not in frame.columns
+    ]
+    if missing_frames:
+        raise ValueError(
+            f"era_col {era_col!r} missing from column set of: "
+            + ", ".join(missing_frames)
+        )
     per_era_a = metric_fn(oof_a)
     per_era_b = metric_fn(oof_b)
     overlap = sorted(set(per_era_a) & set(per_era_b), key=int)

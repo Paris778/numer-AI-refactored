@@ -76,3 +76,30 @@ def test_paired_comparison_device_mismatch_flag() -> None:
         device_a="cpu", device_b="cpu",
     )
     assert same.device_mismatch is False
+
+
+def test_paired_comparison_raises_when_era_col_missing() -> None:
+    a = _frame()
+    renamed = _frame().rename({"era": "epoch"})  # lacks default era_col "era"
+    with pytest.raises(ValueError, match="oof_b"):
+        paired_era_comparison(a, renamed, metric_fn=_era_index_metric, seed=7)
+    with pytest.raises(ValueError, match="oof_a"):
+        paired_era_comparison(renamed, a, metric_fn=_era_index_metric, seed=7)
+    with pytest.raises(ValueError, match="oof_a.*oof_b"):
+        paired_era_comparison(renamed, renamed, metric_fn=_era_index_metric, seed=7)
+
+
+def test_paired_comparison_honors_renamed_era_col() -> None:
+    def metric_on_epoch(frame: pl.DataFrame) -> dict[str, float]:
+        return {
+            str(era): float(era)
+            for era in frame.get_column("epoch").unique().sort().to_list()
+        }
+
+    a = _frame().rename({"era": "epoch"})
+    b = _frame().rename({"era": "epoch"})
+    result = paired_era_comparison(
+        a, b, metric_fn=metric_on_epoch, era_col="epoch", seed=7, n_boot=50,
+    )
+    assert result.n_eras == 24
+    assert result.mean_diff == pytest.approx(0.0, abs=1e-9)
