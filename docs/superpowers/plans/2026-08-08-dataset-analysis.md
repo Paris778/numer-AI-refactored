@@ -1497,7 +1497,7 @@ def test_target_profile_non_finite_dropped() -> None:
     out = target_profile(frame, ["target"])
     row = out.row(0, named=True)
     assert row["n_eras_present"] == 2
-    assert row["missing_rate"] == 2 / 6
+    assert np.isclose(row["missing_rate"], 2 / 6)
     assert np.isclose(row["pooled_mean"], (1.0 + 3.0 + 5.0 + 6.0) / 4)
 
 
@@ -1524,16 +1524,16 @@ def test_target_correlation_matrix_hand_computed() -> None:
     frame = pl.DataFrame(rows)
     out = target_correlation_matrix(frame, ["target_alpha", "target_beta"])
     assert out.columns == ["target_a", "target_b", "mean_corr", "n_eras"]
-    assert out.row(0)["target_a"] == "target_alpha"
-    assert out.row(0)["target_b"] == "target_beta"
-    assert out.row(0)["n_eras"] == 4
+    assert out.row(0, named=True)["target_a"] == "target_alpha"
+    assert out.row(0, named=True)["target_b"] == "target_beta"
+    assert out.row(0, named=True)["n_eras"] == 4
     era_corrs = []
     for part in frame.partition_by("era"):
         a = part["target_alpha"].to_numpy()
         b = part["target_beta"].to_numpy()
         ra, rb = scipy.stats.rankdata(a), scipy.stats.rankdata(b)
         era_corrs.append(np.corrcoef(ra, rb)[0, 1])
-    assert np.isclose(out.row(0)["mean_corr"], float(np.mean(era_corrs)), atol=1e-12)
+    assert np.isclose(out.row(0, named=True)["mean_corr"], float(np.mean(era_corrs)), atol=1e-12)
 
 
 def test_target_correlation_matrix_nan_pair_skipped() -> None:
@@ -1545,8 +1545,8 @@ def test_target_correlation_matrix_nan_pair_skipped() -> None:
         }
     )
     out = target_correlation_matrix(frame, ["target_alpha", "target_beta"])
-    assert out.row(0)["n_eras"] == 1  # era 0001 skipped (all-NaN beta)
-    assert np.isclose(out.row(0)["mean_corr"], 1.0)  # perfectly monotone in 0002
+    assert out.row(0, named=True)["n_eras"] == 1  # era 0001 skipped (all-NaN beta)
+    assert np.isclose(out.row(0, named=True)["mean_corr"], 1.0)  # perfectly monotone in 0002
 
 
 def test_target_correlation_matrix_deterministic() -> None:

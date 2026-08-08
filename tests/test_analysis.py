@@ -71,3 +71,110 @@ def test_era_structure_gap_detection() -> None:
 def test_era_structure_empty_raises() -> None:
     with pytest.raises(ValueError):
         era_structure(pl.DataFrame({"era": [], "id": [], "x": []}))
+
+
+import scipy.stats
+
+from nmr.analysis import target_correlation_matrix, target_profile
+
+
+def test_target_profile_moments() -> None:
+    rng = np.random.default_rng(11)
+    rows: list[dict[str, object]] = []
+    for e in range(3):
+        era = f"{e + 1:04d}"
+        for v in rng.normal(size=100):
+            rows.append({"era": era, "target": float(v)})
+    frame = pl.DataFrame(rows)
+    out = target_profile(frame, ["target"])
+    assert len(out) == 1
+    row = out.row(0, named=True)
+    series = frame["target"].to_numpy()
+    assert row["n_eras_present"] == 3
+    assert np.isclose(row["pooled_mean"], float(series.mean()), atol=1e-12)
+    assert np.isclose(row["pooled_std"], float(series.std(ddof=0)), atol=1e-12)
+    assert np.isclose(
+        row["pooled_skew"], float(scipy.stats.skew(series)), atol=1e-12
+    )
+    assert np.isclose(
+        row["pooled_kurtosis"],
+        float(scipy.stats.kurtosis(series, fisher=True)),
+        atol=1e-12,
+    )
+    assert row["missing_rate"] == 0.0
+    assert row["zero_variance_era_count"] == 0
+
+
+def test_target_profile_non_finite_dropped() -> None:
+    frame = pl.DataFrame(
+        {
+            "era": ["0001", "0001", "0001", "0002", "0002", "0002"],
+            "target": [1.0, float("nan"), 3.0, None, 5.0, 6.0],
+        }
+    )
+    out = target_profile(frame, ["target"])
+    row = out.row(0, named=True)
+    assert row["n_eras_present"] == 2
+    assert np.isclose(row["missing_rate"], 2 / 6)
+    assert np.isclose(row["pooled_mean"], (1.0 + 3.0 + 5.0 + 6.0) / 4)
+
+
+def test_target_profile_zero_variance_era_counted() -> None:
+    frame = pl.DataFrame(
+        {
+            "era": ["0001", "0001", "0002", "0002", "0002"],
+            "target": [5.0, 5.0, 1.0, 2.0, 3.0],
+        }
+    )
+    out = target_profile(frame, ["target"])
+    assert out.row(0, named=True)["zero_variance_era_count"] == 1
+
+
+def test_target_correlation_matrix_hand_computed() -> None:
+    rng = np.random.default_rng(3)
+    rows: list[dict[str, object]] = []
+    for e in range(4):
+        era = f"{e + 1:04d}"
+        for i in range(20):
+            a = float(rng.normal())
+            b = 2.0 * a + float(rng.normal(scale=0.5))
+            rows.append({"era": era, "target_alpha": a, "target_beta": b})
+    frame = pl.DataFrame(rows)
+    out = target_correlation_matrix(frame, ["target_alpha", "target_beta"])
+    assert out.columns == ["target_a", "target_b", "mean_corr", "n_eras"]
+    assert out.row(0, named=True)["target_a"] == "target_alpha"
+    assert out.row(0, named=True)["target_b"] == "target_beta"
+    assert out.row(0, named=True)["n_eras"] == 4
+    era_corrs = []
+    for part in frame.partition_by("era"):
+        a = part["target_alpha"].to_numpy()
+        b = part["target_beta"].to_numpy()
+        ra, rb = scipy.stats.rankdata(a), scipy.stats.rankdata(b)
+        era_corrs.append(np.corrcoef(ra, rb)[0, 1])
+    assert np.isclose(out.row(0, named=True)["mean_corr"], float(np.mean(era_corrs)), atol=1e-12)
+
+
+def test_target_correlation_matrix_nan_pair_skipped() -> None:
+    frame = pl.DataFrame(
+        {
+            "era": ["0001", "0001", "0001", "0002", "0002", "0002"],
+            "target_alpha": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0],
+            "target_beta": [None, None, None, 1.0, 2.0, 3.0],
+        }
+    )
+    out = target_correlation_matrix(frame, ["target_alpha", "target_beta"])
+    assert out.row(0, named=True)["n_eras"] == 1  # era 0001 skipped (all-NaN beta)
+    assert np.isclose(out.row(0, named=True)["mean_corr"], 1.0)  # perfectly monotone in 0002
+
+
+def test_target_correlation_matrix_deterministic() -> None:
+    rng = np.random.default_rng(5)
+    rows = [
+        {"era": f"{e + 1:04d}", "a": float(v), "b": float(-v)}
+        for e in range(3)
+        for v in rng.normal(size=10)
+    ]
+    frame = pl.DataFrame(rows)
+    out1 = target_correlation_matrix(frame, ["a", "b"])
+    out2 = target_correlation_matrix(frame, ["a", "b"])
+    assert out1.equals(out2)
