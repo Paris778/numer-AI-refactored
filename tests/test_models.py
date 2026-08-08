@@ -411,3 +411,31 @@ def test_fit_model_records_resolved_device() -> None:
     df = _model_frame(n_eras=4)
     orchestrator.train_full_history(df, feature_cols=["f1", "f2", "f3"], target_col="target")
     assert orchestrator.resolved_device == "cpu"
+
+
+from nmr.models import ModelOrchestrator, resolve_model_params
+
+
+def test_resolve_model_params_merges_preset_and_overrides():
+    resolved = resolve_model_params("fast", {"n_estimators": 2500})
+    assert resolved["n_estimators"] == 2500          # override wins
+    assert resolved["learning_rate"] == 0.01         # preset default present
+    assert resolved["num_leaves"] == (2**5) - 1      # preset default present
+
+
+def test_resolve_model_params_matches_orchestrator_resolution():
+    cfg = ModelConfig(backend="lightgbm", preset="fast",
+                      params={"n_estimators": 2500, "colsample_bytree": 0.2})
+    orch = ModelOrchestrator(cfg, seed=42)
+    # _resolved_params(use_gpu=False) adds backend boilerplate; the preset+params
+    # core must equal resolve_model_params for the same inputs.
+    resolved = orch._resolved_params(use_gpu=False)
+    for key, value in resolve_model_params("fast", cfg.params).items():
+        assert resolved[key] == value
+
+
+def test_resolve_model_params_unknown_preset_raises():
+    import pytest as _pytest
+
+    with _pytest.raises(KeyError):
+        resolve_model_params("bogus", {})

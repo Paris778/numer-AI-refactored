@@ -59,6 +59,18 @@ _CANONICAL_PRESETS: dict[str, dict[str, Any]] = {
 }
 
 
+def resolve_model_params(preset: str, params: dict[str, Any]) -> dict[str, Any]:
+    """Resolve preset defaults overridden by explicit ``params``.
+
+    Single source of truth for preset+params resolution (ARCHITECTURE.md §S):
+    ``model.params`` wins over ``_CANONICAL_PRESETS[preset]``. Used by
+    :meth:`ModelOrchestrator._resolved_params` and the Bayesian sweep anchor.
+    """
+    resolved = dict(_CANONICAL_PRESETS[preset])
+    resolved.update(params)
+    return resolved
+
+
 @dataclass(frozen=True)
 class CVResult:
     oof: pl.DataFrame
@@ -299,8 +311,7 @@ class ModelOrchestrator:
         return [gpu_params, cpu_params]
 
     def _resolved_params(self, *, use_gpu: bool) -> dict[str, Any]:
-        base = dict(_CANONICAL_PRESETS[self._config.preset])
-        base.update(self._config.params)
+        base = resolve_model_params(self._config.preset, self._config.params)
 
         if self._config.backend == "lightgbm":
             params = {
