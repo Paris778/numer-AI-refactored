@@ -241,7 +241,7 @@ class ExperimentRunner:
             "oof_device": model_orchestrator.resolved_device,
             "metrics": dataclasses.asdict(metrics),
             "code_fingerprint": self._code_fingerprint(),
-            "environment": self._environment_fingerprint(),
+            "environment": self._environment_fingerprint(self._config.model.backend),
             "validation_purge_dropped_first_eras": validation_purge,
         }
 
@@ -462,7 +462,7 @@ class ExperimentRunner:
             "config": config_payload,
             "data_version": config.data.version,
             "code_fingerprint": ExperimentRunner._code_fingerprint(),
-            "environment": ExperimentRunner._environment_fingerprint(),
+            "environment": ExperimentRunner._environment_fingerprint(config.model.backend),
         }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
             "utf-8"
@@ -484,13 +484,23 @@ class ExperimentRunner:
         return digest.hexdigest()
 
     @staticmethod
-    def _environment_fingerprint() -> dict[str, Any]:
+    def _environment_fingerprint(backend: str | None = None) -> dict[str, Any]:
+        """Package-version fingerprint for the canonical run id.
+
+        Config-aware: the ``catboost`` package version is included only for
+        ``backend == "catboost"`` configs, so catboost-backend runs flag
+        catboost version drift while lightgbm/xgboost fingerprints stay
+        byte-identical to the legacy shape (no existing run_id changes).
+        """
+        packages = {
+            name: _package_version(name)
+            for name in ["numpy", "polars", "pandas", "lightgbm", "xgboost"]
+        }
+        if backend == "catboost":
+            packages["catboost"] = _package_version("catboost")
         return {
             "python_version": platform.python_version(),
-            "packages": {
-                name: _package_version(name)
-                for name in ["numpy", "polars", "pandas", "lightgbm", "xgboost"]
-            },
+            "packages": packages,
         }
 
 

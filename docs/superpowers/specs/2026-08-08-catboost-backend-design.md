@@ -33,7 +33,7 @@
 
 - **Determinism:** CatBoost CPU + `thread_count=1` + fixed `random_seed` is deterministic (same config+data+code+device ⇒ identical OOF). Verified by a new test (two `train_cross_validation` runs, same seed → identical OOF frames) mirroring the runner's determinism test. GPU determinism is NOT guaranteed — the per-device caveat already in AGENTS.md covers it.
 - **Deployment:** the deploy closure embeds the trained `CatBoostRegressor` via cloudpickle; `load_predict` roundtrip is tested locally. **Caveat (documented in AGENTS.md hazards + ARCHITECTURE §G):** CatBoost availability in Numerai's hosted predict runtime is unverified — a catboost-backed artifact must be validated against the hosted runtime before it is staked. Local `load_predict` fidelity is covered by the existing F-019-style test pattern.
-- Nothing new enters `canonical_scorecards_bytes`; the run_id environment fingerprint is unchanged. **Decision: do NOT add `catboost` to `_environment_fingerprint`** — adding it would invalidate every existing run_id for a marginal benefit; per-backend version drift is governed by the `requirements.txt` pin (same policy as `optuna`). The fingerprint stays a coarse cross-backend stability marker over `{numpy, polars, pandas, lightgbm, xgboost}`; catboost-backend reproducibility rests on the pin + CI, documented in ARCHITECTURE §G.
+- Nothing new enters `canonical_scorecards_bytes`. **Decision (adopted): config-aware `_environment_fingerprint(backend)`** — the `catboost` package version joins the packages dict **only** when `config.model.backend == "catboost"`; lightgbm/xgboost fingerprints stay byte-identical to the legacy `{numpy, polars, pandas, lightgbm, xgboost}` shape, so no existing run_id is invalidated (and no catboost configs predate this change, so nothing else moves). Unconditional inclusion was rejected: it would invalidate every existing run_id for a marginal benefit. CatBoost-backend reproducibility otherwise rests on the `requirements.txt` pin + CI (same policy as `optuna`), documented in ARCHITECTURE §G.
 
 ## Testing (`tests/test_models.py` + `tests/test_runner.py` extensions)
 
@@ -57,5 +57,5 @@
 
 - Categorical-feature plumbing (no categorical columns in Numerai data).
 - GPU determinism guarantees (per-device caveat already documented).
-- Adding catboost to the run_id environment fingerprint (pin-based reproducibility instead; documented).
+- Unconditional (all-backend) inclusion of `catboost` in the run_id environment fingerprint (config-aware inclusion adopted instead; lightgbm/xgboost fingerprints stay byte-identical).
 - No metric, splitter, ensembling, risk, or scorecard changes.

@@ -342,3 +342,39 @@ def test_runner_catboost_end_to_end(tmp_path) -> None:
     pred = loaded(live_features)
     assert pred["prediction"].notna().all()
     assert pred["prediction"].nunique() > 1  # non-constant pipeline output
+
+
+def test_environment_fingerprint_lightgbm_keeps_legacy_shape(tmp_path) -> None:
+    """Backend-aware fingerprint must not invalidate existing lightgbm run_ids.
+
+    The lightgbm config must resolve to the exact pre-change five-package
+    fingerprint (byte-identical dict), so no existing run_id changes and the
+    cross-process reproducibility guarantee is untouched for lightgbm/xgboost.
+    """
+    cfg = _config(tmp_path)  # lightgbm backend
+    assert cfg.model.backend == "lightgbm"
+    packages = ExperimentRunner._environment_fingerprint(cfg.model.backend)["packages"]
+    assert set(packages) == {"numpy", "polars", "pandas", "lightgbm", "xgboost"}
+    assert "catboost" not in packages
+    # Legacy (pre-change) shape: the no-arg call must be byte-identical.
+    assert packages == ExperimentRunner._environment_fingerprint()["packages"]
+
+
+def test_environment_fingerprint_catboost_includes_version(tmp_path) -> None:
+    """CatBoost-backend configs must fingerprint the catboost package version.
+
+    The catboost-backend run_id must flag the installed catboost version, the
+    same stability marker lightgbm/xgboost get from their package versions.
+    """
+    cfg = _config(tmp_path)
+    catboost_cfg = ExperimentConfig(
+        data=cfg.data, split=cfg.split,
+        model=ModelConfig(backend="catboost", preset="fast",
+                          params={"n_estimators": 40, "learning_rate": 0.05}),
+        evaluation=cfg.evaluation, run=cfg.run,
+    )
+    packages = ExperimentRunner._environment_fingerprint(
+        catboost_cfg.model.backend
+    )["packages"]
+    assert "catboost" in packages
+    assert isinstance(packages["catboost"], str) and packages["catboost"]
