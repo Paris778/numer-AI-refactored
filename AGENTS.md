@@ -79,7 +79,7 @@ If a request violates any of these, **decline the violating component** and offe
 - 🚫 **Never** include wall-clock timings, absolute paths, or environment-variable state in canonical hashes.
 - 🚫 **Never** import from or modify `../numer-AI/` (read-only legacy — mine it for logic, never import it).
 - 🚫 **Never** introduce unrelated refactoring, cosmetic tweaks, or scope creep.
-- 🚫 **Never** add third-party dependencies when the stdlib, NumPy/SciPy, or Polars can do the job. **EXCEPTION (user-granted 2026-08-08): Optuna** (pinned in `requirements.txt`) for the HPO path — imported only in `nmr/opt.py`; parallel trial execution is forbidden (`n_jobs=1`).
+- 🚫 **Never** add third-party dependencies when the stdlib, NumPy/SciPy, or Polars can do the job. **User-granted exceptions (2026-08-08, all pinned in `requirements.txt`):** Optuna (HPO — imported only in `nmr/opt.py`; parallel trial execution forbidden, `n_jobs=1`); CatBoost (model backend — imported only in `nmr/models.py`; CPU-only, §G); Streamlit + Plotly (interactive dashboard — imported only in `dashboard_app.py`; read-only app).
 - 🚫 **Never** suppress or silently swallow exceptions.
 
 ---
