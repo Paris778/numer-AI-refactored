@@ -1412,8 +1412,13 @@ def era_structure(frame: pl.DataFrame, era_col: str = "era") -> pl.DataFrame:
     per = per.with_columns(
         pl.col(era_col).cast(pl.Int64).alias("era_index")
     ).sort("era_index")
-    prev = per.get_column("era_index").shift(1)
-    gap = (per.get_column("era_index") != prev.fill_null(pl.col("era_index") - 1)).alias("gap")
+    gap = (
+        per.select(
+            (pl.col("era_index") != pl.col("era_index").shift(1) + 1)
+            .fill_null(False)
+            .alias("gap")
+        ).get_column("gap")
+    )
     return per.select(
         pl.col(era_col).alias("era"), "era_index", "n_rows", "n_ids", gap
     )

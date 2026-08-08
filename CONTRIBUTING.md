@@ -43,7 +43,7 @@ All code must follow the eight non-negotiable principles in [`AGENTS.md`](AGENTS
 
 ## Testing & Verification
 
-Run the full suite after every change (448 tests; from the repo root):
+Run the full suite after every change (453 tests; from the repo root):
 
 ```powershell
 .\.venv\Scripts\python -m pytest -q
