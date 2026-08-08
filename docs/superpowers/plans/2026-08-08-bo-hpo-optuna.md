@@ -4,7 +4,7 @@
 
 **Goal:** Implement the approved BO-HPO spec: a new `nmr/opt.py` module exposing `bayesian_sweep(...)` (Optuna TPE, deterministic, declarative space dict), an additive `corr_sharpe_ac` metric branch in `research._held_out_metric`, a public `models.resolve_model_params` helper, the pinned `optuna==4.9.0` dependency, and same-change-set docs + S2-skill updates.
 
-**Architecture:** `nmr/opt.py` is the only Optuna-importing module. The objective is harness-internal (materialize trial params via `_override_config` → evaluate via `_held_out_metric`). Sweeps are seeded (`TPESampler(seed, deterministic=True)`), single-threaded (`n_jobs=1` asserted), in-memory storage, and return the existing `SweepResult` contract built post-hoc from `study.trials`. Preset resolution stays in `models.py` via the new public `resolve_model_params`; `opt.py` intersects it with the space for the baseline anchor.
+**Architecture:** `nmr/opt.py` is the only Optuna-importing module. The objective is harness-internal (materialize trial params via `_override_config` → evaluate via `_held_out_metric`). Sweeps are seeded (`TPESampler(seed=...)`, deterministic-by-default in Optuna 4.x), single-threaded (`n_jobs=1` asserted), in-memory storage, and return the existing `SweepResult` contract built post-hoc from `study.trials`. Preset resolution stays in `models.py` via the new public `resolve_model_params`; `opt.py` intersects it with the space for the baseline anchor.
 
 **Tech Stack:** Python 3.11+ (venv 3.12), Polars, NumPy/SciPy, LightGBM/XGBoost, **Optuna 4.9.0** (user-granted exception to the no-new-deps rule, 2026-08-08).
 
@@ -253,7 +253,7 @@ optuna==4.9.0
 - [ ] **Step 2: Install into the project venv**
 
 Run: `.venv/Scripts/python -m pip install optuna==4.9.0`
-Expected: installs; then verify: `.venv/Scripts/python -c "import optuna; print(optuna.__version__)"` → `4.9.0`. Confirm `optuna.logging.set_verbosity`, `optuna.storages.InMemoryStorage`, `optuna.trial.TrialState.COMPLETE`, `optuna.exceptions.TrialPruned`, and `TPESampler(seed=..., deterministic=True)` all exist in 4.9.0 (quick `hasattr` checks; do NOT guess — verify in the installed package).
+Expected: installs; then verify: `.venv/Scripts/python -c "import optuna; print(optuna.__version__)"` → `4.9.0`. Confirm `optuna.logging.set_verbosity`, `optuna.storages.InMemoryStorage`, `optuna.trial.TrialState.COMPLETE`, `optuna.exceptions.TrialPruned`, and `TPESampler(seed=...)` all exist in 4.9.0 (quick `hasattr` checks; do NOT guess — verify in the installed package). **Note: the 3.x `deterministic` flag was removed in Optuna 4.x — seeded TPE is deterministic-by-default (verified empirically on 4.9.0: identical seeds ⇒ identical trial sequences).**
 
 - [ ] **Step 3: Commit** — `build(deps): pin optuna==4.9.0 (user-granted exception)` on `bo-hpo`.
 

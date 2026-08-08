@@ -12,7 +12,7 @@
 | Space expression | **Declarative dict form (canonical), no positional tuples** | Serializable, auditable, config-driven; avoids tuple-length ambiguity for agents generating raw configs |
 | API surface | **New module `nmr/opt.py`** with `bayesian_sweep(...)` | Isolates the Optuna import to one module; `HyperparameterSweep.run` (deterministic random/Cartesian) stays backward-compatible |
 | Review 1.3 | **`corr_sharpe_ac` supported** | Primary promotion/ranking metric (`RunRegistry.promote_if_better` defaults to it); proxy-only objectives misalign with champion gates |
-| Review 3.2 | **`n_jobs=1` non-negotiable** | TPE `deterministic=True` breaks under parallel trials (async completion ordering); models already force `n_jobs: 1` internally (`models.py:309,322`) — parallel Optuna on top would oversubscribe |
+| Review 3.2 | **`n_jobs=1` non-negotiable** | Seeded TPE determinism breaks under parallel trials (async completion ordering); models already force `n_jobs: 1` internally (`models.py:309,322`) — parallel Optuna on top would oversubscribe |
 
 ## Architecture
 
@@ -88,7 +88,7 @@ Validation errors (each raises `ValueError` with a matchable message, ALL before
 
 - Study created with `TPESampler(seed=seed)` — seeded trial generation; deterministic-by-default since Optuna 4.x (the 3.x `deterministic` flag was removed; verified on 4.9.0: identical seeds ⇒ identical trial sequences). Trial 0 (baseline anchor) is deterministic by construction.
 - Evaluations are the harness's bit-deterministic `_held_out_metric` (custom backend, CPU). Same config + space + seed + pinned dependencies ⇒ identical trial sequence, identical best params, cross-process.
-- **`n_jobs=1` is a hard invariant** (enforced by assertion): parallel trials break `deterministic=True` TPE and oversubscribe CPU (models already run `n_jobs: 1` internally).
+- **`n_jobs=1` is a hard invariant** (enforced by assertion): parallel trials break seeded-TPE determinism and oversubscribe CPU (models already run `n_jobs: 1` internally).
 - Documented caveats (mirroring the existing GPU/CPU run caveat):
   1. Sweep reproducibility is per-environment — GPU-vs-CPU evaluation differences cascade through BO adaptivity.
   2. Optuna's TPE internals can change across versions — sweeps are reproducible under pinned versions (`requirements.txt` pins Optuna).
