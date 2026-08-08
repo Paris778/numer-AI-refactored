@@ -178,3 +178,74 @@ def test_target_correlation_matrix_deterministic() -> None:
     out1 = target_correlation_matrix(frame, ["a", "b"])
     out2 = target_correlation_matrix(frame, ["a", "b"])
     assert out1.equals(out2)
+
+
+from nmr.analysis import feature_ic_by_era, feature_ic_screen
+from nmr.features import _per_era_pearson
+
+
+def _ic_frame() -> pl.DataFrame:
+    rng = np.random.default_rng(21)
+    rows: list[dict[str, float | str]] = []
+    for e in range(4):
+        era = f"{e + 1:04d}"
+        for i in range(12):
+            rows.append(
+                {
+                    "era": era,
+                    "feature_alpha": float(rng.normal()),
+                    "feature_beta": float(rng.normal()),
+                    "target": float(rng.normal()),
+                }
+            )
+    return pl.DataFrame(rows)
+
+
+def test_feature_ic_by_era_long_form() -> None:
+    frame = _ic_frame()
+    out = feature_ic_by_era(frame, ["feature_alpha", "feature_beta"], "target")
+    assert out.columns == ["era", "feature", "ic", "degenerate"]
+    assert out.height == 4 * 2
+    assert out["feature"].n_unique() == 2
+    assert out["era"].n_unique() == 4
+    corrs, _ = _per_era_pearson(frame, ["feature_alpha", "feature_beta"], "target", "era")
+    for era, vec in corrs.items():
+        rows = out.filter(pl.col("era") == era)
+        assert np.array_equal(rows["ic"].to_numpy(), vec)
+
+
+def test_feature_ic_by_era_degenerate_flag() -> None:
+    frame = pl.DataFrame(
+        {
+            "era": ["0001", "0002", "0002", "0002", "0002"],
+            "feature_alpha": [1.0, 2.0, 1.0, 1.0, 1.0],
+            "feature_beta": [3.0, 4.0, 5.0, 6.0, 7.0],
+            "target": [0.1, 1.0, 1.0, 1.0, 1.0],
+        }
+    )
+    out = feature_ic_by_era(frame, ["feature_alpha", "feature_beta"], "target")
+    assert out.filter(pl.col("era") == "0001")["degenerate"].all()  # <2 rows
+    assert out.filter(pl.col("era") == "0002")["degenerate"].all()  # const target
+    assert (out.filter(pl.col("era") == "0001")["ic"] == 0.0).all()  # zero vectors
+
+
+def test_feature_ic_screen_multi_target() -> None:
+    frame = _ic_frame()
+    out = feature_ic_screen(frame, ["feature_alpha", "feature_beta"], ["target"])
+    assert out.columns == [
+        "feature",
+        "target",
+        "mean_corr",
+        "corr_std",
+        "decay_slope",
+        "cross_regime_variance",
+        "n_eras",
+        "stable",
+    ]
+    assert out.height == 2
+    assert out["target"].to_list() == ["target", "target"]
+
+
+def test_feature_ic_screen_empty_targets_raises() -> None:
+    with pytest.raises(ValueError):
+        feature_ic_screen(_ic_frame(), ["feature_alpha"], [])

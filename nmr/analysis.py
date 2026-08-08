@@ -226,3 +226,74 @@ def target_correlation_matrix(
         for (a, b), vals in pairs.items()
     ]
     return pl.DataFrame(rows)
+
+
+def feature_ic_by_era(
+    frame: pl.DataFrame,
+    feature_cols: Sequence[str],
+    target_col: str,
+    era_col: str = "era",
+) -> pl.DataFrame:
+    """Per-era per-feature IC long-form, via ``_per_era_pearson``.
+
+    Degenerate eras (per the screen convention) carry ``ic = 0.0`` and
+    ``degenerate = True``; all other rows carry ``degenerate = False``.
+    """
+    from nmr.features import _per_era_pearson
+
+    feature_list = list(feature_cols)
+    corrs, degenerate = _per_era_pearson(frame, feature_list, target_col, era_col)
+    rows = [
+        {
+            "era": era,
+            "feature": feature,
+            "ic": float(vec[i]),
+            "degenerate": era in degenerate,
+        }
+        for era, vec in corrs.items()
+        for i, feature in enumerate(feature_list)
+    ]
+    return pl.DataFrame(
+        rows,
+        schema={
+            "era": pl.Utf8,
+            "feature": pl.Utf8,
+            "ic": pl.Float64,
+            "degenerate": pl.Boolean,
+        },
+    )
+
+
+def feature_ic_screen(
+    frame: pl.DataFrame,
+    feature_cols: Sequence[str],
+    targets: Sequence[str],
+    era_col: str = "era",
+) -> pl.DataFrame:
+    """Aggregated feature-target screen, one block per reference target.
+
+    Thin wrapper over ``feature_stability_screen`` (the single screen
+    implementation) that tags each block with its target.
+    """
+    from nmr.features import feature_stability_screen
+
+    if not targets:
+        raise ValueError("targets must contain at least one target column")
+    blocks = [
+        feature_stability_screen(
+            frame, feature_cols=feature_cols, target_col=t, era_col=era_col
+        ).with_columns(pl.lit(t).alias("target"))
+        for t in targets
+    ]
+    return pl.concat(blocks).select(
+        [
+            "feature",
+            "target",
+            "mean_corr",
+            "corr_std",
+            "decay_slope",
+            "cross_regime_variance",
+            "n_eras",
+            "stable",
+        ]
+    )

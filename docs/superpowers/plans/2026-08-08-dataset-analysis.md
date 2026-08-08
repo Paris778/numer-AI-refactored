@@ -1764,16 +1764,16 @@ def test_feature_ic_by_era_long_form() -> None:
 def test_feature_ic_by_era_degenerate_flag() -> None:
     frame = pl.DataFrame(
         {
-            "era": ["0001", "0001", "0002", "0002", "0002"],
+            "era": ["0001", "0002", "0002", "0002", "0002"],
             "feature_alpha": [1.0, 2.0, 1.0, 1.0, 1.0],
             "feature_beta": [3.0, 4.0, 5.0, 6.0, 7.0],
-            "target": [0.1, 0.2, 1.0, 1.0, 1.0],
+            "target": [0.1, 1.0, 1.0, 1.0, 1.0],
         }
     )
     out = feature_ic_by_era(frame, ["feature_alpha", "feature_beta"], "target")
     assert out.filter(pl.col("era") == "0001")["degenerate"].all()  # <2 rows
     assert out.filter(pl.col("era") == "0002")["degenerate"].all()  # const target
-    assert not out.filter(pl.col("era") == "0001")["ic"].any()  # zero vectors
+    assert (out.filter(pl.col("era") == "0001")["ic"] == 0.0).all()  # zero vectors
 
 
 def test_feature_ic_screen_multi_target() -> None:
@@ -1865,7 +1865,18 @@ def feature_ic_screen(
         ).with_columns(pl.lit(t).alias("target"))
         for t in targets
     ]
-    return pl.concat(blocks)
+    return pl.concat(blocks).select(
+        [
+            "feature",
+            "target",
+            "mean_corr",
+            "corr_std",
+            "decay_slope",
+            "cross_regime_variance",
+            "n_eras",
+            "stable",
+        ]
+    )
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
