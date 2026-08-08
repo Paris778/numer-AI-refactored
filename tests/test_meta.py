@@ -4,7 +4,7 @@ import polars as pl
 import pytest
 
 from nmr.evaluation import MIN_OVERLAP_ERAS, NonVacuityError
-from nmr.meta import paired_era_comparison, promotion_verdict
+from nmr.meta import fleet_summary, paired_era_comparison, promotion_verdict
 
 
 def _frame(n_eras: int = 24) -> pl.DataFrame:
@@ -164,3 +164,77 @@ def test_verdict_directions_match_registry_semantics() -> None:
 def test_verdict_rejects_unknown_metric() -> None:
     with pytest.raises(ValueError, match="metric"):
         promotion_verdict(_entry("d" * 64), None, metric="bogus")
+
+
+def _full_entry(run_id: str, sharpe_ac: float) -> dict:
+    return {
+        "run_id": run_id,
+        "manifest": {
+            "oof_device": "cpu",
+            "config": {
+                "data": {"feature_set": "small", "feature_subset": None},
+                "model": {"preset": "fast"},
+                "risk": {"neutralization_proportion": 1.0},
+            },
+        },
+        "scorecard": {
+            "corr_sharpe_ac": sharpe_ac,
+            "corr_sharpe_ac_ci_low": sharpe_ac - 0.05,
+            "corr_sharpe_ac_ci_high": sharpe_ac + 0.05,
+            "corr_sharpe_ac_n_eras": 30,
+            "deflated_sharpe": 0.98,
+            "max_feature_exposure": 0.3,
+            "bmc": 0.02,
+            "horizon_model_sharpe_20": 0.5,
+            "perturb_ceiling_stability": 0.9,
+            "regime_count": 3,
+        },
+    }
+
+
+def test_fleet_summary_columns_and_flags() -> None:
+    runs = [_full_entry("a" * 64, 0.12), _full_entry("b" * 64, 0.05)]
+    frame = fleet_summary(runs, n_trials=2)
+    assert frame.height == 2
+    assert set(frame.columns) >= {
+        "run_id", "metric", "metric_ci_low", "metric_ci_high", "metric_n_eras",
+        "deflated_sharpe", "dsr_pass", "max_feature_exposure", "oof_device",
+        "preset", "feature_set", "feature_subset", "neutralization_proportion",
+        "has_bmc", "has_horizon", "has_perturb", "has_regime",
+        "policy_n_trials", "policy_dsr_confidence",
+    }
+    first = frame.filter(pl.col("run_id") == "a" * 64).row(0, named=True)
+    assert first["dsr_pass"] is True
+    assert first["oof_device"] == "cpu"
+    assert first["preset"] == "fast"
+    assert first["feature_set"] == "small"
+    assert first["has_bmc"] is True and first["has_horizon"] is True
+    assert first["has_perturb"] is True and first["has_regime"] is True
+    assert first["policy_n_trials"] == 2
+    # sorted by metric desc, run_id tiebreak
+    assert frame.get_column("run_id").to_list() == ["a" * 64, "b" * 64]
+
+
+def test_fleet_summary_flags_legacy_runs_without_scorecard() -> None:
+    legacy = {
+        "run_id": "c" * 64,
+        "manifest": {"oof_device": "cpu", "config": {
+            "data": {"feature_set": "all", "feature_subset": None},
+            "model": {"preset": "deep"},
+            "risk": {"neutralization_proportion": 0.5},
+        }},
+        "scorecard": None,
+    }
+    frame = fleet_summary([legacy], n_trials=1)
+    row = frame.row(0, named=True)
+    assert row["metric"] is None
+    assert row["dsr_pass"] is False
+    assert row["has_bmc"] is False
+    assert row["preset"] == "deep" and row["neutralization_proportion"] == 0.5
+
+
+def test_fleet_summary_validates_policy_arguments() -> None:
+    with pytest.raises(ValueError, match="n_trials"):
+        fleet_summary([], n_trials=0)
+    with pytest.raises(ValueError, match="dsr_confidence"):
+        fleet_summary([], n_trials=1, dsr_confidence=1.5)

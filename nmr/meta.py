@@ -18,7 +18,7 @@ import polars as pl
 from nmr.evaluation import MIN_OVERLAP_ERAS, NonVacuityError
 from nmr.inference import Horizon, block_bootstrap_ci, resolve_block_len
 
-__all__ = ["PairedResult", "paired_era_comparison", "promotion_verdict"]
+__all__ = ["PairedResult", "fleet_summary", "paired_era_comparison", "promotion_verdict"]
 
 
 @dataclass(frozen=True)
@@ -180,3 +180,73 @@ def promotion_verdict(
         if cand_lo > champ_hi:
             return "hold"
     return "caution"
+
+
+def fleet_summary(
+    runs: Sequence[dict],
+    *,
+    metric: str = "corr_sharpe_ac",
+    n_trials: int,
+    dsr_confidence: float = 0.95,
+) -> pl.DataFrame:
+    """Flatten registry entries into a per-run fleet table.
+
+    Per-run cells: the requested scorecard metric (value + CI + n_eras), the
+    stored ``deflated_sharpe`` with a pass/fail flag against
+    ``dsr_confidence``, max feature exposure, ``oof_device``, and grouping
+    attributes from the manifest config (preset, feature_set, feature_subset,
+    neutralization_proportion) plus robustness presence flags (bmc, horizon,
+    perturbation, regime). ``n_trials`` and ``dsr_confidence`` are recorded as
+    policy context columns; the stored DSR itself was computed with
+    ``n_trials=1`` at scorecard time — campaign-aware DSR requires era-level
+    recompute via :func:`paired_era_comparison` tooling and is out of scope
+    here. Runs without a scorecard are flagged (legacy), never silently
+    dropped. Deterministic: sorted by metric desc, run_id tiebreak.
+    """
+    if n_trials < 1:
+        raise ValueError("n_trials must be >= 1")
+    if not (0.0 < dsr_confidence < 1.0):
+        raise ValueError("dsr_confidence must satisfy 0 < dsr_confidence < 1")
+
+    rows: list[dict] = []
+    for entry in runs:
+        run_id = entry["run_id"]
+        manifest = entry.get("manifest") or {}
+        config = manifest.get("config") or {}
+        data_cfg = config.get("data") or {}
+        model_cfg = config.get("model") or {}
+        risk_cfg = config.get("risk") or {}
+        scorecard = entry.get("scorecard") or {}
+        metric_value = scorecard.get(metric)
+        rows.append(
+            {
+                "run_id": run_id,
+                "metric": float(metric_value) if metric_value is not None else None,
+                "metric_ci_low": scorecard.get(f"{metric}_ci_low"),
+                "metric_ci_high": scorecard.get(f"{metric}_ci_high"),
+                "metric_n_eras": scorecard.get(f"{metric}_n_eras"),
+                "deflated_sharpe": scorecard.get("deflated_sharpe"),
+                "dsr_pass": bool(
+                    scorecard.get("deflated_sharpe") is not None
+                    and float(scorecard["deflated_sharpe"]) >= dsr_confidence
+                ),
+                "max_feature_exposure": scorecard.get("max_feature_exposure"),
+                "oof_device": manifest.get("oof_device"),
+                "preset": model_cfg.get("preset"),
+                "feature_set": data_cfg.get("feature_set"),
+                "feature_subset": data_cfg.get("feature_subset"),
+                "neutralization_proportion": risk_cfg.get("neutralization_proportion"),
+                "has_bmc": scorecard.get("bmc") is not None,
+                "has_horizon": scorecard.get("horizon_model_sharpe_20") is not None,
+                "has_perturb": scorecard.get("perturb_ceiling_stability") is not None,
+                "has_regime": scorecard.get("regime_count") is not None,
+                "policy_n_trials": n_trials,
+                "policy_dsr_confidence": dsr_confidence,
+            }
+        )
+    frame = pl.DataFrame(rows)
+    if frame.height > 0:
+        frame = frame.sort(
+            ["metric", "run_id"], descending=[True, False], nulls_last=True
+        )
+    return frame
