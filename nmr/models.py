@@ -19,6 +19,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
+import catboost
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
@@ -69,6 +70,39 @@ def resolve_model_params(preset: str, params: dict[str, Any]) -> dict[str, Any]:
     resolved = dict(_CANONICAL_PRESETS[preset])
     resolved.update(params)
     return resolved
+
+
+def _translate_catboost(
+    resolved: dict[str, Any], *, seed: int, use_gpu: bool
+) -> dict[str, Any]:
+    """Translate generic preset knobs to CatBoost names and apply the fixed contract.
+
+    Renames ``n_estimators``/``colsample_bytree``/``max_depth`` to
+    ``iterations``/``rsm``/``depth``, drops ``num_leaves`` (symmetric
+    depth-limited trees only), passes every other key through unchanged, then
+    overlays the deterministic contract. Contract values win over user params.
+    Only kwargs verified present in the pinned catboost 1.2.10 are emitted.
+    """
+    rename = {
+        "n_estimators": "iterations",
+        "colsample_bytree": "rsm",
+        "max_depth": "depth",
+    }
+    params = {rename.get(key, key): value for key, value in resolved.items()}
+    params.pop("num_leaves", None)
+    params.update(
+        {
+            "loss_function": "RMSE",
+            "random_seed": seed,
+            "thread_count": 1,
+            "verbose": False,
+            "allow_writing_files": False,  # CatBoost writes files by default; disable
+            "task_type": "GPU" if use_gpu else "CPU",
+        }
+    )
+    if use_gpu:
+        params["devices"] = "0"
+    return params
 
 
 @dataclass(frozen=True)
@@ -269,11 +303,12 @@ class ModelOrchestrator:
     ) -> object:
         candidate_params = self._device_candidate_params(use_gpu=use_gpu)
         last_error: Exception | None = None
-        backend_errors = (
-            (ValueError, TypeError, lgb.basic.LightGBMError)
-            if self._config.backend == "lightgbm"
-            else (ValueError, TypeError, xgb.core.XGBoostError)
-        )
+        if self._config.backend == "lightgbm":
+            backend_errors = (ValueError, TypeError, lgb.basic.LightGBMError)
+        elif self._config.backend == "catboost":
+            backend_errors = (ValueError, TypeError, catboost.CatBoostError)
+        else:
+            backend_errors = (ValueError, TypeError, xgb.core.XGBoostError)
 
         for params in candidate_params:
             model = self._build_model(params)
@@ -290,6 +325,7 @@ class ModelOrchestrator:
                 "gpu"
                 if params.get("device_type") == "gpu"
                 or params.get("tree_method") == "gpu_hist"
+                or params.get("task_type") == "GPU"
                 else "cpu"
             )
             return model
@@ -326,6 +362,10 @@ class ModelOrchestrator:
             params["device_type"] = "gpu" if use_gpu else "cpu"
             return params
 
+        if self._config.backend == "catboost":
+            base = resolve_model_params(self._config.preset, self._config.params)
+            return _translate_catboost(base, seed=self._seed, use_gpu=use_gpu)
+
         params = {
             "objective": "reg:squarederror",
             "random_state": self._seed,
@@ -349,6 +389,8 @@ class ModelOrchestrator:
     def _build_model(self, params: dict[str, Any]) -> object:
         if self._config.backend == "lightgbm":
             return lgb.LGBMRegressor(**params)
+        if self._config.backend == "catboost":
+            return catboost.CatBoostRegressor(**params)
         return xgb.XGBRegressor(**params)
 
     def _assert_fold_is_leakage_safe(self, fold: Fold, *, purge_eras: int) -> None:

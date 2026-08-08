@@ -232,6 +232,8 @@ class _FakeModel:
             raise self.backend_error("GPU unavailable")
         if self.params.get("tree_method") == "gpu_hist":
             raise self.backend_error("GPU unavailable")
+        if self.params.get("task_type") == "GPU":
+            raise self.backend_error("GPU unavailable")
         self._rows = len(features)
         return self
 
@@ -439,3 +441,91 @@ def test_resolve_model_params_unknown_preset_raises():
 
     with _pytest.raises(KeyError):
         resolve_model_params("bogus", {})
+
+
+# --- catboost backend (Task 3) -------------------------------------------------
+
+import catboost
+
+
+def test_translate_catboost_maps_preset_knobs() -> None:
+    from nmr.models import _translate_catboost
+
+    resolved = {
+        "n_estimators": 2000, "learning_rate": 0.01, "max_depth": 5,
+        "num_leaves": 31, "colsample_bytree": 0.1, "min_data_in_leaf": 100,
+    }
+    params = _translate_catboost(resolved, seed=42, use_gpu=False)
+    assert params["iterations"] == 2000
+    assert params["learning_rate"] == 0.01
+    assert params["depth"] == 5
+    assert params["rsm"] == 0.1
+    assert params["min_data_in_leaf"] == 100
+    assert "num_leaves" not in params          # dropped: symmetric depth-limited trees
+
+
+def test_translate_catboost_contract_params_are_fixed_and_win() -> None:
+    from nmr.models import _translate_catboost
+
+    resolved = {"random_seed": 1, "thread_count": 8, "n_estimators": 100}
+    params = _translate_catboost(resolved, seed=42, use_gpu=False)
+    assert params["loss_function"] == "RMSE"
+    assert params["random_seed"] == 42         # contract wins over user params
+    assert params["thread_count"] == 1         # contract wins over user params
+    assert params["verbose"] is False
+    assert params["allow_writing_files"] is False
+    assert params["task_type"] == "CPU"
+    assert params["iterations"] == 100         # non-contract keys still map
+
+
+def test_translate_catboost_gpu_sets_task_type_and_devices() -> None:
+    from nmr.models import _translate_catboost
+
+    params = _translate_catboost({"n_estimators": 100}, seed=42, use_gpu=True)
+    assert params["task_type"] == "GPU"
+    assert params["devices"] == "0"
+
+
+def test_catboost_cv_oof_is_deterministic_under_seed(tmp_path) -> None:
+    df = _model_frame()
+    splitter = _walk_forward_splitter()
+    cfg = ModelConfig(backend="catboost", preset="fast", params={"n_estimators": 10})
+    orch = ModelOrchestrator(cfg, seed=17)
+    first = orch.train_cross_validation(
+        df, feature_cols=["f1", "f2", "f3"], target_col="target",
+        splitter=splitter, era_col="era",
+    )
+    second = ModelOrchestrator(cfg, seed=17).train_cross_validation(
+        df, feature_cols=["f1", "f2", "f3"], target_col="target",
+        splitter=splitter, era_col="era",
+    )
+    assert first.oof.equals(second.oof)
+    assert orch.resolved_device == "cpu"
+
+
+def test_catboost_gpu_fallback_records_cpu(tmp_path, monkeypatch) -> None:
+    import nmr.models as models_module
+
+    df = _model_frame()
+
+    def factory(**params):
+        return _FakeModel(params=params, backend_error=catboost.CatBoostError)
+
+    monkeypatch.setattr(models_module.catboost, "CatBoostRegressor", factory)
+
+    orchestrator = ModelOrchestrator(
+        ModelConfig(backend="catboost", preset="fast", params={"n_estimators": 10}),
+        seed=29,
+    )
+    model, prediction = orchestrator.train_anchor_fold(
+        df,
+        feature_cols=["f1", "f2", "f3"],
+        target_col="target",
+        splitter=_anchor_splitter(),
+    )
+
+    assert isinstance(prediction, pl.DataFrame)
+    assert prediction.height > 0
+    params = model.get_params()
+    assert params["task_type"] == "CPU"
+    assert orchestrator.resolved_device == "cpu"
