@@ -1,9 +1,10 @@
 """Feature-set resolution and stability screening for research campaigns.
 
 Pure functions over ``features.json`` and the train frame; no model logic and
-no file state beyond the explicit ``features_json`` argument. Derived subsets
-must remain pure functions of their inputs so the run_id fingerprint (config +
-data_version + ``nmr/*.py`` + env) is unchanged by subset selection.
+no file state beyond the explicit ``features_json`` argument. Subset
+derivation adds no inputs to the run_id fingerprint beyond the config itself:
+the fingerprint is fully determined by config (including
+``data.feature_subset``) + data_version + ``nmr/*.py`` + environment.
 """
 
 from __future__ import annotations
