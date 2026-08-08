@@ -91,7 +91,7 @@ Numerai API credentials (for `numerapi` download/upload) are used only in notebo
 
 ## Data Assets
 
-The framework expects Numerai **v5.2** assets in `data/v5.2/` (downloadable via `numerapi`; see [data/refresh_data.ipynb](data/refresh_data.ipynb)):
+The framework expects Numerai **v5.2** assets in `data/v5.2/` (downloadable via `refresh_data.py`; see [Refreshing data](#refreshing-data)):
 
 | File | Purpose |
 |---|---|
@@ -102,6 +102,25 @@ The framework expects Numerai **v5.2** assets in `data/v5.2/` (downloadable via 
 | `live_example_preds.parquet` / `validation_example_preds.parquet` | Example prediction artifacts |
 
 Real-data tests and `benchmark_runner.py` require these files; pure-unit tests do not.
+
+### Refreshing data
+
+Round-aware refresh of the Numerai datasets (thin script; policy in `nmr/refresh.py`):
+
+```bash
+python refresh_data.py            # round-based refresh + era ledger update
+python refresh_data.py --dry-run  # print the plan, download nothing
+python refresh_data.py --check-only   # exit 3 if a newer data version or stale files
+```
+
+Behavior: `live.parquet` (and live benchmarks/example preds) re-download every time the
+tournament round advances; weekly-expanding files (`validation.parquet`,
+`validation_benchmark_models.parquet`, `meta_model.parquet`, ...) re-download on round
+advance; truly static files download only when missing. A prominent `[WARNING]` is
+printed when the API lists a newer data version than the pipeline's target
+(`--strict` turns it into exit code 3; `--check-only` into a status check). The era
+ledger `data/numerai_era_data.csv` records per-dataset refresh dates, era ranges, and
+the live round. See `docs/superpowers/specs/2026-08-08-dataset-analysis-design.md` §3.
 
 ---
 

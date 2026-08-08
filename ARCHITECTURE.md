@@ -351,6 +351,7 @@ All four are committed at `.kimi-code/skills/<name>/SKILL.md` (project-level Kim
 config.py        (leaf — no nmr imports)
 _transforms.py   (leaf)
 features.py      (leaf — stdlib/NumPy/Polars only)
+refresh.py       (leaf — stdlib only; pure refresh policy, no I/O/numerapi)
 
 data.py      ──> config (DataConfig)
 splitter.py  ──> config (SplitConfig)
@@ -374,6 +375,24 @@ deployment.py (leaf — cloudpickle/stdlib)
 
 nmr/__init__.py re-exports the public API of all modules (keep imports and __all__ in sync).
 ```
+
+### Refresh ledger (`data/numerai_era_data.csv`)
+
+Round-aware refresh (spec §3; policy in `nmr/refresh.py`, wiring in the root script
+`refresh_data.py`) maintains the era ledger with these columns:
+
+| Column | Type | Notes |
+|---|---|---|
+| `date` | ISO date | Date the record was written |
+| `dataset` | `train` / `validation` / `live` | One row per dataset per refresh |
+| `start_era` / `end_era` | zero-padded string | Read from the parquet `era` column; `"X"` for `live` (unlabeled rounds) |
+| `round_id` | float when present, empty otherwise | Tournament round, set only for `live` |
+
+Refresh triggers: `live.*` files every round advance; weekly-expanding files
+(`validation.parquet`, `validation_benchmark_models.parquet`,
+`validation_example_preds.*`, `meta_model.parquet`) on round advance; static files
+(`train.parquet`, `train_benchmark_models.parquet`, `features.json`) only when
+missing. `--live-only` skips expanding files. Writes are atomic via `_atomicio`.
 
 ---
 

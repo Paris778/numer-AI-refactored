@@ -162,6 +162,7 @@ The `docs/` tree is a curated Numerai domain library; `docs/DOCS_README.md` is i
 | Change benchmark gates | `docs/06-evaluation/benchmark-line-in-the-sand.md` (null floor + S11 ladder) |
 | Change evaluation semantics | `docs/06-evaluation/evaluation-suite-bible.md` (evaluation spec of record) |
 | Use `numerapi` / `numerai_tools` | `docs/03-reference/numerapi.md` + `docs/03-reference/numerai-tools.md`; the installed source is the ultimate oracle (see below) |
+| Refresh the Numerai datasets / era ledger | `nmr/refresh.py` + `refresh_data.py` |
 | Plan research work | `docs/04-research/research-program.md` (E0–E8 grid), `docs/04-research/advanced-ideas.md` (ideas incl. NN directions), `docs/04-research/State-of-the-Art Deep Learning for Obfuscated, Non-Stationary Tabular Regression.md` (tabular-DL survey) |
 | Seek domain intuition | `docs/02-strategy/strategy-bible.md` + `docs/02-strategy/why-it-works.md` |
 
