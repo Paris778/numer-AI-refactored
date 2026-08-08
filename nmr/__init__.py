@@ -77,6 +77,7 @@ from .payout import (
     time_to_recovery,
 )
 from .registry import RunRegistry
+from .refresh import CURRENT_DATA_VERSION, detect_newer_version
 from .research import (
     HyperparameterSweep,
     NeutralizationFrontier,
@@ -127,6 +128,7 @@ __all__ = [
     "load_predict",
     "Ensembler",
     "CVResult",
+    "CURRENT_DATA_VERSION",
     "ModelOrchestrator",
     "MetricSummary",
     "EvaluationEngine",
@@ -145,6 +147,7 @@ __all__ = [
     "block_bootstrap_ci",
     "ac_adjusted_sharpe",
     "deflated_sharpe",
+    "detect_newer_version",
     "PairedResult",
     "fleet_summary",
     "paired_era_comparison",
