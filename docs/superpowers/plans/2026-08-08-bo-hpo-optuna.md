@@ -557,8 +557,10 @@ def bayesian_sweep(
 ) -> SweepResult:
     """Bayesian hyperparameter sweep over ``space`` around ``base_config``.
 
-    Seeded TPE sampler (``deterministic=True``), single-threaded (``n_jobs``
-    must be 1 — parallel trials break TPE determinism), in-memory storage.
+    Seeded TPE sampler (``TPESampler(seed=...)`` — deterministic-by-default
+    since Optuna 4.x, which removed the 3.x ``deterministic`` flag; verified
+    on 4.9.0), single-threaded (``n_jobs`` must be 1 — parallel trials break
+    TPE determinism), in-memory storage.
     Trial 0 evaluates the resolved baseline (preset defaults + ``model.params``,
     intersected with the space) when ``enqueue_base_config`` is true.
     Returns the standard :class:`SweepResult` (ARCHITECTURE.md §S).
@@ -577,7 +579,7 @@ def bayesian_sweep(
     parsed = _parse_space(space)
     study = optuna.create_study(
         direction="maximize",
-        sampler=optuna.samplers.TPESampler(seed=seed, deterministic=True),
+        sampler=optuna.samplers.TPESampler(seed=seed),
         storage=optuna.storages.InMemoryStorage(),
     )
     if enqueue_base_config:

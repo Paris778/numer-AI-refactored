@@ -13,5 +13,6 @@ numpy
 pyyaml
 cloudpickle==3.1.1
 numerai-tools==0.5.3
+optuna==4.9.0
 ipykernel
 tqdm

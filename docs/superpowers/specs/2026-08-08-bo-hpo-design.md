@@ -8,7 +8,7 @@
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| Library | **Optuna** (user-granted exception to the no-new-deps rule, 2026-08-08) | TPE sampler with `sampler_seed` + `deterministic=True`; first-class LightGBM/XGBoost integration; actively maintained |
+| Library | **Optuna** (user-granted exception to the no-new-deps rule, 2026-08-08) | TPE sampler seeded via `seed` (deterministic-by-default since Optuna 4.x — the 3.x `deterministic` flag was removed; verified empirically on 4.9.0); first-class LightGBM/XGBoost integration; actively maintained |
 | Space expression | **Declarative dict form (canonical), no positional tuples** | Serializable, auditable, config-driven; avoids tuple-length ambiguity for agents generating raw configs |
 | API surface | **New module `nmr/opt.py`** with `bayesian_sweep(...)` | Isolates the Optuna import to one module; `HyperparameterSweep.run` (deterministic random/Cartesian) stays backward-compatible |
 | Review 1.3 | **`corr_sharpe_ac` supported** | Primary promotion/ranking metric (`RunRegistry.promote_if_better` defaults to it); proxy-only objectives misalign with champion gates |
@@ -86,7 +86,7 @@ Validation errors (each raises `ValueError` with a matchable message, ALL before
 
 ## Determinism & reproducibility contract
 
-- Study created with `TPESampler(seed=seed, deterministic=True)` — seeded trial generation. Trial 0 (baseline anchor) is deterministic by construction.
+- Study created with `TPESampler(seed=seed)` — seeded trial generation; deterministic-by-default since Optuna 4.x (the 3.x `deterministic` flag was removed; verified on 4.9.0: identical seeds ⇒ identical trial sequences). Trial 0 (baseline anchor) is deterministic by construction.
 - Evaluations are the harness's bit-deterministic `_held_out_metric` (custom backend, CPU). Same config + space + seed + pinned dependencies ⇒ identical trial sequence, identical best params, cross-process.
 - **`n_jobs=1` is a hard invariant** (enforced by assertion): parallel trials break `deterministic=True` TPE and oversubscribe CPU (models already run `n_jobs: 1` internally).
 - Documented caveats (mirroring the existing GPU/CPU run caveat):
