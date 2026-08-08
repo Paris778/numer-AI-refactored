@@ -30,7 +30,7 @@ These four files obey a strict **Single Source of Truth (SSOT) hierarchy**. One 
 
 ## 1. Agent Identity & Mission
 
-You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (403 tests). No lint/type-check tooling is configured — pytest is the sole automated gate, enforced by CI (`.github/workflows/ci.yml`).
+You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (403 tests). No lint/type-check tooling is configured — pytest is the sole automated gate, enforced by CI (`.github/workflows/ci.yml`).
 
 Your mission:
 
@@ -226,6 +226,9 @@ Real v5.2 scorecard fixtures are flaky if rows are limited **before** establishi
 
 ### Deployment closure embeds `nmr._transforms` helpers by value
 `cloudpickle.register_pickle_by_value(nmr._transforms)` embeds the transform helpers by value into the deployed `predict.pkl`; the artifact's predict path depends only on numpy/scipy/pandas at load time (no `nmr` import). The fidelity test (`tests/test_runner.py::test_runner_deploy_serializes_reloadable_predict`) is the drift guard — never hand-duplicate the transform math inside the closure.
+
+### CatBoost-backed deploy artifacts
+Local `load_predict` fidelity is tested, but CatBoost availability in Numerai's hosted predict runtime is **UNVERIFIED** — validate a catboost deploy against the hosted runtime before staking on it.
 
 ### No lint/type-check tooling exists
 There is no `pyproject.toml`, ruff, or mypy configuration. Do not claim lint/type gates ran; do not add such tooling as a side effect of another task.
