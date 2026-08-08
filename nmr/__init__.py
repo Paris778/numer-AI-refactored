@@ -22,6 +22,12 @@ from .benchmark import (
     scorecards_to_frame,
     write_scorecards_csv,
 )
+from .campaign import (
+    CampaignLog,
+    build_campaign_log,
+    campaign_id,
+    write_campaign_log,
+)
 from .config import ExperimentConfig, load_config, set_global_seeds
 from .data import IngestionAgent
 from .deployment import DeploymentArtifact, load_predict, serialize_predict
@@ -34,6 +40,11 @@ from .evaluation import (
     clean_frame,
     sorted_era_labels,
 )
+from .features import (
+    feature_stability_screen,
+    resolve_feature_sets,
+    select_stable_features,
+)
 from .inference import (
     BootstrapCI,
     SeriesStats,
@@ -43,6 +54,12 @@ from .inference import (
     era_series_stats,
     resolve_bandwidth,
     resolve_block_len,
+)
+from .meta import (
+    PairedResult,
+    fleet_summary,
+    paired_era_comparison,
+    promotion_verdict,
 )
 from .models import CVResult, ModelOrchestrator
 from .payout import (
@@ -98,6 +115,10 @@ __all__ = [
     "assert_slice1_monotone",
     "canonical_scorecards_bytes",
     "scorecards_sha256",
+    "CampaignLog",
+    "build_campaign_log",
+    "campaign_id",
+    "write_campaign_log",
     "IngestionAgent",
     "DeploymentArtifact",
     "serialize_predict",
@@ -111,6 +132,9 @@ __all__ = [
     "NonVacuityError",
     "clean_frame",
     "sorted_era_labels",
+    "feature_stability_screen",
+    "resolve_feature_sets",
+    "select_stable_features",
     "SeriesStats",
     "BootstrapCI",
     "era_series_stats",
@@ -119,6 +143,10 @@ __all__ = [
     "block_bootstrap_ci",
     "ac_adjusted_sharpe",
     "deflated_sharpe",
+    "PairedResult",
+    "fleet_summary",
+    "paired_era_comparison",
+    "promotion_verdict",
     "PayoutSeries",
     "PayoutResult",
     "payout_series",

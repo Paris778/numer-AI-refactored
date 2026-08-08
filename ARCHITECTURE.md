@@ -63,7 +63,7 @@ Frozen dataclasses; `__post_init__` validates enums, non-negativity, and non-emp
 
 | Section | Fields (defaults) | Valid values |
 |---|---|---|
-| `data: DataConfig` | `version="v5.2"`, `feature_set="small"`, `targets=("target",)`, `data_dir=REPO_ROOT/"data"` | feature_set ∈ `("small", "medium", "all")` |
+| `data: DataConfig` | `version="v5.2"`, `feature_set="small"`, `feature_subset=None`, `targets=("target",)`, `data_dir=REPO_ROOT/"data"` | feature_set ∈ `("small", "medium", "all")`; feature_subset: any `features.json` set name or `None` (validated at ingestion, §P) |
 | `split: SplitConfig` | `scheme="walk_forward"`, `purge_eras=8`, `embargo_eras=4`, `n_folds=4` | scheme ∈ `("walk_forward", "anchor")` |
 | `model: ModelConfig` | `backend="lightgbm"`, `preset="fast"`, `params={}` | backend ∈ `("lightgbm", "xgboost")`, preset ∈ `("fast", "standard", "deep")` |
 | `evaluation: EvalConfig` | `backend="custom"`, `main_target="target"`, `metrics=("corr","mmc","fnc","sharpe")`, `validation_scorecard=True` | backend ∈ `("custom", "official")` |
@@ -264,6 +264,54 @@ def predict(live_features: pd.DataFrame, live_benchmark_models: pd.DataFrame | N
 | [train_first_model.py](train_first_model.py) | `load_config("configs/first_model.yaml")` → `ExperimentRunner.run(deploy=True)` → `RunRegistry.record` + `promote_if_better` (prints promotion verdict) → prints summary, writes `summary.json` |
 | [benchmark_runner.py](benchmark_runner.py) | Flags: `--data-dir` (data/v5.2), `--output`, `--labels-output`, `--seed` (77), `--n-boot` (300), `--min-overlap-eras` (20), `--horizon` (20D/60D), `--min-train-eras` (10), `--log-level`, `--fast-mode` (n_boot=1, skips linear/tree). Loads validation/meta/benchmarks → `BenchmarkSuite` → scorecards CSV + per-era label profile CSV. Low-variance predictions (<1e-9) get a fallback scorecard. |
 | [generate_dashboard.py](generate_dashboard.py) | Aggregates registry runs + benchmark CSV → Sharpe-ranked dark-theme leaderboard at `artifacts/dashboard.html` |
+| [run_campaign.py](run_campaign.py) | Run a named batch of configs and record trial lineage (see §R) |
+
+### P. Feature-Set Resolution & Stability Screening — `nmr/features.py`
+
+Pure functions over `features.json` and the train frame; no model logic and no file state beyond the explicit `features_json` argument. Derived subsets are pure functions of their inputs, so the `run_id` fingerprint is unchanged by subset selection.
+
+`resolve_feature_sets(features_json: Path) -> dict[str, list[str]]` — returns every named set in `features.json` (`feature_sets` must be a non-empty mapping whose values are lists of strings, else `ValueError`), deterministically ordered by set name; values are defensive copies.
+
+`feature_stability_screen(frame, *, feature_cols, target_col, era_col="era", min_mean_corr=DEFAULT_MIN_MEAN_CORR, max_abs_decay=DEFAULT_MAX_ABS_DECAY) -> pl.DataFrame` — per-feature era-window statistics:
+
+- Per era, Pearson `CORR(feature, target)` computed in one vectorized per-era pass over `[era, target, *feature_cols]` (same pattern as `feature_exposure_report`, §L). Degenerate eras — fewer than 2 non-null rows, a zero-variance target, or a non-finite correlation — contribute `0.0`.
+- Aggregates across eras (`_SCREEN_COLUMNS` = `feature, mean_corr, corr_std, decay_slope, cross_regime_variance, n_eras, stable`): `mean_corr` (mean), `corr_std` (population std, ddof=0), `decay_slope` (linear slope of CORR vs numeric era index via `np.polyfit(..., 1)`; `0.0` when fewer than 2 eras), `cross_regime_variance` (`0.25 · (first − second)²` — the variance of the first-half vs second-half era-window mean CORR, a regime-drift proxy), `n_eras`.
+- `stable` predicate: `mean_corr ≥ min_mean_corr` AND `|decay_slope| ≤ max_abs_decay` AND `n_eras ≥ 2`. Defaults: `DEFAULT_MIN_MEAN_CORR = 0.01`, `DEFAULT_MAX_ABS_DECAY = 0.001`.
+
+`select_stable_features(screen, *, min_mean_corr, max_abs_decay) -> list[str]` — filters the screen frame on `mean_corr ≥ min_mean_corr`, `|decay_slope| ≤ max_abs_decay`, `n_eras ≥ 2` and returns the passing feature names sorted.
+
+`DataConfig.feature_subset` (`str | None`, default `None`) — optional override naming any feature set in `features.json`. Config load rejects empty-string values; the name itself is validated against `features.json` at ingestion time (`IngestionAgent.features` — fail loud, fail late). The `resolved_feature_set` property returns `feature_subset` when set, else `feature_set`; the runner and `HyperparameterSweep` resolve features through it (see also §2A, §B).
+
+### Q. Cross-Run Meta-Analysis — `nmr/meta.py`
+
+Decision layer on top of `nmr.inference` and `nmr.evaluation`; reuses the repo's seeded block-bootstrap machinery and never mutates the registry.
+
+`paired_era_comparison(oof_a, oof_b, *, metric_fn, era_col="era", horizon="20D", n_boot=1000, seed, alpha=0.05, min_overlap_eras=MIN_OVERLAP_ERAS, block_len=None, device_a=None, device_b=None) -> PairedResult` — `metric_fn` maps an OOF frame to `{era: metric}` (e.g. a closure over `EvaluationEngine().per_era_corr`). A missing `era_col` in either frame raises `ValueError` naming the frame(s); eras are intersected on the numeric era index, and fewer than `min_overlap_eras` overlapping eras raises `NonVacuityError` (default `MIN_OVERLAP_ERAS`, §E). The era-level diffs (`A − B`; positive `mean_diff` means A is better) are block-bootstrapped via `block_bootstrap_ci` (§I) with `block_len` resolved by `resolve_block_len(n, horizon)` unless overridden. `PairedResult(mean_diff, ci_low, ci_high, n_eras, device_mismatch, alpha, n_boot, block_len)` is frozen. `device_mismatch` is `True` when both `device_a` and `device_b` are supplied and differ — GPU vs CPU OOF values are not comparable ([`AGENTS.md`](AGENTS.md#8-critical-operational-hazards)) — and is reported, never silently corrected.
+
+`promotion_verdict(candidate, champion=None, *, metric="corr_sharpe_ac", alpha=0.05) -> "promote" | "hold" | "caution"` — significance-aware promotion decision on registry entries via CI-bearing scorecard cells. Directions (`_VERDICT_DIRECTIONS`) mirror `RunRegistry._SCORECARD_METRIC_DIRECTION` (higher-is-better: corr, mmc, fnc, corr_sharpe_ac, deflated_sharpe; lower-is-better: std_corr, max_drawdown) and are parity-tested in `test_meta.py`. Higher-is-better: `candidate.ci_low > champion.ci_high` → `"promote"`; `candidate.ci_high < champion.ci_low` → `"hold"`; mirror logic for lower-is-better; any CI overlap → `"caution"`. No champion, or a champion lacking the metric, → `"promote"`; a candidate lacking the metric raises `ValueError`; a missing CI on either side → `"caution"`. Advisory only — never writes the registry. `alpha` is accepted for API symmetry and does not change the CI-separability rule.
+
+`fleet_summary(runs, *, metric="corr_sharpe_ac", n_trials, dsr_confidence=0.95) -> pl.DataFrame` — flattens registry entries into a per-run fleet table: the requested scorecard metric (value + CI + n_eras), stored `deflated_sharpe` with a `dsr_pass` flag against `dsr_confidence`, `max_feature_exposure`, `oof_device`, manifest-config grouping columns (`preset`, `feature_set`, `feature_subset`, `neutralization_proportion`), robustness presence flags (`has_bmc`, `has_horizon`, `has_perturb`, `has_regime`), and policy context columns (`policy_n_trials`, `policy_dsr_confidence`). Runs without a scorecard are flagged (legacy), never silently dropped. Deterministic: sorted by metric desc, run_id tiebreak. **DSR policy note:** the stored `deflated_sharpe` was computed with `n_trials=1` at scorecard time; campaign-aware DSR requires era-level recompute via `paired_era_comparison` tooling and is out of scope here.
+
+### R. Campaign Orchestration — `nmr/campaign.py` + `run_campaign.py`
+
+A campaign is a named batch of experiment configs whose runs share a hypothesis; the module provides deterministic trial-lineage attribution on top of the registry. No wall-clock fields are stored in the log (canonical-determinism friendly; file mtime carries chronology).
+
+`campaign_id(name, config_paths) -> str` — SHA256 over the JSON `{"name": name, "configs": sorted(per-file content SHA256 digests)}` (sorted keys). Order-independent (digests are sorted) and path-independent (content hashes, so moving or renaming config files does not change identity). Empty name or empty config list raises `ValueError`.
+
+`build_campaign_log(name, config_paths, runs) -> CampaignLog` — validates the name, that every config path exists (`FileNotFoundError` otherwise), and that each `CampaignRun` status is in `("recorded", "skipped", "error")`; non-error runs must carry a `run_id`. Returns the frozen `CampaignLog(campaign_id, name, configs: tuple[CampaignConfig(path, sha256), ...], runs: tuple[CampaignRun(config_path, run_id, status, error=None), ...])`.
+
+`write_campaign_log(log, campaigns_dir) -> Path` — writes `campaigns_dir/{campaign_id}.json` atomically via `nmr._atomicio.atomic_write_text` (temp + fsync + `os.replace`). Payload schema (`CampaignLog.to_payload()`, JSON `indent=2`, sorted keys):
+
+```json
+{
+  "campaign_id": "<sha256 hex>",
+  "name": "<campaign name>",
+  "configs": [{"path": "<config path>", "sha256": "<content sha256>"}],
+  "runs": [{"config_path": "<config path>", "run_id": "<sha256 hex>|null", "status": "recorded|skipped|error", "error": "<message>|null"}]
+}
+```
+
+CLI contract (`run_campaign.py`, zero business logic): `--config` (repeatable, required), `--name` (required), `--registry` (default `artifacts/registry`), `--campaigns-dir` (default `artifacts/campaigns`), `--deploy` (passes `deploy=True` to `ExperimentRunner.run`), `--dry-run` (prints computed `run_id`s without training or writing — the registry is not even constructed). Per config: an invalid config is logged and recorded as `status="error"` with the message; an already-recorded `run_id` is `"skipped"`; a successful run is recorded via `RunRegistry.record` as `"recorded"`. Prints one `status<TAB>config_path<TAB>run_id` line per run; exits `0` when no run failed, `1` otherwise (`--dry-run` always exits `0`).
 
 ---
 
@@ -272,6 +320,7 @@ def predict(live_features: pd.DataFrame, live_benchmark_models: pd.DataFrame | N
 ```
 config.py        (leaf — no nmr imports)
 _transforms.py   (leaf)
+features.py      (leaf — stdlib/NumPy/Polars only)
 
 data.py      ──> config (DataConfig)
 splitter.py  ──> config (SplitConfig)
@@ -281,6 +330,7 @@ evaluation.py──> _transforms (power_1_5, rank_gaussianize)
 ensemble.py  ──> _transforms (rank_gaussianize, rank_gaussianize_unit_variance)
 submission.py──> _transforms (tie_kept_rank), numerai_tools.submissions
 inference.py (leaf — NumPy/SciPy only)
+meta.py      ──> evaluation, inference
 payout.py    ──> inference
 research.py  ──> config, data, models, splitter, risk, evaluation
 robustness.py──> inference, _transforms
@@ -288,6 +338,7 @@ scorecard.py ──> evaluation, inference, payout, research, robustness
 benchmark.py ──> scorecard, evaluation, data
 runner.py    ──> config, data, splitter, models, ensemble, risk, evaluation, deployment
 registry.py  ──> runner (RunResult)
+campaign.py  ──> _atomicio
 deployment.py (leaf — cloudpickle/stdlib)
 
 nmr/__init__.py re-exports the public API of all modules (keep imports and __all__ in sync).
@@ -299,7 +350,7 @@ nmr/__init__.py re-exports the public API of all modules (keep imports and __all
 
 - One typed config object (`ExperimentConfig`) parameterizes everything; nothing else reads YAML. Schema in §2A; live examples in [configs/](configs/).
 - Dataset: Numerai **v5.2** parquet assets under `data/v5.2/` (train/validation/live, meta_model, benchmark models, example preds, `features.json`). Asset inventory and download expectations live in [`README.md`](README.md#data-assets).
-- Feature sets from `features.json`: `small` (benchmark tutorial convention: 42-column `feature_sets.small`), `medium`, `all`.
+- Feature sets from `features.json`: `small` (benchmark tutorial convention: 42-column `feature_sets.small`), `medium`, `all`; every named set is resolvable via `nmr.features.resolve_feature_sets` (§P). `data.feature_subset` optionally overrides `feature_set` — schema in §2A, semantics in §P.
 
 ---
 
@@ -323,7 +374,7 @@ nmr/__init__.py re-exports the public API of all modules (keep imports and __all
 ## 6. Technical Debt & Known Gaps
 
 - **`embargo_eras` is inert:** validated, stored, and unused by fold geometry. Reserved for future two-sided schemes.
-- **`features.py` (slice 2b) does not exist:** feature engineering beyond `features.json` subsets is deferred; do not reference a FeatureFactory.
+- **Expression-level feature engineering is deferred:** feature-set resolution + stability screening are now supported (`nmr/features.py` §P); derived/expression-level transforms are still deferred — do not reference a FeatureFactory.
 - **Benchmark train parquet early-era gap:** `train_benchmark_models.parquet` lacks rows for the first ~30 train eras (agent policy in [`AGENTS.md`](AGENTS.md#8-critical-operational-hazards)).
 - **GPU/CPU numeric divergence:** determinism is guaranteed per device, not across GPU↔CPU fallback boundaries.
 - **No packaging metadata:** the repo has no `pyproject.toml`; imports rely on `pythonpath = .` in [pytest.ini](pytest.ini) and running from the repo root.

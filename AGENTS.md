@@ -30,7 +30,7 @@ These four files obey a strict **Single Source of Truth (SSOT) hierarchy**. One 
 
 ## 1. Agent Identity & Mission
 
-You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (349 tests). No lint/type-check tooling is configured — pytest is the sole automated gate, enforced by CI (`.github/workflows/ci.yml`).
+You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (350 tests). No lint/type-check tooling is configured — pytest is the sole automated gate, enforced by CI (`.github/workflows/ci.yml`).
 
 Your mission:
 
@@ -122,6 +122,7 @@ When modifying or generating code, enforce these seven invariants:
 |---|---|
 | Change config schema / valid values | `nmr/config.py` — frozen dataclasses, `load_config`, `VALID_*` tuples |
 | Change data loading / feature sets | `nmr/data.py` — `IngestionAgent` (lazy Polars, `features.json`) |
+| Change feature-set resolution / stability screening | `nmr/features.py` — `resolve_feature_sets`, `feature_stability_screen`, `select_stable_features` (spec: `ARCHITECTURE.md` §P) |
 | Change fold construction / purge math | `nmr/splitter.py` — `PurgedEraSplitter` |
 | Change a metric formula | `nmr/evaluation.py` + `nmr/_transforms.py`; update parity test in `tests/test_parity.py` |
 | Change neutralization / its cache | `nmr/risk.py` — `NeutralizationEngine` |
@@ -132,11 +133,13 @@ When modifying or generating code, enforce these seven invariants:
 | Change submission build/validation | `nmr/submission.py` |
 | Change deployment artifact format | `nmr/deployment.py` — `serialize_predict` / `load_predict` |
 | Change statistical machinery (bootstrap, DSR) | `nmr/inference.py` |
+| Change cross-run meta-analysis / promotion verdicts | `nmr/meta.py` — `paired_era_comparison`, `promotion_verdict`, `fleet_summary` (spec: `ARCHITECTURE.md` §Q) |
 | Change payout proxy / downside metrics | `nmr/payout.py` |
 | Change scorecard fields / evaluation flow | `nmr/scorecard.py` — `MetricScorecard`, `evaluate_model` |
 | Change HPO sweeps / neutralization frontier | `nmr/research.py` |
 | Change perturbation/horizon/regime diagnostics | `nmr/robustness.py` |
 | Change benchmark baselines / gates | `nmr/benchmark.py` + `benchmark_runner.py` |
+| Change campaign orchestration | `nmr/campaign.py` + `run_campaign.py` (spec: `ARCHITECTURE.md` §R) |
 | Add/remove a public API symbol | `nmr/__init__.py` — imports **and** `__all__` |
 | Understand tournament rules & scoring | `docs/DOCS_README.md` → `docs/01-canon/` (canonical laws) |
 | Understand how models are judged | `docs/06-evaluation/evaluation-suite-bible.md` (evaluation spec of record) |
@@ -186,7 +189,7 @@ Never invent a `numerai_tools` / `numerapi` signature — open the installed sou
 .\.venv\Scripts\python -m pytest tests/test_benchmark_slice1.py -q                    # determinism hashes
 
 # Pre-sign-off gate (mandatory before delivering work)
-.\.venv\Scripts\python -m pytest -q                                                    # full 349-test suite
+.\.venv\Scripts\python -m pytest -q                                                    # full 350-test suite
 .\.venv\Scripts\python benchmark_runner.py --fast-mode --output artifacts/benchmark_scores_smoke.csv --labels-output artifacts/benchmark_test_era_labels_smoke.csv   # real-data smoke (writes artifacts/*_smoke.csv)
 ```
 

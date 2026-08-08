@@ -2,7 +2,7 @@
 
 A **lean, deterministic research framework** for the [Numerai Classic tournament](https://numer.ai), built as a single tested Python package (`nmr/`). It takes a typed YAML config through data ingestion, era-purged cross-validation, multi-target LightGBM/XGBoost training, rank-domain ensembling, feature neutralization, oracle-parity evaluation, and out the other end produces a registry-tracked, cloudpickled `predict()` artifact ready for hosted upload.
 
-**Stack:** Python 3.11+ · Polars · LightGBM / XGBoost · NumPy / SciPy / scikit-learn · `numerai-tools` · `numerapi` · cloudpickle · pytest (349 tests)
+**Stack:** Python 3.11+ · Polars · LightGBM / XGBoost · NumPy / SciPy / scikit-learn · `numerai-tools` · `numerapi` · cloudpickle · pytest (350 tests)
 
 > **For AI coding agents:** [`AGENTS.md`](AGENTS.md) is the authoritative source of truth for principles, invariants, and operational hazards — read it first. System internals live in [`ARCHITECTURE.md`](ARCHITECTURE.md). Humans contributing code should read [`CONTRIBUTING.md`](CONTRIBUTING.md). This README is a human-facing overview and setup guide; when documents disagree, trust `AGENTS.md` and the code.
 
@@ -32,15 +32,18 @@ A **lean, deterministic research framework** for the [Numerai Classic tournament
 │   ├── splitter.py            # PurgedEraSplitter — leakage-safe era folds
 │   ├── _transforms.py         # shared rank / gaussianize / power-1.5 transforms
 │   ├── evaluation.py          # dual-backend CORR/MMC/FNC/BMC/CWMM metric engine
+│   ├── features.py            # feature-set resolution + stability screening
 │   ├── risk.py                # NeutralizationEngine — per-era, intercept-aware, cached
 │   ├── models.py              # ModelOrchestrator — LightGBM/XGBoost, CV OOF + anchor
 │   ├── ensemble.py            # rank-domain blending, ridge/NNLS weight learning
 │   ├── inference.py           # bootstrap CI, AC-adjusted Sharpe, Deflated Sharpe
+│   ├── meta.py                # cross-run meta-analysis + promotion verdicts
 │   ├── payout.py              # payout proxy + downside diagnostics
 │   ├── scorecard.py           # MetricScorecard aggregator (evaluate_model)
 │   ├── research.py            # HPO sweeps, neutralization frontier, exposure report
 │   ├── robustness.py          # perturbation, horizon-stability, regime diagnostics
 │   ├── benchmark.py           # benchmark suite: null/classical baselines + gates
+│   ├── campaign.py            # campaign orchestration — trial-lineage logs
 │   ├── runner.py              # ExperimentRunner — deterministic end-to-end pipeline
 │   ├── registry.py            # RunRegistry — atomic run store + champion promotion
 │   ├── submission.py          # submission build / numerai_tools validation / CSV
@@ -48,12 +51,13 @@ A **lean, deterministic research framework** for the [Numerai Classic tournament
 ├── configs/                   # experiment configs (YAML)
 │   ├── example.yaml           # annotated full schema
 │   └── first_model.yaml       # current competitive config (4×20D-target ensemble)
-├── tests/                     # 349 tests (unit / parity / determinism / real-data tests)
+├── tests/                     # 350 tests (unit / parity / determinism / real-data tests)
 ├── data/                      # local Numerai v5.2 assets (parquets git-ignored)
-├── artifacts/                 # runs, registry, caches, benchmark CSVs (generated)
+├── artifacts/                 # runs, registry, caches, campaigns, benchmark CSVs (generated)
 ├── docs/                      # curated Numerai knowledge base — start at docs/DOCS_README.md
 ├── notebooks/                 # researcher control plane (thin, zero business logic)
 ├── benchmark_runner.py        # CLI: score null/classical/benchmark baselines → CSV
+├── run_campaign.py            # CLI: run a named batch of configs → artifacts/campaigns/
 ├── train_first_model.py       # CLI: train, register, and promote the first model
 ├── generate_dashboard.py      # CLI: validation-scorecard leaderboard → artifacts/dashboard.html
 ├── pytest.ini                 # pythonpath = . (no install step needed)

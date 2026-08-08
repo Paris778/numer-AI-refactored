@@ -347,3 +347,23 @@ def test_bmc_and_cwmm_deterministic() -> None:
 
     assert bmc_a == bmc_b
     assert cwmm_a == cwmm_b
+
+
+def test_public_api_includes_harness_symbols() -> None:
+    import nmr
+
+    for name in (
+        "resolve_feature_sets",
+        "feature_stability_screen",
+        "select_stable_features",
+        "PairedResult",
+        "paired_era_comparison",
+        "promotion_verdict",
+        "fleet_summary",
+        "CampaignLog",
+        "campaign_id",
+        "build_campaign_log",
+        "write_campaign_log",
+    ):
+        assert name in nmr.__all__
+        assert getattr(nmr, name) is not None

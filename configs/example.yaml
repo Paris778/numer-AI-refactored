@@ -10,6 +10,8 @@ run:
 data:
   version: v5.2
   feature_set: small        # small | medium | all
+  feature_subset: null      # optional: any name in features.json (e.g. 'sunshine');
+                            # overrides feature_set for this experiment
   targets:
     - target
 
