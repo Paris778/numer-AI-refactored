@@ -3039,7 +3039,7 @@ import os
 import sys
 import tempfile
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import polars as pl
@@ -3276,7 +3276,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 for s in splits
             },
             "refresh_date": refresh_date,
-            "generated_at": datetime.utcnow().isoformat(timespec="seconds"),
+            "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         },
         out / "manifest.json",
     )
