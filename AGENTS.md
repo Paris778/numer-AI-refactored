@@ -141,6 +141,7 @@ When modifying or generating code, enforce these seven invariants:
 | Change perturbation/horizon/regime diagnostics | `nmr/robustness.py` |
 | Change benchmark baselines / gates | `nmr/benchmark.py` + `benchmark_runner.py` |
 | Change campaign orchestration | `nmr/campaign.py` + `run_campaign.py` (spec: `ARCHITECTURE.md` §R) |
+| Run a research protocol (feature campaign / HPO / meta-analysis / QA gate) | `.kimi-code/skills/` — `feature-campaign`, `hpo-narrowing`, `run-meta-analysis`, `verification-before-claim` (map: `ARCHITECTURE.md` §T) |
 | Add/remove a public API symbol | `nmr/__init__.py` — imports **and** `__all__` |
 | Understand tournament rules & scoring | `docs/DOCS_README.md` → `docs/01-canon/` (canonical laws) |
 | Understand how models are judged | `docs/06-evaluation/evaluation-suite-bible.md` (evaluation spec of record) |
@@ -173,6 +174,7 @@ Never invent a `numerai_tools` / `numerapi` signature — open the installed sou
 2. `nmr/__init__.py` — the public API surface (imports + `__all__`); nothing outside it is public.
 3. `configs/first_model.yaml` — the current competitive config; `configs/example.yaml` — annotated schema.
 4. `ARCHITECTURE.md` §1 (pipeline diagram) and §3 (module dependency graph) — the system map.
+5. `.kimi-code/skills/` — the four research-protocol skills (`feature-campaign`, `hpo-narrowing`, `run-meta-analysis`, `verification-before-claim`); map: `ARCHITECTURE.md` §T.
 
 **The tests are the executable spec.** Before touching a metric or formula, read `tests/test_parity.py` + `tests/test_risk_parity.py`; before touching scorecards, `tests/test_scorecard.py`; before benchmark gates, `tests/test_benchmark_*.py`. The tests encode the contracts prose can only summarize.
 

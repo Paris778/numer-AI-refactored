@@ -57,6 +57,7 @@ A **lean, deterministic research framework** for the [Numerai Classic tournament
 ├── artifacts/                 # runs, registry, caches, campaigns, benchmark CSVs (generated)
 ├── docs/                      # curated Numerai knowledge base — start at docs/DOCS_README.md
 ├── notebooks/                 # researcher control plane (thin, zero business logic)
+├── .kimi-code/skills/          # project Kimi skills — research protocols for agents (map: ARCHITECTURE.md §T)
 ├── benchmark_runner.py        # CLI: score null/classical/benchmark baselines → CSV
 ├── run_campaign.py            # CLI: run a named batch of configs → artifacts/campaigns/
 ├── train_first_model.py       # CLI: train, register, and promote the first model

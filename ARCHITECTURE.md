@@ -329,6 +329,19 @@ CLI contract (`run_campaign.py`, zero business logic): `--config` (repeatable, r
 
 `SweepResult` is the shared frozen dataclass (§L): `trials: pl.DataFrame`, `best_params: dict[str, Any]`, `best_value: float`.
 
+### T. Project Skills — `.kimi-code/skills/` (Kimi research protocols)
+
+Project-scope Kimi skills encode the research-orchestration protocols built on the modules above. Each protocol lives in its `SKILL.md` (that file is the source of truth for the protocol); this section is only the map:
+
+| Skill | What it drives |
+|---|---|
+| `feature-campaign` | Feature subsetting + cross-regime stability screening (§P) → `run_campaign.py` batches (§R) → human-reviewed selection |
+| `hpo-narrowing` | Multi-stage HPO: coarse `HyperparameterSweep.run` (§L) → `bayesian_sweep` (§S) → full-run confirmation via `promotion_verdict` (§Q); promotion is always a human decision |
+| `run-meta-analysis` | Paired fleet comparison + robust-family selection (`nmr/meta.py`, §Q) — read-only over the registry |
+| `verification-before-claim` | QA gate for every agent output: full suite, canonical-hash purity, parity tests, 8/16-era purge floor, doc SSOT same-change-set, `oof_device` check |
+
+All four are committed at `.kimi-code/skills/<name>/SKILL.md` (project-level Kimi skills — discovered automatically by the CLI; the directory is tracked, not gitignored).
+
 ---
 
 ## 3. Module Dependency Graph
