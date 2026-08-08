@@ -721,8 +721,13 @@ class FakeNapi:
         elif filename.endswith(".csv"):
             dest.write_text("id,era\nn1,0001\n", encoding="utf-8")
         else:
+            is_live = filename.endswith("live.parquet")
             pl.DataFrame(
-                {"era": ["0001", "0002"], "id": ["n1", "n2"], "target": [0.0, 1.0]}
+                {
+                    "era": ["X", "X"] if is_live else ["0001", "0002"],
+                    "id": ["n1", "n2"],
+                    "target": [0.0, 1.0],
+                }
             ).write_parquet(dest)
 
 
@@ -772,7 +777,7 @@ def test_fresh_refresh_writes_manifest(data_dir: Path, _fake_napi: FakeNapi) -> 
         ["--data-dir", str(data_dir), "--era-csv", str(_era_csv(data_dir))]
     )
     assert rc == 0
-    downloaded = {Path(p).name for _, p in _fake_napi.downloads}
+    downloaded = {Path(f).name for f, _ in _fake_napi.downloads}
     assert "live.parquet" in downloaded
     assert "validation.parquet" in downloaded
     assert "features.json" in downloaded
@@ -853,7 +858,7 @@ def test_live_only_skips_expanding(data_dir: Path, _fake_napi: FakeNapi) -> None
         ]
     )
     assert rc == 0
-    downloaded = {Path(p).name for _, p in _fake_napi.downloads}
+    downloaded = {Path(f).name for f, _ in _fake_napi.downloads}
     assert "live.parquet" in downloaded
     assert "validation.parquet" not in downloaded
 
@@ -961,8 +966,11 @@ def _era_range(path: Path) -> tuple[str | None, str | None]:
         return None, None
     try:
         agg = (
-            pl.scan_parquet(path, columns=["era"])
-            .select(pl.col("era").min(), pl.col("era").max())
+            pl.scan_parquet(path)
+            .select(
+                pl.col("era").min().alias("min_era"),
+                pl.col("era").max().alias("max_era"),
+            )
             .collect()
         )
         return agg.row(0)
@@ -1047,6 +1055,7 @@ def _refresh(
         fd, tmp_name = tempfile.mkstemp(
             dir=version_dir, prefix=f"{name}.tmp.", suffix=".part"
         )
+        os.close(fd)  # Windows: release the handle so os.replace/unlink can work
         tmp = Path(tmp_name)
         try:
             napi.download_dataset(f"{version}/{name}", dest_path=tmp)  # type: ignore[attr-defined]
