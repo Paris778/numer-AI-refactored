@@ -604,3 +604,19 @@ def test_real_feature_sets_nesting() -> None:
     assert medium <= all_
     assert small <= all_
     assert len(small & medium) < len(small)  # curated set, not a medium subset
+
+
+def test_regime_analysis_persistence_ignores_degenerate_eras() -> None:
+    # era 0003 is degenerate (all-zero ICs) -> its constant rank vector must
+    # not produce NaN persistence between 0002 and 0004.
+    frame = pl.DataFrame(
+        {
+            "era": ["0001", "0001", "0002", "0002", "0003", "0003", "0004", "0004"],
+            "feature": ["fa", "fb"] * 4,
+            "ic": [0.1, 0.0, 0.05, 0.02, 0.0, 0.0, 0.05, 0.02],
+        }
+    )
+    out = regime_analysis(frame)
+    pers = out["ic_persistence"]
+    assert np.isfinite(pers["mean"])
+    assert pers["n_adjacent"] >= 1

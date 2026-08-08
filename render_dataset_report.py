@@ -86,9 +86,26 @@ def render_report(
         [{"feature_set": k, "n_features": v} for k, v in overview.get("feature_sets", {}).items()],
     ))
     out.append("")
+    out.append(_schema_block("dataset asset | official description (Numerai docs)"))
+    out.append("")
+    out.append(_table(
+        ["asset", "official_description"],
+        [
+            {"asset": "train.parquet", "official_description": "Data used to train your model (static)"},
+            {"asset": "validation.parquet", "official_description": "Data used to validate or train your model; expands every week"},
+            {"asset": "live.parquet", "official_description": "The live data your model predicts on; changes daily"},
+            {"asset": "features.json", "official_description": "Statistics about each feature + pre-made feature sets"},
+            {"asset": "train_benchmark_models.parquet", "official_description": "Benchmark model predictions for some train data"},
+            {"asset": "validation_benchmark_models.parquet", "official_description": "All benchmark model predictions for validation data"},
+            {"asset": "live_benchmark_models.parquet", "official_description": "All benchmark model predictions for live data"},
+            {"asset": "meta_model.parquet", "official_description": "Meta Model insights (MMC); only available from era 1133 onwards"},
+        ],
+    ))
+    out.append("")
     out.append("- **Key takeaways:** the tournament is a per-era cross-section of obfuscated "
                "equities; eras are the unit of evaluation. Never pool rows across eras for "
-               "metrics.")
+               "metrics. `validation.parquet` expands weekly; the meta model exists only "
+               "from era 1133.")
     out.append("")
 
     out.append("## 2. Era Structure")

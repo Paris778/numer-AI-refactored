@@ -154,6 +154,7 @@ Interpretation for this repository:
 | `04-research/research-program.md` | T2 | Main advanced research playbook | `llm_reports/perplexity_deep_research.md` |
 | `04-research/advanced-ideas.md` | T3 | Research ideas: tree-level upgrades + NN directions (merged with former `neural-networks.md`, 2026-08-06) | `llm_reports/perplexity_deep_research_ideas.md` + `perplexity_deep_research_NN.md` |
 | `04-research/State-of-the-Art Deep Learning for Obfuscated, Non-Stationary Tabular Regression.md` | T3 | Deep tabular-DL survey: TabFM/ICL, TabR, neutralization-aware objectives, CPCV blueprint | deep-research survey (references in-file) |
+| `04-research/dataset-analysis-2026-08.md` | T2 | v5.3 dataset analysis: era structure, targets, full-universe feature IC/stability, regimes, benchmarks. Regenerate via `analyze_dataset.py` + `render_dataset_report.py` after each `refresh_data.py` | generated from `artifacts/reports/dataset_analysis/` dumps |
 | `05-notebooks/*` | T1 | Executable onboarding and examples | `onboarding_notebooks/` + `community_models_and_notebooks/` |
 | `06-evaluation/evaluation-suite-bible.md` | T0 | Evaluation suite spec of record (metrics, math, build slices E1–E6) | this build |
 | `99-archive/*` | T4 | Peripheral or low-priority context | archive sources |

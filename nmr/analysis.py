@@ -618,21 +618,30 @@ def regime_analysis(ic_by_era: pl.DataFrame) -> dict:
     crash_eras = [e for e, c in zip(eras, crash) if c]
     hot_eras = [e for e, h in zip(eras, hot) if h]
 
-    # adjacent-era IC-vector Spearman
+    # adjacent-era IC-vector Spearman; eras whose IC vector is entirely zero
+    # (degenerate: target all-NaN or <2 rows) are constant under ranking and
+    # make corrcoef undefined — exclude them from persistence.
     pivot = ic_by_era.pivot(on="feature", index="era", values="ic").sort("era")
     feature_names = [c for c in pivot.columns if c != "era"]
     matrix = pivot.select(feature_names).to_numpy()
     matrix = np.nan_to_num(matrix, nan=0.0)
-    ranks_mat = np.apply_along_axis(scipy.stats.rankdata, 1, matrix)
-    adj = [
-        float(np.corrcoef(ranks_mat[t], ranks_mat[t - 1])[0, 1])
-        for t in range(1, ranks_mat.shape[0])
-    ]
-    persistence = {
-        "mean": float(np.mean(adj)) if adj else 0.0,
-        "std": float(np.std(adj, ddof=0)) if adj else 0.0,
-        "n_adjacent": len(adj),
-    }
+    valid_rows = np.max(np.abs(matrix), axis=1) > 0.0
+    if int(valid_rows.sum()) < 2:
+        persistence = {"mean": 0.0, "std": 0.0, "n_adjacent": 0}
+    else:
+        ranks_mat = np.apply_along_axis(
+            scipy.stats.rankdata, 1, matrix[valid_rows]
+        )
+        adj = [
+            float(np.corrcoef(ranks_mat[t], ranks_mat[t - 1])[0, 1])
+            for t in range(1, ranks_mat.shape[0])
+        ]
+        adj = [v for v in adj if np.isfinite(v)]
+        persistence = {
+            "mean": float(np.mean(adj)) if adj else 0.0,
+            "std": float(np.std(adj, ddof=0)) if adj else 0.0,
+            "n_adjacent": len(adj),
+        }
 
     rolling = sig.select(
         pl.col("era"),
