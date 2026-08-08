@@ -13,11 +13,11 @@
 - `nmr/` is the only tested boundary; scripts contain zero business logic.
 - TDD: no production code without a failing test first.
 - **Dependency exception (user-granted 2026-08-08):** `catboost==1.2.10` pinned, imported ONLY in `nmr/models.py`.
-- Determinism: `random_seed=seed`, `thread_count=1`, CPU single-thread; verified by a same-seed identical-OOF test. GPU determinism NOT guaranteed (per-device caveat).
+- Determinism: `random_seed=seed`, `thread_count=1`, CPU single-thread; verified by a same-seed identical-OOF test. GPU determinism NOT guaranteed (per-device caveat). **CPU-only backend** (rsm×GPU incompatibility — every preset ships `colsample_bytree`; `_device_candidate_params` returns a single CPU candidate; no GPU attempt).
 - `allow_writing_files=False` is mandatory (CatBoost writes files by default — repo hygiene).
 - Contract params (`loss_function`, `random_seed`, `thread_count`, `verbose`, `allow_writing_files`, `task_type`) are NOT overridable by user params.
 - `num_leaves` is dropped for catboost (symmetric depth-limited trees); `depth` bounds capacity.
-- `catboost` NOT added to the run_id environment fingerprint (pin-based reproducibility; same policy as `optuna`).
+- **Config-aware fingerprint (adjudicated):** the run_id environment fingerprint includes the `catboost` version ONLY for catboost-backend configs; lightgbm/xgboost fingerprints stay byte-identical (no run_id invalidation). Same policy spirit as `optuna` (excluded) for non-catboost configs.
 - No metric, splitter, ensembling, risk, or scorecard changes; nothing enters `canonical_scorecards_bytes`.
 - Doc SSOT same-change-set; AGENTS ≤ 32 KB; test-count claims synced numeric-only (precedent).
 - Git flow (user-authorized pattern): work on branch `catboost-backend` (created), commits per task, `main` untouched until the user chooses integration. No push.
@@ -152,11 +152,11 @@ def test_catboost_cv_oof_is_deterministic_under_seed(tmp_path) -> None:
     assert orch.resolved_device == "cpu"
 
 
-def test_catboost_gpu_fallback_records_cpu(tmp_path, monkeypatch) -> None:
-    # Mirror the existing lightgbm GPU-fallback test: monkeypatch the catboost
-    # GPU fit (task_type="GPU") to raise catboost.CatBoostError, run
-    # train_cross_validation, assert resolved_device == "cpu" and the OOF is
-    # non-empty (the CPU candidate succeeded).
+def test_catboost_is_cpu_only_by_construction() -> None:
+    # Adjudicated at fix round 1: catboost is CPU-only (rsm×GPU incompatibility;
+    # every preset ships colsample_bytree). `_device_candidate_params(use_gpu=True)`
+    # for a catboost config returns exactly ONE candidate with task_type == "CPU"
+    # — no GPU attempt. (The original brief's GPU-fallback test was superseded.)
 ```
 
 - [ ] **Step 2: Run test to verify it fails** — `.venv/Scripts/python -m pytest tests/test_models.py -q` — FAIL: `_translate_catboost` not defined.
