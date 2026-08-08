@@ -2,9 +2,16 @@ from __future__ import annotations
 
 import json
 
+import polars as pl
 import pytest
 
-from nmr.features import resolve_feature_sets
+from nmr.features import (
+    DEFAULT_MAX_ABS_DECAY,
+    DEFAULT_MIN_MEAN_CORR,
+    feature_stability_screen,
+    resolve_feature_sets,
+    select_stable_features,
+)
 
 
 def _write_features(tmp_path, *, sets: dict[str, list[str]]) -> None:
@@ -52,3 +59,78 @@ def test_resolve_feature_sets_rejects_missing_or_empty_feature_sets(tmp_path) ->
         resolve_feature_sets(tmp_path / "empty.json")
     with pytest.raises(ValueError, match="feature_sets"):
         resolve_feature_sets(tmp_path / "notmap.json")
+
+
+def _screen_frame() -> pl.DataFrame:
+    """f_good: per-era CORR ~ +1 with zero decay; f_bad: CORR ~ -1 decaying to 0."""
+    rows: list[dict] = []
+    for era in range(1, 21):
+        for idx in range(50):
+            rows.append(
+                {
+                    "era": str(era),
+                    "id": f"{era}_{idx}",
+                    "f_good": idx * 0.02,                      # CORR +1 all eras
+                    "f_bad": -idx * (0.02 - era * 0.001),      # CORR ~ -1 -> 0 (decay)
+                    "target": idx * 0.02 + 0.5,
+                }
+            )
+    return pl.DataFrame(rows)
+
+
+def test_screen_reports_corr_and_decay_per_feature() -> None:
+    frame = _screen_frame()
+    screen = feature_stability_screen(
+        frame, feature_cols=["f_good", "f_bad"], target_col="target", era_col="era"
+    )
+    assert set(screen.get_column("feature").to_list()) == {"f_good", "f_bad"}
+    assert screen.height == 2
+    good = screen.filter(pl.col("feature") == "f_good").row(0, named=True)
+    bad = screen.filter(pl.col("feature") == "f_bad").row(0, named=True)
+    assert good["mean_corr"] > 0.9
+    assert bad["mean_corr"] < -0.9
+    assert abs(good["decay_slope"]) < abs(bad["decay_slope"])
+    assert good["n_eras"] == 20 and bad["n_eras"] == 20
+
+
+def test_screen_flags_stability_by_default_thresholds() -> None:
+    screen = feature_stability_screen(
+        _screen_frame(), feature_cols=["f_good", "f_bad"], target_col="target"
+    )
+    good = screen.filter(pl.col("feature") == "f_good").get_column("stable")[0]
+    bad = screen.filter(pl.col("feature") == "f_bad").get_column("stable")[0]
+    assert good is True
+    assert bad is False
+    # default constants are positive and sane
+    assert DEFAULT_MIN_MEAN_CORR > 0.0 and DEFAULT_MAX_ABS_DECAY > 0.0
+
+
+def test_screen_handles_degenerate_eras_without_raising() -> None:
+    rows = [
+        {"era": "1", "id": "a", "f": 1.0, "target": 0.5},   # 1 row: degenerate
+        {"era": "1", "id": "b", "f": 1.0, "target": 0.5},   # zero variance
+        {"era": "2", "id": "c", "f": float("nan"), "target": 0.5},  # non-finite
+        {"era": "3", "id": "d", "f": 0.2, "target": 0.9},
+    ]
+    frame = pl.DataFrame(rows)
+    screen = feature_stability_screen(frame, feature_cols=["f"], target_col="target")
+    assert screen.height == 1
+    row = screen.row(0, named=True)
+    assert row["n_eras"] == 3
+    assert screen.get_column("stable").to_list() == [False]
+
+
+def test_select_stable_features_filters_on_thresholds() -> None:
+    screen = feature_stability_screen(
+        _screen_frame(), feature_cols=["f_good", "f_bad"], target_col="target"
+    )
+    kept = select_stable_features(screen, min_mean_corr=-1.0, max_abs_decay=1.0)
+    assert kept == ["f_bad", "f_good"]  # sorted; both pass loose thresholds
+    strict = select_stable_features(screen, min_mean_corr=0.9, max_abs_decay=0.01)
+    assert strict == ["f_good"]
+
+
+def test_select_stable_features_rejects_screen_without_required_columns() -> None:
+    bad = pl.DataFrame({"feature": ["f1"], "mean_corr": [0.5]})
+    with pytest.raises(ValueError, match="decay_slope"):
+        select_stable_features(bad, min_mean_corr=0.0, max_abs_decay=1.0)
