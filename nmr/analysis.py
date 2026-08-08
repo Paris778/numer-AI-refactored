@@ -650,3 +650,46 @@ def regime_analysis(ic_by_era: pl.DataFrame) -> dict:
         "ic_persistence": persistence,
         "rolling_vol": rolling,
     }
+
+
+def benchmark_era_corr(
+    frame: pl.DataFrame,
+    benchmark_cols: Sequence[str],
+    target_col: str,
+    era_col: str = "era",
+) -> dict:
+    """Per-era CORR of benchmark models vs target.
+
+    Lightweight context for the report (floors/ceilings), distinct from the
+    full ``BenchmarkSuite`` harness. Degenerate eras (fewer than 2 non-null
+    rows or constant target) are silently absent — ``n_eras`` reflects the
+    actual era overlap.
+    """
+    from nmr.features import _per_era_pearson
+
+    benchmark_list = list(benchmark_cols)
+    if not benchmark_list:
+        raise ValueError("benchmark_cols must contain at least one benchmark")
+    corrs, degenerate = _per_era_pearson(frame, benchmark_list, target_col, era_col)
+    rows = [
+        {"era": era, "benchmark": b, "corr": float(vec[i])}
+        for era, vec in corrs.items()
+        if era not in degenerate
+        for i, b in enumerate(benchmark_list)
+    ]
+    per_era = pl.DataFrame(
+        rows,
+        schema={"era": pl.Utf8, "benchmark": pl.Utf8, "corr": pl.Float64},
+    )
+    summary = (
+        per_era.group_by("benchmark")
+        .agg(
+            pl.col("corr").mean().alias("mean_corr"),
+            pl.col("corr").std().alias("corr_std"),
+            pl.col("era").count().alias("n_eras"),
+            pl.col("era").min().alias("first_era"),
+            pl.col("era").max().alias("last_era"),
+        )
+        .sort("benchmark")
+    )
+    return {"benchmarks": summary, "per_era": per_era}

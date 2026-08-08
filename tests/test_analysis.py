@@ -510,3 +510,49 @@ def test_regime_analysis_deterministic() -> None:
 def test_regime_analysis_requires_columns() -> None:
     with pytest.raises(ValueError):
         regime_analysis(pl.DataFrame({"era": ["0001"], "ic": [0.1]}))
+
+
+from nmr.analysis import benchmark_era_corr
+
+
+def test_benchmark_era_corr_known_values() -> None:
+    rng = np.random.default_rng(31)
+    rows = []
+    for e in range(3):
+        era = f"{e + 1:04d}"
+        for i in range(20):
+            pred = float(rng.normal())
+            rows.append(
+                {
+                    "era": era,
+                    "id": f"{era}-{i}",
+                    "benchmark_small": pred,
+                    "benchmark_medium": 2.0 * pred + float(rng.normal(scale=0.1)),
+                    "target": pred + float(rng.normal(scale=0.1)),
+                }
+            )
+    frame = pl.DataFrame(rows)
+    out = benchmark_era_corr(frame, ["benchmark_small", "benchmark_medium"], "target")
+    summary = out["benchmarks"]
+    assert summary["benchmark"].to_list() == ["benchmark_medium", "benchmark_small"]
+    assert summary["n_eras"].to_list() == [3, 3]
+    assert summary["first_era"].to_list() == ["0001", "0001"]
+    assert summary["last_era"].to_list() == ["0003", "0003"]
+    for row in summary.iter_rows(named=True):
+        assert row["mean_corr"] > 0.5
+
+
+def test_benchmark_era_corr_absent_degenerate_eras() -> None:
+    # era 0001 has only 1 row -> degenerate -> absent from output
+    frame = pl.DataFrame(
+        {
+            "era": ["0001", "0002", "0002", "0002", "0002"],
+            "id": ["a", "b", "c", "d", "e"],
+            "benchmark_small": [1.0, 1.0, 2.0, 3.0, 4.0],
+            "target": [0.5, 1.0, 2.0, 3.0, 4.0],
+        }
+    )
+    out = benchmark_era_corr(frame, ["benchmark_small"], "target")
+    assert out["benchmarks"]["n_eras"].to_list() == [1]
+    assert out["benchmarks"]["first_era"].to_list() == ["0002"]
+    assert set(out["per_era"]["era"].to_list()) == {"0002"}
