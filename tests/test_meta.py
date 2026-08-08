@@ -4,7 +4,7 @@ import polars as pl
 import pytest
 
 from nmr.evaluation import MIN_OVERLAP_ERAS, NonVacuityError
-from nmr.meta import paired_era_comparison
+from nmr.meta import paired_era_comparison, promotion_verdict
 
 
 def _frame(n_eras: int = 24) -> pl.DataFrame:
@@ -103,3 +103,64 @@ def test_paired_comparison_honors_renamed_era_col() -> None:
     )
     assert result.n_eras == 24
     assert result.mean_diff == pytest.approx(0.0, abs=1e-9)
+
+
+def _entry(run_id: str, metric: str = "corr_sharpe_ac", *, value: float | None = None,
+           lo: float | None = None, hi: float | None = None) -> dict:
+    scorecard: dict = {}
+    if value is not None:
+        scorecard[metric] = value
+    if lo is not None:
+        scorecard[f"{metric}_ci_low"] = lo
+    if hi is not None:
+        scorecard[f"{metric}_ci_high"] = hi
+    return {"run_id": run_id, "scorecard": scorecard}
+
+
+def test_verdict_promotes_when_candidate_ci_clears_champion() -> None:
+    champion = _entry("c" * 64, value=0.10, lo=0.05, hi=0.15)
+    candidate = _entry("d" * 64, value=0.25, lo=0.20, hi=0.30)
+    assert promotion_verdict(candidate, champion) == "promote"
+
+
+def test_verdict_holds_when_candidate_ci_below_champion() -> None:
+    champion = _entry("c" * 64, value=0.25, lo=0.20, hi=0.30)
+    candidate = _entry("d" * 64, value=0.10, lo=0.05, hi=0.15)
+    assert promotion_verdict(candidate, champion) == "hold"
+
+
+def test_verdict_cautions_on_ci_overlap() -> None:
+    champion = _entry("c" * 64, value=0.18, lo=0.10, hi=0.26)
+    candidate = _entry("d" * 64, value=0.20, lo=0.14, hi=0.27)
+    assert promotion_verdict(candidate, champion) == "caution"
+
+
+def test_verdict_cautions_when_ci_unavailable() -> None:
+    champion = _entry("c" * 64, value=0.10)
+    candidate = _entry("d" * 64, value=0.25)
+    assert promotion_verdict(candidate, champion) == "caution"
+
+
+def test_verdict_promotes_without_champion() -> None:
+    candidate = _entry("d" * 64, value=0.25, lo=0.20, hi=0.30)
+    assert promotion_verdict(candidate, None) == "promote"
+
+
+def test_verdict_lower_is_better_for_max_drawdown() -> None:
+    champion = _entry("c" * 64, metric="max_drawdown", value=0.20, lo=0.18, hi=0.22)
+    candidate = _entry("d" * 64, metric="max_drawdown", value=0.10, lo=0.08, hi=0.12)
+    assert promotion_verdict(candidate, champion, metric="max_drawdown") == "promote"
+
+
+def test_verdict_directions_match_registry_semantics() -> None:
+    from nmr.meta import _VERDICT_DIRECTIONS
+    from nmr.registry import _SCORECARD_METRIC_DIRECTION
+
+    assert set(_VERDICT_DIRECTIONS) <= set(_SCORECARD_METRIC_DIRECTION)
+    for metric, higher_is_better in _VERDICT_DIRECTIONS.items():
+        assert _SCORECARD_METRIC_DIRECTION[metric] == higher_is_better
+
+
+def test_verdict_rejects_unknown_metric() -> None:
+    with pytest.raises(ValueError, match="metric"):
+        promotion_verdict(_entry("d" * 64), None, metric="bogus")
