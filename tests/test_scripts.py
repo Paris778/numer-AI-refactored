@@ -207,3 +207,21 @@ def test_robustness_matrix_and_champion(tmp_path) -> None:
     assert dashboard_app.champion_run_id(tmp_path) is None      # no champion.json
     (tmp_path / "champion.json").write_text(json.dumps({"run_id": "f" * 64}), encoding="utf-8")
     assert dashboard_app.champion_run_id(tmp_path) == "f" * 64
+
+
+def test_dashboard_app_imports_without_launching() -> None:
+    # Module-level import must be side-effect free: streamlit/plotly import
+    # headless, no server is launched, and every `st.*` call stays inside
+    # main()/view functions. `main` was already callable in the Task 2 stub,
+    # so the real contract is the five render views per the Task 3 brief.
+    import dashboard_app  # noqa: F401
+
+    assert callable(dashboard_app.main)
+    for view in (
+        "render_leaderboard",
+        "render_run_detail",
+        "render_fleet",
+        "render_campaigns",
+        "render_robustness_matrix",
+    ):
+        assert callable(getattr(dashboard_app, view)), f"missing render view: {view}"
