@@ -249,3 +249,97 @@ def test_feature_ic_screen_multi_target() -> None:
 def test_feature_ic_screen_empty_targets_raises() -> None:
     with pytest.raises(ValueError):
         feature_ic_screen(_ic_frame(), ["feature_alpha"], [])
+
+
+from nmr.analysis import feature_summary
+
+
+def _chunks(n_eras: int = 5, rows: int = 40) -> list[pl.DataFrame]:
+    rng = np.random.default_rng(42)
+    chunks = []
+    for e in range(n_eras):
+        era = f"{e + 1:04d}"
+        chunks.append(
+            pl.DataFrame(
+                {
+                    "era": [era] * rows,
+                    "f1": rng.normal(size=rows),
+                    "f2": rng.normal(loc=2.0, scale=0.5, size=rows),
+                }
+            )
+        )
+    return chunks
+
+
+def test_feature_summary_moments_match_scipy() -> None:
+    chunks = _chunks()
+    out = feature_summary(chunks, ["f1", "f2"])
+    assert out.columns == [
+        "feature",
+        "pooled_mean",
+        "pooled_std",
+        "pooled_skew",
+        "pooled_kurtosis",
+        "min",
+        "max",
+        "missing_rate",
+    ]
+    full = pl.concat(chunks)
+    for feature in ["f1", "f2"]:
+        series = full[feature].to_numpy()
+        row = out.filter(pl.col("feature") == feature).row(0, named=True)
+        assert np.isclose(row["pooled_mean"], float(series.mean()), atol=1e-12)
+        assert np.isclose(row["pooled_std"], float(series.std(ddof=0)), atol=1e-12)
+        assert np.isclose(row["pooled_skew"], float(scipy.stats.skew(series)), atol=1e-9)
+        assert np.isclose(
+            row["pooled_kurtosis"],
+            float(scipy.stats.kurtosis(series, fisher=True)),
+            atol=1e-8,
+        )
+        assert row["missing_rate"] == 0.0
+
+
+def test_feature_summary_constant_column() -> None:
+    chunks = [
+        pl.DataFrame({"era": ["0001"] * 5, "f1": [7.0] * 5}),
+        pl.DataFrame({"era": ["0002"] * 5, "f1": [7.0] * 5}),
+    ]
+    out = feature_summary(chunks, ["f1"])
+    row = out.row(0, named=True)
+    assert row["pooled_std"] == 0.0
+    assert row["pooled_skew"] == 0.0
+    assert row["pooled_kurtosis"] == 0.0
+    assert row["min"] == 7.0 and row["max"] == 7.0
+
+
+def test_feature_summary_missing_rate() -> None:
+    chunks = [
+        pl.DataFrame({"era": ["0001", "0001", "0001"], "f1": [1.0, None, 3.0]}),
+        pl.DataFrame({"era": ["0002", "0002", "0002"], "f1": [4.0, 5.0, None]}),
+    ]
+    out = feature_summary(chunks, ["f1"])
+    assert np.isclose(out.row(0, named=True)["missing_rate"], 2 / 6)
+
+
+def test_feature_summary_chunked_vs_single_pass() -> None:
+    chunks = _chunks()
+    out_chunked = feature_summary(chunks, ["f1", "f2"])
+    out_single = feature_summary([pl.concat(chunks)], ["f1", "f2"])
+    for c in ["pooled_mean", "pooled_std", "pooled_skew", "pooled_kurtosis", "min", "max"]:
+        assert np.allclose(
+            out_chunked[c].to_numpy(), out_single[c].to_numpy(), rtol=1e-9
+        )
+
+
+def test_feature_summary_chunked_bit_identical() -> None:
+    chunks = _chunks()
+    out1 = feature_summary(chunks, ["f1", "f2"])
+    out2 = feature_summary(chunks, ["f1", "f2"])
+    assert out1.equals(out2)  # same chunk order => bit-identical on same build
+
+
+def test_feature_summary_requires_era_and_features() -> None:
+    with pytest.raises(ValueError):
+        feature_summary([pl.DataFrame({"era": ["0001"], "f1": [1.0]})], ["f1", "missing"])
+    with pytest.raises(ValueError):
+        feature_summary([pl.DataFrame({"x": [1.0]})], ["f1"])

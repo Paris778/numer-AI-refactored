@@ -1902,7 +1902,7 @@ git commit -m "feat(analysis): per-era feature IC and multi-target screen"
 - Consumes: nothing new (numpy).
 - Produces:
   - `feature_summary(chunks: Iterable[pl.DataFrame], feature_cols: Sequence[str], era_col: str = "era") -> pl.DataFrame` — per-feature `feature, pooled_mean, pooled_std, pooled_skew, pooled_kurtosis, min, max, missing_rate`. Caller drives chunking (era-sorted ascending ⇒ deterministic). Same chunk order on the same NumPy build ⇒ bit-identical.
-  - Private helpers: `_chunk_moments(values: np.ndarray) -> tuple[float, float, float, float, float]` (n, mean, m2, m3, m4) and `_combine(a, b) -> tuple[...]` (Terriberry parallel combine).
+  - Private helpers: `_chunk_moments(values: np.ndarray) -> tuple[float, float, float, float, float]` (n, mean, M2, M3, M4) and `_combine(a, b) -> tuple[...]` (Terriberry parallel combine).
 
 - [ ] **Step 1: Write the failing tests**
 

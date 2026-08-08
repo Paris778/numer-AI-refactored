@@ -297,3 +297,120 @@ def feature_ic_screen(
             "stable",
         ]
     )
+
+
+def _chunk_moments(values: np.ndarray) -> tuple[float, float, float, float, float]:
+    """(n, mean, M2, M3, M4) over a finite 1-D array (raw central moment sums)."""
+    n = values.size
+    if n == 0:
+        return (0.0, 0.0, 0.0, 0.0, 0.0)
+    mean = float(np.mean(values))
+    centered = values - mean
+    M2 = float(np.sum(centered**2))
+    M3 = float(np.sum(centered**3))
+    M4 = float(np.sum(centered**4))
+    return (float(n), mean, M2, M3, M4)
+
+
+def _combine(
+    a: tuple[float, float, float, float, float],
+    b: tuple[float, float, float, float, float],
+) -> tuple[float, float, float, float, float]:
+    """Terriberry parallel combine of (n, mean, M2, M3, M4) moments.
+
+    ``M2/M3/M4`` are raw central-moment sums; ``mean`` is the arithmetic mean.
+    """
+    n1, mean_a, M2_a, M3_a, M4_a = a
+    n2, mean_b, M2_b, M3_b, M4_b = b
+    n = n1 + n2
+    if n == 0.0:
+        return (0.0, 0.0, 0.0, 0.0, 0.0)
+    delta = mean_b - mean_a
+    mean = mean_a + delta * n2 / n
+    M2 = M2_a + M2_b + delta * delta * n1 * n2 / n
+    M3 = (
+        M3_a
+        + M3_b
+        + delta * delta * delta * n1 * n2 * (n1 - n2) / (n * n)
+        + 3.0 * delta * (n1 * M2_b - n2 * M2_a) / n
+    )
+    M4 = (
+        M4_a
+        + M4_b
+        + delta**4 * n1 * n2 * (n1 * n1 - n1 * n2 + n2 * n2) / (n**3)
+        + 6.0 * delta * delta * (n1 * n1 * M2_b + n2 * n2 * M2_a) / (n * n)
+        + 4.0 * delta * (n1 * M3_b - n2 * M3_a) / n
+    )
+    return (n, mean, M2, M3, M4)
+
+
+def feature_summary(
+    chunks: Iterable[pl.DataFrame],
+    feature_cols: Sequence[str],
+    era_col: str = "era",
+) -> pl.DataFrame:
+    """Per-feature pooled moments via streaming Welford + Terriberry.
+
+    Caller drives chunking (era-sorted ascending). Non-finite values are
+    dropped before moments; ``missing_rate = 1 - n_finite / n_total``.
+    """
+    feature_list = list(feature_cols)
+    if not feature_list:
+        raise ValueError("feature_cols must contain at least one feature")
+    acc = {
+        f: [0.0, 0.0, 0.0, 0.0, 0.0, np.inf, -np.inf, 0.0]
+        for f in feature_list
+    }  # n, mean, M2, M3, M4, min, max, n_finite
+    n_total = 0
+    for chunk in chunks:
+        if era_col not in chunk.columns:
+            raise ValueError(f"chunk missing required column {era_col!r}")
+        missing = set(feature_list) - set(chunk.columns)
+        if missing:
+            raise ValueError(f"chunk missing feature columns: {sorted(missing)}")
+        n_total += chunk.height
+        for f in feature_list:
+            values = chunk.get_column(f).cast(pl.Float64).to_numpy()
+            finite = values[np.isfinite(values)]
+            if finite.size == 0:
+                continue
+            state = acc[f]
+            combined = _combine(tuple(state[:5]), _chunk_moments(finite))
+            state[:5] = list(combined)
+            state[5] = min(state[5], float(np.min(finite)))
+            state[6] = max(state[6], float(np.max(finite)))
+            state[7] += float(finite.size)
+
+    rows = []
+    for f in feature_list:
+        n, mean, M2, M3, M4, cmin, cmax, n_finite = acc[f]
+        if n == 0.0:
+            rows.append(
+                {
+                    "feature": f,
+                    "pooled_mean": None,
+                    "pooled_std": None,
+                    "pooled_skew": None,
+                    "pooled_kurtosis": None,
+                    "min": None,
+                    "max": None,
+                    "missing_rate": 1.0,
+                }
+            )
+            continue
+        std = float(np.sqrt(M2 / n)) if M2 > 0 else 0.0
+        skew = float((M3 / n) / ((M2 / n) ** 1.5)) if M2 > 0 else 0.0
+        kurt = float((M4 / n) / ((M2 / n) ** 2) - 3.0) if M2 > 0 else 0.0
+        rows.append(
+            {
+                "feature": f,
+                "pooled_mean": mean,
+                "pooled_std": std,
+                "pooled_skew": skew,
+                "pooled_kurtosis": kurt,
+                "min": cmin,
+                "max": cmax,
+                "missing_rate": 1.0 - n_finite / n_total,
+            }
+        )
+    return pl.DataFrame(rows)
