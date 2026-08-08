@@ -340,6 +340,11 @@ class ModelOrchestrator:
     def _device_candidate_params(self, *, use_gpu: bool) -> list[dict[str, Any]]:
         if not use_gpu:
             return [self._resolved_params(use_gpu=False)]
+        if self._config.backend == "catboost":
+            # CPU-only by design: catboost rejects `rsm` on GPU (non-pairwise
+            # modes) and every canonical preset ships colsample_bytree -> rsm,
+            # so a GPU candidate can never fit. Never attempt one.
+            return [self._resolved_params(use_gpu=False)]
         cpu_params = self._resolved_params(use_gpu=False)
         gpu_params = self._resolved_params(use_gpu=True)
         if gpu_params == cpu_params:

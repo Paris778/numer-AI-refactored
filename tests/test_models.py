@@ -232,8 +232,6 @@ class _FakeModel:
             raise self.backend_error("GPU unavailable")
         if self.params.get("tree_method") == "gpu_hist":
             raise self.backend_error("GPU unavailable")
-        if self.params.get("task_type") == "GPU":
-            raise self.backend_error("GPU unavailable")
         self._rows = len(features)
         return self
 
@@ -445,8 +443,6 @@ def test_resolve_model_params_unknown_preset_raises():
 
 # --- catboost backend (Task 3) -------------------------------------------------
 
-import catboost
-
 
 def test_translate_catboost_maps_preset_knobs() -> None:
     from nmr.models import _translate_catboost
@@ -503,29 +499,14 @@ def test_catboost_cv_oof_is_deterministic_under_seed(tmp_path) -> None:
     assert orch.resolved_device == "cpu"
 
 
-def test_catboost_gpu_fallback_records_cpu(tmp_path, monkeypatch) -> None:
-    import nmr.models as models_module
-
-    df = _model_frame()
-
-    def factory(**params):
-        return _FakeModel(params=params, backend_error=catboost.CatBoostError)
-
-    monkeypatch.setattr(models_module.catboost, "CatBoostRegressor", factory)
-
+def test_catboost_is_cpu_only_by_construction() -> None:
+    # CatBoost rejects `rsm` on GPU (non-pairwise modes) and every canonical
+    # preset ships colsample_bytree -> rsm, so the orchestrator never attempts
+    # a GPU candidate for the catboost backend: CPU-only by construction.
     orchestrator = ModelOrchestrator(
         ModelConfig(backend="catboost", preset="fast", params={"n_estimators": 10}),
         seed=29,
     )
-    model, prediction = orchestrator.train_anchor_fold(
-        df,
-        feature_cols=["f1", "f2", "f3"],
-        target_col="target",
-        splitter=_anchor_splitter(),
-    )
-
-    assert isinstance(prediction, pl.DataFrame)
-    assert prediction.height > 0
-    params = model.get_params()
-    assert params["task_type"] == "CPU"
-    assert orchestrator.resolved_device == "cpu"
+    candidates = orchestrator._device_candidate_params(use_gpu=True)
+    assert len(candidates) == 1
+    assert candidates[0]["task_type"] == "CPU"
