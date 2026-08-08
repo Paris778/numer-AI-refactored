@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 
+import optuna
 import polars as pl
 import pytest
 
@@ -254,3 +255,31 @@ def test_bayesian_sweep_metrics_reject_unknown(tmp_path) -> None:
     with pytest.raises(ValueError, match="metric"):
         bayesian_sweep(cfg, {"num_leaves": {"kind": "int", "low": 4, "high": 32}},
                        n_trials=2, seed=7, metric="corr")
+
+
+def test_bayesian_sweep_forwards_n_startup_trials_to_sampler(
+    tmp_path, monkeypatch
+) -> None:
+    # Pins the wiring between bayesian_sweep's n_startup_trials parameter and
+    # TPESampler: a no-op here (silent default of 10) violates AGENTS §2.5
+    # fail-loud/no-hidden-defaults. Wrapper delegates to the real __init__ so
+    # the sampler still works; plain pytest monkeypatch, no unittest.mock.
+    from nmr.opt import bayesian_sweep
+
+    seen: dict[str, int] = {}
+    orig_init = optuna.samplers.TPESampler.__init__
+
+    def recording_init(self, *args, **kwargs):
+        seen["n_startup_trials"] = kwargs.get("n_startup_trials")
+        orig_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(optuna.samplers.TPESampler, "__init__", recording_init)
+    cfg = _sweep_config(tmp_path)
+    bayesian_sweep(
+        cfg,
+        {"num_leaves": {"kind": "int", "low": 4, "high": 32}},
+        n_trials=1,
+        seed=7,
+        n_startup_trials=2,
+    )
+    assert seen["n_startup_trials"] == 2
