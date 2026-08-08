@@ -451,11 +451,15 @@ import polars as pl
 from nmr.opt import bayesian_sweep
 
 
-def _sweep_config(tmp_path):
-    # Reuse the synthetic-data pattern from tests/test_runner.py (vtest fixture).
-    # Implement a local builder identical to test_runner._config/_write_synthetic_data
-    # (copy the fixture code; small frames, fast preset, n_estimators=10, n_folds=2).
-    from tests.test_runner import _config
+def _sweep_config(tmp_path, *, n_train_eras: int = 12):
+    """Synthetic-data builder identical to tests/test_runner.py's vtest pattern
+    (small frames, fast preset, n_estimators=10, n_folds=2), parameterized by the
+    number of TRAIN eras. Held-out = round(0.2 * n) eras; ``corr_sharpe_ac`` needs
+    >= 5 held-out eras (the 20D AC bandwidth floor is 4, cap n-1), so the
+    corr_sharpe_ac test uses n_train_eras=30 (held-out=6). Inline the builder —
+    do NOT import across test modules (tests/ is not a package)."""
+    from tests.test_runner import _config  # inlined if this import fails (tests/ is not a package)
+
     return _config(tmp_path)
 
 
@@ -500,7 +504,9 @@ def test_bayesian_sweep_rejects_parallel_trials(tmp_path) -> None:
 
 
 def test_bayesian_sweep_supports_corr_sharpe_ac_metric(tmp_path) -> None:
-    cfg = _sweep_config(tmp_path)
+    # 30 train eras -> held-out = round(0.2*30) = 6 eras; the 20D AC bandwidth
+    # floor (4) needs >= 5 eras, so the default 12-era fixture would raise.
+    cfg = _sweep_config(tmp_path, n_train_eras=30)
     space = {"learning_rate": {"kind": "float", "low": 0.01, "high": 0.1, "log": True}}
     result = bayesian_sweep(cfg, space, n_trials=2, seed=7, metric="corr_sharpe_ac")
     assert result.trials.get_column("metric").to_list() == ["corr_sharpe_ac"] * 2
