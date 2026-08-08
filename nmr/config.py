@@ -53,6 +53,7 @@ class DataConfig:
 
     version: str = "v5.2"
     feature_set: str = "small"
+    feature_subset: str | None = None
     targets: tuple[str, ...] = ("target",)
     data_dir: Path = REPO_ROOT / "data"
 
@@ -63,8 +64,21 @@ class DataConfig:
             raise ValueError(
                 f"feature_set={self.feature_set!r} not in {VALID_FEATURE_SETS}"
             )
+        if self.feature_subset is not None and not self.feature_subset:
+            raise ValueError(
+                "data.feature_subset must be a non-empty string when provided"
+            )
         if not self.targets:
             raise ValueError("data.targets must contain at least one target")
+
+    @property
+    def resolved_feature_set(self) -> str:
+        """Feature set actually used: explicit ``feature_subset`` wins over ``feature_set``.
+
+        ``feature_subset`` names are validated against ``features.json`` at
+        ingestion time (fail loud, fail late — ``IngestionAgent.features``).
+        """
+        return self.feature_subset if self.feature_subset is not None else self.feature_set
 
     def path(self, filename: str) -> Path:
         """Absolute path to a dataset file for this version, e.g. ``train.parquet``."""

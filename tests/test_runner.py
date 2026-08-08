@@ -272,3 +272,29 @@ def test_fold_held_out_weight_learning_and_scoring_eras(tmp_path) -> None:
         era for fold in folds[:-1] for era in fold.val_eras
     }
     assert set(result.manifest["scoring_eras"]) == set(folds[-1].val_eras)
+
+
+def test_feature_subset_changes_run_id_and_uses_subset_features(tmp_path) -> None:
+    """feature_subset must change the run fingerprint and reach the data layer."""
+    import json as _json
+
+    cfg = _config(tmp_path)
+    # vtest features.json has small == medium == all == [f1, f2]; add a family
+    # set via the data dir used by _config and re-run with feature_subset.
+    version_dir = cfg.data.data_dir / "vtest"
+    features = _json.loads((version_dir / "features.json").read_text(encoding="utf-8"))
+    features["feature_sets"]["sunshine"] = ["f1", "f2"]
+    (version_dir / "features.json").write_text(_json.dumps(features), encoding="utf-8")
+
+    plain = ExperimentRunner(cfg)
+    subset_cfg = ExperimentConfig(
+        data=DataConfig(
+            version=cfg.data.version, feature_set=cfg.data.feature_set,
+            feature_subset="sunshine", targets=cfg.data.targets,
+            data_dir=cfg.data.data_dir,
+        ),
+        split=cfg.split, model=cfg.model, evaluation=cfg.evaluation, run=cfg.run,
+    )
+    subset = ExperimentRunner(subset_cfg)
+    assert plain._run_id != subset._run_id
+    assert subset.run(deploy=False).manifest["feature_cols"] == ["f1", "f2"]

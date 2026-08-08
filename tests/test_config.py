@@ -110,3 +110,21 @@ def test_set_global_seeds_does_not_touch_hash_env() -> None:
     os.environ.pop("PYTHONHASHSEED", None)
     set_global_seeds(42)
     assert "PYTHONHASHSEED" not in os.environ
+
+
+def test_feature_subset_overrides_feature_set_in_resolution():
+    from nmr.config import DataConfig
+
+    cfg = DataConfig(feature_set="small", feature_subset="sunshine")
+    assert cfg.resolved_feature_set == "sunshine"
+    plain = DataConfig(feature_set="small")
+    assert plain.resolved_feature_set == "small"
+
+
+def test_feature_subset_must_be_non_empty_when_provided():
+    from nmr.config import DataConfig
+
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="feature_subset"):
+        DataConfig(feature_subset="")

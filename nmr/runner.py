@@ -68,7 +68,7 @@ class ExperimentRunner:
         set_global_seeds(self._config.run.seed)
 
         agent = IngestionAgent(self._config.data)
-        feature_cols = agent.features(self._config.data.feature_set)
+        feature_cols = agent.features(self._config.data.resolved_feature_set)
         main_target = self._config.evaluation.main_target
         target_cols = list(dict.fromkeys([*self._config.data.targets, main_target]))
         logger.info(

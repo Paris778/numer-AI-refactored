@@ -204,7 +204,7 @@ def _pred_feature_pearson(pred: np.ndarray, features: np.ndarray) -> np.ndarray:
 def _held_out_metric(config: ExperimentConfig, *, metric_name: str) -> float:
     set_global_seeds(config.run.seed)
     agent = IngestionAgent(config.data)
-    feature_cols = agent.features(config.data.feature_set)
+    feature_cols = agent.features(config.data.resolved_feature_set)
     main_target = config.evaluation.main_target
     targets = list(dict.fromkeys([*config.data.targets, main_target]))
 

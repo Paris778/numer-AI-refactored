@@ -5,6 +5,8 @@ import json
 import polars as pl
 import pytest
 
+from nmr.config import DataConfig
+from nmr.data import IngestionAgent
 from nmr.features import (
     DEFAULT_MAX_ABS_DECAY,
     DEFAULT_MIN_MEAN_CORR,
@@ -134,3 +136,44 @@ def test_select_stable_features_rejects_screen_without_required_columns() -> Non
     bad = pl.DataFrame({"feature": ["f1"], "mean_corr": [0.5]})
     with pytest.raises(ValueError, match="decay_slope"):
         select_stable_features(bad, min_mean_corr=0.0, max_abs_decay=1.0)
+
+
+def _write_features_with_sunshine(tmp_path) -> None:
+    version_dir = tmp_path / "vtest"
+    version_dir.mkdir(parents=True, exist_ok=True)
+    (version_dir / "features.json").write_text(
+        json.dumps(
+            {
+                "feature_sets": {
+                    "small": ["f1", "f2"],
+                    "sunshine": ["f1", "f2", "f3"],
+                },
+                "targets": ["target"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    pl.DataFrame(
+        {"era": ["1", "1"], "id": ["a", "b"], "f1": [0.1, 0.2], "f2": [0.3, 0.4],
+         "f3": [0.5, 0.6], "target": [0.2, 0.3]}
+    ).write_parquet(version_dir / "train.parquet")
+
+
+def test_ingestion_resolves_feature_subset_from_features_json(tmp_path) -> None:
+    _write_features_with_sunshine(tmp_path)
+    cfg = DataConfig(
+        version="vtest", feature_set="small", feature_subset="sunshine",
+        data_dir=tmp_path,
+    )
+    agent = IngestionAgent(cfg)
+    assert agent.features() == ["f1", "f2", "f3"]  # resolved_feature_set threaded
+
+
+def test_ingestion_rejects_unknown_feature_subset_with_valid_options(tmp_path) -> None:
+    _write_features_with_sunshine(tmp_path)
+    cfg = DataConfig(
+        version="vtest", feature_set="small", feature_subset="nope", data_dir=tmp_path,
+    )
+    agent = IngestionAgent(cfg)
+    with pytest.raises(ValueError, match="sunshine"):
+        agent.features()

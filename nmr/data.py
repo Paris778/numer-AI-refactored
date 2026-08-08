@@ -105,7 +105,7 @@ class IngestionAgent:
 
     def features(self, subset: str | None = None) -> list[str]:
         """Return the ordered feature column names for ``subset``."""
-        key = subset if subset is not None else self._data.feature_set
+        key = subset if subset is not None else self._data.resolved_feature_set
         sets = self._metadata_raw()["feature_sets"]
         if key not in sets:
             raise ValueError(
