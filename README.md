@@ -62,6 +62,7 @@ A **lean, deterministic research framework** for the [Numerai Classic tournament
 ├── run_campaign.py            # CLI: run a named batch of configs → artifacts/campaigns/
 ├── train_first_model.py       # CLI: train, register, and promote the first model
 ├── generate_dashboard.py      # CLI: validation-scorecard leaderboard → artifacts/dashboard.html
+├── dashboard_app.py           # interactive dashboard — streamlit run dashboard_app.py (registry/benchmarks/campaigns, read-only)
 ├── pytest.ini                 # pythonpath = . (no install step needed)
 ├── requirements.txt           # runtime + dev dependencies
 ├── AGENTS.md                  # authoritative reference for AI coding agents
@@ -117,6 +118,9 @@ Real-data tests and `benchmark_runner.py` require these files; pure-unit tests d
 # 3. Score the baseline field and build the leaderboard
 .\.venv\Scripts\python benchmark_runner.py --fast-mode
 .\.venv\Scripts\python generate_dashboard.py     # → artifacts/dashboard.html
+
+# 4. Browse runs and campaigns interactively (read-only)
+streamlit run dashboard_app.py   # interactive leaderboard + fleet + campaign views (read-only)
 ```
 
 The dashboard ranks trained runs and benchmarks on the same validation-scorecard definitions (CORR/Sharpe from the `scorecard` block in `run.json`); runs without a validation scorecard are shown separately in a legacy (train-OOF metrics) section.

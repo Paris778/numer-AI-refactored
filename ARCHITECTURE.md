@@ -265,6 +265,7 @@ def predict(live_features: pd.DataFrame, live_benchmark_models: pd.DataFrame | N
 | [train_first_model.py](train_first_model.py) | `load_config("configs/first_model.yaml")` → `ExperimentRunner.run(deploy=True)` → `RunRegistry.record` + `promote_if_better` (prints promotion verdict) → prints summary, writes `summary.json` |
 | [benchmark_runner.py](benchmark_runner.py) | Flags: `--data-dir` (data/v5.2), `--output`, `--labels-output`, `--seed` (77), `--n-boot` (300), `--min-overlap-eras` (20), `--horizon` (20D/60D), `--min-train-eras` (10), `--log-level`, `--fast-mode` (n_boot=1, skips linear/tree). Loads validation/meta/benchmarks → `BenchmarkSuite` → scorecards CSV + per-era label profile CSV. Low-variance predictions (<1e-9) get a fallback scorecard. |
 | [generate_dashboard.py](generate_dashboard.py) | Aggregates registry runs + benchmark CSV → Sharpe-ranked dark-theme leaderboard at `artifacts/dashboard.html` |
+| [dashboard_app.py](dashboard_app.py) | Streamlit+Plotly interactive dashboard over registry scorecards, benchmark CSV, campaign logs, and `fleet_summary` (§Q); read-only; launch: `streamlit run dashboard_app.py`. Pure shaping helpers are unit-tested (tests/test_scripts.py). |
 | [run_campaign.py](run_campaign.py) | Run a named batch of configs and record trial lineage (see §R) |
 
 ### P. Feature-Set Resolution & Stability Screening — `nmr/features.py`

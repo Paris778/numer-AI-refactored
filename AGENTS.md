@@ -141,6 +141,7 @@ When modifying or generating code, enforce these seven invariants:
 | Change perturbation/horizon/regime diagnostics | `nmr/robustness.py` |
 | Change benchmark baselines / gates | `nmr/benchmark.py` + `benchmark_runner.py` |
 | Change campaign orchestration | `nmr/campaign.py` + `run_campaign.py` (spec: `ARCHITECTURE.md` §R) |
+| Inspect runs / campaigns interactively | `dashboard_app.py` — `streamlit run` (read-only) |
 | Run a research protocol (feature campaign / HPO / meta-analysis / QA gate) | `.kimi-code/skills/` — `feature-campaign`, `hpo-narrowing`, `run-meta-analysis`, `verification-before-claim` (map: `ARCHITECTURE.md` §T) |
 | Add/remove a public API symbol | `nmr/__init__.py` — imports **and** `__all__` |
 | Understand tournament rules & scoring | `docs/DOCS_README.md` → `docs/01-canon/` (canonical laws) |
