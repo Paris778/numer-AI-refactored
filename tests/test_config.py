@@ -143,3 +143,12 @@ def test_invalid_backend_still_raises():
 
     with _pytest.raises(ValueError, match="backend"):
         ModelConfig(backend="bogus")
+
+
+def test_model_config_device_validation() -> None:
+    for device in ("auto", "gpu", "cpu"):
+        assert ModelConfig(device=device).device == device
+    with pytest.raises(ValueError, match="device"):
+        ModelConfig(device="quantum")
+    # the default preserves the legacy GPU-first behavior
+    assert ModelConfig().device == "auto"

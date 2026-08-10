@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 
+import numpy as np
 import polars as pl
 import pytest
 
@@ -118,7 +119,7 @@ def test_screen_flags_stability_by_default_thresholds() -> None:
     assert DEFAULT_MIN_MEAN_CORR > 0.0 and DEFAULT_MAX_ABS_DECAY > 0.0
 
 
-def test_screen_handles_degenerate_eras_without_raising() -> None:
+def test_screen_all_degenerate_eras_yield_null_stats() -> None:
     rows = [
         {"era": "1", "id": "a", "f": 1.0, "target": 0.5},   # 1 row: degenerate
         {"era": "1", "id": "b", "f": 1.0, "target": 0.5},   # zero variance
@@ -129,8 +130,37 @@ def test_screen_handles_degenerate_eras_without_raising() -> None:
     screen = feature_stability_screen(frame, feature_cols=["f"], target_col="target")
     assert screen.height == 1
     row = screen.row(0, named=True)
-    assert row["n_eras"] == 3
+    assert row["n_eras"] == 0
+    assert row["mean_corr"] is None
+    assert row["decay_slope"] is None
     assert screen.get_column("stable").to_list() == [False]
+
+
+def test_screen_excludes_degenerate_eras_from_aggregates() -> None:
+    # era 0002 has an all-NaN target (degenerate): its forced zero-IC vector
+    # must not dilute mean_corr, distort the decay slope, or count in n_eras.
+    # Valid eras carry a perfect linear signal (corr = 1.0, slope = 0).
+    rng = np.random.default_rng(7)
+    rows = []
+    for e in ["0001", "0002", "0003"]:
+        for i in range(20):
+            x = float(rng.normal())
+            rows.append(
+                {
+                    "era": e,
+                    "id": f"{e}_{i}",
+                    "f": x,
+                    "target": float("nan") if e == "0002" else x,
+                }
+            )
+    screen = feature_stability_screen(
+        pl.DataFrame(rows), feature_cols=["f"], target_col="target"
+    )
+    row = screen.row(0, named=True)
+    assert row["n_eras"] == 2  # degenerate era excluded
+    assert row["mean_corr"] > 0.9  # not diluted by the zero vector
+    assert abs(row["decay_slope"]) <= 0.001  # no artificial decay from the zero
+    assert screen.get_column("stable").to_list() == [True]
 
 
 def test_select_stable_features_filters_on_thresholds() -> None:

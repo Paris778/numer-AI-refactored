@@ -34,6 +34,9 @@ logger = logging.getLogger("nmr.models")
 __all__ = ["CVResult", "ModelOrchestrator"]
 
 
+_FIT_PROGRESS_PERIOD = 100  # print one training progress line every N iterations
+
+
 _CANONICAL_PRESETS: dict[str, dict[str, Any]] = {
     "fast": {
         "n_estimators": 2000,
@@ -275,6 +278,7 @@ class ModelOrchestrator:
         model = self._fit_model(
             features=self._feature_frame(train_df, feature_cols=feature_cols),
             target=train_df.get_column(target_col).to_numpy(),
+            use_gpu=self._config.device != "cpu",
         )
         logger.info(
             "[_fit_predict_fold] %s fold %d: fit complete in %.1fs",
@@ -313,7 +317,7 @@ class ModelOrchestrator:
         for params in candidate_params:
             model = self._build_model(params)
             try:
-                model.fit(features, target)
+                self._fit_with_progress(model, features, target)
             except backend_errors as exc:
                 logger.warning(
                     "[fit] %s fit failed (%s: %s); trying next candidate",
@@ -324,7 +328,7 @@ class ModelOrchestrator:
             self.resolved_device = (
                 "gpu"
                 if params.get("device_type") == "gpu"
-                or params.get("tree_method") == "gpu_hist"
+                or params.get("device") == "cuda"
                 or params.get("task_type") == "GPU"
                 else "cpu"
             )
@@ -332,6 +336,37 @@ class ModelOrchestrator:
 
         assert last_error is not None
         raise last_error
+
+    def _fit_with_progress(
+        self, model: object, features: pd.DataFrame, target: np.ndarray
+    ) -> None:
+        """Fit with progress markers on stdout.
+
+        LightGBM and CatBoost expose per-iteration hooks; the installed
+        xgboost 3.x sklearn wrapper does not (no ``callbacks`` fit argument),
+        so xgboost gets start/elapsed markers instead. Markers are
+        output-only: they never touch the model's numeric results or the
+        params dict, so determinism guarantees are unchanged.
+        """
+        backend = self._config.backend
+        period = _FIT_PROGRESS_PERIOD
+        if backend == "lightgbm":
+            def _lgb_progress(env: Any) -> None:
+                iteration = env.iteration + 1
+                if iteration == 1 or iteration % period == 0:
+                    print(f"[fit] lightgbm iteration {iteration}", flush=True)
+
+            model.fit(features, target, callbacks=[_lgb_progress])
+        elif backend == "xgboost":
+            started = time.monotonic()
+            print("[fit] xgboost training started", flush=True)
+            model.fit(features, target)
+            print(
+                f"[fit] xgboost training done ({time.monotonic() - started:.1f}s)",
+                flush=True,
+            )
+        else:  # catboost: period-based verbose logging at fit time
+            model.fit(features, target, verbose=period)
 
     def _predict_model(self, model: object, *, features: pd.DataFrame) -> np.ndarray:
         prediction = model.predict(features)
@@ -345,8 +380,11 @@ class ModelOrchestrator:
             # modes) and every canonical preset ships colsample_bytree -> rsm,
             # so a GPU candidate can never fit. Never attempt one.
             return [self._resolved_params(use_gpu=False)]
-        cpu_params = self._resolved_params(use_gpu=False)
         gpu_params = self._resolved_params(use_gpu=True)
+        if self._config.device == "gpu":
+            # Forced GPU: a failing GPU fit raises — no silent CPU fallback.
+            return [gpu_params]
+        cpu_params = self._resolved_params(use_gpu=False)
         if gpu_params == cpu_params:
             return [cpu_params]
         return [gpu_params, cpu_params]
@@ -388,7 +426,10 @@ class ModelOrchestrator:
             params.setdefault("max_leaves", num_leaves)
         if min_data_in_leaf is not None:
             params.setdefault("min_child_weight", float(min_data_in_leaf))
-        params["tree_method"] = "gpu_hist" if use_gpu else "hist"
+        # xgboost >= 3.0 unified GPU acceleration under device='cuda';
+        # tree_method='gpu_hist' was removed and raises Invalid Input.
+        params["tree_method"] = "hist"
+        params["device"] = "cuda" if use_gpu else "cpu"
         return params
 
     def _build_model(self, params: dict[str, Any]) -> object:

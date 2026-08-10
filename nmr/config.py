@@ -22,6 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 VALID_FEATURE_SETS = ("small", "medium", "all")
 VALID_MODEL_BACKENDS = ("lightgbm", "xgboost", "catboost")
 VALID_MODEL_PRESETS = ("fast", "standard", "deep")
+VALID_MODEL_DEVICES = ("auto", "gpu", "cpu")
 VALID_EVAL_BACKENDS = ("custom", "official")
 VALID_SPLIT_SCHEMES = ("walk_forward", "anchor")
 VALID_ENSEMBLE_METHODS = ("ridge", "non_negative")
@@ -107,11 +108,20 @@ class SplitConfig:
 
 @dataclass(frozen=True)
 class ModelConfig:
-    """Model backend, parameter preset, and explicit param overrides."""
+    """Model backend, parameter preset, explicit overrides, and device policy.
+
+    ``device``: ``auto`` (default — GPU-first with CPU fallback in CV, the
+    legacy behavior), ``gpu`` (force GPU for CV/experimentation; a failed GPU
+    fit raises — no silent fallback), ``cpu`` (never attempt GPU). The
+    deployment artifact path (``train_full_history``) is always CPU by
+    invariant: determinism is per-device and the hosted runtime may lack a
+    GPU.
+    """
 
     backend: str = "lightgbm"
     preset: str = "fast"
     params: dict[str, Any] = field(default_factory=dict)
+    device: str = "auto"
 
     def __post_init__(self) -> None:
         if self.backend not in VALID_MODEL_BACKENDS:
@@ -121,6 +131,10 @@ class ModelConfig:
         if self.preset not in VALID_MODEL_PRESETS:
             raise ValueError(
                 f"model.preset={self.preset!r} not in {VALID_MODEL_PRESETS}"
+            )
+        if self.device not in VALID_MODEL_DEVICES:
+            raise ValueError(
+                f"model.device={self.device!r} not in {VALID_MODEL_DEVICES}"
             )
 
 

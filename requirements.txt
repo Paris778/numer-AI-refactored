@@ -18,4 +18,15 @@ catboost==1.2.10
 streamlit==1.61.1
 plotly==6.6.0
 ipykernel
-tqdm
+tqdm# GPU acceleration (user-granted deps): cupy rankdata for the analysis
+# pipeline; nvidia-* wheels provide the CUDA runtime DLLs cupy needs on
+# Windows. Optional at runtime — everything degrades to scipy without them.
+cupy-cuda12x==14.1.1
+nvidia-cublas-cu12==12.9.2.10
+nvidia-cuda-nvrtc-cu12==12.9.86
+nvidia-cuda-runtime-cu12==12.9.79
+nvidia-cufft-cu12==11.4.1.4
+nvidia-curand-cu12==10.3.10.19
+nvidia-cusolver-cu12==11.7.5.82
+nvidia-cusparse-cu12==12.5.10.65
+nvidia-nvjitlink-cu12==12.9.86

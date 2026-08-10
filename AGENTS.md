@@ -30,7 +30,7 @@ These four files obey a strict **Single Source of Truth (SSOT) hierarchy**. One 
 
 ## 1. Agent Identity & Mission
 
-You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (489 tests). No lint/type-check tooling is configured — pytest is the sole automated gate, enforced by CI (`.github/workflows/ci.yml`).
+You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (549 tests). No lint/type-check tooling is configured — pytest is the sole automated gate, enforced by CI (`.github/workflows/ci.yml`).
 
 Your mission:
 
@@ -142,6 +142,8 @@ When modifying or generating code, enforce these seven invariants:
 | Change benchmark baselines / gates | `nmr/benchmark.py` + `benchmark_runner.py` |
 | Change campaign orchestration | `nmr/campaign.py` + `run_campaign.py` (spec: `ARCHITECTURE.md` §R) |
 | Inspect runs / campaigns interactively | `dashboard_app.py` — `streamlit run` (read-only) |
+| Analyze the dataset / run one analysis stage | `analyze_dataset.py` — 15 modular stages, `--only`/`--skip` (deps auto-included), progress markers |
+| Discover hardware / check live resource status | `nmr/hardware.py` + `hardware_status.py` (stdlib only: nvidia-smi + ctypes) |
 | Run a research protocol (feature campaign / HPO / meta-analysis / QA gate) | `.kimi-code/skills/` — `feature-campaign`, `hpo-narrowing`, `run-meta-analysis`, `verification-before-claim` (map: `ARCHITECTURE.md` §T) |
 | Add/remove a public API symbol | `nmr/__init__.py` — imports **and** `__all__` |
 | Understand tournament rules & scoring | `docs/DOCS_README.md` → `docs/01-canon/` (canonical laws) |
@@ -194,7 +196,7 @@ Never invent a `numerai_tools` / `numerapi` signature — open the installed sou
 .\.venv\Scripts\python -m pytest tests/test_benchmark_slice1.py -q                    # determinism hashes
 
 # Pre-sign-off gate (mandatory before delivering work)
-.\.venv\Scripts\python -m pytest -q                                                    # full 489-test suite
+.\.venv\Scripts\python -m pytest -q                                                    # full 549-test suite
 .\.venv\Scripts\python benchmark_runner.py --fast-mode --output artifacts/benchmark_scores_smoke.csv --labels-output artifacts/benchmark_test_era_labels_smoke.csv   # real-data smoke (writes artifacts/*_smoke.csv)
 ```
 
@@ -218,7 +220,7 @@ These are real, verified issues — do not "fix" them silently as a side effect.
 Real v5.3 scorecard fixtures are flaky if rows are limited **before** establishing era overlap across validation/meta/benchmarks. Always build test payloads from overlap eras first (join/filter by shared eras), then limit/window. `NonVacuityError` fires when overlap < `MIN_OVERLAP_ERAS` (20).
 
 ### GPU-first model params with CPU fallback
-`ModelOrchestrator` is GPU-first (`device_type="gpu"` / `tree_method="gpu_hist"`) with CPU fallback; a failed device attempt is logged with the exception type and the resolved device is recorded in the run manifest (`oof_device`). Numeric results may differ slightly between GPU and CPU runs — determinism guarantees hold per-device, not across devices.
+`ModelOrchestrator` is GPU-first with CPU fallback: LightGBM via `device_type="gpu"`, XGBoost (>= 3.0) via `device="cuda"` + `tree_method="hist"` (`gpu_hist` was removed in 3.x and raises `Invalid Input`). A failed device attempt is logged with the exception type and the resolved device is recorded in the run manifest (`oof_device`). `model.device` (`auto` | `gpu` | `cpu`, default `auto`) controls CV/experimentation: `gpu` forces the GPU candidate (a failure raises — no silent fallback), `cpu` never attempts it. `train_full_history` is always CPU (deploy artifact invariant). Numeric results may differ slightly between GPU and CPU runs — determinism guarantees hold per-device, not across devices.
 
 ### `embargo_eras` is structurally inert
 `SplitConfig.embargo_eras` is validated and accepted but currently unused by fold geometry (reserved for future two-sided schemes). Do not document or rely on it as an active safeguard; do not remove it without a schema decision.

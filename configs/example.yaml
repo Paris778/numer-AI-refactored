@@ -24,6 +24,7 @@ split:
 model:
   backend: lightgbm         # lightgbm | xgboost | catboost
   preset: fast              # fast | standard | deep
+  device: auto              # auto (GPU-first, CPU fallback) | gpu (forced; failures raise) | cpu (never GPU)
   params: {}                # explicit overrides on top of the preset
 
 evaluation:

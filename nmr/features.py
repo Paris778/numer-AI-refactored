@@ -60,6 +60,46 @@ _SCREEN_COLUMNS = (
 )
 
 
+def _era_ic_pair(
+    part: pl.DataFrame,
+    feature_list: Sequence[str],
+    target_col: str,
+    era_col: str,
+    *,
+    spearman: bool,
+) -> tuple[str, np.ndarray, np.ndarray, bool]:
+    """Per-era (era, Pearson IC vector, Spearman IC vector, degenerate flag).
+
+    The single implementation of per-era feature-target IC. Degenerate eras
+    (fewer than 2 usable rows, an all-non-finite target, or a constant target)
+    return zero vectors for both metrics with ``degenerate = True``. NaN is
+    not null in polars, so non-finite target rows are excluded explicitly;
+    rows are complete-case on features via ``drop_nulls``.
+    """
+    if era_col not in part.columns:
+        raise ValueError(f"chunk missing required column {era_col!r}")
+    era = str(part.get_column(era_col).to_list()[0])
+    zeros = np.zeros(len(feature_list), dtype=float)
+    clean = part.drop_nulls()
+    if clean.height < 2:
+        return era, zeros, zeros, True
+    target_all = clean.get_column(target_col).cast(pl.Float64).to_numpy()
+    finite = np.isfinite(target_all)
+    target = target_all[finite]
+    if target.size == 0 or bool(np.all(target == target[0])):
+        return era, zeros, zeros, True
+    features = clean.select(feature_list).cast(pl.Float64).to_numpy()[finite]
+    pearson = _feature_target_pearson(features, target)
+    if not spearman:
+        return era, pearson, zeros, False
+    from nmr import _gpu  # lazy: keeps this module's import graph acyclic
+
+    spearman_vec = _feature_target_pearson(
+        _gpu.rankdata(features, axis=0), _gpu.rankdata(target)
+    )
+    return era, pearson, spearman_vec, False
+
+
 def _per_era_pearson_chunks(
     chunks: Iterable[pl.DataFrame],
     feature_cols: Sequence[str],
@@ -69,8 +109,9 @@ def _per_era_pearson_chunks(
     """Per-era Pearson CORR of each feature vs ``target_col`` from era chunks.
 
     Each chunk is one era. Returns ``(corrs_by_era, degenerate_eras)``. A
-    degenerate era (fewer than 2 non-null rows, or a constant target)
-    contributes a zero vector and its label is recorded in ``degenerate_eras``.
+    degenerate era (fewer than 2 usable rows, an all-non-finite target, or a
+    constant target) contributes a zero vector and its label is recorded in
+    ``degenerate_eras``.
     This is the single implementation of per-era feature-target correlation:
     the frame-based ``_per_era_pearson``, ``feature_stability_screen``, and
     ``nmr.analysis`` all route through it.
@@ -79,18 +120,12 @@ def _per_era_pearson_chunks(
     per_era: dict[str, np.ndarray] = {}
     degenerate: set[str] = set()
     for part in chunks:
-        if era_col not in part.columns:
-            raise ValueError(f"chunk missing required column {era_col!r}")
-        era = str(part.get_column(era_col).to_list()[0])
-        clean = part.drop_nulls()
-        target = clean.get_column(target_col).cast(pl.Float64).to_numpy()
-        zero_target_variance = target.size > 0 and bool(np.all(target == target[0]))
-        if clean.height < 2 or target.size == 0 or zero_target_variance:
-            per_era[era] = np.zeros(len(feature_list), dtype=float)
+        era, pearson, _, is_degenerate = _era_ic_pair(
+            part, feature_list, target_col, era_col, spearman=False
+        )
+        per_era[era] = pearson
+        if is_degenerate:
             degenerate.add(era)
-            continue
-        features = clean.select(feature_list).cast(pl.Float64).to_numpy()
-        per_era[era] = _feature_target_pearson(features, target)
     return per_era, degenerate
 
 
@@ -125,13 +160,16 @@ def feature_stability_screen(
 
     Definition (ARCHITECTURE.md §P): per-era Pearson CORR(feature, target)
     using the same vectorized per-era pattern as ``feature_exposure_report``;
-    degenerate eras (zero variance, <2 usable rows, non-finite values)
-    contribute 0.0. Aggregates across eras: ``mean_corr`` (mean), ``corr_std``
-    (population std), ``decay_slope`` (linear slope of CORR vs era index),
-    ``cross_regime_variance`` (variance of first-half vs second-half era-window
-    mean CORR — a regime-drift proxy). ``stable`` is True when
-    ``mean_corr >= min_mean_corr`` and ``|decay_slope| <= max_abs_decay`` and
-    ``n_eras >= 2``.
+    degenerate eras (zero variance, <2 usable rows, non-finite values) are
+    excluded from every aggregate — they carry no signal information, and
+    padding them with 0.0 would bias the mean, std, and decay slope. ``n_eras``
+    therefore counts valid eras only. Aggregates across eras: ``mean_corr``
+    (mean), ``corr_std`` (population std), ``decay_slope`` (linear slope of
+    CORR vs era index), ``cross_regime_variance`` (variance of first-half vs
+    second-half era-window mean CORR — a regime-drift proxy). ``stable`` is
+    True when ``mean_corr >= min_mean_corr`` and ``|decay_slope| <=
+    max_abs_decay`` and ``n_eras >= 2``. When no valid eras exist, numeric
+    aggregates are None and ``stable`` is False.
     """
     feature_list = list(feature_cols)
     if not feature_list:
@@ -141,12 +179,15 @@ def feature_stability_screen(
     if missing:
         raise ValueError(f"frame missing required columns: {sorted(missing)}")
 
-    per_era, _ = _per_era_pearson(frame, feature_list, target_col, era_col)
-    return _aggregate_screen(per_era, feature_list, min_mean_corr, max_abs_decay)
+    per_era, degenerate = _per_era_pearson(frame, feature_list, target_col, era_col)
+    return _aggregate_screen(
+        per_era, degenerate, feature_list, min_mean_corr, max_abs_decay
+    )
 
 
 def _aggregate_screen(
     per_era: dict[str, np.ndarray],
+    degenerate: set[str],
     feature_list: Sequence[str],
     min_mean_corr: float,
     max_abs_decay: float,
@@ -154,15 +195,32 @@ def _aggregate_screen(
     """Aggregate per-era CORR vectors into the screen's summary columns.
 
     Shared by the frame-based :func:`feature_stability_screen` and the
-    chunk-based screen path used by ``nmr.analysis``. See
-    :func:`feature_stability_screen` for column semantics.
+    chunk-based screen path used by ``nmr.analysis``. Degenerate eras (target
+    all-NaN, <2 usable rows, or zero-variance target) are excluded from all
+    aggregates — see :func:`feature_stability_screen` for column semantics.
     """
     if not per_era:
         return pl.DataFrame(
             {name: [] for name in _SCREEN_COLUMNS}
         )
 
-    eras = sorted(per_era, key=int)
+    eras = [e for e in sorted(per_era, key=int) if e not in degenerate]
+    if not eras:
+        return pl.DataFrame(
+            [
+                {
+                    "feature": feature,
+                    "mean_corr": None,
+                    "corr_std": None,
+                    "decay_slope": None,
+                    "cross_regime_variance": None,
+                    "n_eras": 0,
+                    "stable": False,
+                }
+                for feature in feature_list
+            ],
+            schema=_SCREEN_COLUMNS,
+        )
     matrix = np.column_stack([per_era[era] for era in eras])
     rows = []
     for i, feature in enumerate(feature_list):

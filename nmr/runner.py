@@ -237,7 +237,7 @@ class ExperimentRunner:
             "weight_learning_eras": weight_learning_eras,
             "scoring_eras": scoring_eras,
             "summary_metrics": summary_metrics,
-            "pipeline_device": "cpu",
+            "pipeline_device": self._config.model.device,
             "oof_device": model_orchestrator.resolved_device,
             "metrics": dataclasses.asdict(metrics),
             "code_fingerprint": self._code_fingerprint(),

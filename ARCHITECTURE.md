@@ -145,7 +145,7 @@ Per-era pseudo-inverse cache: key = SHA256 of `{era, sorted feature_cols, row_co
 - `train_full_history(df, *, feature_cols, target_col, era_col="era") -> model` — one CPU-only model fit on every era, with null/non-finite targets dropped (logged count; `ValueError` if nothing remains). Used by the deployment pipeline so the artifact reproduces identically on any hosted runtime.
 - Fold leakage-safety re-asserted at train time (`_assert_fold_is_leakage_safe(fold, purge_eras=...)`): before fitting each fold it enforces no era reuse, non-empty sides, strict time-ordering, and `min(val) − max(train) > purge_eras` (gap ≤ `purge_eras` ⇒ `ValueError`).
 - `_fit_predict_fold` drops null/non-finite target rows from the train slice before fitting (logged dropped count; `ValueError` if nothing remains).
-- OOF-CV is GPU-first for lightgbm/xgboost (`device_type="gpu"` / `tree_method="gpu_hist"`) with automatic CPU fallback: a failed device attempt is logged with `type(exc).__name__` + message (only backend errors — `ValueError`/`TypeError`/`LightGBMError`/`XGBoostError`/`CatBoostError` — trigger fallback; anything else fails loudly), and `resolved_device` records which device actually fit (`"gpu"`/`"cpu"`, `None` before the first successful fit). The run manifest records it as `oof_device`. CatBoost is CPU-only by design — it never attempts a GPU candidate (see below). `train_full_history` is CPU-only by design.
+- OOF-CV is GPU-first for lightgbm/xgboost with automatic CPU fallback: LightGBM via `device_type="gpu"`, XGBoost (>= 3.0) via `device="cuda"` + `tree_method="hist"` (`gpu_hist` was removed in 3.x and raises `Invalid Input`). A failed device attempt is logged with `type(exc).__name__` + message (only backend errors — `ValueError`/`TypeError`/`LightGBMError`/`XGBoostError`/`CatBoostError` — trigger fallback; anything else fails loudly), and `resolved_device` records which device actually fit (`"gpu"`/`"cpu"`, `None` before the first successful fit). `model.device` (`auto` | `gpu` | `cpu`, default `auto`) controls CV/experimentation: `gpu` returns only the GPU candidate (a failure raises — no silent fallback), `cpu` never attempts GPU. The run manifest records the config device as `pipeline_device` and the actual fit device as `oof_device`. CatBoost is CPU-only by design — it never attempts a GPU candidate (see below). `train_full_history` is CPU-only by design.
 
 Canonical presets (`_CANONICAL_PRESETS`, mirroring Numerai's published benchmark params):
 
@@ -267,6 +267,8 @@ def predict(live_features: pd.DataFrame, live_benchmark_models: pd.DataFrame | N
 | [generate_dashboard.py](generate_dashboard.py) | Aggregates registry runs + benchmark CSV → Sharpe-ranked dark-theme leaderboard at `artifacts/dashboard.html` |
 | [dashboard_app.py](dashboard_app.py) | Streamlit+Plotly interactive dashboard over registry scorecards, benchmark CSV, campaign logs, and `fleet_summary` (§Q); read-only; launch: `streamlit run dashboard_app.py`. Pure shaping helpers are unit-tested (tests/test_scripts.py). |
 | [run_campaign.py](run_campaign.py) | Run a named batch of configs and record trial lineage (see §R) |
+| [analyze_dataset.py](analyze_dataset.py) | Modular dataset analysis: 15 named stages (`overview`, `targets`, `ic_by_era`, `screens`, `summary`, `psi`, `drift`, `corr_medium`, `corr_all`, `set_membership`, `ic_by_split`, `regimes`, `benchmarks`, `meta_ortho`, `manifest`). Flags: `--only a,b` / `--skip a,b` run a subset (dependencies auto-included; `manifest` always runs), `--features small\|medium\|all`, `--max-eras N`, `--full-all-matrix`. `drift` writes the PSI + W1 + adversarial-AUC profile (`feature_drift_profile.parquet`); `meta_ortho` writes per-feature meta-model orthogonality; the FNE profile uses an 11-point neutralization grid. Stage boundaries and per-era ticks print progress to stdout/stderr (never into artifacts); the manifest records `stages_run` + a machine-hardware summary (informational — never hashed). |
+| [hardware_status.py](hardware_status.py) | Print machine specs + live resource status (`--record` writes `artifacts/reports/hardware_specs.json`); all logic in `nmr/hardware.py` (stdlib only) |
 
 ### P. Feature-Set Resolution & Stability Screening — `nmr/features.py`
 
@@ -276,7 +278,7 @@ Pure functions over `features.json` and the train frame; no model logic and no f
 
 `feature_stability_screen(frame, *, feature_cols, target_col, era_col="era", min_mean_corr=DEFAULT_MIN_MEAN_CORR, max_abs_decay=DEFAULT_MAX_ABS_DECAY) -> pl.DataFrame` — per-feature era-window statistics:
 
-- Per era, Pearson `CORR(feature, target)` computed in one vectorized per-era pass over `[era, target, *feature_cols]` (same pattern as `feature_exposure_report`, §L). Degenerate eras — fewer than 2 non-null rows, a zero-variance target, or a non-finite correlation — contribute `0.0`.
+- Per era, Pearson `CORR(feature, target)` computed in one vectorized per-era pass over `[era, target, *feature_cols]` (same pattern as `feature_exposure_report`, §L). Degenerate eras — fewer than 2 usable rows, an all-non-finite target, or a constant target — are excluded from every aggregate: `n_eras` counts valid eras only, and when no valid eras exist the numeric aggregates are `None` with `stable = False`. (Zero-IC padding of degenerate eras would bias the mean, std, and decay slope — label-lag eras carry no signal information, not zero signal.)
 - Aggregates across eras (`_SCREEN_COLUMNS` = `feature, mean_corr, corr_std, decay_slope, cross_regime_variance, n_eras, stable`): `mean_corr` (mean), `corr_std` (population std, ddof=0), `decay_slope` (linear slope of CORR vs numeric era index via `np.polyfit(..., 1)`; `0.0` when fewer than 2 eras), `cross_regime_variance` (`0.25 · (first − second)²` — the variance of the first-half vs second-half era-window mean CORR, a regime-drift proxy), `n_eras`.
 - `stable` predicate: `mean_corr ≥ min_mean_corr` AND `|decay_slope| ≤ max_abs_decay` AND `n_eras ≥ 2`. Defaults: `DEFAULT_MIN_MEAN_CORR = 0.01`, `DEFAULT_MAX_ABS_DECAY = 0.001`.
 
@@ -342,6 +344,14 @@ Project-scope Kimi skills encode the research-orchestration protocols built on t
 | `verification-before-claim` | QA gate for every agent output: full suite, canonical-hash purity, parity tests, 8/16-era purge floor, doc SSOT same-change-set, `oof_device` check |
 
 All four are committed at `.kimi-code/skills/<name>/SKILL.md` (project-level Kimi skills — discovered automatically by the CLI; the directory is tracked, not gitignored).
+
+### U. Hardware Discovery & Status — `nmr/hardware.py`
+
+Stdlib-only system probing (no new dependencies): CUDA device discovery via the `nvidia-smi` CLI, RAM via ctypes `GlobalMemoryStatusEx` (Windows) or `/proc/meminfo` (Linux), CPU usage via `GetSystemTimes` (Windows) or `/proc/stat` (Linux). `discover_hardware()` returns the machine-constant `HardwareSpec` (safe to record — the dataset-analysis manifest embeds a summary); `hardware_status()` returns the instantaneous `HardwareStatus` and **must never enter canonical hashes or run_id payloads**. Pure parsing helpers (`parse_gpu_devices`, `parse_gpu_status`, `parse_meminfo`, `parse_cpu_times`) are the tested boundary. GPU acceleration policy: `ModelOrchestrator` (§G) is GPU-first with CPU fallback (LightGBM `device_type="gpu"`; XGBoost 3.x `device="cuda"`; CatBoost CPU-only by design). The analysis pipeline uses `nmr/_gpu.py`: cupy-accelerated `rankdata` (bit-identical to scipy on finite data, ~6x on era-sized matrices) with automatic scipy fallback when cupy is absent — cupy and the `nvidia-*` runtime wheels are user-granted, optional dependencies (see `requirements.txt`); the analysis remains fully functional without them.
+
+### V. Training & Analysis Progress Markers
+
+Long-running paths print console progress that never enters artifacts: `analyze_dataset.py` logs `[stage i/n] name ... done (Xs)` per stage and `[label] era k/N` ticks per 100 eras (stderr); `ModelOrchestrator` prints `[fit] lightgbm iteration N` every `_FIT_PROGRESS_PERIOD` (100) iterations (CatBoost: period `verbose`; xgboost 3.x's sklearn wrapper has no callback hook — start/elapsed markers only); `benchmark_runner.py` logs per-strategy start/memory/elapsed. Progress is wall-clock output only — excluded from all canonical hashes by construction (it never reaches artifacts).
 
 ---
 

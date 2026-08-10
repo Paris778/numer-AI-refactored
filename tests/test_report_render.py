@@ -45,7 +45,49 @@ def _fixture() -> dict:
             {"feature": "f1", "pooled_mean": 0.1, "pooled_std": 1.0, "missing_rate": 0.0}
         ],
         "ic_screen_rows": [
-            {"feature": "f1", "target": "target", "mean_corr": 0.05, "n_eras": 4, "stable": True}
+            {
+                "feature": "f1",
+                "target": "target",
+                "mean_corr": 0.05,
+                "mean_spearman": 0.06,
+                "n_eras": 4,
+                "stable": True,
+                "nonlinear": False,
+            }
+        ],
+        "split_ic_rows": [
+            {
+                "feature": "f1",
+                "train_mean_ic": 0.05,
+                "train_n_eras": 2,
+                "val_mean_ic": 0.02,
+                "val_n_eras": 2,
+                "delta_ic": -0.03,
+            }
+        ],
+        "drift_rows": [
+            {
+                "feature": "f1",
+                "psi": 0.05,
+                "w1": 0.12,
+                "auc_roc": 0.55,
+                "n_train": 20,
+                "n_val": 20,
+                "drifted": False,
+            }
+        ],
+        "meta_ortho_rows": [
+            {
+                "feature": "f1",
+                "meta": "numerai_meta_model",
+                "corr_meta": 0.001,
+                "corr_target": 0.05,
+                "n_eras": 86,
+                "orthogonal": True,
+            }
+        ],
+        "redundancy_rows": [
+            {"feature_set": "small", "n_features": 1, "mean_abs_corr": 0.1, "n_pairs": 0}
         ],
         "regime": {
             "regime_thresholds": {"q1": -0.01, "q3": 0.01},
@@ -54,13 +96,31 @@ def _fixture() -> dict:
             "ic_persistence": {"mean": 0.5, "std": 0.1, "n_adjacent": 3},
         },
         "era_signal_rows": [
-            {"era": "0001", "mean_ic": -0.02, "regime": "low", "crash": True, "hot": False},
-            {"era": "0002", "mean_ic": 0.0, "regime": "normal", "crash": False, "hot": False},
+            {
+                "era": "0001",
+                "mean_ic": -0.02,
+                "regime": "low",
+                "crash": True,
+                "hot": False,
+                "degenerate": False,
+            },
+            {
+                "era": "0002",
+                "mean_ic": 0.0,
+                "regime": "unlabeled",
+                "crash": False,
+                "hot": False,
+                "degenerate": True,
+            },
         ],
         "benchmark_rows": [
             {"benchmark": "benchmark_small", "mean_corr": 0.03, "n_eras": 4}
         ],
-        "corr_summary": {"mean_abs_corr": 0.2, "top_pairs": []},
+        "fne_profile": [
+            {"signal": "benchmark_small", "proportion": 0.0, "mean_ic": 0.03, "n_eras": 4},
+            {"signal": "benchmark_small", "proportion": 1.0, "mean_ic": 0.001, "n_eras": 4},
+        ],
+        "corr_summary": {"mean_abs_corr": 0.2, "min_eigenvalue": 0.5, "top_pairs": []},
         "set_membership": {"sets": {"small": {"n_features": 2}}},
     }
 
@@ -76,7 +136,10 @@ def test_render_report_structure() -> None:
     assert md.startswith("# Dataset Analysis")
     for header in ["## 1. Dataset Overview", "## 2. Era Structure", "## 3. Targets",
                    "## 4. Features", "## 5. Regimes & Signal Dynamics",
-                   "## 6. Benchmarks & Meta-Model", "## 7. Modeling Implications"]:
+                   "## 6. Benchmarks & Meta-Model", "## 7. Modeling Implications",
+                   "### 4.3 Cross-Split Drift (PSI + W1 + Adversarial AUC)",
+                   "### 4.4 Signal by Split", "### 4.5 Set Redundancy",
+                   "unlabeled", "min eigenvalue", "orthogonal=True"]:
         assert header in md
     # schema blocks precede tables; takeaways present
     assert "**Schema:**" in md

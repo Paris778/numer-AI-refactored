@@ -227,10 +227,12 @@ class _FakeModel:
     params: dict[str, Any]
     backend_error: type[Exception] = RuntimeError
 
-    def fit(self, features, target):
+    def fit(self, features, target, **kwargs):
         if self.params.get("device_type") == "gpu":
             raise self.backend_error("GPU unavailable")
         if self.params.get("tree_method") == "gpu_hist":
+            raise self.backend_error("GPU unavailable")
+        if self.params.get("device") == "cuda":
             raise self.backend_error("GPU unavailable")
         self._rows = len(features)
         return self
@@ -247,7 +249,7 @@ class _FeatureNameModel:
     seen_fit_columns: list[str] | None = None
     seen_predict_columns: list[str] | None = None
 
-    def fit(self, features, target):
+    def fit(self, features, target, **kwargs):
         self.seen_fit_columns = list(features.columns)
         return self
 
@@ -257,16 +259,17 @@ class _FeatureNameModel:
 
 
 @pytest.mark.parametrize(
-    ("backend", "attribute", "gpu_value", "cpu_value", "backend_error"),
+    ("backend", "attribute", "key", "gpu_value", "cpu_value", "backend_error"),
     [
-        ("lightgbm", "LGBMRegressor", "gpu", "cpu", lgb.basic.LightGBMError),
-        ("xgboost", "XGBRegressor", "gpu_hist", "hist", xgb.core.XGBoostError),
+        ("lightgbm", "LGBMRegressor", "device_type", "gpu", "cpu", lgb.basic.LightGBMError),
+        ("xgboost", "XGBRegressor", "device", "cuda", "cpu", xgb.core.XGBoostError),
     ],
 )
 def test_gpu_absent_falls_back_to_cpu_without_raising(
     monkeypatch: pytest.MonkeyPatch,
     backend: str,
     attribute: str,
+    key: str,
     gpu_value: str,
     cpu_value: str,
     backend_error: type[Exception],
@@ -294,7 +297,6 @@ def test_gpu_absent_falls_back_to_cpu_without_raising(
 
     assert isinstance(prediction, pl.DataFrame)
     params = model.get_params()
-    key = "device_type" if backend == "lightgbm" else "tree_method"
     assert params[key] != gpu_value
     assert params[key] == cpu_value
     assert orchestrator.resolved_device == "cpu"
@@ -441,6 +443,20 @@ def test_resolve_model_params_unknown_preset_raises():
         resolve_model_params("bogus", {})
 
 
+def test_xgboost_gpu_params_use_cuda_device() -> None:
+    """xgboost >= 3.0 removed tree_method='gpu_hist' (raises Invalid Input);
+    GPU acceleration is device='cuda' with tree_method='hist'."""
+    cfg = ModelConfig(backend="xgboost", preset="fast")
+    orchestrator = ModelOrchestrator(cfg, seed=3)
+    gpu = orchestrator._resolved_params(use_gpu=True)
+    cpu = orchestrator._resolved_params(use_gpu=False)
+    assert gpu["tree_method"] == "hist"
+    assert gpu["device"] == "cuda"
+    assert cpu["tree_method"] == "hist"
+    assert cpu["device"] == "cpu"
+    assert orchestrator._device_candidate_params(use_gpu=True)[0]["device"] == "cuda"
+
+
 # --- catboost backend (Task 3) -------------------------------------------------
 
 
@@ -510,3 +526,89 @@ def test_catboost_is_cpu_only_by_construction() -> None:
     candidates = orchestrator._device_candidate_params(use_gpu=True)
     assert len(candidates) == 1
     assert candidates[0]["task_type"] == "CPU"
+
+
+# --- model.device knob (auto|gpu|cpu) -----------------------------------------
+
+def test_orchestrator_device_cpu_never_attempts_gpu(monkeypatch) -> None:
+    import nmr.models as models_module
+
+    seen: list[str] = []
+
+    def factory(**params):
+        seen.append(params.get("device_type", "?"))
+        return _FakeModel(params=params, backend_error=RuntimeError)
+
+    monkeypatch.setattr(models_module.lgb, "LGBMRegressor", factory)
+    orchestrator = ModelOrchestrator(
+        ModelConfig(backend="lightgbm", preset="fast", device="cpu",
+                    params=_tiny_model_params()),
+        seed=29,
+    )
+    model, prediction = orchestrator.train_anchor_fold(
+        _model_frame(),
+        feature_cols=["f1", "f2", "f3"],
+        target_col="target",
+        splitter=_anchor_splitter(),
+    )
+    assert isinstance(prediction, pl.DataFrame)
+    assert seen == ["cpu"]  # a single CPU candidate, no GPU attempt
+    assert orchestrator.resolved_device == "cpu"
+
+
+def test_orchestrator_device_gpu_forced_raises_without_cpu_fallback(monkeypatch) -> None:
+    import nmr.models as models_module
+
+    def factory(**params):
+        return _FakeModel(params=params, backend_error=lgb.basic.LightGBMError)
+
+    monkeypatch.setattr(models_module.lgb, "LGBMRegressor", factory)
+    orchestrator = ModelOrchestrator(
+        ModelConfig(backend="lightgbm", preset="fast", device="gpu",
+                    params=_tiny_model_params()),
+        seed=29,
+    )
+    with pytest.raises(lgb.basic.LightGBMError):
+        orchestrator.train_anchor_fold(
+            _model_frame(),
+            feature_cols=["f1", "f2", "f3"],
+            target_col="target",
+            splitter=_anchor_splitter(),
+        )
+
+
+def test_orchestrator_device_auto_tries_gpu_then_falls_back(monkeypatch) -> None:
+    import nmr.models as models_module
+
+    seen: list[str] = []
+
+    def factory(**params):
+        seen.append(params.get("device_type"))
+        return _FakeModel(params=params, backend_error=lgb.basic.LightGBMError)
+
+    monkeypatch.setattr(models_module.lgb, "LGBMRegressor", factory)
+    orchestrator = ModelOrchestrator(
+        ModelConfig(backend="lightgbm", preset="fast", device="auto",
+                    params=_tiny_model_params()),
+        seed=29,
+    )
+    model, _ = orchestrator.train_anchor_fold(
+        _model_frame(),
+        feature_cols=["f1", "f2", "f3"],
+        target_col="target",
+        splitter=_anchor_splitter(),
+    )
+    assert seen == ["gpu", "cpu"]  # GPU attempted, then CPU fallback
+    assert orchestrator.resolved_device == "cpu"
+
+
+def test_train_full_history_stays_cpu_even_with_device_gpu() -> None:
+    orchestrator = ModelOrchestrator(
+        ModelConfig(backend="lightgbm", preset="fast", device="gpu",
+                    params=_tiny_model_params()),
+        seed=5,
+    )
+    model = orchestrator.train_full_history(
+        _model_frame(), feature_cols=["f1", "f2", "f3"], target_col="target"
+    )
+    assert model.get_params()["device_type"] == "cpu"  # deploy artifact invariant
