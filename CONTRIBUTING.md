@@ -33,6 +33,8 @@ All code must follow the eight non-negotiable principles in [`AGENTS.md`](AGENTS
 
 ### ⚠️ Critical footguns
 
+- **Never use `./.venv/Scripts/pip` — it is a shim into the legacy `../numer-AI/.venv`** (shared site-packages; installing through it touches the legacy repo's environment). Always `./.venv/Scripts/python -m pip install ...`. Verified 2026-08-09: `Scripts/pip --version` reports pip 24.0 from `C:\dev\numer-AI\.venv`, while `python -m pip` targets this repo's venv.
+- **cupy needs the NVIDIA runtime DLLs on PATH on Windows.** The `cupy-cuda12x` wheel does not bundle them; the `nvidia-*-cu12` wheels (pinned in `requirements.txt`) ship them, and `nmr/_gpu.py` adds their `bin/` dirs to PATH at load. If cupy import fails with a `cublas` DLL error, check that those wheels are installed.
 - **New scorecard/instrumentation fields can break determinism tests.** Anything containing wall-clock time or absolute paths must be excluded from `canonical_scorecards_bytes()` and run-id payloads, or cross-process determinism tests will fail intermittently.
 - **Real-v5.3 test fixtures: establish era overlap before limiting rows.** Join/filter validation, meta-model, and benchmark frames by shared eras *first*, then window/limit — otherwise fixtures flake with `NonVacuityError` or empty joins (benchmark train parquet has no rows for the first ~30 train eras).
 - **Run pytest from the repo root.** `pythonpath = .` is relative; running from a subdirectory breaks `import nmr`.
