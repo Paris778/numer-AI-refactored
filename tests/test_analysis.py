@@ -264,6 +264,8 @@ def test_feature_ic_screen_multi_target() -> None:
         "feature",
         "target",
         "mean_corr",
+        "mean_corr_ci_lo",
+        "mean_corr_ci_hi",
         "corr_std",
         "decay_slope",
         "cross_regime_variance",
@@ -277,6 +279,53 @@ def test_feature_ic_screen_multi_target() -> None:
     # random features: no monotone-nonlinear signal -> flag False
     assert out["nonlinear"].to_list() == [False, False]
     assert np.allclose(out["mean_spearman"].to_numpy(), out["mean_corr"].to_numpy(), atol=0.05)
+
+
+def test_feature_ic_screen_ci_columns_bracket_mean() -> None:
+    # 24 eras so the block bootstrap has real resampling variation
+    rng = np.random.default_rng(23)
+    rows = []
+    for e in range(24):
+        era = f"{e + 1:04d}"
+        for i in range(12):
+            rows.append(
+                {
+                    "era": era,
+                    "feature_alpha": float(rng.normal()),
+                    "feature_beta": float(rng.normal()),
+                    "target": float(rng.normal()),
+                }
+            )
+    frame = pl.DataFrame(rows)
+    out = feature_ic_screen(
+        frame.partition_by("era", maintain_order=True),
+        ["feature_alpha", "feature_beta"],
+        ["target"],
+    )
+    mean = out["mean_corr"].to_numpy()
+    lo = out["mean_corr_ci_lo"].to_numpy()
+    hi = out["mean_corr_ci_hi"].to_numpy()
+    assert np.isfinite(lo).all() and np.isfinite(hi).all()
+    # CI brackets the point estimate with strictly positive width
+    assert (lo <= mean + 1e-12).all() and (mean - 1e-12 <= hi).all()
+    assert (hi - lo > 0.0).all()
+
+
+def test_feature_ic_screen_ci_deterministic() -> None:
+    frame = _ic_frame()
+    kwargs = dict(
+        chunks=frame.partition_by("era", maintain_order=True),
+        feature_cols=["feature_alpha", "feature_beta"],
+        targets=["target"],
+    )
+    out1 = feature_ic_screen(**kwargs)
+    out2 = feature_ic_screen(**kwargs)
+    assert np.array_equal(
+        out1["mean_corr_ci_lo"].to_numpy(), out2["mean_corr_ci_lo"].to_numpy()
+    )
+    assert np.array_equal(
+        out1["mean_corr_ci_hi"].to_numpy(), out2["mean_corr_ci_hi"].to_numpy()
+    )
 
 
 def test_feature_ic_screen_empty_targets_raises() -> None:
@@ -536,9 +585,48 @@ def test_feature_drift_profile_schema_and_determinism() -> None:
     out1 = feature_drift_profile(train, val, ["f_shift", "f_const"], edge_sample_stride=1)
     out2 = feature_drift_profile(train, val, ["f_shift", "f_const"], edge_sample_stride=1)
     assert out1.columns == [
-        "feature", "psi", "w1", "auc_roc", "n_train", "n_val", "drifted",
+        "feature", "psi", "w1", "w1_norm", "auc_roc", "n_train", "n_val", "drifted",
     ]
     assert out1.equals(out2)
+
+
+def test_feature_drift_profile_w1_norm_scale_invariance() -> None:
+    # Bounded feature: raw W1 = 0.05 (~1 sigma of sigma=0.05) — below the old
+    # raw threshold (0.25) but a real 1-sigma shift -> flagged once
+    # standardized. Unbounded feature: raw W1 = 0.3 (~0.1 sigma of sigma=3) —
+    # above the old raw threshold but statistical noise -> not flagged.
+    rng = np.random.default_rng(45)
+    base = rng.normal(size=900)
+    rows = [
+        {
+            "era": "0001",
+            "f_bounded": float(t * 0.05),
+            "f_unbounded": float(t * 3.0),
+        }
+        for t in base
+    ]
+    val_rows = [
+        {
+            "era": "0002",
+            "f_bounded": float(t * 0.05 + 0.05),
+            "f_unbounded": float(t * 3.0 + 0.3),
+        }
+        for t in base
+    ]
+    out = feature_drift_profile(
+        [pl.DataFrame(rows)],
+        [pl.DataFrame(val_rows)],
+        ["f_bounded", "f_unbounded"],
+        edge_sample_stride=1,
+    )
+    bounded = out.filter(pl.col("feature") == "f_bounded").row(0, named=True)
+    unbounded = out.filter(pl.col("feature") == "f_unbounded").row(0, named=True)
+    assert bounded["w1"] == pytest.approx(0.05, abs=0.02)
+    assert bounded["w1_norm"] == pytest.approx(1.0, abs=0.2)
+    assert bounded["drifted"] is True
+    assert unbounded["w1"] == pytest.approx(0.3, abs=0.1)
+    assert unbounded["w1_norm"] == pytest.approx(0.1, abs=0.03)
+    assert unbounded["drifted"] is False
 
 
 from nmr.analysis import (

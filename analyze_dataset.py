@@ -48,6 +48,7 @@ _STAGE_DEPS: dict[str, frozenset[str]] = {
     "summary": frozenset(),
     "psi": frozenset(),
     "drift": frozenset(),
+    "derived_sets": frozenset(),
     "corr_medium": frozenset(),
     "corr_all": frozenset(),
     "set_membership": frozenset(),
@@ -380,6 +381,65 @@ def _stage_drift(ctx: _Ctx) -> None:
     )
 
 
+def _stage_derived_sets(ctx: _Ctx) -> None:
+    """Write screen-derived feature sets for campaign configs.
+
+    Pure function of the stage outputs: reads ``feature_ic_screen.parquet``
+    and ``feature_drift_profile.parquet`` from the output dir and writes
+    ``derived_feature_sets.json`` (shape ``{"feature_sets": {...}}``, sorted
+    lists, always all four keys):
+      - ``screen_stable``: stable features (primary reference target)
+      - ``screen_nonlinear``: unstable but |Spearman| > threshold
+      - ``screen_linear_or_nonlinear``: stable OR nonlinear
+      - ``screen_drift_filtered``: linear-or-nonlinear minus drift-flagged
+    Drift flags only exist for medium-universe features; features without a
+    drift row are kept (no evidence of drift). Primary reference target is
+    ``target`` when present, else the first distinct target in the screen.
+    """
+    screen_path = ctx.out / "feature_ic_screen.parquet"
+    drift_path = ctx.out / "feature_drift_profile.parquet"
+    if not screen_path.exists():
+        raise RuntimeError(
+            f"{screen_path} not found — run the 'screens' stage first "
+            "(e.g. --only screens,drift,derived_sets)"
+        )
+    if not drift_path.exists():
+        raise RuntimeError(
+            f"{drift_path} not found — run the 'drift' stage first "
+            "(e.g. --only screens,drift,derived_sets)"
+        )
+    screen = pl.read_parquet(screen_path)
+    if "target" not in screen.columns:
+        raise RuntimeError(f"{screen_path}: missing 'target' column")
+    distinct_targets = screen["target"].unique().to_list()
+    primary = "target" if "target" in distinct_targets else distinct_targets[0]
+    rows = screen.filter(pl.col("target") == primary)
+    stable = sorted(rows.filter(pl.col("stable")).get_column("feature").to_list())
+    nonlinear = sorted(
+        rows.filter((~pl.col("stable")) & pl.col("nonlinear"))
+        .get_column("feature")
+        .to_list()
+    )
+    lin_or_non = sorted(set(stable) | set(nonlinear))
+    drifted = set(
+        pl.read_parquet(drift_path)
+        .filter(pl.col("drifted"))
+        .get_column("feature")
+        .to_list()
+    )
+    _atomic_write_json(
+        {
+            "feature_sets": {
+                "screen_stable": stable,
+                "screen_nonlinear": nonlinear,
+                "screen_linear_or_nonlinear": lin_or_non,
+                "screen_drift_filtered": [f for f in lin_or_non if f not in drifted],
+            }
+        },
+        ctx.out / "derived_feature_sets.json",
+    )
+
+
 def _stage_corr_medium(ctx: _Ctx) -> None:
     medium_result = analysis.feature_correlation_structure(
         _iter_era_chunks(
@@ -648,6 +708,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "summary": _stage_summary,
         "psi": _stage_psi,
         "drift": _stage_drift,
+        "derived_sets": _stage_derived_sets,
         "corr_medium": _stage_corr_medium,
         "corr_all": _stage_corr_all,
         "set_membership": _stage_set_membership,

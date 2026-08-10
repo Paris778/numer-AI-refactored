@@ -64,6 +64,17 @@ class RunRegistry:
                 tmp_oof.unlink()
         logger.info("[record] OOF written to %s", oof_path)
 
+        if result.validation_predictions is not None:
+            val_path = run_dir / "validation_preds.parquet"
+            tmp_val = run_dir / f"{val_path.name}.tmp.{os.getpid()}"
+            try:
+                result.validation_predictions.write_parquet(tmp_val)
+                os.replace(tmp_val, val_path)
+            finally:
+                if tmp_val.exists():
+                    tmp_val.unlink()
+            logger.info("[record] validation predictions written to %s", val_path)
+
         scorecard_block = None
         if result.scorecard is not None:
             row = result.scorecard.to_frame().to_dicts()[0]

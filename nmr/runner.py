@@ -37,6 +37,47 @@ from nmr.splitter import PurgedEraSplitter
 
 logger = logging.getLogger("nmr.runner")
 
+_VAL_PREDICT_ERA_BATCH = 40  # eras per validation predict chunk (bounds peak RAM)
+
+
+def _predict_in_era_batches(
+    val_df: pl.DataFrame,
+    feature_cols: Sequence[str],
+    predict_fn: Callable[[pd.DataFrame], pd.DataFrame],
+    batch_eras: int,
+) -> pl.DataFrame:
+    """Predict validation eras in era-batches to bound peak memory.
+
+    The deploy closure is stateless across calls and the era-partitioned
+    neutralization inside it is order-independent (cache keyed per era), so
+    batching is bit-identical to a single full-frame predict. Feature columns
+    are coerced to a single Float32 block first (``nmr.models.
+    coerce_float32_features``) so the backend's float32 conversion is a
+    zero-copy view — at 3,555 features a full-frame pandas materialization is
+    ~28 GiB. Batches follow the frame's era appearance order, so the output
+    row order equals ``val_df``'s.
+    """
+    from nmr.models import coerce_float32_features
+
+    eras = list(dict.fromkeys(val_df.get_column("era").to_list()))
+    chunks: list[pl.DataFrame] = []
+    for start in range(0, len(eras), batch_eras):
+        batch_era_set = set(eras[start : start + batch_eras])
+        batch = val_df.filter(pl.col("era").is_in(batch_era_set))
+        feats = coerce_float32_features(batch, feature_cols)
+        features_pd = (
+            pl.concat([batch.select(["id", "era"]), feats], how="horizontal")
+            .to_pandas()
+            .set_index("id")
+        )
+        prediction_frame = predict_fn(features_pd)
+        chunks.append(
+            batch.select(["era", "id"]).with_columns(
+                pl.Series("prediction", prediction_frame["prediction"].to_numpy())
+            )
+        )
+    return pl.concat(chunks)
+
 __all__ = ["RunResult", "ExperimentRunner"]
 
 
@@ -333,10 +374,8 @@ class ExperimentRunner:
             "%d eras scored", purge, val_df.select(pl.col("era").n_unique()).item()
         )
 
-        features_pd = val_df.select(["id", "era", *feature_cols]).to_pandas().set_index("id")
-        prediction_frame = predict_fn(features_pd)
-        preds = val_df.select(["era", "id"]).with_columns(
-            pl.Series("prediction", prediction_frame["prediction"].to_numpy())
+        preds = _predict_in_era_batches(
+            val_df, feature_cols, predict_fn, _VAL_PREDICT_ERA_BATCH
         )
         scorecard = evaluate_model(
             preds,

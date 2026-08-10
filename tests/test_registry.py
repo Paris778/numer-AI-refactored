@@ -202,3 +202,24 @@ def test_promote_if_better_corrupted_champion_pointer_is_treated_as_no_champion(
 
     assert promoted is True
     assert json.loads(path.read_text(encoding="utf-8")) == {"run_id": "a" * 64}
+
+
+def test_record_persists_validation_predictions(tmp_path) -> None:
+    registry = RunRegistry(tmp_path)
+    result = _result("c" * 64, sharpe=0.4)
+    result = RunResult(
+        run_id=result.run_id,
+        oof=result.oof,
+        metrics=result.metrics,
+        artifact=result.artifact,
+        manifest=result.manifest,
+        validation_predictions=pl.DataFrame(
+            {"era": ["0575", "0575"], "id": ["x", "y"], "prediction": [0.2, 0.8]}
+        ),
+    )
+    run_dir = registry.record(result)
+    persisted = pl.read_parquet(run_dir / "validation_preds.parquet")
+    assert persisted.height == 2
+    assert persisted["prediction"].to_list() == [0.2, 0.8]
+    # no validation predictions -> no file
+    assert not (tmp_path / ("d" * 64) / "validation_preds.parquet").exists()

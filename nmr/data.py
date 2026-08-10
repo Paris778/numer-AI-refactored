@@ -73,16 +73,65 @@ class IngestionAgent:
                     f"features.json not found at {path}. "
                     "Download the Numerai dataset before calling metadata methods."
                 ) from None
+            raw = self._metadata
+            if not isinstance(raw.get("feature_sets"), dict) or not raw["feature_sets"]:
+                raise ValueError(
+                    f"{path}: 'feature_sets' must be a non-empty mapping"
+                )
+            if not isinstance(raw.get("targets"), (list, dict)) or not raw["targets"]:
+                raise ValueError(
+                    f"{path}: 'targets' must be a non-empty list or mapping"
+                )
         return self._metadata
+
+    def _merged_feature_sets(self) -> dict[str, list[str]]:
+        """features.json sets merged with the optional supplemental sets file.
+
+        The supplemental file must be a JSON object with a non-empty
+        ``feature_sets`` mapping whose keys do not collide with ``features.json``
+        (collision raises — fail loud, never silently shadow). The merge is a
+        pure function of the two files, so screen-derived sets stay
+        deterministic across processes.
+        """
+        raw = self._metadata_raw()
+        sets = {
+            key: list(values) for key, values in raw["feature_sets"].items()
+        }
+        supp_path = self._data.supplemental_feature_sets
+        if supp_path is not None:
+            if not supp_path.is_file():
+                raise ValueError(
+                    "data.supplemental_feature_sets file not found: "
+                    f"{supp_path}"
+                )
+            payload = json.loads(supp_path.read_text(encoding="utf-8"))
+            supp = payload.get("feature_sets")
+            if not isinstance(supp, dict) or not supp:
+                raise ValueError(
+                    f"{supp_path}: expected a non-empty 'feature_sets' mapping"
+                )
+            collisions = sorted(set(supp) & set(sets))
+            if collisions:
+                raise ValueError(
+                    f"{supp_path}: keys collide with features.json feature_sets: "
+                    f"{collisions}"
+                )
+            for key, values in supp.items():
+                if not isinstance(values, list) or not all(
+                    isinstance(v, str) for v in values
+                ):
+                    raise ValueError(
+                        f"{supp_path}: set {key!r} must be a list of strings"
+                    )
+                sets[key] = list(values)
+        return sets
 
     @property
     def feature_metadata(self) -> dict:
         """Return a defensive copy of parsed ``features.json`` metadata."""
         raw = self._metadata_raw()
         metadata = dict(raw)
-        metadata["feature_sets"] = {
-            key: list(values) for key, values in raw["feature_sets"].items()
-        }
+        metadata["feature_sets"] = self._merged_feature_sets()
         targets = raw.get("targets")
         if isinstance(targets, list):
             metadata["targets"] = list(targets)
@@ -95,7 +144,7 @@ class IngestionAgent:
         """Return a defensive copy of all named feature sets."""
         return {
             key: list(values)
-            for key, values in self._metadata_raw()["feature_sets"].items()
+            for key, values in self._merged_feature_sets().items()
         }
 
     def available_targets(self) -> list[str]:
@@ -106,7 +155,7 @@ class IngestionAgent:
     def features(self, subset: str | None = None) -> list[str]:
         """Return the ordered feature column names for ``subset``."""
         key = subset if subset is not None else self._data.resolved_feature_set
-        sets = self._metadata_raw()["feature_sets"]
+        sets = self._merged_feature_sets()
         if key not in sets:
             raise ValueError(
                 f"Feature subset {key!r} not found in features.json; "

@@ -31,10 +31,38 @@ from nmr.splitter import Fold, PurgedEraSplitter
 
 logger = logging.getLogger("nmr.models")
 
-__all__ = ["CVResult", "ModelOrchestrator"]
+__all__ = ["CVResult", "ModelOrchestrator", "coerce_float32_features"]
 
 
 _FIT_PROGRESS_PERIOD = 100  # print one training progress line every N iterations
+
+# Dtypes that are exactly representable in float32 (the Numerai v5.x integer
+# feature bins). Casting these to a single Float32 block BEFORE pandas makes
+# LightGBM/XGBoost's `to_numpy(dtype=float32)` a zero-copy view instead of a
+# full dense copy — at 3,555 features × 2.1M rows that copy is ~28 GiB (the
+# lgbm_v1 campaign OOM). Float64 columns are left untouched (precision).
+_EXACT_FLOAT32_DTYPES = frozenset(
+    {
+        pl.Int8, pl.Int16, pl.Int32, pl.UInt8, pl.UInt16, pl.UInt32, pl.Float32
+    }
+)
+
+
+def coerce_float32_features(
+    df: pl.DataFrame, feature_cols: Sequence[str]
+) -> pl.DataFrame:
+    """Return ``df`` with exactly-representable feature columns cast to Float32.
+
+    Pure dtype normalization: no value changes (integer bins are exact in
+    float32). Mixed or Float64 schemas are returned unchanged so full
+    precision is never silently dropped. The result is a single-block pandas
+    frame downstream, which removes the backend's dense float32 copy.
+    """
+    selected = df.select(feature_cols)
+    schema = selected.schema
+    if all(dt in _EXACT_FLOAT32_DTYPES for dt in schema.values()):
+        return selected.cast(pl.Float32)
+    return selected
 
 
 _CANONICAL_PRESETS: dict[str, dict[str, Any]] = {
@@ -299,7 +327,7 @@ class ModelOrchestrator:
     def _feature_frame(
         self, df: pl.DataFrame, *, feature_cols: Sequence[str]
     ) -> pd.DataFrame:
-        feature_frame = df.select(feature_cols).to_pandas()
+        feature_frame = coerce_float32_features(df, feature_cols).to_pandas()
         return feature_frame.loc[:, list(feature_cols)]
 
     def _fit_model(

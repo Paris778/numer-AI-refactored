@@ -377,3 +377,62 @@ def test_real_v52_smoke() -> None:
     assert "target" in ag.live().collect_schema().names()
     for feat in ag.features("small"):
         assert feat in names, f"feature {feat!r} missing from real train schema"
+
+
+class TestSupplementalFeatureSets:
+    """data.supplemental_feature_sets merge semantics (fail loud)."""
+
+    def _agent(self, dataset_root: Path, supp: Path | None) -> IngestionAgent:
+        return IngestionAgent(
+            DataConfig(
+                version=_VERSION,
+                feature_set="small",
+                supplemental_feature_sets=supp,
+                data_dir=dataset_root,
+            )
+        )
+
+    def test_merge_resolves_supplemental_subsets(
+        self, dataset_root: Path
+    ) -> None:
+        supp = dataset_root / "supplemental.json"
+        supp.write_text(
+            json.dumps({"feature_sets": {"screen_stable": ["feature_c"]}}),
+            encoding="utf-8",
+        )
+        agent = self._agent(dataset_root, supp)
+        assert agent.features("screen_stable") == ["feature_c"]
+        sets = agent.feature_sets
+        assert sets["screen_stable"] == ["feature_c"]
+        assert sets["small"] == ["feature_a", "feature_b"]  # base untouched
+
+    def test_merge_collision_raises(self, dataset_root: Path) -> None:
+        supp = dataset_root / "supplemental.json"
+        supp.write_text(
+            json.dumps({"feature_sets": {"small": ["feature_c"]}}),
+            encoding="utf-8",
+        )
+        agent = self._agent(dataset_root, supp)
+        with pytest.raises(ValueError, match="collide"):
+            agent.features("small")
+
+    def test_merge_missing_file_raises(self, dataset_root: Path) -> None:
+        agent = self._agent(dataset_root, dataset_root / "nope.json")
+        with pytest.raises(ValueError, match="not found"):
+            agent.features("small")
+
+    def test_merge_malformed_raises(self, dataset_root: Path) -> None:
+        supp = dataset_root / "supplemental.json"
+        supp.write_text(json.dumps({"feature_sets": []}), encoding="utf-8")
+        agent = self._agent(dataset_root, supp)
+        with pytest.raises(ValueError, match="feature_sets"):
+            agent.features("small")
+
+    def test_merge_non_string_values_raise(self, dataset_root: Path) -> None:
+        supp = dataset_root / "supplemental.json"
+        supp.write_text(
+            json.dumps({"feature_sets": {"screen_x": [1, 2]}}), encoding="utf-8"
+        )
+        agent = self._agent(dataset_root, supp)
+        with pytest.raises(ValueError, match="list of strings"):
+            agent.features("screen_x")

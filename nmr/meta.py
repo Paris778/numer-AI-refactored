@@ -7,7 +7,9 @@ mutates the registry.
 
 from __future__ import annotations
 
+import json
 import math
+from pathlib import Path
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Literal
@@ -15,10 +17,18 @@ from typing import Literal
 import numpy as np
 import polars as pl
 
+from nmr.config import DataConfig
 from nmr.evaluation import MIN_OVERLAP_ERAS, NonVacuityError
 from nmr.inference import Horizon, block_bootstrap_ci, resolve_block_len
 
-__all__ = ["PairedResult", "fleet_summary", "paired_era_comparison", "promotion_verdict"]
+__all__ = [
+    "PairedResult",
+    "campaign_evidence",
+    "fleet_summary",
+    "paired_era_comparison",
+    "promotion_verdict",
+    "CampaignEvidence",
+]
 
 
 @dataclass(frozen=True)
@@ -252,3 +262,220 @@ def fleet_summary(
             ["metric", "run_id"], descending=[True, False], nulls_last=True
         )
     return frame
+
+@dataclass(frozen=True)
+class CampaignEvidence:
+    """Per-variant validation evidence plus pairwise screen verdicts."""
+
+    variants: pl.DataFrame
+    pairwise: pl.DataFrame
+
+
+def _identity_era_ic(df: pl.DataFrame) -> dict[str, float]:
+    return dict(zip(df.get_column("era"), df.get_column("ic")))
+
+
+def campaign_evidence(
+    campaign_log_path: str | Path,
+    registry_root: str | Path,
+    *,
+    data: DataConfig,
+    main_target: str = "target",
+    fne_reference_set: str = "medium",
+    n_boot: int = 200,
+    seed: int = 0,
+    min_overlap_eras: int = MIN_OVERLAP_ERAS,
+) -> CampaignEvidence:
+    """Assemble validation evidence for every recorded run of a campaign.
+
+    Reads the campaign log (``artifacts/campaigns/<name>.json``) and the
+    per-run registry payloads. For each recorded run: validation mean IC with
+    the run scorecard's 95% block-bootstrap CI, IC Sharpe and max drawdown
+    (scorecard), feature count and backend/device (manifest), and FNE at 100%
+    neutralization against ``fne_reference_set`` (medium by default) with its
+    own bootstrap CI over per-era residual ICs (:func:`neutralized_ic_series`).
+
+    ``pairwise`` reports block-bootstrap mean differences on the validation IC
+    series for the screen-defining pairs (v2 vs v3, v2 vs v4, v3 vs v4) per
+    backend — a positive diff means the first variant is better. Runs whose
+    status is not ``recorded`` or whose artifacts are missing are collected as
+    ``error`` rows (fail loud, never silently dropped).
+    """
+    from nmr.analysis import neutralized_ic_series
+    from nmr.data import IngestionAgent
+    from nmr.features import _per_era_pearson
+
+    log_path = Path(campaign_log_path)
+    payload = json.loads(log_path.read_text(encoding="utf-8"))
+    runs = payload.get("runs")
+    if not runs:
+        raise ValueError(f"{log_path}: campaign log contains no runs")
+
+    agent = IngestionAgent(data)
+    targets = agent.scan(
+        "validation", columns=["era", "id", main_target]
+    ).collect()
+    medium_cols = agent.features(fne_reference_set)
+    val_medium = agent.scan(
+        "validation", columns=["era", "id", *medium_cols, main_target]
+    ).collect()
+
+    variant_rows: list[dict[str, object]] = []
+    ic_frames: dict[str, pl.DataFrame] = {}
+    for entry in runs:
+        label = Path(str(entry["config_path"])).stem
+        run_id = entry.get("run_id")
+        if entry.get("status") != "recorded" or run_id is None:
+            err_msg = entry.get("error")
+            variant_rows.append(
+                {"variant": label, "status": str(entry.get("status")),
+                 "error": err_msg if err_msg else f"status={entry.get('status')!r}"}
+            )
+            continue
+        run_json = Path(registry_root) / run_id / "run.json"
+        if not run_json.exists():
+            variant_rows.append(
+                {"variant": label, "status": "recorded",
+                 "error": f"run.json missing for {run_id}"}
+            )
+            continue
+        meta = json.loads(run_json.read_text(encoding="utf-8"))
+        scorecard = meta.get("scorecard") or {}
+        manifest = meta.get("manifest") or {}
+        config = manifest.get("config") or {}
+        preds_path = Path(registry_root) / run_id / "validation_preds.parquet"
+        if not preds_path.exists():
+            variant_rows.append(
+                {"variant": label, "status": "recorded",
+                 "error": f"validation_preds.parquet missing for {run_id}"}
+            )
+            continue
+        preds = pl.read_parquet(preds_path)
+
+        joined = preds.join(targets, on=["era", "id"], how="inner")
+        corrs, degenerate = _per_era_pearson(
+            joined, ["prediction"], main_target, "era"
+        )
+        series = pl.DataFrame(
+            [
+                {"era": era, "ic": float(vec[0])}
+                for era, vec in corrs.items()
+                if era not in degenerate
+            ],
+            schema={"era": pl.Utf8, "ic": pl.Float64},
+        ).sort("era")
+        ic_frames[label] = series
+        ics = series["ic"].to_numpy()
+        n_eras = int(ics.size)
+        ic_ci_lo = ic_ci_hi = None
+        if n_eras >= 2:
+            ci = block_bootstrap_ci(
+                ics, np.mean,
+                block_len=resolve_block_len(n_eras, "20D"),
+                n_boot=n_boot, seed=seed,
+            )
+            ic_ci_lo, ic_ci_hi = ci.lo, ci.hi
+
+        fne_joined = preds.join(val_medium, on=["era", "id"], how="inner")
+        fne_series = neutralized_ic_series(
+            fne_joined.partition_by("era", maintain_order=True),
+            ["prediction"], medium_cols, main_target,
+            proportion=1.0,
+        )
+        fne_ics = fne_series["ic"].to_numpy()
+        fne_ci_lo = fne_ci_hi = None
+        if int(fne_ics.size) >= 2:
+            fci = block_bootstrap_ci(
+                fne_ics, np.mean,
+                block_len=resolve_block_len(int(fne_ics.size), "20D"),
+                n_boot=n_boot, seed=seed,
+            )
+            fne_ci_lo, fne_ci_hi = fci.lo, fci.hi
+
+        variant_rows.append(
+            {
+                "variant": label,
+                "status": "recorded",
+                "backend": (config.get("model") or {}).get("backend"),
+                "device": (config.get("model") or {}).get("device", "auto"),
+                "n_features": len(manifest.get("feature_cols") or []),
+                "mean_ic": scorecard.get("corr"),
+                "ic_ci_lo": scorecard.get("corr_ci_low", ic_ci_lo),
+                "ic_ci_hi": scorecard.get("corr_ci_high", ic_ci_hi),
+                "ic_sharpe": scorecard.get("corr_sharpe_ac"),
+                "max_drawdown": scorecard.get("max_drawdown"),
+                "n_eras": scorecard.get("n_eras", n_eras),
+                "fne100": float(np.mean(fne_ics)) if fne_ics.size else None,
+                "fne100_ci_lo": fne_ci_lo,
+                "fne100_ci_hi": fne_ci_hi,
+            }
+        )
+
+    variants = pl.DataFrame(variant_rows)
+
+    pairwise_rows: list[dict[str, object]] = []
+    if ic_frames:
+        # pair keys derive from the config-filename prefix (e.g. 'lgbm_v2'),
+        # never from the backend name, so renames cannot silently drop pairs.
+        prefixes: dict[str, list[str]] = {}
+        for label in ic_frames:
+            if "_v" in label:
+                prefixes.setdefault(label.rsplit("_v", 1)[0], []).append(label)
+        for prefix, labels in sorted(prefixes.items()):
+            backend = next(
+                (r["backend"] for r in variant_rows
+                 if r.get("variant") == f"{prefix}_v2"),
+                prefix,
+            )
+            for pair in (("v2", "v3"), ("v2", "v4"), ("v3", "v4")):
+                key_a = f"{prefix}_{pair[0]}"
+                key_b = f"{prefix}_{pair[1]}"
+                if key_a not in labels or key_b not in labels:
+                    continue
+                try:
+                    res = paired_era_comparison(
+                        ic_frames[key_a], ic_frames[key_b],
+                        metric_fn=_identity_era_ic,
+                        horizon="20D",
+                        n_boot=n_boot,
+                        seed=seed,
+                        min_overlap_eras=min_overlap_eras,
+                        device_a=str(
+                            next(
+                                (r["device"] for r in variant_rows
+                                 if r.get("variant") == key_a), None
+                            )
+                        ),
+                        device_b=str(
+                            next(
+                                (r["device"] for r in variant_rows
+                                 if r.get("variant") == key_b), None
+                            )
+                        ),
+                    )
+                except NonVacuityError as exc:
+                    pairwise_rows.append(
+                        {
+                            "pair": f"{key_a} vs {key_b}",
+                            "backend": backend,
+                            "mean_diff": None,
+                            "ci_low": None,
+                            "ci_high": None,
+                            "n_eras": 0,
+                            "error": str(exc),
+                        }
+                    )
+                    continue
+                pairwise_rows.append(
+                    {
+                        "pair": f"{key_a} vs {key_b}",
+                        "backend": backend,
+                        "mean_diff": res.mean_diff,
+                        "ci_low": res.ci_low,
+                        "ci_high": res.ci_high,
+                        "n_eras": res.n_eras,
+                        "error": None,
+                    }
+                )
+    pairwise = pl.DataFrame(pairwise_rows)
+    return CampaignEvidence(variants=variants, pairwise=pairwise)

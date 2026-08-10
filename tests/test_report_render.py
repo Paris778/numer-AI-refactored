@@ -164,3 +164,36 @@ def test_main_rejects_version_mismatch(tmp_path) -> None:
     )
     assert rc == 1
     assert not (tmp_path / "out.md").exists()
+
+
+def test_render_report_meta_watermark() -> None:
+    md = render_dataset_report.render_report(**{**_fixture()})
+    assert "SMALL SAMPLE: 86 ERAS — HIGH SAMPLING VARIANCE" in md
+    # the watermark sits directly above the meta-model table section
+    assert md.index("SMALL SAMPLE") < md.index("corr_meta")
+
+
+def test_render_report_campaign_section() -> None:
+    kwargs = {**_fixture()}
+    kwargs["campaign_rows"] = [
+        {
+            "variant": "lgbm_v2", "status": "recorded", "backend": "lightgbm",
+            "device": "cpu", "n_features": 3, "mean_ic": 0.012,
+            "ic_ci_lo": 0.004, "ic_ci_hi": 0.020, "ic_sharpe": 0.7,
+            "max_drawdown": -0.15, "fne100": 0.003, "fne100_ci_lo": 0.0,
+            "fne100_ci_hi": 0.006, "n_eras": 640,
+        }
+    ]
+    kwargs["pairwise_rows"] = [
+        {
+            "pair": "lgbm_v2 vs lgbm_v3", "backend": "lightgbm",
+            "mean_diff": -0.003, "ci_low": -0.007, "ci_high": 0.001,
+            "n_eras": 640, "error": None,
+        }
+    ]
+    md = render_dataset_report.render_report(**kwargs)
+    assert "### 7.1 Feature Campaign" in md
+    assert "### 7.2 Paired Screen Verdicts" in md
+    assert "lgbm_v2" in md
+    assert "fne100" in md
+    assert "lgbm_v2 vs lgbm_v3" in md

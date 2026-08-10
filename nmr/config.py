@@ -55,12 +55,23 @@ class DataConfig:
     version: str = "v5.3"
     feature_set: str = "small"
     feature_subset: str | None = None
+    supplemental_feature_sets: Path | None = None
     targets: tuple[str, ...] = ("target",)
     data_dir: Path = REPO_ROOT / "data"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "targets", tuple(self.targets))
         object.__setattr__(self, "data_dir", _resolve_path(self.data_dir))
+        if self.supplemental_feature_sets is not None:
+            object.__setattr__(
+                self,
+                "supplemental_feature_sets",
+                _resolve_path(self.supplemental_feature_sets),
+            )
+            if not str(self.supplemental_feature_sets).strip():
+                raise ValueError(
+                    "data.supplemental_feature_sets must be a non-empty path when provided"
+                )
         if self.feature_set not in VALID_FEATURE_SETS:
             raise ValueError(
                 f"feature_set={self.feature_set!r} not in {VALID_FEATURE_SETS}"

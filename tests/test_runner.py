@@ -16,6 +16,7 @@ from nmr.config import (
     RunConfig,
     SplitConfig,
 )
+from nmr.data import IngestionAgent
 from nmr.deployment import load_predict
 from nmr.runner import ExperimentRunner
 from nmr.splitter import PurgedEraSplitter
@@ -378,3 +379,39 @@ def test_environment_fingerprint_catboost_includes_version(tmp_path) -> None:
     )["packages"]
     assert "catboost" in packages
     assert isinstance(packages["catboost"], str) and packages["catboost"]
+
+
+def test_predict_in_era_batches_matches_full_frame_predict(tmp_path) -> None:
+    """Chunked validation predict is bit-identical to the full-frame path."""
+    from nmr.models import ModelOrchestrator, coerce_float32_features
+    from nmr.runner import _predict_in_era_batches
+
+    data_root = tmp_path / "data"
+    _write_synthetic_data(data_root)
+    cfg = _config(tmp_path)
+    agent = IngestionAgent(cfg.data)
+    val_df = agent.load("validation", columns=["era", "id", "f1", "f2"])
+    train_df = agent.load("train", columns=["era", "id", "f1", "f2", "target"])
+
+    orchestrator = ModelOrchestrator(cfg.model, seed=cfg.run.seed)
+    model = orchestrator.train_full_history(
+        train_df, feature_cols=["f1", "f2"], target_col="target"
+    )
+
+    def predict_fn(features_pd):
+        # mirror the deploy closure: select only feature columns (era is meta)
+        frame = features_pd.loc[:, ["f1", "f2"]]
+        return features_pd.assign(prediction=model.predict(frame))[["prediction"]]
+
+    batched = _predict_in_era_batches(val_df, ["f1", "f2"], predict_fn, batch_eras=2)
+    full_feats = coerce_float32_features(val_df, ["f1", "f2"])
+    full_pd = (
+        pl.concat([val_df.select(["id"]), full_feats], how="horizontal")
+        .to_pandas()
+        .set_index("id")
+    )
+    full = val_df.select(["era", "id"]).with_columns(
+        pl.Series("prediction", predict_fn(full_pd)["prediction"].to_numpy())
+    )
+    assert batched.equals(full)
+    assert batched.height == val_df.height

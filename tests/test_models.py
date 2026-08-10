@@ -612,3 +612,44 @@ def test_train_full_history_stays_cpu_even_with_device_gpu() -> None:
         _model_frame(), feature_cols=["f1", "f2", "f3"], target_col="target"
     )
     assert model.get_params()["device_type"] == "cpu"  # deploy artifact invariant
+
+
+def test_coerce_float32_features_exact_and_all_or_nothing() -> None:
+    from nmr.models import coerce_float32_features
+
+    int_frame = pl.DataFrame(
+        {
+            "f1": pl.Series([0, 1, 2, 3, 4], dtype=pl.Int8),
+            "f2": pl.Series([4, 3, 2, 1, 0], dtype=pl.Int8),
+        }
+    )
+    out = coerce_float32_features(int_frame, ["f1", "f2"])
+    assert out.schema == {"f1": pl.Float32, "f2": pl.Float32}
+    assert out.to_numpy().tolist() == int_frame.to_numpy().tolist()  # exact
+
+    # Float64 stays untouched (precision), all-or-nothing per frame
+    float_frame = pl.DataFrame(
+        {"f1": pl.Series([0.1, 0.2], dtype=pl.Float64), "f2": pl.Series([1, 2], dtype=pl.Int8)}
+    )
+    out_mixed = coerce_float32_features(float_frame, ["f1", "f2"])
+    assert out_mixed.schema == {"f1": pl.Float64, "f2": pl.Int8}
+    out_float = coerce_float32_features(float_frame.select("f1"), ["f1"])
+    assert out_float.schema == {"f1": pl.Float64}
+
+
+def test_feature_frame_is_single_float32_block_for_int_features() -> None:
+    from nmr.models import ModelOrchestrator, coerce_float32_features
+
+    df = _model_frame().with_columns(
+        pl.col("f1").cast(pl.Int8), pl.col("f2").cast(pl.Int8), pl.col("f3").cast(pl.Int8)
+    )
+    orchestrator = ModelOrchestrator(ModelConfig(backend="lightgbm"), seed=7)
+    frame = orchestrator._feature_frame(df, feature_cols=["f1", "f2", "f3"])
+    assert list(frame.dtypes) == [np.dtype("float32")] * 3  # single uniform block
+    # The zero-copy precondition: to_numpy(float32) on a uniform float32
+    # block is a view — a second conversion must not allocate a new buffer.
+    arr = frame.to_numpy(dtype=np.float32, copy=False)
+    assert arr.base is not None or arr.flags["OWNDATA"] is False
+    assert coerce_float32_features(df, ["f1", "f2", "f3"]).schema == {
+        "f1": pl.Float32, "f2": pl.Float32, "f3": pl.Float32
+    }

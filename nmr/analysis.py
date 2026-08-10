@@ -16,6 +16,7 @@ import polars as pl
 import scipy.stats
 
 from nmr.features import DEFAULT_MAX_ABS_DECAY, DEFAULT_MIN_MEAN_CORR
+from nmr.inference import block_bootstrap_ci, resolve_block_len
 
 __all__ = [
     "SplitStats",
@@ -44,7 +45,10 @@ REGIME_HIGH_PCT = 90.0
 IC_VOL_WINDOW = 20
 PSI_FLAG_THRESHOLD = 0.25
 WASSERSTEIN_FLAG_THRESHOLD = 0.25
+WASSERSTEIN_NORM_FLAG_THRESHOLD = 0.50
 AUC_FLAG_DELTA = 0.1
+IC_CI_BOOT = 200
+IC_CI_SEED = 0
 _PSI_EPS = 1e-6
 _PSI_EDGE_SAMPLE_STRIDE = 100
 
@@ -352,6 +356,42 @@ def _nonlinear_flag(
     )
 
 
+def _era_mean_bootstrap_ci(
+    feature_era_matrix: np.ndarray, n_boot: int, seed: int
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-feature 95% block-bootstrap CI on the era-mean of an (F, E) matrix.
+
+    Row-major ``(n_features, n_eras)`` layout (``np.column_stack`` of per-era
+    vectors — the convention used by ``feature_ic_screen``). Stationary block
+    bootstrap over era columns (20D horizon convention: block floor 8 eras)
+    with a fixed seed — deterministic across processes. Returns
+    ``(ci_lo, ci_hi)`` arrays of length ``F``; features with fewer valid eras
+    than the block floor fall back to a single full-length block (weak but
+    defined CI) and all-non-finite rows report NaN.
+    """
+    valid_pearson = np.asarray(feature_era_matrix, dtype=float)
+    finite = np.isfinite(valid_pearson)
+    n_features, n_eras = valid_pearson.shape
+    ci_lo = np.full(n_features, np.nan)
+    ci_hi = np.full(n_features, np.nan)
+    if n_eras < 2:
+        return ci_lo, ci_hi
+    try:
+        block_len = resolve_block_len(n_eras, "20D")
+    except ValueError:
+        block_len = n_eras
+    for f in range(n_features):
+        row = valid_pearson[f, :]
+        if not np.any(finite[f, :]):
+            continue
+        est = block_bootstrap_ci(
+            row, np.mean, block_len=block_len, n_boot=n_boot, seed=seed
+        )
+        ci_lo[f] = est.lo
+        ci_hi[f] = est.hi
+    return ci_lo, ci_hi
+
+
 def feature_ic_screen(
     chunks: Iterable[pl.DataFrame],
     feature_cols: Sequence[str],
@@ -359,6 +399,8 @@ def feature_ic_screen(
     era_col: str = "era",
     min_mean_corr: float = DEFAULT_MIN_MEAN_CORR,
     max_abs_decay: float = DEFAULT_MAX_ABS_DECAY,
+    ci_boot: int = IC_CI_BOOT,
+    ci_seed: int = IC_CI_SEED,
 ) -> pl.DataFrame:
     """Aggregated feature-target screen, one block per reference target.
 
@@ -368,6 +410,10 @@ def feature_ic_screen(
     ``feature_stability_screen``). Adds ``mean_spearman`` (mean per-era
     Spearman rank IC over valid eras) and ``nonlinear`` (|Pearson| <=
     ``min_mean_corr`` but |Spearman| > ``min_mean_corr``) as diagnostics.
+    ``mean_corr_ci_lo``/``mean_corr_ci_hi`` are the 95% stationary
+    block-bootstrap CI of the era-mean Pearson IC over valid (non-degenerate)
+    eras — a feature whose CI spans zero cannot be called stable at 95%
+    confidence.
     """
     from nmr.features import _aggregate_screen, _era_ic_pair
 
@@ -394,11 +440,16 @@ def feature_ic_screen(
             e for e in sorted(spearman_eras, key=int) if e not in degenerate
         ]
         if valid_eras:
+            valid_pearson = np.column_stack([pearson_eras[e] for e in valid_eras])
             mean_spearman = np.mean(
                 np.column_stack([spearman_eras[e] for e in valid_eras]), axis=1
             )
+            ci_lo, ci_hi = _era_mean_bootstrap_ci(valid_pearson, ci_boot, ci_seed)
         else:
-            mean_spearman = np.full(len(feature_list), np.nan)
+            n_features = len(feature_list)
+            mean_spearman = np.full(n_features, np.nan)
+            ci_lo = np.full(n_features, np.nan)
+            ci_hi = np.full(n_features, np.nan)
         nonlinear = _nonlinear_flag(
             screen.get_column("mean_corr").to_numpy(),
             mean_spearman,
@@ -409,6 +460,12 @@ def feature_ic_screen(
                 pl.Series("mean_spearman", mean_spearman)
                 .fill_nan(None)
                 .alias("mean_spearman"),
+                pl.Series("mean_corr_ci_lo", ci_lo)
+                .fill_nan(None)
+                .alias("mean_corr_ci_lo"),
+                pl.Series("mean_corr_ci_hi", ci_hi)
+                .fill_nan(None)
+                .alias("mean_corr_ci_hi"),
                 pl.Series("nonlinear", nonlinear).alias("nonlinear"),
             ).with_columns(pl.lit(t).alias("target"))
         )
@@ -417,6 +474,8 @@ def feature_ic_screen(
             "feature",
             "target",
             "mean_corr",
+            "mean_corr_ci_lo",
+            "mean_corr_ci_hi",
             "corr_std",
             "decay_slope",
             "cross_regime_variance",
@@ -672,7 +731,7 @@ def feature_drift_profile(
     era_col: str = "era",
     n_bins: int = 10,
     flag_threshold: float = PSI_FLAG_THRESHOLD,
-    w1_threshold: float = WASSERSTEIN_FLAG_THRESHOLD,
+    w1_norm_threshold: float = WASSERSTEIN_NORM_FLAG_THRESHOLD,
     auc_delta: float = AUC_FLAG_DELTA,
     edge_sample_stride: int = _PSI_EDGE_SAMPLE_STRIDE,
 ) -> pl.DataFrame:
@@ -680,10 +739,16 @@ def feature_drift_profile(
 
     One deterministic strided sample of each stream feeds all three metrics
     (identical sampling to ``feature_drift_psi``); ``n_train``/``n_val`` are
-    full finite counts. ``drifted`` = psi > ``flag_threshold`` OR w1 >
-    ``w1_threshold`` OR |auc_roc - 0.5| > ``auc_delta``. The AUC is the
-    Mann-Whitney separation of train vs validation rows per feature
-    (0.5 = no separation, ~1.0 = perfectly distinguishable).
+    full finite counts. ``w1`` is the raw 1-Wasserstein distance (unit scale
+    of the feature, kept for reference); ``w1_norm`` standardizes it by the
+    train sample standard deviation so a single global threshold is
+    scale-invariant across features (a raw shift of 0.25 is 5 sigma for a
+    bounded feature but noise for an unbounded one). ``drifted`` = psi >
+    ``flag_threshold`` OR w1_norm > ``w1_norm_threshold`` OR |auc_roc - 0.5|
+    > ``auc_delta``. The AUC is the Mann-Whitney separation of train vs
+    validation rows per feature (0.5 = no separation, ~1.0 = perfectly
+    distinguishable). ``w1_norm`` is None when either stream is non-finite
+    or the train sample has zero variance.
     """
     feature_list = list(feature_cols)
     if not feature_list:
@@ -706,9 +771,13 @@ def feature_drift_profile(
         psi = _psi_from_samples(t, v, n_bins, _PSI_EPS)
         w1 = _wasserstein_from_samples(t, v)
         auc = _auc_from_samples(t, v)
+        t_std = float(np.std(t)) if t.size else 0.0
+        w1_norm: float | None = None
+        if w1 is not None and t_std > 0.0 and np.isfinite(w1):
+            w1_norm = w1 / t_std
         drifted = (
             (psi is not None and psi > flag_threshold)
-            or (w1 is not None and w1 > w1_threshold)
+            or (w1_norm is not None and w1_norm > w1_norm_threshold)
             or (auc is not None and abs(auc - 0.5) > auc_delta)
         )
         rows.append(
@@ -716,6 +785,7 @@ def feature_drift_profile(
                 "feature": f,
                 "psi": psi,
                 "w1": w1,
+                "w1_norm": w1_norm,
                 "auc_roc": auc,
                 "n_train": n_train[f],
                 "n_val": n_val[f],
@@ -1163,6 +1233,68 @@ def neutralized_ic_profile(
         }
         for (s, p), vals in sorted(acc.items(), key=lambda kv: (kv[0][0], kv[0][1]))
     ]
+    return pl.DataFrame(rows)
+
+
+def neutralized_ic_series(
+    chunks: Iterable[pl.DataFrame],
+    signal_cols: Sequence[str],
+    feature_cols: Sequence[str],
+    target_col: str,
+    era_col: str = "era",
+    proportion: float = 1.0,
+) -> pl.DataFrame:
+    """Per-era IC of signals after neutralization at one proportion.
+
+    Long-form complement to :func:`neutralized_ic_profile`: the same
+    intercept-aware per-era neutralize + Pearson IC math (pinv rcond=1e-6),
+    but one row per ``(era, signal)`` so downstream code can bootstrap CIs or
+    run paired era comparisons. Degenerate eras (target non-finite, <2 rows,
+    zero variance) are omitted; ``n_eras`` per signal reflects the valid
+    overlap.
+    """
+    from nmr._transforms import neutralize_array
+    from nmr.features import _feature_target_pearson
+
+    signal_list = list(signal_cols)
+    feature_list = list(feature_cols)
+    if not signal_list:
+        raise ValueError("signal_cols must contain at least one signal")
+    if not feature_list:
+        raise ValueError("feature_cols must contain at least one feature")
+    if not 0.0 <= proportion <= 1.0:
+        raise ValueError("proportion must be within [0, 1]")
+
+    rows: list[dict[str, object]] = []
+    for part in chunks:
+        clean = part.drop_nulls()
+        if clean.height < 2:
+            continue
+        era = clean.get_column(era_col)[0]
+        target_all = clean.get_column(target_col).cast(pl.Float64).to_numpy()
+        features = clean.select(feature_list).cast(pl.Float64).to_numpy()
+        for s in signal_list:
+            pred = clean.get_column(s).cast(pl.Float64).to_numpy()
+            mask = np.isfinite(target_all) & np.isfinite(pred) & np.all(
+                np.isfinite(features), axis=1
+            )
+            target = target_all[mask]
+            if target.size < 2 or bool(np.all(target == target[0])):
+                continue
+            feat_clean = features[mask]
+            pred_clean = pred[mask]
+            if proportion == 0.0:
+                neutralized = pred_clean
+            else:
+                design = np.hstack(
+                    (feat_clean, np.ones((feat_clean.shape[0], 1), dtype=float))
+                )
+                pinv = np.linalg.pinv(design, rcond=1e-6)
+                neutralized = neutralize_array(
+                    pred_clean, feat_clean, proportion=proportion, pseudo_inverse=pinv
+                )
+            ic = _feature_target_pearson(neutralized[:, None], target)[0]
+            rows.append({"era": str(era), "signal": s, "ic": float(ic)})
     return pl.DataFrame(rows)
 
 

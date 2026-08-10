@@ -123,6 +123,7 @@ def test_analyze_writes_all_dumps(tmp_path: Path, fake_data: Path) -> None:
         "feature_set_redundancy.json",
         "feature_drift_psi.parquet",
         "feature_drift_profile.parquet",
+        "derived_feature_sets.json",
         "set_membership.json",
         "regimes.json",
         "era_signal.parquet",
@@ -267,7 +268,59 @@ def test_analyze_deterministic_dumps(tmp_path: Path, fake_data: Path) -> None:
         "feature_corr_medium_matrix.parquet",
         "feature_drift_psi.parquet",
         "feature_drift_profile.parquet",
+        "derived_feature_sets.json",
         "meta_ortho.parquet",
         "era_signal.parquet",
     ]:
         assert (out1 / name).read_bytes() == (out2 / name).read_bytes(), name
+
+
+def test_derived_sets_stage_content(tmp_path: Path, fake_data: Path) -> None:
+    out = tmp_path / "dumps"
+    rc = analyze_dataset.main(
+        [
+            "--data-dir", str(fake_data),
+            "--output-dir", str(out),
+            "--features", "small",
+            "--max-eras", "3",
+        ]
+    )
+    assert rc == 0
+    payload = json.loads(
+        (out / "derived_feature_sets.json").read_text(encoding="utf-8")
+    )
+    sets = payload["feature_sets"]
+    assert set(sets) == {
+        "screen_stable",
+        "screen_nonlinear",
+        "screen_linear_or_nonlinear",
+        "screen_drift_filtered",
+    }
+    all_feats = {"f_alpha", "f_beta", "f_gamma"}
+    for name, values in sets.items():
+        assert sorted(values) == values, name
+        assert set(values) <= all_feats, name
+    # drift-filtered is a subset of linear-or-nonlinear (drift rows only exist
+    # for medium features; features without a drift row are kept)
+    assert set(sets["screen_drift_filtered"]) <= set(
+        sets["screen_linear_or_nonlinear"]
+    )
+    # linear-or-nonlinear is exactly the union of the two flags
+    assert set(sets["screen_linear_or_nonlinear"]) == set(
+        sets["screen_stable"]
+    ) | set(sets["screen_nonlinear"])
+
+
+def test_derived_sets_missing_inputs_returns_error(
+    tmp_path: Path, fake_data: Path
+) -> None:
+    out = tmp_path / "dumps"
+    with pytest.raises(RuntimeError, match="screens"):
+        analyze_dataset.main(
+            [
+                "--data-dir", str(fake_data),
+                "--output-dir", str(out),
+                "--only", "derived_sets",
+            ]
+        )
+    assert not (out / "derived_feature_sets.json").exists()

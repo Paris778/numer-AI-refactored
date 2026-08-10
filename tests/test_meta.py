@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import polars as pl
 import pytest
 
@@ -259,3 +262,177 @@ def test_fleet_summary_validates_policy_arguments() -> None:
         fleet_summary([], n_trials=0)
     with pytest.raises(ValueError, match="dsr_confidence"):
         fleet_summary([], n_trials=1, dsr_confidence=1.5)
+
+
+def test_neutralized_ic_series_parity_with_profile() -> None:
+    import numpy as np
+
+    from nmr.analysis import neutralized_ic_profile, neutralized_ic_series
+
+    rng = np.random.default_rng(11)
+    rows = []
+    for e in range(6):
+        era = f"{e + 1:04d}"
+        for i in range(20):
+            f1, f2 = float(rng.normal()), float(rng.normal())
+            y = 0.6 * f1 + 0.4 * f2 + float(rng.normal(scale=0.3))
+            rows.append(
+                {"era": era, "id": f"{era}_{i}", "f1": f1, "f2": f2,
+                 "prediction": y, "target": y}
+            )
+    frame = pl.DataFrame(rows)
+    chunks = frame.partition_by("era", maintain_order=True)
+    profile = neutralized_ic_profile(
+        chunks, ["prediction"], ["f1", "f2"], "target", proportions=[1.0]
+    )
+    series = neutralized_ic_series(
+        chunks, ["prediction"], ["f1", "f2"], "target", proportion=1.0
+    )
+    row = profile.filter(pl.col("signal") == "prediction").row(0, named=True)
+    assert series.height == row["n_eras"]
+    assert series["ic"].mean() == pytest.approx(row["mean_ic"], abs=1e-12)
+    # proportion=0.0 keeps the raw signal: IC vs itself is ~1
+    raw = neutralized_ic_series(
+        chunks, ["prediction"], ["f1", "f2"], "target", proportion=0.0
+    )
+    assert raw["ic"].mean() > 0.99
+
+
+def _evidence_environment(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Synthetic v0test data dir + registry with two recorded campaign runs."""
+    import numpy as np
+
+    d = tmp_path / "data" / "v0test"
+    d.mkdir(parents=True)
+    (d / "features.json").write_text(
+        json.dumps(
+            {
+                "feature_sets": {
+                    "small": ["f1"],
+                    "medium": ["f1", "f2"],
+                    "all": ["f1", "f2"],
+                },
+                "targets": ["target"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    rng = np.random.default_rng(12)
+    rows = []
+    for e in range(6):
+        era = f"{e + 1:04d}"
+        for i in range(15):
+            f1, f2 = float(rng.normal()), float(rng.normal())
+            rows.append(
+                {"era": era, "id": f"{era}_{i}", "f1": f1, "f2": f2,
+                 "target": 0.7 * f1 + 0.3 * f2 + float(rng.normal(scale=0.5))}
+            )
+    pl.DataFrame(rows).write_parquet(d / "validation.parquet")
+
+    reg = tmp_path / "registry"
+    for run_id, pred_fn in (
+        ("a" * 64, lambda r: 0.7 * r["f1"]),                    # v2: linear only
+        ("b" * 64, lambda r: 0.7 * r["f1"] + 0.25 * r["f2"]),   # v3: + nonlinear-ish
+    ):
+        rd = reg / run_id
+        rd.mkdir(parents=True)
+        preds = pl.DataFrame(
+            [
+                {"era": r["era"], "id": r["id"],
+                 "prediction": float(pred_fn(r))}
+                for r in rows
+            ]
+        )
+        preds.write_parquet(rd / "validation_preds.parquet")
+        (rd / "run.json").write_text(
+            json.dumps(
+                {
+                    "scorecard": {
+                        "corr": 0.05,
+                        "corr_ci_low": 0.01,
+                        "corr_ci_high": 0.09,
+                        "corr_sharpe_ac": 0.6,
+                        "max_drawdown": -0.12,
+                        "n_eras": 6,
+                    },
+                    "manifest": {
+                        "config": {
+                            "model": {"backend": "lightgbm", "device": "cpu"}
+                        },
+                        "feature_cols": ["f1"],
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    log = tmp_path / "campaign.json"
+    log.write_text(
+        json.dumps(
+            {
+                "campaign_id": "x" * 64,
+                "name": "t",
+                "configs": [],
+                "runs": [
+                    {
+                        "config_path": "configs/campaigns/benchmark-rebuild-v1/lgbm_v2.yaml",
+                        "run_id": "a" * 64,
+                        "status": "recorded",
+                    },
+                    {
+                        "config_path": "configs/campaigns/benchmark-rebuild-v1/lgbm_v3.yaml",
+                        "run_id": "b" * 64,
+                        "status": "recorded",
+                    },
+                    {
+                        "config_path": "configs/campaigns/benchmark-rebuild-v1/lgbm_v4.yaml",
+                        "run_id": None,
+                        "status": "error",
+                        "error": "boom",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return d.parent, reg, log
+
+
+def test_campaign_evidence_assembles_variants_and_pairwise(
+    tmp_path: Path,
+) -> None:
+    import numpy as np
+
+    from nmr.config import DataConfig
+    from nmr.meta import campaign_evidence
+
+    data_root, reg, log = _evidence_environment(tmp_path)
+    evidence = campaign_evidence(
+        log, reg, data=DataConfig(version="v0test", data_dir=data_root),
+        min_overlap_eras=2,
+    )
+
+    variants = evidence.variants
+    assert variants.height == 3  # two recorded + one error row
+    recorded = variants.filter(pl.col("status") == "recorded")
+    assert recorded.height == 2
+    v2 = recorded.filter(pl.col("variant") == "lgbm_v2").row(0, named=True)
+    assert v2["mean_ic"] == pytest.approx(0.05)
+    assert v2["ic_sharpe"] == pytest.approx(0.6)
+    assert v2["max_drawdown"] == pytest.approx(-0.12)
+    assert v2["n_features"] == 1
+    assert v2["backend"] == "lightgbm"
+    assert v2["fne100"] is not None and np.isfinite(v2["fne100"])
+    err = variants.filter(pl.col("variant") == "lgbm_v4").row(0, named=True)
+    assert "boom" in err["error"]
+
+    pairwise = evidence.pairwise
+    assert pairwise.height == 1
+    row = pairwise.row(0, named=True)
+    assert row["pair"] == "lgbm_v2 vs lgbm_v3"
+    assert row["backend"] == "lightgbm"
+    assert row["n_eras"] == 6
+    # v3 carries strictly more signal -> v2 - v3 < 0 with CI excluding zero
+    assert row["mean_diff"] < 0.0
+    assert row["ci_high"] < 0.0
+    assert row["ci_low"] <= row["mean_diff"] <= row["ci_high"]

@@ -46,7 +46,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Optimized low-memory real-data benchmark runner."
     )
-    parser.add_argument("--data-dir", type=Path, default=Path("data") / "v5.2")
+    parser.add_argument("--data-dir", type=Path, default=Path("data") / "v5.3")
     parser.add_argument(
         "--output", type=Path, default=Path("artifacts") / "benchmark_scores.csv"
     )

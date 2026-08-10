@@ -30,7 +30,7 @@ These four files obey a strict **Single Source of Truth (SSOT) hierarchy**. One 
 
 ## 1. Agent Identity & Mission
 
-You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (549 tests). No lint/type-check tooling is configured — pytest is the sole automated gate, enforced by CI (`.github/workflows/ci.yml`).
+You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (564 tests). No lint/type-check tooling is configured — pytest is the sole automated gate, enforced by CI (`.github/workflows/ci.yml`).
 
 Your mission:
 
@@ -142,7 +142,7 @@ When modifying or generating code, enforce these seven invariants:
 | Change benchmark baselines / gates | `nmr/benchmark.py` + `benchmark_runner.py` |
 | Change campaign orchestration | `nmr/campaign.py` + `run_campaign.py` (spec: `ARCHITECTURE.md` §R) |
 | Inspect runs / campaigns interactively | `dashboard_app.py` — `streamlit run` (read-only) |
-| Analyze the dataset / run one analysis stage | `analyze_dataset.py` — 15 modular stages, `--only`/`--skip` (deps auto-included), progress markers |
+| Analyze the dataset / run one analysis stage | `analyze_dataset.py` — 16 modular stages, `--only`/`--skip` (deps auto-included), progress markers |
 | Discover hardware / check live resource status | `nmr/hardware.py` + `hardware_status.py` (stdlib only: nvidia-smi + ctypes) |
 | Run a research protocol (feature campaign / HPO / meta-analysis / QA gate) | `.kimi-code/skills/` — `feature-campaign`, `hpo-narrowing`, `run-meta-analysis`, `verification-before-claim` (map: `ARCHITECTURE.md` §T) |
 | Add/remove a public API symbol | `nmr/__init__.py` — imports **and** `__all__` |
@@ -196,7 +196,7 @@ Never invent a `numerai_tools` / `numerapi` signature — open the installed sou
 .\.venv\Scripts\python -m pytest tests/test_benchmark_slice1.py -q                    # determinism hashes
 
 # Pre-sign-off gate (mandatory before delivering work)
-.\.venv\Scripts\python -m pytest -q                                                    # full 549-test suite
+.\.venv\Scripts\python -m pytest -q                                                    # full 564-test suite
 .\.venv\Scripts\python benchmark_runner.py --fast-mode --output artifacts/benchmark_scores_smoke.csv --labels-output artifacts/benchmark_test_era_labels_smoke.csv   # real-data smoke (writes artifacts/*_smoke.csv)
 ```
 
@@ -229,6 +229,11 @@ Real v5.3 scorecard fixtures are flaky if rows are limited **before** establishi
 - **Windows pip pitfall:** `./.venv/Scripts/pip` is a shim into the legacy `../numer-AI/.venv` — always `./.venv/Scripts/python -m pip`. The venv is shared with the legacy repo; never install there via the shim (see CONTRIBUTING.md).
 - **Long jobs:** background tasks die when the session closes — for multi-hour runs use `nohup ./.venv/Scripts/python <script> > <log> 2>&1 &` and poll the log (stage markers + era ticks make progress visible).
 - **Analysis runtime:** full-universe (`--features all`) analysis is ~4–5 h, dominated by the three 3,555-feature streaming passes (ic_by_era + 2 screens, each re-streaming the parquet); cupy cuts the per-era rankdata 5.8×. The screen passes could be derived from the persisted long-form (dedup, ~1–1.5 h saved) — deferred.
+
+### RAM ceiling & full-universe training (recorded 2026-08-10)
+- **Machine:** 63.7 GiB RAM total. The **full 3,555-feature universe is memory-marginal**: a dense float32 feature array alone is ~28 GiB (2.12M train rows), and the deploy/validation path's float64 `to_numpy` is ~54 GiB. Peak for a solo full-universe fit ≈ 40–45 GiB — **run full-universe jobs only when the machine is otherwise idle** (a concurrent analysis/benchmark job caused the `lgbm_v1` campaign OOM: `_ArrayMemoryError: 28.1 GiB, shape (3555, 2123070)`).
+- **Memory guards now in code:** `nmr.models.coerce_float32_features` casts exactly-representable (Int*/UInt*/Float32) feature frames to a single Float32 block *before* pandas, so LightGBM/XGBoost's `to_numpy(dtype=float32)` is a zero-copy view (values bit-identical — Int8 bins are exact in float32; Float64 frames are untouched). The validation stage predicts in era-batches (`_predict_in_era_batches`, 40 eras/chunk) so the 54 GiB float64 materialization is bounded to ~1.7 GiB. OOF neutralization at 3,555 features is compute-bound (per-era pinv, ~3.5 h) — not a memory issue, do not "optimize" the math (oracle parity).
+- **Full-universe campaign cells:** if a 3,555-feature variant OOMs, re-run it solo with the current code; never run two full-universe jobs concurrently.
 
 ### `embargo_eras` is structurally inert
 `SplitConfig.embargo_eras` is validated and accepted but currently unused by fold geometry (reserved for future two-sided schemes). Do not document or rely on it as an active safeguard; do not remove it without a schema decision.

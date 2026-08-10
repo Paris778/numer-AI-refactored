@@ -16,6 +16,13 @@ import polars as pl
 
 from nmr.refresh import CURRENT_DATA_VERSION
 
+_META_SAMPLE_WARNING = (
+    "> **[SMALL SAMPLE: 86 ERAS — HIGH SAMPLING VARIANCE]** This table is "
+    "computed only on eras 1133-1218 where the meta model exists (~1.6 years "
+    "of weekly data). Estimates carry high sampling variance and are not "
+    "equivalent to the 1,218-era feature moments elsewhere in this report."
+)
+
 
 def _fmt(value: object, digits: int = 4) -> str:
     if value is None:
@@ -59,6 +66,8 @@ def render_report(
     meta_ortho_rows: list[dict],
     corr_summary: dict,
     set_membership: dict,
+    campaign_rows: list[dict] | None = None,
+    pairwise_rows: list[dict] | None = None,
 ) -> str:
     """Render the full report. Deterministic given identical inputs."""
     out: list[str] = []
@@ -153,37 +162,44 @@ def render_report(
     out.append("### 4.2 Feature-Target IC Screen")
     out.append("")
     out.append(_schema_block(
-        "feature | target | mean_corr | mean_spearman | n_eras | stable | nonlinear "
-        "(per-era Pearson/Spearman IC, valid eras only)"
+        "feature | target | mean_corr | mean_corr_ci_lo | mean_corr_ci_hi | "
+        "mean_spearman | n_eras | stable | nonlinear "
+        "(per-era Pearson/Spearman IC, valid eras only; CI = 95% stationary "
+        "block-bootstrap on the era-mean IC, 20D block convention)"
     ))
     out.append("")
     out.append(_table(
-        ["feature", "target", "mean_corr", "mean_spearman", "n_eras", "stable", "nonlinear"],
+        ["feature", "target", "mean_corr", "mean_corr_ci_lo", "mean_corr_ci_hi",
+         "mean_spearman", "n_eras", "stable", "nonlinear"],
         ic_screen_rows,
     ))
     out.append("")
     out.append("- **Key takeaways:** `n_eras` counts valid (non-degenerate) eras only — "
                "label-lag eras without a target never contribute zero ICs. `nonlinear` flags "
                "features with |Pearson| <= 0.01 but |Spearman| > 0.01: monotone-nonlinear "
-               "signal the linear screen would miss.")
+               "signal the linear screen would miss. A `mean_corr` whose 95% CI spans zero "
+               "cannot be called stable at 95% confidence.")
     out.append("")
     out.append("### 4.3 Cross-Split Drift (PSI + W1 + Adversarial AUC)")
     out.append("")
     out.append(_schema_block(
-        "feature | psi | w1 | auc_roc | n_train | n_val | drifted "
-        "(psi > 0.25 OR w1 > 0.25 OR |auc_roc - 0.5| > 0.1)"
+        "feature | psi | w1 | w1_norm | auc_roc | n_train | n_val | drifted "
+        "(psi > 0.25 OR w1_norm > 0.50 OR |auc_roc - 0.5| > 0.1; "
+        "w1_norm = raw W1 / train-sample sigma — scale-standardized)"
     ))
     out.append("")
     out.append(_table(
-        ["feature", "psi", "w1", "auc_roc", "n_train", "n_val", "drifted"],
+        ["feature", "psi", "w1", "w1_norm", "auc_roc", "n_train", "n_val", "drifted"],
         drift_rows,
     ))
     out.append("")
-    out.append("- **Key takeaways:** PSI > 0.25 marks bin-proportion shift; W1 is the "
-               "distributional distance; adversarial AUC > ~0.6 (or < ~0.4) means the "
-               "feature alone separates train from validation rows — a distribution "
-               "shift a tree model can overfit to. Constrain or neutralize drifted "
-               "features before training.")
+    out.append("- **Key takeaways:** PSI > 0.25 marks bin-proportion shift; `w1` is the raw "
+               "distributional distance (unit scale of the feature) and `w1_norm` divides it "
+               "by the train-sample sigma so one threshold works across bounded and unbounded "
+               "features — a raw shift of 0.25 is 5 sigma for a bounded feature but noise for "
+               "an unbounded one. Adversarial AUC > ~0.6 (or < ~0.4) means the feature alone "
+               "separates train from validation rows — a distribution shift a tree model can "
+               "overfit to. Constrain or neutralize drifted features before training.")
     out.append("")
     out.append("### 4.4 Signal by Split")
     out.append("")
@@ -257,6 +273,8 @@ def render_report(
                "feature set — beating it requires non-linear or orthogonal signal. The "
                "proportion where IC halves is the practical neutralization budget.")
     out.append("")
+    out.append(_META_SAMPLE_WARNING)
+    out.append("")
     out.append(_schema_block(
         "feature | meta | corr_meta | corr_target | n_eras | orthogonal "
         "(|corr_meta| <= 0.01 and |corr_target| > 0.01 on meta-model eras)"
@@ -280,6 +298,59 @@ def render_report(
     out.append("- Rank-gaussianize per era before ensembling; never blend raw outputs.")
     out.append("- Select features from the stability screen, not pooled correlation.")
     out.append("- Watch auxiliary-target era coverage before including them.")
+    if campaign_rows:
+        out.append("")
+        out.append("### 7.1 Feature Campaign — Validation Evidence")
+        out.append("")
+        out.append(_schema_block(
+            "variant | backend | device | n_features | mean_ic | ic_ci_lo | "
+            "ic_ci_hi | ic_sharpe | max_drawdown | fne100 | fne100_ci_lo | "
+            "fne100_ci_hi | n_eras "
+            "(identical model params per backend, fixed seed, 8-era purge; "
+            "mean_ic CI from the run scorecard; FNE = residual IC after 100% "
+            "linear neutralization against the medium feature set, own "
+            "block-bootstrap CI)"
+        ))
+        out.append("")
+        out.append(_table(
+            ["variant", "backend", "device", "n_features", "mean_ic",
+             "ic_ci_lo", "ic_ci_hi", "ic_sharpe", "max_drawdown",
+             "fne100", "fne100_ci_lo", "fne100_ci_hi", "n_eras"],
+            [r for r in campaign_rows if r.get("status") == "recorded"],
+        ))
+        error_rows = [r for r in campaign_rows if r.get("status") != "recorded"]
+        if error_rows:
+            out.append("")
+            out.append("**Failed/unrecorded variants:** " + "; ".join(
+                f"{r.get('variant')} ({r.get('error')})" for r in error_rows
+            ))
+        out.append("")
+        out.append("- **Read:** a variant's `mean_ic` CI that excludes zero is "
+                   "statistically non-zero signal; `fne100` is the signal that "
+                   "survives full neutralization against the medium set — the "
+                   "orthogonal, non-linearizable component. `ic_sharpe` is the "
+                   "risk-adjusted consistency; `max_drawdown` of the cumulative "
+                   "IC line shows crash-era fragility.")
+    if pairwise_rows:
+        out.append("")
+        out.append("### 7.2 Paired Screen Verdicts (validation IC)")
+        out.append("")
+        out.append(_schema_block(
+            "pair | backend | mean_diff | ci_low | ci_high | n_eras "
+            "(block-bootstrap 95% CI on per-era IC difference; positive diff = "
+            "first variant better; CI excluding zero = significant)"
+        ))
+        out.append("")
+        out.append(_table(
+            ["pair", "backend", "mean_diff", "ci_low", "ci_high", "n_eras"],
+            pairwise_rows,
+        ))
+        out.append("")
+        out.append("- **Verdict rule (screen gate):** if v3 (nonlinear rescue) or "
+                   "v4 (drift-filtered) beats v2 (linear stable) with a CI "
+                   "excluding zero on both backends, the univariate Pearson "
+                   "screen is dropping model-value and the `stable` gate "
+                   "defaults must be revised per the campaign evidence.")
     out.append("")
     return "\n".join(out)
 
@@ -296,6 +367,16 @@ def main(argv: list[str] | None = None) -> int:
         default=Path("artifacts") / "reports" / "dataset_analysis",
     )
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument(
+        "--campaign-log",
+        type=Path,
+        default=None,
+        help="campaign log (artifacts/campaigns/<name>.json); when given, "
+        "section 7 renders per-variant validation evidence from the registry",
+    )
+    parser.add_argument(
+        "--registry", type=Path, default=Path("artifacts") / "registry"
+    )
     args = parser.parse_args(argv)
     d = args.dumps_dir
 
@@ -326,6 +407,24 @@ def main(argv: list[str] | None = None) -> int:
         _load_json(fne_path).get("profile", []) if fne_path.exists() else []
     )
 
+    campaign_rows: list[dict] | None = None
+    pairwise_rows: list[dict] | None = None
+    if args.campaign_log is not None:
+        from nmr.config import DataConfig
+        from nmr.meta import campaign_evidence
+
+        if not args.campaign_log.exists():
+            print(f"ERROR: campaign log not found: {args.campaign_log}", file=sys.stderr)
+            return 1
+        evidence = campaign_evidence(
+            args.campaign_log,
+            args.registry,
+            data=DataConfig(version=manifest["data_version"]),
+            main_target="target",
+        )
+        campaign_rows = evidence.variants.to_dicts()
+        pairwise_rows = evidence.pairwise.to_dicts()
+
     md = render_report(
         manifest=manifest,
         overview=_load_json(d / "overview.json"),
@@ -344,6 +443,8 @@ def main(argv: list[str] | None = None) -> int:
         meta_ortho_rows=pl.read_parquet(d / "meta_ortho.parquet").to_dicts(),
         corr_summary=_load_json(d / "feature_corr_all_summary.json"),
         set_membership=_load_json(d / "set_membership.json"),
+        campaign_rows=campaign_rows,
+        pairwise_rows=pairwise_rows,
     )
     refresh_date = manifest.get("refresh_date") or "0000-00"
     output = args.output or (
