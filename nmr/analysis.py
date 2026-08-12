@@ -357,17 +357,21 @@ def _nonlinear_flag(
 
 
 def _era_mean_bootstrap_ci(
-    feature_era_matrix: np.ndarray, n_boot: int, seed: int
+    feature_era_matrix: np.ndarray,
+    n_boot: int,
+    seed: int,
+    *,
+    horizon: str = "20D",
 ) -> tuple[np.ndarray, np.ndarray]:
     """Per-feature 95% block-bootstrap CI on the era-mean of an (F, E) matrix.
 
     Row-major ``(n_features, n_eras)`` layout (``np.column_stack`` of per-era
     vectors — the convention used by ``feature_ic_screen``). Stationary block
-    bootstrap over era columns (20D horizon convention: block floor 8 eras)
-    with a fixed seed — deterministic across processes. Returns
-    ``(ci_lo, ci_hi)`` arrays of length ``F``; features with fewer valid eras
-    than the block floor fall back to a single full-length block (weak but
-    defined CI) and all-non-finite rows report NaN.
+    bootstrap over era columns with the target's own horizon floor (5 for 20D,
+    13 for 60D via ``resolve_block_len``) and a fixed seed — deterministic
+    across processes. Returns ``(ci_lo, ci_hi)`` arrays of length ``F``;
+    features with fewer valid eras than the block floor fall back to a single
+    full-length block (weak but defined CI) and all-non-finite rows report NaN.
     """
     valid_pearson = np.asarray(feature_era_matrix, dtype=float)
     finite = np.isfinite(valid_pearson)
@@ -377,7 +381,7 @@ def _era_mean_bootstrap_ci(
     if n_eras < 2:
         return ci_lo, ci_hi
     try:
-        block_len = resolve_block_len(n_eras, "20D")
+        block_len = resolve_block_len(n_eras, horizon)  # type: ignore[arg-type]
     except ValueError:
         block_len = n_eras
     for f in range(n_features):
@@ -444,7 +448,12 @@ def feature_ic_screen(
             mean_spearman = np.mean(
                 np.column_stack([spearman_eras[e] for e in valid_eras]), axis=1
             )
-            ci_lo, ci_hi = _era_mean_bootstrap_ci(valid_pearson, ci_boot, ci_seed)
+            # horizon-aware block floor: 60D targets need 13-era blocks, 20D
+            # need 5 — a 20D block on a 60D series understates the CI
+            ci_horizon = "60D" if str(t).endswith("_60") else "20D"
+            ci_lo, ci_hi = _era_mean_bootstrap_ci(
+                valid_pearson, ci_boot, ci_seed, horizon=ci_horizon
+            )
         else:
             n_features = len(feature_list)
             mean_spearman = np.full(n_features, np.nan)

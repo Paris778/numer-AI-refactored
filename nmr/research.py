@@ -19,7 +19,7 @@ from nmr.data import IngestionAgent
 from nmr.ensemble import Ensembler
 from nmr.evaluation import EvaluationEngine, MetricSummary
 from nmr.inference import ac_adjusted_sharpe
-from nmr.models import ModelOrchestrator
+from nmr.models import ModelOrchestrator, coerce_float32_features
 from nmr.risk import NeutralizationEngine
 from nmr.splitter import PurgedEraSplitter
 
@@ -273,7 +273,11 @@ def _held_out_metric(config: ExperimentConfig, *, metric_name: str) -> float:
             splitter=anchor_splitter,
             era_col="era",
         )
-        feature_frame = held_out_df.select(feature_cols).to_pandas()
+        # numpy feature matrix (zero-copy float32) — the pandas path goes
+        # through pyarrow and doubles memory (OOM at 3,555 features)
+        feature_frame = coerce_float32_features(
+            held_out_df, feature_cols
+        ).to_numpy()
         raw_pred = np.asarray(model.predict(feature_frame), dtype=float)
         anchor_predictions.append(
             held_out_df.select(["id", "era"]).with_columns(
@@ -358,7 +362,15 @@ def _held_out_partition(
     if purge_eras < 0:
         raise ValueError("purge_eras must be >= 0")
 
-    unique = sorted({int(era) for era in eras})
+    # Preserve the ORIGINAL era labels (zero-padded "0575"): converting to
+    # str(int) produced "575", which matches nothing in is_in() filters on
+    # padded data — the HPO held-out evaluation silently dropped every era
+    # below 1000 (regression 2026-08-11, same class as the runner purge bug).
+    numeric_to_label: dict[int, str] = {}
+    for era in eras:
+        numeric_to_label.setdefault(int(era), era)
+
+    unique = sorted(numeric_to_label)
     hold_count = max(1, int(round(len(unique) * frac)))
     held_out_nums = unique[-hold_count:]
     held_out_set = set(held_out_nums)
@@ -376,9 +388,9 @@ def _held_out_partition(
     purge_nums = [value for value in unique if value in purge_set]
 
     return (
-        [str(value) for value in train_nums],
-        [str(value) for value in purge_nums],
-        [str(value) for value in held_out_nums],
+        [numeric_to_label[value] for value in train_nums],
+        [numeric_to_label[value] for value in purge_nums],
+        [numeric_to_label[value] for value in held_out_nums],
     )
 
 

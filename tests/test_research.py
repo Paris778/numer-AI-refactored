@@ -230,3 +230,20 @@ def test_held_out_metric_still_rejects_unknown_metric(tmp_path) -> None:
     cfg = _write_data(tmp_path)
     with pytest.raises(ValueError, match="Unknown metric"):
         _held_out_metric(cfg, metric_name="bogus_metric")
+
+
+def test_held_out_partition_preserves_zero_padded_labels() -> None:
+    """Regression (2026-08-11): the partition returned str(int) era labels
+    ("575"), which match nothing in is_in() filters on zero-padded data —
+    the HPO held-out evaluation silently dropped every era below 1000."""
+    eras = [f"{e:04d}" for e in range(1, 21)]  # "0001".."0020"
+    train_eras, purge_eras, held_out_eras = _held_out_partition(
+        eras, frac=0.2, purge_eras=2
+    )
+    # labels must round-trip through the padded data (not str(int))
+    assert all(e in eras for e in train_eras + purge_eras + held_out_eras)
+    assert set(train_eras) | set(purge_eras) | set(held_out_eras) == set(eras)
+    # held-out = last 20% (4 eras: 0017-0020); purge = 2 eras before (0015-0016)
+    assert held_out_eras == ["0017", "0018", "0019", "0020"]
+    assert purge_eras == ["0015", "0016"]
+    assert max(map(int, train_eras)) == 14

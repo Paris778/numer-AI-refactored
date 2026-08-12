@@ -146,3 +146,12 @@ class TestInfeasibility:
         )
         with pytest.raises(ValueError, match="too small"):
             splitter.split(_eras(1, 6))
+
+
+def test_normalize_eras_rejects_inconsistent_padding() -> None:
+    from nmr.config import SplitConfig
+    from nmr.splitter import PurgedEraSplitter
+
+    splitter = PurgedEraSplitter(SplitConfig(purge_eras=1, n_folds=2))
+    with pytest.raises(ValueError, match="zero-padding"):
+        splitter.split(["0001", "0002", "2", "0003", "0004", "0005"])

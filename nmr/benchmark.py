@@ -431,6 +431,12 @@ class BenchmarkSuite:
             .sort(self._join_keys)
             .unique(subset=self._join_keys, keep="first")
         )
+        if cleaned.height != frame.height:
+            logger.warning(
+                "[normalize] dropped %d of %d rows (null/non-finite preds or "
+                "duplicate (era, id) pairs — first in sorted order kept)",
+                frame.height - cleaned.height, frame.height,
+            )
 
         if cleaned.is_empty():
             raise ValueError("No valid prediction rows after normalization")

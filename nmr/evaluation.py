@@ -61,7 +61,15 @@ def sorted_era_labels(labels: Sequence[str]) -> list[str]:
             raise ValueError(
                 f"Non-numeric era label {label!r}; evaluation requires chronological eras"
             ) from exc
-        numeric_to_label.setdefault(numeric_label, label)
+        if (
+            numeric_label in numeric_to_label
+            and numeric_to_label[numeric_label] != label
+        ):
+            raise ValueError(
+                "Inconsistent zero-padding detected for era index "
+                f"{numeric_label}: {numeric_to_label[numeric_label]!r} vs {label!r}"
+            )
+        numeric_to_label[numeric_label] = label
     return [numeric_to_label[num] for num in sorted(numeric_to_label)]
 
 

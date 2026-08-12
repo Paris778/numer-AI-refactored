@@ -27,7 +27,7 @@ __all__ = ["NeutralizationEngine"]
 
 _INTERCEPT_AWARE = True
 
-DEFAULT_CACHE_MAX_BYTES = 2 * 2**30  # 2 GiB
+DEFAULT_CACHE_MAX_BYTES = 8 * 2**30  # 8 GiB (per-era pinv cache; bigger = fewer recomputes on repeated runs)
 
 
 class NeutralizationEngine:

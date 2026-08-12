@@ -59,6 +59,10 @@ def _predict_in_era_batches(
     """
     from nmr.models import coerce_float32_features
 
+    if val_df.is_empty():
+        return val_df.select(["era", "id"]).with_columns(
+            pl.Series("prediction", [], dtype=pl.Float64)
+        )
     eras = list(dict.fromkeys(val_df.get_column("era").to_list()))
     chunks: list[pl.DataFrame] = []
     for start in range(0, len(eras), batch_eras):
@@ -367,8 +371,13 @@ class ExperimentRunner:
         purge = self._config.split.purge_eras
         all_eras = sorted({int(e) for e in val_df.get_column("era").unique().to_list()})
         if purge > 0:
-            keep = {str(e) for e in all_eras[purge:]}
-            val_df = val_df.filter(pl.col("era").is_in(keep))
+            # Compare on the NUMERIC era index: the era column is zero-padded
+            # ("0583"), so str(int) strings would match nothing below 1000 and
+            # silently truncate the window to eras >= 1000 (regression: the
+            # validation stage scored only 232 of 649 eras).
+            val_df = val_df.filter(
+                pl.col("era").cast(pl.Int32).is_in(all_eras[purge:])
+            )
         logger.info(
             "[validation] dropping first %d validation eras (20D-target overlap); "
             "%d eras scored", purge, val_df.select(pl.col("era").n_unique()).item()
@@ -514,12 +523,18 @@ class ExperimentRunner:
         return ExperimentRunner._compute_run_id(config)
 
     @staticmethod
-    def _code_fingerprint() -> str:
-        package_dir = Path(__file__).resolve().parent
+    def _code_fingerprint(package_dir: Path | None = None) -> str:
+        """SHA256 over sorted ``nmr/*.py`` names+contents.
+
+        Line endings are normalized (CRLF -> LF) before hashing so a Windows
+        checkout (autocrlf) and a POSIX checkout of the same commit produce
+        the same fingerprint — otherwise run_ids diverge across machines.
+        """
+        package_dir = package_dir or Path(__file__).resolve().parent
         digest = hashlib.sha256()
         for path in sorted(package_dir.glob("*.py")):
             digest.update(path.name.encode("utf-8"))
-            digest.update(path.read_bytes())
+            digest.update(path.read_bytes().replace(b"\r\n", b"\n"))
         return digest.hexdigest()
 
     @staticmethod

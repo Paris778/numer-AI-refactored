@@ -478,3 +478,11 @@ def test_evaluate_model_auto_selects_benchmark_column() -> None:
     assert score.bmc is not None
     assert score.bmc.n_eras >= 5
     assert np.isfinite(score.bmc.value)
+
+
+def test_sorted_numeric_keys_rejects_non_numeric_eras() -> None:
+    from nmr.scorecard import _sorted_numeric_keys
+
+    assert _sorted_numeric_keys({"0575": 1.0, "0583": 2.0}) == ["0575", "0583"]
+    with pytest.raises(ValueError, match="Non-numeric era keys"):
+        _sorted_numeric_keys({"0575": 1.0, "X": 0.0})

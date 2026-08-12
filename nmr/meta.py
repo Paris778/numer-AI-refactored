@@ -356,14 +356,22 @@ def campaign_evidence(
         corrs, degenerate = _per_era_pearson(
             joined, ["prediction"], main_target, "era"
         )
-        series = pl.DataFrame(
-            [
-                {"era": era, "ic": float(vec[0])}
-                for era, vec in corrs.items()
-                if era not in degenerate
-            ],
-            schema={"era": pl.Utf8, "ic": pl.Float64},
-        ).sort("era")
+        # Numeric chronological order — lexicographic sort on era strings
+        # scrambles the series (e.g. "1000" < "999") and corrupts the
+        # block-bootstrap block structure (regression class 2026-08-11).
+        series = (
+            pl.DataFrame(
+                [
+                    {"era": era, "ic": float(vec[0])}
+                    for era, vec in corrs.items()
+                    if era not in degenerate
+                ],
+                schema={"era": pl.Utf8, "ic": pl.Float64},
+            )
+            .with_columns(pl.col("era").cast(pl.Int64).alias("_era_idx"))
+            .sort("_era_idx")
+            .drop("_era_idx")
+        )
         ic_frames[label] = series
         ics = series["ic"].to_numpy()
         n_eras = int(ics.size)
@@ -382,6 +390,13 @@ def campaign_evidence(
             ["prediction"], medium_cols, main_target,
             proportion=1.0,
         )
+        # chronological order for the block bootstrap (see series above)
+        fne_series = (
+            fne_series
+            .with_columns(pl.col("era").cast(pl.Int64).alias("_era_idx"))
+            .sort("_era_idx")
+            .drop("_era_idx")
+        )
         fne_ics = fne_series["ic"].to_numpy()
         fne_ci_lo = fne_ci_hi = None
         if int(fne_ics.size) >= 2:
@@ -397,7 +412,11 @@ def campaign_evidence(
                 "variant": label,
                 "status": "recorded",
                 "backend": (config.get("model") or {}).get("backend"),
-                "device": (config.get("model") or {}).get("device", "auto"),
+                # actual resolved device (manifest) over config intent: an
+                # auto-configured run that fell back to CPU must be compared
+                # as CPU, not "auto"
+                "device": manifest.get("oof_device")
+                or (config.get("model") or {}).get("device", "auto"),
                 "n_features": len(manifest.get("feature_cols") or []),
                 "mean_ic": scorecard.get("corr"),
                 "ic_ci_lo": scorecard.get("corr_ci_low", ic_ci_lo),
@@ -440,17 +459,13 @@ def campaign_evidence(
                         n_boot=n_boot,
                         seed=seed,
                         min_overlap_eras=min_overlap_eras,
-                        device_a=str(
-                            next(
-                                (r["device"] for r in variant_rows
-                                 if r.get("variant") == key_a), None
-                            )
+                        device_a=next(
+                            (r["device"] for r in variant_rows
+                             if r.get("variant") == key_a), None
                         ),
-                        device_b=str(
-                            next(
-                                (r["device"] for r in variant_rows
-                                 if r.get("variant") == key_b), None
-                            )
+                        device_b=next(
+                            (r["device"] for r in variant_rows
+                             if r.get("variant") == key_b), None
                         ),
                     )
                 except NonVacuityError as exc:

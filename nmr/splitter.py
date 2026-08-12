@@ -77,7 +77,15 @@ class PurgedEraSplitter:
                 raise ValueError(
                     f"Non-numeric era label {era!r}; splitter requires numeric chronology"
                 ) from exc
-            numeric_to_label.setdefault(era_num, era)
+            if (
+                era_num in numeric_to_label
+                and numeric_to_label[era_num] != era
+            ):
+                raise ValueError(
+                    "Inconsistent zero-padding detected in era splitter for index "
+                    f"{era_num}: {numeric_to_label[era_num]!r} vs {era!r}"
+                )
+            numeric_to_label[era_num] = era
 
         if not numeric_to_label:
             raise ValueError("Era universe is empty")

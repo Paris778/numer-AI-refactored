@@ -35,6 +35,7 @@ __all__ = ["CVResult", "ModelOrchestrator", "coerce_float32_features"]
 
 
 _FIT_PROGRESS_PERIOD = 100  # print one training progress line every N iterations
+_PREDICT_ERA_BATCH = 20  # eras per predict call (bounds GPU VRAM / RAM)
 
 # Dtypes that are exactly representable in float32 (the Numerai v5.x integer
 # feature bins). Casting these to a single Float32 block BEFORE pandas makes
@@ -314,10 +315,7 @@ class ModelOrchestrator:
             fold.index,
             time.time() - t0,
         )
-        prediction = self._predict_model(
-            model,
-            features=self._feature_frame(val_df, feature_cols=feature_cols),
-        )
+        prediction = self._predict_model_chunked(model, val_df, feature_cols)
         pred_frame = val_df.select(["id", era_col]).rename({era_col: "era"})
         pred_frame = pred_frame.with_columns(
             pl.Series("prediction", np.asarray(prediction, dtype=float).reshape(-1))
@@ -326,12 +324,52 @@ class ModelOrchestrator:
 
     def _feature_frame(
         self, df: pl.DataFrame, *, feature_cols: Sequence[str]
-    ) -> pd.DataFrame:
-        feature_frame = coerce_float32_features(df, feature_cols).to_pandas()
-        return feature_frame.loc[:, list(feature_cols)]
+    ) -> np.ndarray:
+        """Float32 feature matrix, zero-copy from the coerced polars frame.
+
+        Skipping pandas entirely: polars→pandas goes through pyarrow and
+        allocates a full second copy (~36 GiB at 3,555 × 2.1M — the lgbm_v1
+        full-history OOM), while polars→numpy is zero-copy for the uniform
+        Float32 block (verified empirically). Values are bit-identical to the
+        pandas path: Int8 bins are exact in float32 and Float64 frames pass
+        through untouched.
+        """
+        return coerce_float32_features(df, feature_cols).to_numpy()
+
+    def _predict_model(self, model: object, *, features: np.ndarray) -> np.ndarray:
+        prediction = model.predict(features)
+        return np.asarray(prediction, dtype=float).reshape(-1)
+
+    def _predict_model_chunked(
+        self, model: object, val_df: pl.DataFrame, feature_cols: Sequence[str]
+    ) -> np.ndarray:
+        """Fold/val predict in era-batches to bound predict-time memory.
+
+        At 3,555 features a full fold-val matrix is ~4.9 GiB float32 — above
+        the 4 GiB GPU VRAM (xgb_v1 CUDA OOM) and heavy on RAM for CPU
+        predictors. Per-era predictions are row-wise identical to the full
+        frame, so concatenating era-batches is bit-identical to one call.
+        """
+        if val_df.is_empty():
+            return np.zeros(0, dtype=float)
+        eras = list(dict.fromkeys(val_df.get_column("era").to_list()))
+        parts: list[np.ndarray] = []
+        for start in range(0, len(eras), _PREDICT_ERA_BATCH):
+            batch_eras = set(eras[start : start + _PREDICT_ERA_BATCH])
+            part = val_df.filter(pl.col("era").is_in(batch_eras))
+            if part.is_empty():
+                continue
+            parts.append(
+                self._predict_model(
+                    model, features=self._feature_frame(part, feature_cols=feature_cols)
+                )
+            )
+        if not parts:
+            return np.zeros(0, dtype=float)
+        return np.concatenate(parts)
 
     def _fit_model(
-        self, *, features: pd.DataFrame, target: np.ndarray, use_gpu: bool = True
+        self, *, features: np.ndarray, target: np.ndarray, use_gpu: bool = True
     ) -> object:
         candidate_params = self._device_candidate_params(use_gpu=use_gpu)
         last_error: Exception | None = None
@@ -366,7 +404,7 @@ class ModelOrchestrator:
         raise last_error
 
     def _fit_with_progress(
-        self, model: object, features: pd.DataFrame, target: np.ndarray
+        self, model: object, features: np.ndarray, target: np.ndarray
     ) -> None:
         """Fit with progress markers on stdout.
 
@@ -396,7 +434,7 @@ class ModelOrchestrator:
         else:  # catboost: period-based verbose logging at fit time
             model.fit(features, target, verbose=period)
 
-    def _predict_model(self, model: object, *, features: pd.DataFrame) -> np.ndarray:
+    def _predict_model(self, model: object, *, features: np.ndarray) -> np.ndarray:
         prediction = model.predict(features)
         return np.asarray(prediction, dtype=float).reshape(-1)
 

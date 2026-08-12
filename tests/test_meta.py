@@ -319,7 +319,7 @@ def _evidence_environment(tmp_path: Path) -> tuple[Path, Path, Path]:
     )
     rng = np.random.default_rng(12)
     rows = []
-    for e in range(6):
+    for e in range(12):
         era = f"{e + 1:04d}"
         for i in range(15):
             f1, f2 = float(rng.normal()), float(rng.normal())
@@ -431,7 +431,7 @@ def test_campaign_evidence_assembles_variants_and_pairwise(
     row = pairwise.row(0, named=True)
     assert row["pair"] == "lgbm_v2 vs lgbm_v3"
     assert row["backend"] == "lightgbm"
-    assert row["n_eras"] == 6
+    assert row["n_eras"] == 12
     # v3 carries strictly more signal -> v2 - v3 < 0 with CI excluding zero
     assert row["mean_diff"] < 0.0
     assert row["ci_high"] < 0.0

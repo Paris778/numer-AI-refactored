@@ -30,7 +30,7 @@ These four files obey a strict **Single Source of Truth (SSOT) hierarchy**. One 
 
 ## 1. Agent Identity & Mission
 
-You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (564 tests). No lint/type-check tooling is configured — pytest is the sole automated gate, enforced by CI (`.github/workflows/ci.yml`).
+You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (577 tests). No lint/type-check tooling is configured — pytest is the sole automated gate, enforced by CI (`.github/workflows/ci.yml`).
 
 Your mission:
 
@@ -196,7 +196,7 @@ Never invent a `numerai_tools` / `numerapi` signature — open the installed sou
 .\.venv\Scripts\python -m pytest tests/test_benchmark_slice1.py -q                    # determinism hashes
 
 # Pre-sign-off gate (mandatory before delivering work)
-.\.venv\Scripts\python -m pytest -q                                                    # full 564-test suite
+.\.venv\Scripts\python -m pytest -q                                                    # full 577-test suite
 .\.venv\Scripts\python benchmark_runner.py --fast-mode --output artifacts/benchmark_scores_smoke.csv --labels-output artifacts/benchmark_test_era_labels_smoke.csv   # real-data smoke (writes artifacts/*_smoke.csv)
 ```
 
@@ -232,7 +232,7 @@ Real v5.3 scorecard fixtures are flaky if rows are limited **before** establishi
 
 ### RAM ceiling & full-universe training (recorded 2026-08-10)
 - **Machine:** 63.7 GiB RAM total. The **full 3,555-feature universe is memory-marginal**: a dense float32 feature array alone is ~28 GiB (2.12M train rows), and the deploy/validation path's float64 `to_numpy` is ~54 GiB. Peak for a solo full-universe fit ≈ 40–45 GiB — **run full-universe jobs only when the machine is otherwise idle** (a concurrent analysis/benchmark job caused the `lgbm_v1` campaign OOM: `_ArrayMemoryError: 28.1 GiB, shape (3555, 2123070)`).
-- **Memory guards now in code:** `nmr.models.coerce_float32_features` casts exactly-representable (Int*/UInt*/Float32) feature frames to a single Float32 block *before* pandas, so LightGBM/XGBoost's `to_numpy(dtype=float32)` is a zero-copy view (values bit-identical — Int8 bins are exact in float32; Float64 frames are untouched). The validation stage predicts in era-batches (`_predict_in_era_batches`, 40 eras/chunk) so the 54 GiB float64 materialization is bounded to ~1.7 GiB. OOF neutralization at 3,555 features is compute-bound (per-era pinv, ~3.5 h) — not a memory issue, do not "optimize" the math (oracle parity).
+- **Memory guards now in code (final form):** `nmr.models.coerce_float32_features` casts exactly-representable (Int*/UInt*/Float32) schemas to a single Float32 polars block, and `_feature_frame` returns the **zero-copy numpy view** of it (verified: 0.00 GiB RSS delta at 3 GiB) — pandas is skipped entirely because polars→pandas goes through pyarrow and allocates a second full copy (~36 GiB at 3,555 × 2.1M; this was the `lgbm_v1` full-history OOM even after the first fix). Values are bit-identical (Int8 bins exact in float32; Float64 frames untouched). All fold/full-history predicts run in era-batches (`_predict_model_chunked`, 20 eras/chunk) — a full fold-val matrix at 3,555 features is ~4.9 GiB float32, above the 4 GiB GPU VRAM (the `xgb_v1` CUDA OOM). The validation stage predicts in era-batches (`runner._predict_in_era_batches`, 40 eras/chunk) so the deploy closure's float64 `to_numpy` stays ≤ ~1.7 GiB. OOF neutralization at 3,555 features is compute-bound (per-era pinv, ~3.5 h) — not a memory issue, do not "optimize" the math (oracle parity).
 - **Full-universe campaign cells:** if a 3,555-feature variant OOMs, re-run it solo with the current code; never run two full-universe jobs concurrently.
 
 ### `embargo_eras` is structurally inert

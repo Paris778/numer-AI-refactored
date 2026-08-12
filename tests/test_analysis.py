@@ -1157,3 +1157,15 @@ def test_regime_analysis_persistence_ignores_degenerate_eras() -> None:
     pers = out["ic_persistence"]
     assert np.isfinite(pers["mean"])
     assert pers["n_adjacent"] >= 1
+
+
+def test_sorted_era_labels_strict_padding() -> None:
+    from nmr.evaluation import sorted_era_labels
+
+    # consistent (even mixed-width but unique ints) -> chronological
+    assert sorted_era_labels(["0583", "0575", "1000"]) == ["0575", "0583", "1000"]
+    # same int index with two string representations -> fail loud
+    with pytest.raises(ValueError, match="zero-padding"):
+        sorted_era_labels(["0575", "575"])
+    with pytest.raises(ValueError, match="Non-numeric"):
+        sorted_era_labels(["0575", "X"])

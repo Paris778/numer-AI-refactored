@@ -222,7 +222,20 @@ class MetricScorecard:
 
 
 def _sorted_numeric_keys(values: dict[str, float]) -> list[str]:
-    return sorted(values, key=lambda x: int(x))
+    """Sort per-era keys chronologically; non-numeric eras raise (fail loud).
+
+    A non-numeric era descriptor (e.g. live ``"X"``) in a scorecard metric
+    series is a data-integrity anomaly — silently sorting it last would fold
+    a bogus era into the aggregate, so it raises with a clear message instead.
+    """
+    try:
+        return sorted(values, key=lambda x: int(x))
+    except ValueError as exc:
+        bad = [k for k in values if not str(k).lstrip("-").isdigit()]
+        raise ValueError(
+            "Non-numeric era keys in scorecard metric series: "
+            f"{sorted(bad)} (validation eras must be numeric)"
+        ) from exc
 
 
 def _cell_from_series(

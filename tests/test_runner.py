@@ -415,3 +415,59 @@ def test_predict_in_era_batches_matches_full_frame_predict(tmp_path) -> None:
     )
     assert batched.equals(full)
     assert batched.height == val_df.height
+
+
+def test_validation_purge_keeps_zero_padded_eras(tmp_path) -> None:
+    """Regression (2026-08-11): the validation purge compared str(int) era
+    indices against zero-padded era labels, silently truncating the scored
+    window to eras >= 1000 (e.g. 232 of 649 eras). With padded fixture eras,
+    the purge must keep the numeric window: 6 eras, purge 1 -> 0014..0018."""
+    # _config writes the data; pad the files AFTER it (it rewrites them)
+    cfg = _validation_config(tmp_path)
+    vd = tmp_path / "data" / "vtest"
+    for name in (
+        "validation.parquet",
+        "meta_model.parquet",
+        "validation_benchmark_models.parquet",
+    ):
+        path = vd / name
+        df = pl.read_parquet(path)
+        df = df.with_columns(
+            pl.col("era").cast(pl.Int32).cast(pl.String).str.zfill(4)
+        )
+        df.write_parquet(path)
+
+    result = ExperimentRunner(cfg).run(deploy=True)
+    assert result.validation_predictions is not None
+    scored = sorted(
+        result.validation_predictions.get_column("era").unique().to_list()
+    )
+    assert scored == ["0014", "0015", "0016", "0017", "0018"]
+
+
+def test_predict_in_era_batches_empty_frame() -> None:
+    from nmr.runner import _predict_in_era_batches
+
+    empty = pl.DataFrame({"era": [], "id": []}, schema={"era": pl.String, "id": pl.String})
+    out = _predict_in_era_batches(empty, ["f1"], lambda pdf: pdf, batch_eras=40)
+    assert out.height == 0
+    assert out.columns == ["era", "id", "prediction"]
+
+
+def test_code_fingerprint_normalizes_line_endings(tmp_path) -> None:
+    """Windows (CRLF) and POSIX (LF) checkouts of the same commit must hash
+    identically — otherwise run_ids diverge across machines."""
+    from nmr.runner import ExperimentRunner
+
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    (pkg / "a.py").write_bytes(b"x = 1\r\n")
+    (pkg / "b.py").write_bytes(b"y = 2\r\n")
+    lf = ExperimentRunner._code_fingerprint(pkg)
+
+    (pkg / "a.py").write_bytes(b"x = 1\n")
+    (pkg / "b.py").write_bytes(b"y = 2\n")
+    assert ExperimentRunner._code_fingerprint(pkg) == lf
+
+    (pkg / "a.py").write_bytes(b"x = 99\n")
+    assert ExperimentRunner._code_fingerprint(pkg) != lf

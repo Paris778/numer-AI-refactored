@@ -246,15 +246,17 @@ class _FakeModel:
 
 @dataclass
 class _FeatureNameModel:
-    seen_fit_columns: list[str] | None = None
-    seen_predict_columns: list[str] | None = None
+    seen_fit_shape: tuple[int, int] | None = None
+    seen_predict_shape: tuple[int, int] | None = None
 
     def fit(self, features, target, **kwargs):
-        self.seen_fit_columns = list(features.columns)
+        self.seen_fit_shape = features.shape
+        assert isinstance(features, np.ndarray), "feature frames must be numpy"
         return self
 
     def predict(self, features):
-        self.seen_predict_columns = list(features.columns)
+        self.seen_predict_shape = features.shape
+        assert isinstance(features, np.ndarray), "feature frames must be numpy"
         return np.zeros(len(features), dtype=float)
 
 
@@ -327,8 +329,12 @@ def test_backend_boundary_uses_named_feature_frames_consistently() -> None:
     )
 
     assert prediction.height > 0
-    assert model.seen_fit_columns == ["f3", "f1", "f2"]
-    assert model.seen_predict_columns == ["f3", "f1", "f2"]
+    # feature frames are Float32 numpy (zero-copy memory discipline); column
+    # ORDER follows the requested feature_cols; fit/predict split heights
+    # differ (anchor split purges eras between them)
+    assert model.seen_fit_shape[1] == 3
+    assert model.seen_predict_shape[1] == 3
+    assert model.seen_fit_shape[0] > 0 and model.seen_predict_shape[0] > 0
 
 
 def test_train_full_history_covers_all_eras_and_is_cpu_only() -> None:
@@ -637,7 +643,7 @@ def test_coerce_float32_features_exact_and_all_or_nothing() -> None:
     assert out_float.schema == {"f1": pl.Float64}
 
 
-def test_feature_frame_is_single_float32_block_for_int_features() -> None:
+def test_feature_frame_is_float32_numpy_for_int_features() -> None:
     from nmr.models import ModelOrchestrator, coerce_float32_features
 
     df = _model_frame().with_columns(
@@ -645,11 +651,38 @@ def test_feature_frame_is_single_float32_block_for_int_features() -> None:
     )
     orchestrator = ModelOrchestrator(ModelConfig(backend="lightgbm"), seed=7)
     frame = orchestrator._feature_frame(df, feature_cols=["f1", "f2", "f3"])
-    assert list(frame.dtypes) == [np.dtype("float32")] * 3  # single uniform block
-    # The zero-copy precondition: to_numpy(float32) on a uniform float32
-    # block is a view — a second conversion must not allocate a new buffer.
-    arr = frame.to_numpy(dtype=np.float32, copy=False)
-    assert arr.base is not None or arr.flags["OWNDATA"] is False
+    assert isinstance(frame, np.ndarray)
+    assert frame.dtype == np.float32
+    assert frame.shape == (df.height, 3)
+    assert np.array_equal(frame, df.select(["f1", "f2", "f3"]).to_numpy())
     assert coerce_float32_features(df, ["f1", "f2", "f3"]).schema == {
         "f1": pl.Float32, "f2": pl.Float32, "f3": pl.Float32
     }
+
+
+@pytest.mark.parametrize("backend", ["lightgbm", "xgboost"])
+def test_fold_predict_chunked_matches_full_predict(backend: str) -> None:
+    """Era-batched predict (GPU-VRAM bound) is bit-identical to one call."""
+    df = _model_frame(n_eras=12, rows_per_era=6)
+    orchestrator = ModelOrchestrator(
+        ModelConfig(backend=backend, preset="fast", params=_tiny_model_params()),
+        seed=7,
+    )
+    model = orchestrator.train_full_history(
+        df, feature_cols=["f1", "f2", "f3"], target_col="target"
+    )
+    full = orchestrator._predict_model(
+        model, features=orchestrator._feature_frame(df, feature_cols=["f1", "f2", "f3"])
+    )
+    chunked = orchestrator._predict_model_chunked(model, df, ["f1", "f2", "f3"])
+    assert np.array_equal(full, chunked)
+
+
+def test_predict_model_chunked_empty_frame() -> None:
+    orchestrator = ModelOrchestrator(
+        ModelConfig(backend="lightgbm", preset="fast", params=_tiny_model_params()),
+        seed=7,
+    )
+    empty = _model_frame().clear()
+    out = orchestrator._predict_model_chunked(None, empty, ["f1"])  # type: ignore[arg-type]
+    assert out.size == 0
