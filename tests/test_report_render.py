@@ -133,7 +133,7 @@ def test_render_report_deterministic() -> None:
 
 def test_render_report_structure() -> None:
     md = render_dataset_report.render_report(**{**_fixture()})
-    assert md.startswith("# Dataset Analysis")
+    assert md.startswith("# Pre-Modelling Dataset & Feature Study")
     for header in ["## 1. Dataset Overview", "## 2. Era Structure", "## 3. Targets",
                    "## 4. Features", "## 5. Regimes & Signal Dynamics",
                    "## 6. Benchmarks & Meta-Model", "## 7. Modeling Implications",

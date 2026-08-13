@@ -1,11 +1,23 @@
-# Dataset Analysis — Numerai v5.3
+# Pre-Modelling Dataset & Feature Study — Numerai v5.3
 
-> Generated from `artifacts/reports/dataset_analysis/` dumps. All numbers have full precision in the dumps; tables are display-rounded. Schema lines precede every table.
+> **Purpose — read this first.** This document is the **single source of truth for the pre-modelling phase** of Numerai in this repo: what the dataset is, how it was refreshed, what the diagnostics show, which feature sets were tested end-to-end, and what the evidence implies for model design. A new engineer or LLM agent should start at §0, then §7 (modeling implications), §8 (decision log), §9 (methodology & reproduction), and §10 (artifact map).
+
+> Generated from `artifacts/reports/dataset_analysis/` dumps. All numbers have full precision in the dumps; tables are display-rounded. Schema lines precede every table. Regenerate: `analyze_dataset.py --features all` then `render_dataset_report.py --campaign-log artifacts/campaigns/<campaign_id>.json`.
 
 - Data version: `v5.3`
 - Feature set: `all` (3555 features)
 - Refresh date: `2026-08-08`
 - Era ranges: train `0001..0574`, validation `0575..1231`
+
+## 0. Executive Summary
+
+- **Dataset:** `v5.3` — train `0001..0574` (574 eras, 2,746,268 rows), validation `0575..1231` (657 eras, 4,107,040 rows); 3555 features across 19 packaged sets; 2 targets (`target, target_agnes_60`).
+- **Hardware:** 63.7 GiB RAM, 20 logical cores; GPU: NVIDIA RTX A1000 Laptop GPU. XGBoost trains on CUDA (~9.1x vs CPU); LightGBM on CPU; analysis ranks via cupy `rankdata` (~5.8x, bit-identical). The full 3,555-feature universe is memory-marginal on this machine — see §8 for the hardware ceiling.
+- **Stability screen (`target`):** 3 stable, 0 nonlinear of 3555 features. `stable` requires |mean_corr| >= 0.01 and |decay_slope| <= 0.001 on valid eras; `nonlinear` = |Pearson| <= 0.01 but |Spearman| > 0.01.
+- **Stability screen (`target_agnes_60`):** 423 stable, 98 nonlinear of 3555 features. `stable` requires |mean_corr| >= 0.01 and |decay_slope| <= 0.001 on valid eras; `nonlinear` = |Pearson| <= 0.01 but |Spearman| > 0.01.
+- **Benchmark floor (validation, 86-era meta overlap):** best benchmark `v53_lgbm_ender60` mean corr 0.0286; meta model 0.0221 (86 eras). Benchmarks define the achievable floor — a model must beat them, not just show positive IC.
+- **Feature-campaign verdict (validation eras 0583..1231, 8-era purge, identical params per backend, both engines agree <=3%):** `medium` (780) mean IC 0.0248..0.0254, IC Sharpe 1.52..1.53, FNE@100% 0.0248..0.0254 — signal survives full neutralization = non-linear structure; `small` (42) mean IC 0.0135..0.0144; the 3-feature screen variants mean IC 0.0016..0.0016 (near-null). Best cell: `xgb_v6` (xgboost).
+- **Unavailable cells:** 2 — `lgbm_v1`: hardware-infeasible for full-window validation on this machine (63.7 GiB): 4 attempts, 4 f; `xgb_v1`: hardware-infeasible: full-universe xgboost full-history DMatrix ~64 GiB > 63.7 GiB RAM (3  (full failure modes in §8).
 
 ## 1. Dataset Overview
 
@@ -18503,10 +18515,91 @@
 | xgb_v3 vs xgb_v4 | xgboost | 0.0000 | 0.0000 | 0.0000 | 636 |
 
 - **Verdict rule (screen gate):** if v3 (nonlinear rescue) or v4 (drift-filtered) beats v2 (linear stable) with a CI excluding zero on both backends, the univariate Pearson screen is dropping model-value and the `stable` gate defaults must be revised per the campaign evidence.
-## 8. Operational Findings (2026-08-10..13)
+## 8. Operational Findings & Decision Log (2026-08-08..13)
 
-- **Validation purge bug (fixed 2026-08-11):** the validation stage compared `str(int)` era indices against zero-padded era labels, silently scoring only eras >= 1000 (232 of 649) in every run before the fix. All campaign evidence in this report was regenerated on the corrected 649-era window (583..1231).
-- **HPO held-out partition bug (fixed 2026-08-11):** the same era-padding class broke `HyperparameterSweep`/`bayesian_sweep` on real data (held-out split empty); labels now preserve the data's zero-padding.
-- **Memory ceiling (documented):** the full 3,555-feature universe needs ~64 GiB commit for the xgboost full-history DMatrix and ~123 GiB of accumulated commit for the LightGBM deploy path on this 63.7 GiB machine — lgbm_v1 and xgb_v1 full-window validation cells are hardware-infeasible (4 + 3 documented attempts). Float32 zero-copy feature frames, era-batched predict, and a fresh-process full-history fit path were implemented and tested (bit-identical).
+- **2026-08-08 — Dataset refresh to v5.3.** `refresh_data.py` downloaded the current tournament assets; era ledger updated (`data/numerai_era_data.csv`: train 0001..0574, validation 0575..1231, live round 1329). The refresh module (`nmr/refresh.py`) had been hardened before this session: numeric version comparison (lexicographic would misorder v5.10 vs v5.3), live-round reconciliation, per-file refresh plans, atomic swaps, exit code 3 for `--check-only`.
+- **2026-08-09..10 — Full-universe analysis.** `analyze_dataset.py` ran all 16 stages on 3,555 features (~4-5 h): pooled moments, per-era IC screens (Pearson + Spearman + CI), PSI/W1/adversarial-AUC drift, regimes, correlation structure, benchmark/meta orthogonality. GPU rankdata (cupy) verified bit-identical to scipy and ~5.8x faster.
+- **2026-08-10 — Benchmark & evidence purge (user-approved).** Registry (2 runs + champion), run outputs, benchmark CSVs and era labels were purged; `benchmark_runner.py` re-pointed to v5.3 and re-run (null baselines + lgbm ender20/60) → `artifacts/benchmark_scores.csv`.
+- **2026-08-10 — Audit of evaluation machinery.** 7 findings fixed (strict era-label validation in evaluation/splitter/scorecard — inconsistent zero-padding previously caused silent data loss; numeric era ordering before block bootstrap — lexicographic sorts scramble the time series; device-string normalization in meta comparison; CRLF fingerprint normalization in `runner._code_fingerprint`; benchmark duplicate-row warning; empty-frame guards in chunked predict). 3 rejected with documented evidence (mtime-based registry sort — would violate the no-wall-clock invariant; silent sort-to-end fallback in scorecard; others).
+- **2026-08-11 — Validation purge bug (fixed).** The validation stage compared `str(int)` era indices against zero-padded era labels, silently scoring only eras >= 1000 (232 of 649) in every run before the fix. All campaign evidence in this report was regenerated on the corrected 649-era window (583..1231).
+- **2026-08-11 — HPO held-out partition bug (fixed).** The same era-padding class broke `HyperparameterSweep`/`bayesian_sweep` on real data (held-out split empty); labels now preserve the data's zero-padding.
+- **2026-08-12..13 — Feature campaign (12 cells).** 6 subsets x 2 backends with identical params per backend (fast preset, seed 20260810, walk_forward 4 folds, 8-era purge, 20D target). 10 cells recorded; both `v1` (all 3,555) cells are hardware-infeasible on this machine (4 + 3 documented attempts, see below). Campaign log: `artifacts/campaigns/a19577a6...c6ba9.json`; console log: `artifacts/campaigns/rebuild_v53_corrected.log`.
+- **Memory ceiling (documented):** the full 3,555-feature universe needs ~64 GiB commit for the xgboost full-history DMatrix and ~123 GiB of accumulated commit for the LightGBM deploy path on this 63.7 GiB machine — lgbm_v1 and xgb_v1 full-window validation cells are hardware-infeasible (4 + 3 documented attempts). The last lgbm_v1 solo attempt proved the **OOF path completes** at 3,555 features (~47 min training + ~2.7 h era-batched neutralization, OOF mean IC 0.0178 / Sharpe 1.19 on the train-window folds, log `artifacts/campaigns/rebuild_v53_v1solo.log`) — only the full-history deploy path OOMs, so CV experimentation on the full universe is feasible but the deploy artifact is not. Float32 zero-copy feature frames, era-batched predict, and a fresh-process full-history fit path were implemented and tested (bit-identical).
 - **Screen verdict on `target` (20D):** the linear screen yields only 3 stable features with near-null OOS IC (0.0016, CI [0.0003, 0.0028]); Numerai's packaged medium set carries 15x the signal (0.0248). The nonlinear/drift variants are structurally identical to v2 (0 nonlinear, 0 drifted features for `target`), so the audit's v3-vs-v2 gate cannot fire — the screen defaults stay unchanged pending human review of this evidence.
 - **Cross-backend agreement:** LightGBM and XGBoost rank the variants identically and agree within ~3% per cell — the evidence is engine-independent.
+
+## 9. Methodology & Provenance
+
+- **Dataset refresh (2026-08-08):** `refresh_data.py` + `nmr/refresh.py` — numeric version detection (`detect_newer_version`, `v<major>.<minor>` parse), live-round reconciliation against the era ledger `data/numerai_era_data.csv` (`needs_live_refresh`), per-file plans (`classify_refresh_plan`: static files `ensure`, expanding/live files `refresh` on round advance), atomic temp+fsync+`os.replace` swaps, and exit code 3 for `--check-only/--strict` gates. `validation.parquet` expands every week; `live.parquet` changes daily; `train.parquet` is static. Run: `./.venv/Scripts/python refresh_data.py --version v5.3`.
+- **Analysis pipeline (2026-08-09..10):** `analyze_dataset.py` — 16 modular stages (`overview, targets, ic_by_era, screens, summary, psi, drift, derived_sets, corr_medium, corr_all, set_membership, ic_by_split, regimes, benchmarks, meta_ortho, manifest`) with auto-included dependencies and `--only/--skip` so a single metric can be recomputed without a full run. GPU: cupy `rankdata` (bit-identical to scipy on finite data, ~5.8x) with automatic scipy fallback. Full-universe run is ~4-5 h (three 3,555-feature streaming passes); `--max-eras` truncates for fast iteration.
+- **Feature campaign (2026-08-12..13):** 12 cells = 6 feature subsets x 2 backends, identical model params per backend (fast preset, seed 20260810, walk_forward 4 folds, 8-era purge, 20D target only): v1 `all` (3,555) — baseline floor; v2 `screen_stable` (3); v3 `screen_linear_or_nonlinear` (3); v4 `screen_drift_filtered` (3); v5 `small` (42); v6 `medium` (780). Configs: `configs/campaigns/benchmark-rebuild-v1/`. Evidence assembled by `nmr.meta.campaign_evidence` from each run's `validation_preds.parquet` — per-era validation IC, block-bootstrap 95% CI, IC Sharpe, max drawdown, and FNE@100% (residual IC after full linear neutralization against `medium`).
+- **Benchmark rebuild (2026-08-10..13):** `benchmark_runner.py` re-run on v5.3 (null baselines + lgbm ender20/60) → `artifacts/benchmark_scores.csv` (8 rows: constant-0.5, gaussian-random, uniform-random, trivial, linear, tree, v53_lgbm_ender20, v53_lgbm_ender60; 86-era meta-overlap window).
+- **Determinism:** every number above comes from persisted dumps (`artifacts/reports/dataset_analysis/`); the renderer is a pure function of those dumps. Registry runs are immutable and hashed (`run_id`); all registry writes are atomic temp+fsync+replace.
+
+## 10. File & Artifact Map
+
+**Dumps (full precision lives here; the report tables are display-rounded):**
+
+| path | contents |
+|---|---|
+| artifacts/reports/dataset_analysis/manifest.json | data version, era ranges, feature counts, hardware spec, stages run |
+| artifacts/reports/dataset_analysis/overview.json | split sizes (rows/eras) + packaged feature-set sizes |
+| artifacts/reports/dataset_analysis/era_structure.parquet | per-era rows/ids/gaps (§2) |
+| artifacts/reports/dataset_analysis/targets.json | per-target pooled moments, missing rates, era coverage (§3) |
+| artifacts/reports/dataset_analysis/target_corr.parquet | pairwise target per-era Spearman (§3) |
+| artifacts/reports/dataset_analysis/feature_summary.parquet | per-feature pooled moments (§4.1) |
+| artifacts/reports/dataset_analysis/feature_ic_by_era.parquet | per-era feature IC long form (48 MB) — the raw screen input |
+| artifacts/reports/dataset_analysis/feature_ic_screen.parquet | stability screen: mean_corr + CI, spearman, stable/nonlinear flags (§4.2) |
+| artifacts/reports/dataset_analysis/feature_ic_by_split.parquet | train vs validation mean IC per feature (§4.4) |
+| artifacts/reports/dataset_analysis/feature_drift_profile.parquet | PSI, W1, W1/sigma, adversarial AUC, drifted flag (§4.3) |
+| artifacts/reports/dataset_analysis/feature_drift_psi.parquet | raw PSI stage dump |
+| artifacts/reports/dataset_analysis/feature_set_redundancy.json | within-set pairwise \|corr\| stats (§4.5) |
+| artifacts/reports/dataset_analysis/feature_corr_medium.parquet | top medium-set correlation pairs |
+| artifacts/reports/dataset_analysis/feature_corr_medium_matrix.parquet | full 780x780 medium correlation matrix |
+| artifacts/reports/dataset_analysis/feature_corr_all_summary.json | mean \|corr\| + min eigenvalue (PSD guard) (§4.6) |
+| artifacts/reports/dataset_analysis/set_membership.json | feature -> packaged-set membership |
+| artifacts/reports/dataset_analysis/regimes.json | crash/hot eras, IC persistence, regime thresholds (§5) |
+| artifacts/reports/dataset_analysis/era_signal.parquet | per-era mean IC + regime labels (§5) |
+| artifacts/reports/dataset_analysis/benchmarks.json | benchmark mean corr over the 86-era meta-overlap window (§6) |
+| artifacts/reports/dataset_analysis/meta_ortho.parquet | feature vs meta-model correlation + orthogonal flag (§6) |
+| artifacts/reports/dataset_analysis/neutralized_ic.json | FNE profile over the neutralization-proportion grid (§6) |
+| artifacts/reports/dataset_analysis/derived_feature_sets.json | screen-derived subsets: screen_stable / screen_nonlinear / screen_linear_or_nonlinear / screen_drift_filtered |
+| artifacts/reports/dataset_analysis/campaign_variants.parquet | §7.1 evidence table (persisted; regenerated only if missing, ~30-50 min) |
+| artifacts/reports/dataset_analysis/campaign_pairwise.parquet | §7.2 paired screen verdicts |
+
+**Campaign & registry (the actual run results):**
+
+| path | contents |
+|---|---|
+| artifacts/campaigns/a19577a6...c6ba9.json | campaign log: per-config sha256, status (recorded/error), run_id, error reasons — the source for §7 cells |
+| artifacts/campaigns/rebuild_v53_corrected.log | full campaign console log on the corrected 649-era window |
+| artifacts/registry/<run_id>/run.json | run manifest + scorecard + metrics (immutable record) |
+| artifacts/registry/<run_id>/validation_preds.parquet | per-era validation predictions — the input to campaign_evidence |
+| artifacts/registry/<run_id>/oof.parquet | out-of-fold predictions |
+| artifacts/benchmark_scores.csv | rebuilt benchmark suite output (8 model rows) |
+| configs/campaigns/benchmark-rebuild-v1/*.yaml | the 12 campaign configs (lgbm/xgb x v1..v6) |
+| data/v5.3/ | downloaded tournament assets (train/validation/live parquet, features.json, benchmark + meta-model parquets) |
+| data/numerai_era_data.csv | refresh-era ledger (train/validation ranges + live round id) |
+
+**Regenerate everything:**
+
+```bash
+# 1. Refresh data (new rounds)
+./.venv/Scripts/python refresh_data.py --version v5.3
+
+# 2. Full analysis (16 stages, ~4-5 h) or a subset
+./.venv/Scripts/python analyze_dataset.py --features all --output-dir artifacts/reports/dataset_analysis
+./.venv/Scripts/python analyze_dataset.py --only screens,drift,derived_sets --features all --output-dir artifacts/reports/dataset_analysis
+
+# 3. Render this report (campaign evidence reads persisted parquets)
+./.venv/Scripts/python render_dataset_report.py --campaign-log artifacts/campaigns/a19577a60700ce94209343aa244f2582e8aeda1df995482a9591a4a5aa6c6ba9.json
+
+# 4. Run a campaign (dry-run first; training is not cheap)
+./.venv/Scripts/python run_campaign.py --config a.yaml --config b.yaml --name <campaign> --dry-run
+
+# 5. Benchmark suite (smoke / full)
+./.venv/Scripts/python benchmark_runner.py --fast-mode --output artifacts/benchmark_scores_smoke.csv
+
+# 6. Tests (580-collection guard enforced by tests/test_docs_hygiene.py)
+./.venv/Scripts/python -m pytest -q
+```

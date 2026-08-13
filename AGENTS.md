@@ -167,7 +167,7 @@ The `docs/` tree is a curated Numerai domain library; `docs/DOCS_README.md` is i
 | Refresh the Numerai datasets / era ledger | `nmr/refresh.py` + `refresh_data.py` |
 | Plan research work | `docs/04-research/research-program.md` (E0–E8 grid), `docs/04-research/advanced-ideas.md` (ideas incl. NN directions), `docs/04-research/State-of-the-Art Deep Learning for Obfuscated, Non-Stationary Tabular Regression.md` (tabular-DL survey) |
 | Seek domain intuition | `docs/02-strategy/strategy-bible.md` + `docs/02-strategy/why-it-works.md` |
-| Design/train a model — start here | `docs/04-research/dataset-analysis-2026-08.md` — the **joined pre-modeling document**: dataset diagnostics (§1–6), feature-campaign evidence (§7: 10 variants × 2 backends, full 649-era validation window, CIs + FNE), operational findings incl. hardware ceilings (§8) |
+| Design/train a model — start here | `docs/04-research/pre-modelling-dataset-feature-study-2026-08.md` — the **golden pre-modelling document (single source of truth)**: dataset diagnostics (§1–6), feature-campaign evidence (§7: 12 cells × 2 backends, full 649-era validation window, CIs + FNE), decision log + hardware ceilings (§8), methodology & reproduction (§9), file/artifact map with pointers to every result number (§10) |
 
 Start with the agent reading order in `docs/DOCS_README.md` §1; the 15-minute version is §2–§3.
 
