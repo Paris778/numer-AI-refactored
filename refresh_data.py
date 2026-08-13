@@ -1,13 +1,12 @@
 """Round-aware Numerai dataset refresh — thin control plane.
 
-Downloads/updates data/v5.2 assets via the public Numerai API and maintains
+Downloads/updates data/v5.3 assets via the public Numerai API and maintains
 data/numerai_era_data.csv (the refresh ledger). All decision logic lives in
 ``nmr/refresh.py``; this script only wires numerapi calls, file I/O, and
 argument parsing.
 
 Exit codes: 0 = ok (or advisory-only warning), 1 = hard failure,
-3 = gate tripped (--check-only/--strict). See docs/superpowers/specs/
-2026-08-08-dataset-analysis-design.md §3.4.
+3 = gate tripped (--check-only/--strict).
 """
 
 from __future__ import annotations

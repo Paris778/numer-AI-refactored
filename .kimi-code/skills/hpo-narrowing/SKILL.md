@@ -26,7 +26,7 @@ disableModelInvocation: false
 - Seeded TPE, but deterministic **per environment** — results can differ across machines (like GPU vs CPU OOF); rerun on the environment you report.
 - Pick top candidates from `SweepResult.trials` (columns `trial_id`, `params_json`, `metric_value`, `metric`, sorted by `metric_value` desc).
 
-**Stage 3 — confirm.** Materialize best configs into `configs/hpo/*.yaml`; run full `ExperimentRunner(cfg).run(deploy=False)` + validation scorecard. Compare via `promotion_verdict(candidate, champion, *, metric="corr_sharpe_ac")`: propose **"promote"** only when the candidate's CI clears the champion's; "caution" on overlap or missing CI. Advisory only — hand the proposal to the human; **never call `RunRegistry.promote` yourself**.
+**Stage 3 — confirm.** Materialize best configs into tracked YAML files (e.g. `configs/campaigns/<name>/hpo-*.yaml`); run full `ExperimentRunner(cfg).run(deploy=False)` + validation scorecard. Compare via `promotion_verdict(candidate, champion, *, metric="corr_sharpe_ac")`: propose **"promote"** only when the candidate's CI clears the champion's; "caution" on overlap or missing CI. Advisory only — hand the proposal to the human; **never call `RunRegistry.promote` yourself**.
 
 ## Budget Rule
 - Routine sweeps: `fast` preset only; `deep` reserved for confirmed winners (AGENTS.md §10).

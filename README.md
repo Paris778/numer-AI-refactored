@@ -2,7 +2,7 @@
 
 A **lean, deterministic research framework** for the [Numerai Classic tournament](https://numer.ai), built as a single tested Python package (`nmr/`). It takes a typed YAML config through data ingestion, era-purged cross-validation, multi-target LightGBM/XGBoost/CatBoost training, rank-domain ensembling, feature neutralization, oracle-parity evaluation, and out the other end produces a registry-tracked, cloudpickled `predict()` artifact ready for hosted upload.
 
-**Stack:** Python 3.11+ · Polars · LightGBM / XGBoost / CatBoost · NumPy / SciPy / scikit-learn · `numerai-tools` · `numerapi` · cloudpickle · Streamlit / Plotly · pytest (580 tests)
+**Stack:** Python 3.11+ · Polars · LightGBM / XGBoost / CatBoost · NumPy / SciPy / scikit-learn · `numerai-tools` · `numerapi` · cloudpickle · Streamlit / Plotly · pytest
 
 > **For AI coding agents:** [`AGENTS.md`](AGENTS.md) is the authoritative source of truth for principles, invariants, and operational hazards — read it first. System internals live in [`ARCHITECTURE.md`](ARCHITECTURE.md). Humans contributing code should read [`CONTRIBUTING.md`](CONTRIBUTING.md). This README is a human-facing overview and setup guide; when documents disagree, trust `AGENTS.md` and the code.
 
@@ -11,7 +11,7 @@ A **lean, deterministic research framework** for the [Numerai Classic tournament
 ## What it does
 
 - **Deterministic experiments** — one frozen `ExperimentConfig` drives everything; identical config + data + code produces an identical SHA256 `run_id`, OOF predictions, and scorecard hash.
-- **Leakage-safe validation** — era-grouped walk-forward / anchor splits with an 8-era purge for 20D targets (16 for 60D). Random row-level CV is structurally impossible.
+- **Leakage-safe validation** — era-grouped walk-forward / anchor splits with purged era buffers (splitter spec: [`ARCHITECTURE.md`](ARCHITECTURE.md#c-validation-splitting--nmrsplitterpy)). Random row-level CV is structurally impossible.
 - **Oracle-parity metrics** — fast custom CORR / MMC / FNC / BMC / CWMM implementations, each pinned to `numerai_tools.scoring` by parity tests.
 - **Rank-domain ensembling** — per-era rank-gaussianized component blending with ridge/NNLS weight learning.
 - **Feature neutralization** — intercept-aware per-era least squares with a content-addressed pseudo-inverse cache.
@@ -52,7 +52,7 @@ A **lean, deterministic research framework** for the [Numerai Classic tournament
 ├── configs/                   # experiment configs (YAML)
 │   ├── example.yaml           # annotated full schema
 │   └── first_model.yaml       # current competitive config (4×20D-target ensemble)
-├── tests/                     # 580 tests (unit / parity / determinism / real-data tests)
+├── tests/                     # unit / parity / determinism / real-data tests
 ├── data/                      # local Numerai v5.3 assets (parquets git-ignored)
 ├── artifacts/                 # runs, registry, caches, campaigns, benchmark CSVs (generated)
 ├── docs/                      # curated Numerai knowledge base — start at docs/DOCS_README.md
@@ -63,7 +63,7 @@ A **lean, deterministic research framework** for the [Numerai Classic tournament
 ├── train_first_model.py       # CLI: train, register, and promote the first model
 ├── generate_dashboard.py      # CLI: validation-scorecard leaderboard → artifacts/dashboard.html
 ├── dashboard_app.py           # interactive dashboard — streamlit run dashboard_app.py (registry/benchmarks/campaigns, read-only)
-├── pytest.ini                 # pythonpath = . (no install step needed)
+├── pytest.ini                 # pytest configuration
 ├── requirements.txt           # runtime + dev dependencies
 ├── AGENTS.md                  # authoritative reference for AI coding agents
 ├── ARCHITECTURE.md            # pipeline topology, formulas, schemas
@@ -113,24 +113,14 @@ python refresh_data.py --dry-run  # print the plan, download nothing
 python refresh_data.py --check-only   # exit 3 if a newer data version or stale files
 ```
 
-Behavior: `live.parquet` (and live benchmarks/example preds) re-download every time the
-tournament round advances; weekly-expanding files (`validation.parquet`,
-`validation_benchmark_models.parquet`, `meta_model.parquet`, ...) re-download on round
-advance; truly static files download only when missing. A prominent `[WARNING]` is
-printed when the API lists a newer data version than the pipeline's target
-(`--strict` turns it into exit code 3; `--check-only` into a status check). The era
-ledger `data/numerai_era_data.csv` records per-dataset refresh dates, era ranges, and
-the live round. See `docs/superpowers/specs/2026-08-08-dataset-analysis-design.md` §3.
+A prominent `[WARNING]` is printed when the API lists a newer data version than the pipeline's target (`--strict` turns it into exit code 3; `--check-only` into a status check). Refresh triggers and the era-ledger schema (`data/numerai_era_data.csv`) are specified in [`ARCHITECTURE.md`](ARCHITECTURE.md) §3.
 
 ---
 
 ## Quickstart
 
 ```powershell
-# 1. Activate the venv and install dependencies
-.\.venv\Scripts\Activate.ps1
-.\.venv\Scripts\python -m pip install -r requirements.txt
-
+# 1. Activate the venv and install dependencies — see CONTRIBUTING.md 'Before you start'
 # 2. Train, register, and promote the first competitive model
 .\.venv\Scripts\python train_first_model.py
 
@@ -163,11 +153,6 @@ registry.promote(result.run_id)                   # → artifacts/registry/champ
 
 See [`CONTRIBUTING.md`](CONTRIBUTING.md#testing--verification) for the full workflow, targeted subsets, and the pre-sign-off gate.
 
-```powershell
-# Quick verification (from the repo root)
-.\.venv\Scripts\python -m pytest -q
-```
-
 ---
 
 ## Repository Guide
@@ -188,7 +173,7 @@ A curated, tiered Numerai knowledge base with a deterministic reading path:
 - [docs/04-research/](docs/04-research/research-program.md) — research program + consolidated research-ideas file (incl. neural-network directions), deep tabular-DL survey
 - [docs/05-notebooks/](docs/05-notebooks/) — onboarding notebooks (hello-numerai, neutralization, target ensembles, sunshine example)
 - [docs/06-evaluation/](docs/06-evaluation/evaluation-suite-bible.md) — **the evaluation spec of record**: how this repo judges a model; the benchmark null-floor / S11 ladder is [benchmark-line-in-the-sand.md](docs/06-evaluation/benchmark-line-in-the-sand.md)
-- [docs/99-archive/](docs/99-archive/) — archived, low-priority reference (bounty/security pointer, grandmaster-seasons summary, super-research prompt); raw source originals preserved unmodified under `docs/99-archive/raw-source/`
+- [docs/99-archive/](docs/99-archive/) — archived, low-priority reference (bounty/security pointer, grandmaster-seasons summary, super-research prompt); surviving raw source originals under `docs/99-archive/raw-source/` (provenance policy: [docs/DOCS_README.md](docs/DOCS_README.md#6-provenance-and-merge-policy))
 
 The authoritative map — importance tiers, per-file table, and reading recipes — lives in [docs/DOCS_README.md](docs/DOCS_README.md); the bullets above are a directory summary, not the map itself.
 

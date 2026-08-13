@@ -79,7 +79,7 @@ If a request violates any of these, **decline the violating component** and offe
 - 🚫 **Never** include wall-clock timings, absolute paths, or environment-variable state in canonical hashes.
 - 🚫 **Never** import from or modify `../numer-AI/` (read-only legacy — mine it for logic, never import it).
 - 🚫 **Never** introduce unrelated refactoring, cosmetic tweaks, or scope creep.
-- 🚫 **Never** add third-party dependencies when the stdlib, NumPy/SciPy, or Polars can do the job. **User-granted exceptions (2026-08-08, all pinned in `requirements.txt`):** Optuna (HPO — imported only in `nmr/opt.py`; parallel trial execution forbidden, `n_jobs=1`); CatBoost (model backend — imported only in `nmr/models.py`; CPU-only, §G); Streamlit + Plotly (interactive dashboard — imported only in `dashboard_app.py`; read-only app).
+- 🚫 **Never** add third-party dependencies when the stdlib, NumPy/SciPy, or Polars can do the job. **User-granted exceptions (all pinned in `requirements.txt`):** Optuna (HPO — imported only in `nmr/opt.py`; parallel trial execution forbidden, `n_jobs=1`); CatBoost (model backend — imported only in `nmr/models.py`; CPU-only, §G); Streamlit + Plotly (interactive dashboard — imported only in `dashboard_app.py`; read-only app); cupy + NVIDIA runtime wheels (analysis rankdata — imported only in `nmr/_gpu.py`; optional at runtime, automatic scipy fallback; §8).
 - 🚫 **Never** suppress or silently swallow exceptions.
 
 ---
@@ -142,7 +142,7 @@ When modifying or generating code, enforce these seven invariants:
 | Change benchmark baselines / gates | `nmr/benchmark.py` + `benchmark_runner.py` |
 | Change campaign orchestration | `nmr/campaign.py` + `run_campaign.py` (spec: `ARCHITECTURE.md` §R) |
 | Inspect runs / campaigns interactively | `dashboard_app.py` — `streamlit run` (read-only) |
-| Analyze the dataset / run one analysis stage | `analyze_dataset.py` — 16 modular stages, `--only`/`--skip` (deps auto-included), progress markers |
+| Analyze the dataset / run one analysis stage | `analyze_dataset.py` — modular stages, `--only`/`--skip` (deps auto-included), progress markers (stage registry: `ARCHITECTURE.md` §O) |
 | Discover hardware / check live resource status | `nmr/hardware.py` + `hardware_status.py` (stdlib only: nvidia-smi + ctypes) |
 | Run a research protocol (feature campaign / HPO / meta-analysis / QA gate) | `.kimi-code/skills/` — `feature-campaign`, `hpo-narrowing`, `run-meta-analysis`, `verification-before-claim` (map: `ARCHITECTURE.md` §T) |
 | Add/remove a public API symbol | `nmr/__init__.py` — imports **and** `__all__` |
@@ -159,7 +159,7 @@ The `docs/` tree is a curated Numerai domain library; `docs/DOCS_README.md` is i
 | Change neutralization | `docs/01-canon/models.md` (official `neutralize()` code) + `docs/05-notebooks/2_feature_neutralization.ipynb` |
 | Change ensembling | `docs/02-strategy/target-ensembling-math.md` + `docs/05-notebooks/3_target_ensemble.ipynb` |
 | Change the payout proxy | `docs/01-canon/staking.md` (0.75/2.25 weights, ±5% clip, stake thresholds) |
-| Change model presets / params | `docs/01-canon/models.md` (benchmark walk-forward: 8-era purge for 20D, 16 for 60D; standard/deep params) |
+| Change model presets / params | `docs/01-canon/models.md` (benchmark walk-forward conventions; standard/deep params) |
 | Touch submission or deployment | `docs/01-canon/submissions.md` + `docs/02-strategy/strategy-bible.md` §8 (deployment contract) |
 | Change benchmark gates | `docs/06-evaluation/benchmark-line-in-the-sand.md` (null floor + S11 ladder) |
 | Change evaluation semantics | `docs/06-evaluation/evaluation-suite-bible.md` (evaluation spec of record) |
@@ -175,7 +175,7 @@ Never invent a `numerai_tools` / `numerapi` signature — open the installed sou
 
 **First-session orientation (10 minutes):**
 
-1. `.\.venv\Scripts\python -m pytest -q` — establish the green baseline (the test count is CI-enforced against this file's claims).
+1. Run the fast gate ([Verification Gates](#7-verification-gates)) — establish the green baseline (the test count is CI-enforced against this file's claims).
 2. `nmr/__init__.py` — the public API surface (imports + `__all__`); nothing outside it is public.
 3. `configs/first_model.yaml` — the current competitive config; `configs/example.yaml` — annotated schema.
 4. `ARCHITECTURE.md` §1 (pipeline diagram) and §3 (module dependency graph) — the system map.
@@ -188,20 +188,13 @@ Never invent a `numerai_tools` / `numerapi` signature — open the installed sou
 <verification_gates>
 ## 7. Verification Gates
 
-```powershell
-# Fast gate — run after every meaningful change (repo root, venv active)
-.\.venv\Scripts\python -m pytest -q
+Three gates, in order of rigor — **exact commands live only in [`CONTRIBUTING.md`](CONTRIBUTING.md#testing--verification)**:
 
-# Targeted subsets while iterating
-.\.venv\Scripts\python -m pytest tests/test_parity.py tests/test_risk_parity.py -q   # oracle parity
-.\.venv\Scripts\python -m pytest tests/test_benchmark_slice1.py -q                    # determinism hashes
+1. **Fast gate** — full `pytest -q` after every meaningful change.
+2. **Targeted subsets** while iterating — oracle parity (`tests/test_parity.py` + `tests/test_risk_parity.py`) and determinism hashes (`tests/test_benchmark_slice1.py`).
+3. **Pre-sign-off gate** (mandatory before delivering work) — full 580-test suite plus the real-data benchmark smoke (`benchmark_runner.py --fast-mode` → `artifacts/*_smoke.csv`).
 
-# Pre-sign-off gate (mandatory before delivering work)
-.\.venv\Scripts\python -m pytest -q                                                    # full 580-test suite
-.\.venv\Scripts\python benchmark_runner.py --fast-mode --output artifacts/benchmark_scores_smoke.csv --labels-output artifacts/benchmark_test_era_labels_smoke.csv   # real-data smoke (writes artifacts/*_smoke.csv)
-```
-
-Real-data tests require the `data/v5.3/` parquet assets (see [`README.md`](README.md#data-assets)). If they are missing, report which tests were skipped — never claim full verification. CI (`.github/workflows/ci.yml`) runs this same fast gate on every push/PR (see [`CONTRIBUTING.md`](CONTRIBUTING.md#testing--verification)).
+Real-data tests require the `data/v5.3/` parquet assets (see [`README.md`](README.md#data-assets)). If they are missing, report which tests were skipped — never claim full verification. CI (`.github/workflows/ci.yml`) enforces the fast gate on every push/PR (see [`CONTRIBUTING.md`](CONTRIBUTING.md#testing--verification)).
 </verification_gates>
 
 ---
@@ -220,24 +213,21 @@ These are real, verified issues — do not "fix" them silently as a side effect.
 ### Era-overlap-before-limit rule for real-data fixtures
 Real v5.3 scorecard fixtures are flaky if rows are limited **before** establishing era overlap across validation/meta/benchmarks. Always build test payloads from overlap eras first (join/filter by shared eras), then limit/window. `NonVacuityError` fires when overlap < `MIN_OVERLAP_ERAS` (20).
 
-### GPU-first model params with CPU fallback
-`ModelOrchestrator` is GPU-first with CPU fallback: LightGBM via `device_type="gpu"`, XGBoost (>= 3.0) via `device="cuda"` + `tree_method="hist"` (`gpu_hist` was removed in 3.x and raises `Invalid Input`). A failed device attempt is logged with the exception type and the resolved device is recorded in the run manifest (`oof_device`). `model.device` (`auto` | `gpu` | `cpu`, default `auto`) controls CV/experimentation: `gpu` forces the GPU candidate (a failure raises — no silent fallback), `cpu` never attempts it. `train_full_history` is always CPU (deploy artifact invariant). Numeric results may differ slightly between GPU and CPU runs — determinism guarantees hold per-device, not across devices.
-
-### GPU & runtime state (recorded 2026-08-09)
-- **Device flag:** `model.device` (`auto|gpu|cpu`) — the knob for GPU training; the run manifest records `pipeline_device` (config) and `oof_device` (actual). Compare runs across devices only with that caveat in mind.
-- **xgboost ≥ 3.0:** GPU is `device="cuda"` + `tree_method="hist"`. `gpu_hist` no longer exists — the old GPU-first params were silently falling back to CPU on every xgboost fit; fixed in this session (measured: **9.1×** faster CUDA vs CPU, 300k×780, 300 trees, RTX A1000 Laptop 4 GiB — the full 3,555-feature universe fits).
-- **cupy (user-granted, pinned in `requirements.txt`):** `nmr/_gpu.py` provides `rankdata` — lazy cupy load, **bit-identical to scipy on finite data** (~5.8× faster at 3555×7000), automatic scipy fallback, wired into the analysis rank paths (Spearman IC, rank-gaussianize, drift AUC). Two rules: never import cupy into `nmr/_transforms` (embedded by value in deploy artifacts — must stay numpy/scipy-only), and note scipy 1.17's `rankdata` returns *all-NaN* when any NaN is present (`nan_policy='propagate'`) — `_gpu.rankdata` deliberately isolates NaN instead (more correct; v5.3 features have zero NaN so both paths agree).
+### GPU & runtime state (updated 2026-08-09)
+`ModelOrchestrator` is GPU-first with CPU fallback for CV (device params: `ARCHITECTURE.md` §G). A failed device attempt is logged; the run manifest records the config device as `pipeline_device` and the actual fit device as `oof_device`. `model.device` (`auto|gpu|cpu`, default `auto`) is the knob for CV/experimentation: `gpu` forces the GPU candidate (a failure raises — no silent fallback), `cpu` never attempts it. `train_full_history` is always CPU (deploy artifact invariant). Determinism holds per-device, not across devices — numeric results may differ slightly between GPU and CPU runs.
+- **xgboost ≥ 3.0 (fixed 2026-08-09):** the old GPU-first params were silently falling back to CPU on every fit; CUDA now actually engages (measured: `ARCHITECTURE.md` §U).
+- **cupy (user-granted, pinned in `requirements.txt`):** `nmr/_gpu.py` provides `rankdata` — lazy cupy load, bit-identical to scipy on finite data, automatic scipy fallback (measurements: `ARCHITECTURE.md` §U). Two rules: never import cupy into `nmr/_transforms` (embedded by value in deploy artifacts — must stay numpy/scipy-only); `_gpu.rankdata` deliberately isolates NaN instead of scipy's all-NaN propagation (`nan_policy='propagate'`) — v5.3 features have zero NaN so both paths agree.
 - **Windows pip pitfall:** `./.venv/Scripts/pip` is a shim into the legacy `../numer-AI/.venv` — always `./.venv/Scripts/python -m pip`. The venv is shared with the legacy repo; never install there via the shim (see CONTRIBUTING.md).
 - **Long jobs:** background tasks die when the session closes — for multi-hour runs use `nohup ./.venv/Scripts/python <script> > <log> 2>&1 &` and poll the log (stage markers + era ticks make progress visible).
-- **Analysis runtime:** full-universe (`--features all`) analysis is ~4–5 h, dominated by the three 3,555-feature streaming passes (ic_by_era + 2 screens, each re-streaming the parquet); cupy cuts the per-era rankdata 5.8×. The screen passes could be derived from the persisted long-form (dedup, ~1–1.5 h saved) — deferred.
+- **Analysis runtime:** full-universe (`--features all`) analysis is ~4–5 h, dominated by the three 3,555-feature streaming passes (ic_by_era + 2 screens, each re-streaming the parquet); cupy accelerates the per-era rankdata (measured: `ARCHITECTURE.md` §U). The screen passes could be derived from the persisted long-form (dedup, ~1–1.5 h saved) — deferred.
 
 ### RAM ceiling & full-universe training (recorded 2026-08-10)
 - **Machine:** 63.7 GiB RAM total. The **full 3,555-feature universe is memory-marginal**: a dense float32 feature array alone is ~28 GiB (2.12M train rows), and the deploy/validation path's float64 `to_numpy` is ~54 GiB. Peak for a solo full-universe fit ≈ 40–45 GiB — **run full-universe jobs only when the machine is otherwise idle** (a concurrent analysis/benchmark job caused the `lgbm_v1` campaign OOM: `_ArrayMemoryError: 28.1 GiB, shape (3555, 2123070)`).
-- **Memory guards now in code (final form):** `nmr.models.coerce_float32_features` casts exactly-representable (Int*/UInt*/Float32) schemas to a single Float32 polars block, and `_feature_frame` returns the **zero-copy numpy view** of it (verified: 0.00 GiB RSS delta at 3 GiB) — pandas is skipped entirely because polars→pandas goes through pyarrow and allocates a second full copy (~36 GiB at 3,555 × 2.1M; this was the `lgbm_v1` full-history OOM even after the first fix). Values are bit-identical (Int8 bins exact in float32; Float64 frames untouched). All fold/full-history predicts run in era-batches (`_predict_model_chunked`, 20 eras/chunk) — a full fold-val matrix at 3,555 features is ~4.9 GiB float32, above the 4 GiB GPU VRAM (the `xgb_v1` CUDA OOM). The validation stage predicts in era-batches (`runner._predict_in_era_batches`, 40 eras/chunk) so the deploy closure's float64 `to_numpy` stays ≤ ~1.7 GiB. OOF neutralization at 3,555 features is compute-bound (per-era pinv, ~3.5 h) — not a memory issue, do not "optimize" the math (oracle parity).
+- **Memory guards live in code** (`coerce_float32_features`, zero-copy numpy views, era-batched predicts — full spec: `ARCHITECTURE.md` §G). OOF neutralization at 3,555 features is compute-bound (per-era pinv, ~3.5 h) — not a memory issue, do not "optimize" the math (oracle parity).
 - **Full-universe campaign cells:** if a 3,555-feature variant OOMs, re-run it solo with the current code; never run two full-universe jobs concurrently.
 
 ### `embargo_eras` is structurally inert
-`SplitConfig.embargo_eras` is validated and accepted but currently unused by fold geometry (reserved for future two-sided schemes). Do not document or rely on it as an active safeguard; do not remove it without a schema decision.
+`SplitConfig.embargo_eras` is validated and accepted but unused by fold geometry (schema: `ARCHITECTURE.md` §C). Do not rely on it as an active safeguard; do not remove it without a schema decision.
 
 ### `cloudpickle` deserialization executes arbitrary code
 `load_predict()` verifies a SHA256 manifest (corruption detection only, **not** authentication) then calls `cloudpickle.loads()`. Only load artifacts produced by this repo. Pin `cloudpickle==3.1.1` — Numerai's hosted runtime must unpickle what we pickle.

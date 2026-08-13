@@ -165,7 +165,7 @@ Interpretation for this repository:
 - `02-strategy/strategy-bible.md` intentionally deduplicates overlapping guidance from two source bibles.
 - `03-reference/numerapi.md` is a practical consolidated surface, not a full generated API spec.
 - `04-research` is useful but speculative. Do not treat as protocol truth.
-- The `Source` column in section 5 names the original files. Every original is preserved unmodified in `99-archive/raw-source/` (with normalized lowercase names, e.g. `Golden Bible.txt` -> `golden-bible.txt`). The original reorganization deleted nothing (low-value material was relocated, not destroyed). The 2026-08-06 trim removed two superseded files (`04-research/the-state-of-the-art.md`, `99-archive/general-ml-cookbook.md`) and merged `04-research/neural-networks.md` into `04-research/advanced-ideas.md`.
+- The `Source` column in section 5 names the original inputs. Surviving raw originals are preserved unmodified in `99-archive/raw-source/` (normalized lowercase names, e.g. `Golden Bible.txt` -> `golden-bible.txt`); the remaining sources (canon `*.txt`, `Scoring-*.txt`, `numerai_tools_reference.md`, `llm_reports/`, notebook collections) are not archived as separate files. The 2026-08-06 trim removed two superseded files (`04-research/the-state-of-the-art.md`, `99-archive/general-ml-cookbook.md`) and merged `04-research/neural-networks.md` into `04-research/advanced-ideas.md`.
 
 ## 7) Minimal Traversal Recipes
 

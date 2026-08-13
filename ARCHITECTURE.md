@@ -26,7 +26,7 @@ ExperimentConfig
 |       → OOF pred_{target} columns joined on [id, era]          |
 |  4. Ensembler.learn_weights(ensemble.method) on folds 0..K-2    |
 |     Ensembler.blend()               rank-domain, re-gaussianize|
-|  5. NeutralizationEngine.neutralize(proportion=1.0)            |
+|  5. NeutralizationEngine.neutralize(proportion from config)    |
 |         └── per-era pinv cache: artifacts/cache/neutralization |
 |  6. per_era_corr() on scoring eras (final fold) → summarize()  |
 |  7. [deploy] full-history pipeline → serialize_predict()       |
@@ -360,7 +360,7 @@ All four are committed at `.kimi-code/skills/<name>/SKILL.md` (project-level Kim
 
 ### U. Hardware Discovery & Status — `nmr/hardware.py`
 
-Stdlib-only system probing (no new dependencies): CUDA device discovery via the `nvidia-smi` CLI, RAM via ctypes `GlobalMemoryStatusEx` (Windows) or `/proc/meminfo` (Linux), CPU usage via `GetSystemTimes` (Windows) or `/proc/stat` (Linux). `discover_hardware()` returns the machine-constant `HardwareSpec` (safe to record — the dataset-analysis manifest embeds a summary); `hardware_status()` returns the instantaneous `HardwareStatus` and **must never enter canonical hashes or run_id payloads**. Pure parsing helpers (`parse_gpu_devices`, `parse_gpu_status`, `parse_meminfo`, `parse_cpu_times`) are the tested boundary. GPU acceleration policy: `ModelOrchestrator` (§G) is GPU-first with CPU fallback (LightGBM `device_type="gpu"`; XGBoost 3.x `device="cuda"`; CatBoost CPU-only by design). The analysis pipeline uses `nmr/_gpu.py`: cupy-accelerated `rankdata` (bit-identical to scipy on finite data, ~6x on era-sized matrices) with automatic scipy fallback when cupy is absent — cupy and the `nvidia-*` runtime wheels are user-granted, optional dependencies (see `requirements.txt`); the analysis remains fully functional without them.
+Stdlib-only system probing (no new dependencies): CUDA device discovery via the `nvidia-smi` CLI, RAM via ctypes `GlobalMemoryStatusEx` (Windows) or `/proc/meminfo` (Linux), CPU usage via `GetSystemTimes` (Windows) or `/proc/stat` (Linux). `discover_hardware()` returns the machine-constant `HardwareSpec` (safe to record — the dataset-analysis manifest embeds a summary); `hardware_status()` returns the instantaneous `HardwareStatus` and **must never enter canonical hashes or run_id payloads**. Pure parsing helpers (`parse_gpu_devices`, `parse_gpu_status`, `parse_meminfo`, `parse_cpu_times`) are the tested boundary. GPU acceleration policy: `ModelOrchestrator` (§G) is GPU-first with CPU fallback. The analysis pipeline uses `nmr/_gpu.py`: cupy-accelerated `rankdata` (bit-identical to scipy on finite data, ~5.8× on era-sized matrices) with automatic scipy fallback when cupy is absent — cupy and the `nvidia-*` runtime wheels are user-granted, optional dependencies (see `requirements.txt`); the analysis remains fully functional without them.
 
 Measured on the dev box (RTX A1000 Laptop, 4 GiB VRAM, driver 580.97; recorded 2026-08-09): xgboost `device="cuda"` trains **9.1×** faster than CPU (`hist`, `n_jobs=1`) on 300k×780, 300 trees — 13.5 s vs 123.3 s — and the full 3,555-feature universe fits the 4 GiB device; cupy `rankdata` is **5.8×** faster than scipy at 3555×7000 (0.40 s vs 2.33 s). scipy 1.17 `rankdata` returns an all-NaN array when any input is NaN (`nan_policy='propagate'`); `_gpu.rankdata` isolates NaN at the NaN positions instead (intentionally more correct; v5.3 features contain no NaN, so both paths agree on real data).
 
@@ -403,7 +403,7 @@ nmr/__init__.py re-exports the public API of all modules (keep imports and __all
 
 ### Refresh ledger (`data/numerai_era_data.csv`)
 
-Round-aware refresh (spec §3; policy in `nmr/refresh.py`, wiring in the root script
+Round-aware refresh (policy in `nmr/refresh.py`, wiring in the root script
 `refresh_data.py`) maintains the era ledger with these columns:
 
 | Column | Type | Notes |
@@ -448,9 +448,9 @@ missing. `--live-only` skips expanding files. Writes are atomic via `_atomicio`.
 
 ## 6. Technical Debt & Known Gaps
 
-- **`embargo_eras` is inert:** validated, stored, and unused by fold geometry. Reserved for future two-sided schemes.
+- **`embargo_eras` is structurally inert** — see §C (schema) and [`AGENTS.md`](AGENTS.md#8-critical-operational-hazards) (agent directive).
 - **Expression-level feature engineering is deferred:** feature-set resolution + stability screening are now supported (`nmr/features.py` §P); derived/expression-level transforms are still deferred — do not reference a FeatureFactory.
 - **Benchmark train parquet early-era gap:** `train_benchmark_models.parquet` lacks rows for the first ~30 train eras (agent policy in [`AGENTS.md`](AGENTS.md#8-critical-operational-hazards)).
 - **GPU/CPU numeric divergence:** determinism is guaranteed per device, not across GPU↔CPU fallback boundaries.
-- **No packaging metadata:** the repo has no `pyproject.toml`; imports rely on `pythonpath = .` in [pytest.ini](pytest.ini) and running from the repo root.
+- **No packaging metadata:** the repo has no `pyproject.toml`; imports rely on the pytest setup documented in [`CONTRIBUTING.md`](CONTRIBUTING.md) (Critical footguns).
 - **Timing instrumentation is hash-hazardous by construction:** every new scorecard field must be triaged into canonical-vs-excluded (see `canonical_scorecards_bytes`).

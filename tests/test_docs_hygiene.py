@@ -1,7 +1,5 @@
 """Docs hygiene suite — CI-enforced drift guard for the golden docs and knowledge base.
 
-Spec: docs/superpowers/specs/2026-08-06-docs-hygiene-suite-design.md
-
 Checks:
   T1  relative markdown links in the nav docs resolve to existing files
   T2  #fragment anchors resolve to headings (GitHub slug rules)
