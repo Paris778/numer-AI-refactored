@@ -153,7 +153,12 @@ class IngestionAgent:
         return list(raw) if isinstance(raw, list) else list(raw.keys())
 
     def features(self, subset: str | None = None) -> list[str]:
-        """Return the ordered feature column names for ``subset``."""
+        """Return the ordered feature column names for ``subset``.
+
+        An empty resolved set raises — a pipeline cannot train on zero
+        features, and an empty screen-derived set (e.g. ``screen_stable``)
+        means the producing stage found nothing, not that it failed silently.
+        """
         key = subset if subset is not None else self._data.resolved_feature_set
         sets = self._merged_feature_sets()
         if key not in sets:
@@ -161,7 +166,13 @@ class IngestionAgent:
                 f"Feature subset {key!r} not found in features.json; "
                 f"valid subsets: {sorted(sets)}"
             )
-        return list(sets[key])
+        values = list(sets[key])
+        if not values:
+            raise ValueError(
+                f"Resolved feature set {key!r} is empty (0 features). Cannot "
+                "train pipeline on an empty subset. Verify 'screens_train' output."
+            )
+        return values
 
     def schema(self, split: str) -> Mapping[str, pl.DataType]:
         """Return parquet schema for ``split`` using metadata-only I/O."""

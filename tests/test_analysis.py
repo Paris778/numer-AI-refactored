@@ -266,6 +266,10 @@ def test_feature_ic_screen_multi_target() -> None:
         "mean_corr",
         "mean_corr_ci_lo",
         "mean_corr_ci_hi",
+        "ci_excludes_zero",
+        "p_value",
+        "fdr_q",
+        "fdr_pass",
         "corr_std",
         "decay_slope",
         "cross_regime_variance",
@@ -331,6 +335,213 @@ def test_feature_ic_screen_ci_deterministic() -> None:
 def test_feature_ic_screen_empty_targets_raises() -> None:
     with pytest.raises(ValueError):
         feature_ic_screen(_ic_frame().partition_by("era", maintain_order=True), ["feature_alpha"], [])
+
+
+def _screen_gate_frame() -> pl.DataFrame:
+    """Three features with EXACT engineered per-era IC profiles over 13 eras.
+
+    Each era builds 7 mutually orthogonal unit-norm directions (Gram-Schmidt
+    over 40 rows, centered first so every direction has variance exactly
+    1/n): x1, x2, z3, z4..z7. Both targets are exact unit-variance linear
+    combinations of those directions, so realized per-era Pearson ICs equal
+    the design values (correlation is scale-invariant; equal-variance
+    orthogonal directions make sd(y) == sd(x)):
+
+      target:      corr(x1) alternates 0.28125 / 0.279296875 (dyadic; tiny
+                   non-constant variance per the degenerate-series patch) —
+                   the full gate passes.
+                   corr(x2) follows a half-sine hump with mean 0.0117 and
+                   amplitude 0.035 — slope == 0 exactly (symmetry) and
+                   mean >= 0.01 (the classic predicate passes), but the
+                   smooth positive autocorrelation inflates the
+                   block-bootstrap SE so the CI spans zero.
+                   corr(z3) == 0 exactly.
+      target_alt:  corr(x1) == 0, corr(x2) == the same hump (a moderate
+                   p-value), corr(z3) == 0 — a different p-value set so
+                   per-target BH grouping is testable.
+    """
+    rng = np.random.default_rng(20260813)
+    n_rows, n_eras, n_dirs = 40, 13, 7
+    c_strong = (0.28125, 0.279296875)
+    # Centered half-sine hump: mean exactly 0.0117 (>= the 0.01 floor) and
+    # OLS slope exactly zero by symmetry — the classic predicate passes —
+    # while the smooth positive autocorrelation (rho_1 ~ 0.95) inflates the
+    # block-bootstrap SE enough for the CI to span zero. Verified realized:
+    # mean 0.0117, slope ~0, CI ~[-0.005, 0.027], p ~ 0.19, stable False.
+    sin_hump = np.sin(np.pi * np.arange(n_eras) / (n_eras - 1.0))
+    c_marginal = list(0.0117 + 0.05 * (sin_hump - sin_hump.mean()))
+    c_alt = c_marginal
+    rows: list[dict[str, float | str]] = []
+    for e in range(n_eras):
+        era = f"{e + 1:04d}"
+        cs = c_strong[e % 2]
+        cm = c_marginal[e]
+        ca = c_alt[e]
+        raw = rng.normal(size=(n_rows, n_dirs))
+        basis = np.zeros_like(raw)
+        for j in range(n_dirs):
+            # Center first: unit-norm alone leaves variance ~ 1/n - mean^2,
+            # which differs across directions and breaks the equal-variance
+            # assumption behind the exact correlation design. Centered +
+            # normalized columns all have variance exactly 1/n.
+            vector = raw[:, j] - float(np.mean(raw[:, j]))
+            for k in range(j):
+                vector = vector - float(vector @ basis[:, k]) * basis[:, k]
+            basis[:, j] = vector / float(np.linalg.norm(vector))
+        x1, x2, z3 = basis[:, 0], basis[:, 1], basis[:, 2]
+        tail = basis[:, 3] + basis[:, 4] + basis[:, 5] + basis[:, 6]
+        eps = float(np.sqrt((1.0 - cs**2 - cm**2) / 4.0))
+        eps_alt = float(np.sqrt((1.0 - ca**2) / 4.0))
+        target = cs * x1 + cm * x2 + eps * tail
+        target_alt = ca * x2 + eps_alt * tail
+        for i in range(n_rows):
+            rows.append(
+                {
+                    "era": era,
+                    "feature_strong": float(x1[i]),
+                    "feature_marginal": float(x2[i]),
+                    "feature_noise": float(z3[i]),
+                    "target": float(target[i]),
+                    "target_alt": float(target_alt[i]),
+                }
+            )
+    return pl.DataFrame(rows)
+
+
+def test_feature_ic_screen_stable_requires_ci_and_fdr() -> None:
+    frame = _screen_gate_frame()
+    out = feature_ic_screen(
+        frame.partition_by("era", maintain_order=True),
+        ["feature_strong", "feature_marginal", "feature_noise"],
+        ["target"],
+    )
+    assert out.columns == [
+        "feature",
+        "target",
+        "mean_corr",
+        "mean_corr_ci_lo",
+        "mean_corr_ci_hi",
+        "ci_excludes_zero",
+        "p_value",
+        "fdr_q",
+        "fdr_pass",
+        "corr_std",
+        "decay_slope",
+        "cross_regime_variance",
+        "mean_spearman",
+        "n_eras",
+        "stable",
+        "nonlinear",
+    ]
+    by_feature = {row["feature"]: row for row in out.to_dicts()}
+
+    strong = by_feature["feature_strong"]
+    assert strong["mean_corr"] >= 0.2
+    assert strong["mean_corr_ci_lo"] > 0.0  # CI excludes zero
+    assert strong["ci_excludes_zero"] is True
+    assert strong["p_value"] is not None and strong["p_value"] <= 0.05
+    assert strong["fdr_q"] is not None and strong["fdr_q"] <= 0.05
+    assert strong["fdr_pass"] is True
+    assert strong["stable"] is True
+
+    marginal = by_feature["feature_marginal"]
+    # Classic point predicate alone would call this stable: mean >= 0.01 and
+    # |slope| ~ 0. The CI/FDR gates must flip it to unstable.
+    assert marginal["mean_corr"] >= 0.01
+    assert marginal["mean_corr_ci_lo"] < 0.0 < marginal["mean_corr_ci_hi"]
+    assert marginal["ci_excludes_zero"] is False
+    assert marginal["stable"] is False
+
+    noise = by_feature["feature_noise"]
+    assert noise["stable"] is False
+
+
+def test_feature_ic_screen_pvalue_deterministic() -> None:
+    frame = _screen_gate_frame()
+    kwargs = dict(
+        chunks=frame.partition_by("era", maintain_order=True),
+        feature_cols=["feature_strong", "feature_marginal", "feature_noise"],
+        targets=["target"],
+    )
+    out1 = feature_ic_screen(**kwargs)
+    out2 = feature_ic_screen(**kwargs)
+    for col in ("p_value", "fdr_q", "ci_excludes_zero", "fdr_pass"):
+        left = out1.get_column(col).to_list()
+        right = out2.get_column(col).to_list()
+        assert left == right, col
+    assert np.array_equal(out1["stable"].to_numpy(), out2["stable"].to_numpy())
+
+
+def test_feature_ic_screen_bh_applied_per_target() -> None:
+    from nmr.inference import benjamini_hochberg
+
+    frame = _screen_gate_frame()
+    out = feature_ic_screen(
+        frame.partition_by("era", maintain_order=True),
+        ["feature_strong", "feature_marginal", "feature_noise"],
+        ["target", "target_alt"],
+    )
+    target_rows = out.filter(pl.col("target") == "target")
+    alt_rows = out.filter(pl.col("target") == "target_alt")
+    p_target = target_rows["p_value"].to_numpy()
+    p_alt = alt_rows["p_value"].to_numpy()
+    assert np.isfinite(p_target).all() and np.isfinite(p_alt).all()
+
+    # BH must run within each target's own p-value set, never pooled across
+    # the flattened multi-target table (20D vs 60D horizons have different
+    # effective sample sizes; pooling corrupts the rank order).
+    expected_target = benjamini_hochberg(p_target)
+    expected_alt = benjamini_hochberg(p_alt)
+    pooled = benjamini_hochberg(np.concatenate([p_target, p_alt]))
+    assert np.allclose(target_rows["fdr_q"].to_numpy(), expected_target, atol=1e-12)
+    assert np.allclose(alt_rows["fdr_q"].to_numpy(), expected_alt, atol=1e-12)
+    assert not np.allclose(target_rows["fdr_q"].to_numpy(), pooled[:3], atol=1e-12)
+
+
+def test_feature_ic_screen_schema_dtypes_enforced() -> None:
+    from nmr.analysis import SCREEN_PARQUET_SCHEMA
+
+    frame = _screen_gate_frame()
+    out = feature_ic_screen(
+        frame.partition_by("era", maintain_order=True),
+        ["feature_strong", "feature_marginal", "feature_noise"],
+        ["target"],
+    )
+    assert list(out.columns) == list(SCREEN_PARQUET_SCHEMA)
+    for col, dtype in SCREEN_PARQUET_SCHEMA.items():
+        assert out.schema[col] == dtype, (col, out.schema[col])
+
+
+def test_era_mean_bootstrap_ci_tolerates_partial_nan_rows() -> None:
+    # Review patch: a feature observed in only a subset of eras must not
+    # crash the CI path — the finite slice gets its own block length.
+    from nmr.analysis import _era_mean_bootstrap_ci
+
+    matrix = np.full((3, 24), 0.3, dtype=float)
+    matrix[1, :] = np.nan  # unobserved feature
+    matrix[2, 20:] = np.nan  # partial coverage (20 of 24 eras)
+    lo, hi = _era_mean_bootstrap_ci(matrix, n_boot=50, seed=0, horizon="20D")
+    assert np.isfinite(lo[0]) and np.isfinite(hi[0]) and lo[0] <= hi[0]
+    assert np.isnan(lo[1]) and np.isnan(hi[1])  # all-NaN row skipped
+    assert np.isfinite(lo[2]) and np.isfinite(hi[2]) and lo[2] <= hi[2]
+
+
+def test_screen_fdr_qvalues_per_feature_block_length() -> None:
+    # Review patch: a feature with fewer finite eras than the global block
+    # length must not raise — its p-value uses its own block length.
+    from nmr.analysis import _screen_fdr_qvalues
+
+    rng = np.random.default_rng(5)
+    matrix = rng.normal(loc=0.3, scale=0.1, size=(3, 24))
+    matrix[1, :] = np.nan
+    matrix[2, 4:] = np.nan  # 4 finite eras < the 20D block floor of 5
+    p_vals, fdr_q = _screen_fdr_qvalues(
+        matrix, horizon="20D", n_boot=50, seed=0
+    )
+    assert np.isfinite(p_vals[0]) and 0.0 < p_vals[0] <= 1.0
+    assert np.isnan(p_vals[1]) and np.isnan(fdr_q[1])
+    assert np.isfinite(p_vals[2]) and 0.0 < p_vals[2] <= 1.0
+    assert np.isfinite(fdr_q[0]) and np.isfinite(fdr_q[2])
 
 
 from nmr.analysis import feature_ic_by_split

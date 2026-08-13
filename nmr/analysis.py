@@ -16,7 +16,12 @@ import polars as pl
 import scipy.stats
 
 from nmr.features import DEFAULT_MAX_ABS_DECAY, DEFAULT_MIN_MEAN_CORR
-from nmr.inference import block_bootstrap_ci, resolve_block_len
+from nmr.inference import (
+    benjamini_hochberg,
+    block_bootstrap_ci,
+    block_bootstrap_pvalue,
+    resolve_block_len,
+)
 
 __all__ = [
     "SplitStats",
@@ -49,6 +54,30 @@ WASSERSTEIN_NORM_FLAG_THRESHOLD = 0.50
 AUC_FLAG_DELTA = 0.1
 IC_CI_BOOT = 200
 IC_CI_SEED = 0
+SCREEN_FDR_Q = 0.05
+
+# Explicit dtype contract for the screen parquet artifacts (train-only
+# ``screens_train`` and descriptive full-span ``screens``). Enforced by a
+# schema cast at the ``feature_ic_screen`` boundary so downstream parquet
+# aggregation never sees type drift.
+SCREEN_PARQUET_SCHEMA: dict[str, pl.DataType] = {
+    "feature": pl.Utf8,
+    "target": pl.Utf8,
+    "mean_corr": pl.Float64,
+    "mean_corr_ci_lo": pl.Float64,
+    "mean_corr_ci_hi": pl.Float64,
+    "ci_excludes_zero": pl.Boolean,
+    "p_value": pl.Float64,
+    "fdr_q": pl.Float64,
+    "fdr_pass": pl.Boolean,
+    "corr_std": pl.Float64,
+    "decay_slope": pl.Float64,
+    "cross_regime_variance": pl.Float64,
+    "mean_spearman": pl.Float64,
+    "n_eras": pl.Int64,
+    "stable": pl.Boolean,
+    "nonlinear": pl.Boolean,
+}
 _PSI_EPS = 1e-6
 _PSI_EDGE_SAMPLE_STRIDE = 100
 
@@ -356,6 +385,19 @@ def _nonlinear_flag(
     )
 
 
+def _screen_block_len(n_eras: int, horizon: str) -> int:
+    """Bootstrap block length for screen series, with a full-series fallback.
+
+    ``resolve_block_len`` enforces the horizon floor (5 eras for 20D targets,
+    13 for 60D); when the series is shorter than the floor, a single
+    full-length block is used (weak but defined CI/p-value).
+    """
+    try:
+        return resolve_block_len(n_eras, horizon)
+    except ValueError:
+        return int(n_eras)
+
+
 def _era_mean_bootstrap_ci(
     feature_era_matrix: np.ndarray,
     n_boot: int,
@@ -369,9 +411,11 @@ def _era_mean_bootstrap_ci(
     vectors — the convention used by ``feature_ic_screen``). Stationary block
     bootstrap over era columns with the target's own horizon floor (5 for 20D,
     13 for 60D via ``resolve_block_len``) and a fixed seed — deterministic
-    across processes. Returns ``(ci_lo, ci_hi)`` arrays of length ``F``;
-    features with fewer valid eras than the block floor fall back to a single
-    full-length block (weak but defined CI) and all-non-finite rows report NaN.
+    across processes. Each feature is sliced to its own finite eras and gets
+    its own block length (features with fewer valid eras than the block floor
+    fall back to a single full-length block — weak but defined CI); features
+    with fewer than 2 finite eras report NaN. Returns ``(ci_lo, ci_hi)``
+    arrays of length ``F``.
     """
     valid_pearson = np.asarray(feature_era_matrix, dtype=float)
     finite = np.isfinite(valid_pearson)
@@ -380,20 +424,54 @@ def _era_mean_bootstrap_ci(
     ci_hi = np.full(n_features, np.nan)
     if n_eras < 2:
         return ci_lo, ci_hi
-    try:
-        block_len = resolve_block_len(n_eras, horizon)  # type: ignore[arg-type]
-    except ValueError:
-        block_len = n_eras
     for f in range(n_features):
-        row = valid_pearson[f, :]
-        if not np.any(finite[f, :]):
+        finite_row = valid_pearson[f, :][finite[f, :]]
+        if finite_row.size < 2:
             continue
+        f_block_len = _screen_block_len(int(finite_row.size), horizon)
         est = block_bootstrap_ci(
-            row, np.mean, block_len=block_len, n_boot=n_boot, seed=seed
+            finite_row, np.mean, block_len=f_block_len, n_boot=n_boot, seed=seed
         )
         ci_lo[f] = est.lo
         ci_hi[f] = est.hi
     return ci_lo, ci_hi
+
+
+def _screen_fdr_qvalues(
+    pearson_matrix: np.ndarray,
+    *,
+    horizon: str,
+    n_boot: int,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Per-feature Hall bootstrap p-values and BH-adjusted q-values.
+
+    ``pearson_matrix`` is the ``(n_features, n_eras)`` row-major matrix of
+    per-era Pearson ICs over valid (non-degenerate) eras. Each feature is
+    sliced to its own finite eras and gets its own block length, so partial
+    coverage can never exceed the bootstrap's ``block_len <= n`` bound.
+    Features with fewer than 2 finite eras yield NaN p/q (they cannot be
+    tested and can never be stable). The BH ranking length counts every
+    tested feature. The p-value uses the same seeded block machinery and
+    bootstrap budget as the CI, so p and CI are a consistent pair.
+    """
+    n_features = int(pearson_matrix.shape[0])
+    p_vals = np.full(n_features, np.nan)
+    for f in range(n_features):
+        row = pearson_matrix[f, :]
+        finite_row = row[np.isfinite(row)]
+        if finite_row.size >= 2:
+            f_block_len = _screen_block_len(int(finite_row.size), horizon)
+            p_vals[f] = block_bootstrap_pvalue(
+                finite_row, block_len=f_block_len, n_boot=n_boot, seed=seed
+            )
+    fdr_q = np.full(n_features, np.nan)
+    finite_mask = np.isfinite(p_vals)
+    if finite_mask.any():
+        fdr_q[finite_mask] = benjamini_hochberg(
+            p_vals[finite_mask], q=SCREEN_FDR_Q
+        )
+    return p_vals, fdr_q
 
 
 def feature_ic_screen(
@@ -416,8 +494,17 @@ def feature_ic_screen(
     ``min_mean_corr`` but |Spearman| > ``min_mean_corr``) as diagnostics.
     ``mean_corr_ci_lo``/``mean_corr_ci_hi`` are the 95% stationary
     block-bootstrap CI of the era-mean Pearson IC over valid (non-degenerate)
-    eras — a feature whose CI spans zero cannot be called stable at 95%
-    confidence.
+    eras (horizon-aware block floors: 5 eras for 20D targets, 13 for 60D).
+
+    ``stable`` is the full gate: the classic point predicate from
+    ``_aggregate_screen`` (|mean_corr| >= ``min_mean_corr``, |decay_slope| <=
+    ``max_abs_decay``, n_eras >= 2) AND the CI strictly excluding zero
+    (``ci_excludes_zero``: both bounds on the same side, a bound touching zero
+    fails) AND Benjamini-Hochberg FDR control at q = ``SCREEN_FDR_Q``
+    (``fdr_q <= q``). ``p_value`` is the dual Hall null-shifted block-bootstrap
+    p-value (same seeded machinery and budget as the CI); features with fewer
+    than 2 valid eras carry null p/q and are never stable. The p-value pass
+    doubles the screen's bootstrap cost.
     """
     from nmr.features import _aggregate_screen, _era_ic_pair
 
@@ -443,22 +530,36 @@ def feature_ic_screen(
         valid_eras = [
             e for e in sorted(spearman_eras, key=int) if e not in degenerate
         ]
+        n_features = len(feature_list)
+        # horizon-aware block floor: 60D targets need 13-era blocks, 20D
+        # need 5 — a 20D block on a 60D series understates the CI
+        ci_horizon = "60D" if str(t).endswith("_60") else "20D"
         if valid_eras:
             valid_pearson = np.column_stack([pearson_eras[e] for e in valid_eras])
             mean_spearman = np.mean(
                 np.column_stack([spearman_eras[e] for e in valid_eras]), axis=1
             )
-            # horizon-aware block floor: 60D targets need 13-era blocks, 20D
-            # need 5 — a 20D block on a 60D series understates the CI
-            ci_horizon = "60D" if str(t).endswith("_60") else "20D"
             ci_lo, ci_hi = _era_mean_bootstrap_ci(
                 valid_pearson, ci_boot, ci_seed, horizon=ci_horizon
             )
+            p_vals, fdr_q = _screen_fdr_qvalues(
+                valid_pearson,
+                horizon=ci_horizon,
+                n_boot=ci_boot,
+                seed=ci_seed,
+            )
         else:
-            n_features = len(feature_list)
             mean_spearman = np.full(n_features, np.nan)
             ci_lo = np.full(n_features, np.nan)
             ci_hi = np.full(n_features, np.nan)
+            p_vals = np.full(n_features, np.nan)
+            fdr_q = np.full(n_features, np.nan)
+        ci_excludes_zero = ((ci_lo > 0.0) & (ci_hi > 0.0)) | (
+            (ci_lo < 0.0) & (ci_hi < 0.0)
+        )
+        fdr_pass = np.isfinite(fdr_q) & (fdr_q <= SCREEN_FDR_Q)
+        classic_stable = screen.get_column("stable").to_numpy().astype(bool)
+        stable_final = classic_stable & ci_excludes_zero & fdr_pass
         nonlinear = _nonlinear_flag(
             screen.get_column("mean_corr").to_numpy(),
             mean_spearman,
@@ -475,16 +576,25 @@ def feature_ic_screen(
                 pl.Series("mean_corr_ci_hi", ci_hi)
                 .fill_nan(None)
                 .alias("mean_corr_ci_hi"),
+                pl.Series("ci_excludes_zero", ci_excludes_zero),
+                pl.Series("p_value", p_vals).fill_nan(None).alias("p_value"),
+                pl.Series("fdr_q", fdr_q).fill_nan(None).alias("fdr_q"),
+                pl.Series("fdr_pass", fdr_pass),
                 pl.Series("nonlinear", nonlinear).alias("nonlinear"),
+                pl.Series("stable", stable_final),
             ).with_columns(pl.lit(t).alias("target"))
         )
-    return pl.concat(blocks).select(
+    frame = pl.concat(blocks).select(
         [
             "feature",
             "target",
             "mean_corr",
             "mean_corr_ci_lo",
             "mean_corr_ci_hi",
+            "ci_excludes_zero",
+            "p_value",
+            "fdr_q",
+            "fdr_pass",
             "corr_std",
             "decay_slope",
             "cross_regime_variance",
@@ -494,6 +604,7 @@ def feature_ic_screen(
             "nonlinear",
         ]
     )
+    return frame.cast(SCREEN_PARQUET_SCHEMA)
 
 
 def _chunk_moments(values: np.ndarray) -> tuple[float, float, float, float, float]:

@@ -97,8 +97,11 @@ def _executive_summary(
         c = by_target[t]
         out.append(f"- **Stability screen (`{t}`):** {c['stable']} stable, "
                    f"{c['nonlinear']} nonlinear of {n_features} features. "
-                   "`stable` requires |mean_corr| >= 0.01 and |decay_slope| <= 0.001 "
-                   "on valid eras; `nonlinear` = |Pearson| <= 0.01 but |Spearman| > 0.01.")
+                   "`stable` requires the full gate: |mean_corr| >= 0.01 and "
+                   "|decay_slope| <= 0.001 on valid eras AND the 95% block-bootstrap "
+                   "CI strictly excluding zero AND Benjamini-Hochberg FDR pass at "
+                   "q=0.05 (per target); `nonlinear` = |Pearson| <= 0.01 but "
+                   "|Spearman| > 0.01.")
 
     if benchmark_rows:
         bm = {b.get("benchmark"): b for b in benchmark_rows if b.get("mean_corr") is not None}
@@ -221,7 +224,12 @@ def _artifact_map_section() -> list[str]:
                 {"path": "artifacts/reports/dataset_analysis/feature_ic_by_era.parquet",
                  "contents": "per-era feature IC long form (48 MB) — the raw screen input"},
                 {"path": "artifacts/reports/dataset_analysis/feature_ic_screen.parquet",
-                 "contents": "stability screen: mean_corr + CI, spearman, stable/nonlinear flags (§4.2)"},
+                 "contents": "DESCRIPTIVE full-span screen (eras 0001..1231): mean_corr + CI + "
+                 "p_value/fdr_q, spearman, stable/nonlinear flags (§4.2). DO NOT use "
+                 "for subset derivation."},
+                {"path": "artifacts/reports/dataset_analysis/feature_ic_screen_train.parquet",
+                 "contents": "train-only screen (eras 0001..0574, `screens_train` stage) — "
+                 "the sole input to `derived_sets` (§4.2)"},
                 {"path": "artifacts/reports/dataset_analysis/feature_ic_by_split.parquet",
                  "contents": "train vs validation mean IC per feature (§4.4)"},
                 {"path": "artifacts/reports/dataset_analysis/feature_drift_profile.parquet",
@@ -249,8 +257,9 @@ def _artifact_map_section() -> list[str]:
                 {"path": "artifacts/reports/dataset_analysis/neutralized_ic.json",
                  "contents": "FNE profile over the neutralization-proportion grid (§6)"},
                 {"path": "artifacts/reports/dataset_analysis/derived_feature_sets.json",
-                 "contents": "screen-derived subsets: screen_stable / screen_nonlinear / "
-                 "screen_linear_or_nonlinear / screen_drift_filtered"},
+                 "contents": "screen-derived subsets (from the train-only screen + drift): "
+                 "screen_stable / screen_nonlinear / screen_linear_or_nonlinear / "
+                 "screen_drift_filtered — empty sets are valid scientific results"},
                 {"path": "artifacts/reports/dataset_analysis/campaign_variants.parquet",
                  "contents": "§7.1 evidence table (persisted; regenerated only if missing, "
                  "~30-50 min)"},
@@ -296,7 +305,7 @@ def _artifact_map_section() -> list[str]:
         "# 2. Full analysis (16 stages, ~4-5 h) or a subset",
         "./.venv/Scripts/python analyze_dataset.py --features all "
         "--output-dir artifacts/reports/dataset_analysis",
-        "./.venv/Scripts/python analyze_dataset.py --only screens,drift,derived_sets "
+        "./.venv/Scripts/python analyze_dataset.py --only screens_train,drift,derived_sets "
         "--features all --output-dir artifacts/reports/dataset_analysis",
         "",
         "# 3. Render this report (campaign evidence reads persisted parquets)",
@@ -451,9 +460,13 @@ def render_report(
     out.append("")
     out.append(_schema_block(
         "feature | target | mean_corr | mean_corr_ci_lo | mean_corr_ci_hi | "
-        "mean_spearman | n_eras | stable | nonlinear "
+        "ci_excludes_zero | p_value | fdr_q | fdr_pass | corr_std | decay_slope | "
+        "cross_regime_variance | mean_spearman | n_eras | stable | nonlinear "
         "(per-era Pearson/Spearman IC, valid eras only; CI = 95% stationary "
-        "block-bootstrap on the era-mean IC, 20D block convention)"
+        "block-bootstrap on the era-mean IC with horizon-aware block floors; "
+        "p_value = Hall null-shifted block-bootstrap p (same seed/budget); "
+        "fdr_q = Benjamini-Hochberg adjusted, per target; stable = classic "
+        "point predicate AND CI strictly excluding zero AND fdr_q <= 0.05)"
     ))
     out.append("")
     out.append(_table(
@@ -465,8 +478,10 @@ def render_report(
     out.append("- **Key takeaways:** `n_eras` counts valid (non-degenerate) eras only — "
                "label-lag eras without a target never contribute zero ICs. `nonlinear` flags "
                "features with |Pearson| <= 0.01 but |Spearman| > 0.01: monotone-nonlinear "
-               "signal the linear screen would miss. A `mean_corr` whose 95% CI spans zero "
-               "cannot be called stable at 95% confidence.")
+               "signal the linear screen would miss. `stable` is the full gate: a feature "
+               "whose 95% CI spans zero, or whose Benjamini-Hochberg q-value exceeds 0.05, "
+               "is never called stable (p_value/fdr_q/fdr_pass carry the full precision in "
+               "the parquet dumps; the table shows the headline columns only).")
     out.append("")
     out.append("### 4.3 Cross-Split Drift (PSI + W1 + Adversarial AUC)")
     out.append("")

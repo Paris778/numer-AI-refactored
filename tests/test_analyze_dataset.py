@@ -115,6 +115,7 @@ def test_analyze_writes_all_dumps(tmp_path: Path, fake_data: Path) -> None:
         "target_corr.parquet",
         "feature_summary.parquet",
         "feature_ic_screen.parquet",
+        "feature_ic_screen_train.parquet",
         "feature_ic_by_era.parquet",
         "feature_ic_by_split.parquet",
         "feature_corr_medium.parquet",
@@ -262,6 +263,7 @@ def test_analyze_deterministic_dumps(tmp_path: Path, fake_data: Path) -> None:
         "era_structure.parquet",
         "feature_summary.parquet",
         "feature_ic_screen.parquet",
+        "feature_ic_screen_train.parquet",
         "feature_ic_by_era.parquet",
         "feature_ic_by_split.parquet",
         "feature_corr_medium.parquet",
@@ -324,3 +326,88 @@ def test_derived_sets_missing_inputs_returns_error(
             ]
         )
     assert not (out / "derived_feature_sets.json").exists()
+
+
+def test_screens_train_restricted_to_train_eras(
+    tmp_path: Path, fake_data: Path
+) -> None:
+    # Fixture: train = eras 0001-0002, validation = eras 0003-0004. The
+    # train-only screen must never see validation eras.
+    out = tmp_path / "dumps"
+    rc = analyze_dataset.main(
+        [
+            "--data-dir", str(fake_data),
+            "--output-dir", str(out),
+            "--features", "small",
+        ]
+    )
+    assert rc == 0
+    train_screen = pl.read_parquet(out / "feature_ic_screen_train.parquet")
+    full_screen = pl.read_parquet(out / "feature_ic_screen.parquet")
+    assert train_screen["n_eras"].max() <= 2
+    assert full_screen["n_eras"].max() == 4
+    assert "ci_excludes_zero" in train_screen.columns
+    assert "fdr_pass" in train_screen.columns
+
+
+def test_derived_sets_reads_train_screen_not_full_span(
+    tmp_path: Path, fake_data: Path
+) -> None:
+    out = tmp_path / "dumps"
+    rc = analyze_dataset.main(
+        [
+            "--data-dir", str(fake_data),
+            "--output-dir", str(out),
+            "--features", "small",
+        ]
+    )
+    assert rc == 0
+
+    # The descriptive full-span screen is not an input to subset derivation:
+    # deleting it must not affect derived_sets.
+    (out / "feature_ic_screen.parquet").unlink()
+    rc = analyze_dataset.main(
+        [
+            "--data-dir", str(fake_data),
+            "--output-dir", str(out),
+            "--only", "derived_sets",
+        ]
+    )
+    assert rc == 0
+    assert (out / "derived_feature_sets.json").exists()
+
+    # The train-only screen IS the input: deleting it fails loudly.
+    (out / "feature_ic_screen_train.parquet").unlink()
+    with pytest.raises(RuntimeError, match="screens_train"):
+        analyze_dataset.main(
+            [
+                "--data-dir", str(fake_data),
+                "--output-dir", str(out),
+                "--only", "derived_sets",
+            ]
+        )
+
+
+def test_derived_sets_drift_error_names_screens_train(
+    tmp_path: Path, fake_data: Path
+) -> None:
+    # Review patch: the drift-missing hint must recommend the train-only
+    # recipe, not the superseded full-span one.
+    out = tmp_path / "dumps"
+    rc = analyze_dataset.main(
+        [
+            "--data-dir", str(fake_data),
+            "--output-dir", str(out),
+            "--features", "small",
+        ]
+    )
+    assert rc == 0
+    (out / "feature_drift_profile.parquet").unlink()
+    with pytest.raises(RuntimeError, match="screens_train"):
+        analyze_dataset.main(
+            [
+                "--data-dir", str(fake_data),
+                "--output-dir", str(out),
+                "--only", "derived_sets",
+            ]
+        )

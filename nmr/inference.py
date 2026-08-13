@@ -23,6 +23,8 @@ __all__ = [
     "resolve_block_len",
     "resolve_bandwidth",
     "block_bootstrap_ci",
+    "block_bootstrap_pvalue",
+    "benjamini_hochberg",
     "ac_adjusted_sharpe",
     "deflated_sharpe",
 ]
@@ -296,3 +298,93 @@ def deflated_sharpe(
 
     z_score = (sharpe_f - sr0) * math.sqrt(float(n_obs - 1)) / math.sqrt(radicand)
     return float(norm.cdf(z_score))
+
+
+def block_bootstrap_pvalue(
+    series: ArrayLike1D,
+    *,
+    block_len: int,
+    n_boot: int,
+    seed: int,
+) -> float:
+    """Two-sided Hall null-shifted block-bootstrap p-value for H0: mean == 0.
+
+    Studentized test statistic ``T = mean / se_boot`` with the bootstrap
+    standard error as a *global* denominator. Since ``se_boot > 0`` is a scalar
+    constant over all replicates, it cancels identically in the comparison
+    ``|T*_b| >= |T_0|  <=>  |x̄*_b - x̄| >= |x̄|``, so the p-value is the tail
+    probability of the centered replicate-mean distribution:
+
+        p = (1 + sum_b I(|x̄*_b - x̄| >= |x̄|)) / (1 + B)
+
+    This is the dual of :func:`block_bootstrap_ci`'s percentile CI (same
+    seeded circular-block machinery, same index convention and horizon-aware
+    block lengths), so a CI excluding zero and a p-value below ``alpha`` cannot
+    disagree. Cost is O(B), not O(B²) — a per-replicate SE would need a nested
+    bootstrap. A zero sample mean returns 1.0 (no evidence against the null);
+    a degenerate series (constant up to 1e-12, or fewer than 2 observations)
+    also returns 1.0 — the studentized statistic is undefined at zero
+    variance, and the repo's fail-safe doctrine never claims signal from
+    degenerate inputs (such features can never pass the screen's stable gate).
+    """
+    x = _as_finite_1d(series, name="series")
+    n = int(x.size)
+    if not 1 <= block_len <= n:
+        raise ValueError("block_len must satisfy 1 <= block_len <= n")
+    if n_boot < 1:
+        raise ValueError("n_boot must be >= 1")
+    if n < 2 or float(np.std(x, ddof=0)) < 1e-12:
+        # Degenerate series (constant, or a single observation): the
+        # studentized statistic is undefined (the global-SE cancellation
+        # requires se > 0), so no significance can be claimed — fail-safe 1.0.
+        return 1.0
+
+    observed = float(np.mean(x))
+    if observed == 0.0:
+        return 1.0
+
+    centered = x - observed
+    rng = np.random.default_rng(seed)
+    n_blocks = int(math.ceil(n / block_len))
+    offsets = np.arange(block_len)
+    count = 0
+    for _ in range(n_boot):
+        starts = rng.integers(0, n, size=n_blocks)
+        idx = ((starts[:, None] + offsets[None, :]) % n).reshape(-1)[:n]
+        if abs(float(np.mean(centered[idx]))) >= abs(observed):
+            count += 1
+    return (1.0 + count) / (1.0 + n_boot)
+
+
+def benjamini_hochberg(
+    p_values: ArrayLike1D,
+    *,
+    q: float = 0.05,
+) -> np.ndarray:
+    """Benjamini–Hochberg step-up adjusted q-values, aligned to input order.
+
+    ``q_(i) = min(1.0, min_{k >= i} (m / k) * p_(k))`` with ``m`` = the full
+    input length (non-finites included). Reject H0_i iff ``q_(i) <= q``.
+    Non-finite p-values are coerced to 1.0 before ranking — they can never be
+    discoveries — and evaluate to ``fdr_q = 1.0`` / ``fdr_pass = False``.
+    Pure NumPy; no external dependency.
+    """
+    p = np.asarray(p_values, dtype=float)
+    if p.ndim != 1:
+        raise ValueError("p_values must be 1-D")
+    if p.size == 0:
+        return np.zeros(0, dtype=float)
+    if not np.isfinite(q) or not (0.0 < q < 1.0):
+        raise ValueError("q must satisfy 0 < q < 1")
+
+    p = np.where(np.isfinite(p), p, 1.0)
+    order = np.argsort(p, kind="stable")
+    sorted_p = p[order]
+    n = p.size
+    with np.errstate(divide="ignore", invalid="ignore"):
+        raw = sorted_p * n / np.arange(1, n + 1)
+    adjusted_sorted = np.minimum.accumulate(raw[::-1])[::-1]
+    np.minimum(adjusted_sorted, 1.0, out=adjusted_sorted)
+    adjusted = np.empty(n, dtype=float)
+    adjusted[order] = adjusted_sorted
+    return adjusted

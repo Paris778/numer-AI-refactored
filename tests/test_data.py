@@ -416,6 +416,20 @@ class TestSupplementalFeatureSets:
         with pytest.raises(ValueError, match="collide"):
             agent.features("small")
 
+    def test_empty_subset_raises_with_stage_hint(self, dataset_root: Path) -> None:
+        # Amendment C contract: an empty derived set (e.g. an empty
+        # screen_stable) must fail loudly at resolution with the exact message.
+        supp = dataset_root / "supplemental.json"
+        supp.write_text(
+            json.dumps({"feature_sets": {"screen_stable": []}}),
+            encoding="utf-8",
+        )
+        agent = self._agent(dataset_root, supp)
+        with pytest.raises(ValueError, match=r"empty \(0 features\)"):
+            agent.features("screen_stable")
+        with pytest.raises(ValueError, match="screens_train"):
+            agent.features("screen_stable")
+
     def test_merge_missing_file_raises(self, dataset_root: Path) -> None:
         agent = self._agent(dataset_root, dataset_root / "nope.json")
         with pytest.raises(ValueError, match="not found"):

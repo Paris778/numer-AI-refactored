@@ -45,6 +45,7 @@ _STAGE_DEPS: dict[str, frozenset[str]] = {
     "targets": frozenset(),
     "ic_by_era": frozenset(),
     "screens": frozenset(),
+    "screens_train": frozenset(),
     "summary": frozenset(),
     "psi": frozenset(),
     "drift": frozenset(),
@@ -333,6 +334,34 @@ def _stage_screens(ctx: _Ctx) -> None:
     )
 
 
+def _stage_screens_train(ctx: _Ctx) -> None:
+    """Train-only stability screen — the sole input to subset derivation.
+
+    Descriptive full-span characterization lives in ``screens``
+    (``feature_ic_screen.parquet``, eras 0001..1231); this stage screens the
+    train split only (eras 0001..0574) so feature-subset selection can never
+    see validation-era labels (look-ahead leakage, committee Red Flag 1).
+    """
+    feature_columns = ["era", *ctx.feature_cols, *ctx.target_columns]
+    screens = [
+        analysis.feature_ic_screen(
+            _iter_era_chunks(
+                ctx.agent,
+                ["train"],
+                feature_columns,
+                ctx.args.max_eras,
+                label=f"screen_train:{t}",
+            ),
+            ctx.feature_cols,
+            [t],
+        )
+        for t in ctx.target_columns
+    ]
+    _atomic_write_parquet(
+        pl.concat(screens), ctx.out / "feature_ic_screen_train.parquet"
+    )
+
+
 def _stage_summary(ctx: _Ctx) -> None:
     feature_columns = ["era", *ctx.feature_cols, *ctx.target_columns]
     _atomic_write_parquet(
@@ -384,8 +413,10 @@ def _stage_drift(ctx: _Ctx) -> None:
 def _stage_derived_sets(ctx: _Ctx) -> None:
     """Write screen-derived feature sets for campaign configs.
 
-    Pure function of the stage outputs: reads ``feature_ic_screen.parquet``
-    and ``feature_drift_profile.parquet`` from the output dir and writes
+    Pure function of the stage outputs: reads
+    ``feature_ic_screen_train.parquet`` (the train-only screen — subset
+    derivation must never see validation-era labels) and
+    ``feature_drift_profile.parquet`` from the output dir and writes
     ``derived_feature_sets.json`` (shape ``{"feature_sets": {...}}``, sorted
     lists, always all four keys):
       - ``screen_stable``: stable features (primary reference target)
@@ -395,18 +426,21 @@ def _stage_derived_sets(ctx: _Ctx) -> None:
     Drift flags only exist for medium-universe features; features without a
     drift row are kept (no evidence of drift). Primary reference target is
     ``target`` when present, else the first distinct target in the screen.
+    Empty sets are valid scientific results (an empty ``screen_stable`` means
+    the full-gate screen found nothing); training on them fails loudly at
+    ingestion (``IngestionAgent.features``).
     """
-    screen_path = ctx.out / "feature_ic_screen.parquet"
+    screen_path = ctx.out / "feature_ic_screen_train.parquet"
     drift_path = ctx.out / "feature_drift_profile.parquet"
     if not screen_path.exists():
         raise RuntimeError(
-            f"{screen_path} not found — run the 'screens' stage first "
-            "(e.g. --only screens,drift,derived_sets)"
+            f"{screen_path} not found — run the 'screens_train' stage first "
+            "(e.g. --only screens_train,drift,derived_sets)"
         )
     if not drift_path.exists():
         raise RuntimeError(
             f"{drift_path} not found — run the 'drift' stage first "
-            "(e.g. --only screens,drift,derived_sets)"
+            "(e.g. --only screens_train,drift,derived_sets)"
         )
     screen = pl.read_parquet(screen_path)
     if "target" not in screen.columns:
@@ -705,6 +739,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "targets": _stage_targets,
         "ic_by_era": _stage_ic_by_era,
         "screens": _stage_screens,
+        "screens_train": _stage_screens_train,
         "summary": _stage_summary,
         "psi": _stage_psi,
         "drift": _stage_drift,

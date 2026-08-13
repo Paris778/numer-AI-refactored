@@ -11,7 +11,9 @@ from nmr.inference import (
     BootstrapCI,
     SeriesStats,
     ac_adjusted_sharpe,
+    benjamini_hochberg,
     block_bootstrap_ci,
+    block_bootstrap_pvalue,
     deflated_sharpe,
     era_series_stats,
     resolve_bandwidth,
@@ -305,3 +307,95 @@ def test_block_bootstrap_ci_rejects_non_finite_point_estimate() -> None:
             n_boot=10,
             seed=1,
         )
+
+
+def test_benjamini_hochberg_known_example() -> None:
+    # Classic BH step-up example: n=6, q=0.05 rejects the first five.
+    p = np.array([0.001, 0.01, 0.02, 0.03, 0.04, 0.5])
+    adjusted = benjamini_hochberg(p, q=0.05)
+    assert np.allclose(
+        adjusted, [0.006, 0.03, 0.04, 0.045, 0.048, 0.5], atol=1e-9
+    )
+    assert (adjusted <= 0.05).tolist() == [True, True, True, True, True, False]
+
+
+def test_benjamini_hochberg_order_invariance() -> None:
+    # Adjusted q-values stay aligned to the caller's input order.
+    adjusted = benjamini_hochberg([0.02, 0.5, 0.001])
+    assert np.allclose(adjusted, [0.03, 0.5, 0.003], atol=1e-9)
+
+
+def test_benjamini_hochberg_empty_and_uniform() -> None:
+    assert benjamini_hochberg([]).tolist() == []
+    assert np.allclose(benjamini_hochberg([1.0, 1.0, 1.0]), [1.0, 1.0, 1.0])
+    assert np.allclose(benjamini_hochberg([0.0, 0.0]), [0.0, 0.0])
+
+
+def test_benjamini_hochberg_validation() -> None:
+    with pytest.raises(ValueError, match="1-D"):
+        benjamini_hochberg(np.ones((2, 2)))
+    with pytest.raises(ValueError, match="q"):
+        benjamini_hochberg([0.01], q=1.0)
+
+
+def test_benjamini_hochberg_non_finite_coerced_to_one() -> None:
+    # Amendment A: non-finite p-values are coerced to 1.0 before ranking; the
+    # ranking length m counts the full input length; non-finite inputs
+    # evaluate to fdr_q = 1.0 and fdr_pass = False.
+    adjusted = benjamini_hochberg([0.01, np.nan, np.inf])
+    assert np.allclose(adjusted, [0.03, 1.0, 1.0], atol=1e-9)
+    assert (adjusted <= 0.05).tolist() == [True, False, False]
+
+
+def test_block_bootstrap_pvalue_small_for_consistent_signal() -> None:
+    signal = np.linspace(0.05, 0.95, 60)  # era-mean >> 0; no replicate can match it
+    p_value = block_bootstrap_pvalue(
+        signal, block_len=5, n_boot=400, seed=7
+    )
+    assert 0.0 < p_value <= 1.0 / (1 + 400)
+
+
+def test_block_bootstrap_pvalue_zero_mean_returns_one() -> None:
+    rng = np.random.default_rng(11)
+    noise = rng.normal(size=80)
+    assert block_bootstrap_pvalue(
+        noise - float(np.mean(noise)), block_len=5, n_boot=100, seed=3
+    ) == 1.0
+
+
+def test_block_bootstrap_pvalue_constant_series_returns_one() -> None:
+    # Final green-light patch: zero-variance series are degenerate artifacts —
+    # the studentized statistic is undefined; fail-safe p = 1.0, never 1/(B+1).
+    constant_positive = np.full(40, 0.5)
+    assert block_bootstrap_pvalue(
+        constant_positive, block_len=5, n_boot=100, seed=1
+    ) == 1.0
+    constant_zero = np.zeros(40)
+    assert block_bootstrap_pvalue(
+        constant_zero, block_len=5, n_boot=100, seed=1
+    ) == 1.0
+
+
+def test_block_bootstrap_pvalue_single_observation_returns_one() -> None:
+    assert block_bootstrap_pvalue([0.7], block_len=1, n_boot=10, seed=1) == 1.0
+
+
+def test_block_bootstrap_pvalue_deterministic_and_bounds() -> None:
+    rng = np.random.default_rng(13)
+    series = rng.normal(loc=0.1, scale=1.0, size=120)
+    first = block_bootstrap_pvalue(series, block_len=5, n_boot=300, seed=42)
+    second = block_bootstrap_pvalue(series, block_len=5, n_boot=300, seed=42)
+    assert first == second
+    assert 0.0 < first <= 1.0
+    assert first < 1.0  # a non-degenerate series must fail at least one replicate
+
+
+def test_block_bootstrap_pvalue_validation() -> None:
+    with pytest.raises(ValueError, match="non-empty"):
+        block_bootstrap_pvalue([], block_len=1, n_boot=10, seed=1)
+    with pytest.raises(ValueError, match="finite"):
+        block_bootstrap_pvalue([1.0, np.nan], block_len=1, n_boot=10, seed=1)
+    with pytest.raises(ValueError, match="block_len"):
+        block_bootstrap_pvalue([1.0, 2.0], block_len=3, n_boot=10, seed=1)
+    with pytest.raises(ValueError, match="n_boot"):
+        block_bootstrap_pvalue([1.0, 2.0], block_len=1, n_boot=0, seed=1)
