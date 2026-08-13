@@ -160,6 +160,8 @@ LightGBM adds `objective="regression"`, `random_state=seed`, `n_jobs=1`, `determ
 
 Presets mirror Numerai's published benchmark params and walk-forward purge convention in [docs/01-canon/models.md](docs/01-canon/models.md).
 
+**Dynamic colsample floor (2026-08-14):** the feature-sampling fraction is raise-only floored per feature count at fit time — `c_effective = min(1.0, max(c_resolved, min(1.0, max(0.1, min(10, |S|)/|S| + 1e-7))))`. Small sets can no longer be crippled by sampling ~1 feature per tree (campaign v2–v4 had `3 × 0.1 → 1`); the 1e-7 expansion guards the float32 truncation hazard in the C++ backends (`static_cast<int>(n_features · fraction)` can land infinitesimally below an integer boundary) and sits inside the `max(0.1, …)` bound so `|S| ≥ 100` configs are bit-identical to pre-floor behavior. Applied in `_resolved_params` on the backend-final sampling key(s): `colsample_bytree` for XGBoost; **every present member** of the LightGBM alias group `{colsample_bytree, feature_fraction, sub_feature}` (one `_ConfigAliases` group in the installed wrapper — unknown kwargs flow through `**kwargs` into the native engine, so flooring a single alias is not precedence-proof); `rsm` post-translation for CatBoost (a user-native `rsm` is bounded identically). `n_features` is threaded `_fit_model → _device_candidate_params → _resolved_params` (both device candidates get the identical floored value); the Optuna baseline anchor still enqueues the raw resolved value (§S, documented divergence).
+
 ### H. Ensembling — `nmr/ensemble.py`
 
 `Ensembler`:

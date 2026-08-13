@@ -109,6 +109,42 @@ def resolve_model_params(preset: str, params: dict[str, Any]) -> dict[str, Any]:
     return resolved
 
 
+_COLSAMPLE_FLOOR_MIN = 0.1
+_COLSAMPLE_FLOOR_TARGET_FEATURES = 10
+_COLSAMPLE_FLOOR_EPS = 1e-7
+
+# LightGBM's sampling aliases form one _ConfigAliases group in the installed
+# sklearn wrapper (verified on lightgbm 4.6.0); unknown kwargs flow through
+# **kwargs into the native engine, so every present member must be floored.
+_LGBM_COLSAMPLE_ALIASES = ("colsample_bytree", "feature_fraction", "sub_feature")
+
+
+def _colsample_floor(n_features: int) -> float:
+    """Dynamic lower bound for the feature-sampling fraction.
+
+    Small feature sets must not be crippled by sampling ~1 feature per tree:
+    ``min(1.0, max(0.1, min(10, |S|) / |S| + 1e-7))`` guarantees at least
+    ``min(10, |S|)`` candidate features per split. The 1e-7 expansion guards
+    the float32 truncation hazard in the C++ backends (``static_cast<int>(
+    n_features * fraction)`` in single precision can land infinitesimally
+    below an integer boundary, e.g. ``float32(10/42) * 42 == 9.9999999...``).
+    The expansion sits *inside* the ``max(0.1, ...)`` bound, so ``|S| >= 100``
+    keeps the floor at exactly 0.1 (large-set configs stay bit-identical).
+    """
+    if n_features < 1:
+        raise ValueError("n_features must be >= 1")
+    raw_floor = (
+        min(float(_COLSAMPLE_FLOOR_TARGET_FEATURES), float(n_features))
+        / float(n_features)
+    )
+    return float(min(1.0, max(_COLSAMPLE_FLOOR_MIN, raw_floor + _COLSAMPLE_FLOOR_EPS)))
+
+
+def _raise_to_colsample_floor(value: float, n_features: int) -> float:
+    """Raise-only application of the sampling floor (a floor is never a ceiling)."""
+    return float(min(1.0, max(value, _colsample_floor(n_features))))
+
+
 def _translate_catboost(
     resolved: dict[str, Any], *, seed: int, use_gpu: bool
 ) -> dict[str, Any]:
@@ -399,7 +435,9 @@ class ModelOrchestrator:
     def _fit_model(
         self, *, features: np.ndarray, target: np.ndarray, use_gpu: bool = True
     ) -> object:
-        candidate_params = self._device_candidate_params(use_gpu=use_gpu)
+        candidate_params = self._device_candidate_params(
+            use_gpu=use_gpu, n_features=int(features.shape[1])
+        )
         last_error: Exception | None = None
         if self._config.backend == "lightgbm":
             backend_errors = (ValueError, TypeError, lgb.basic.LightGBMError)
@@ -462,24 +500,28 @@ class ModelOrchestrator:
         else:  # catboost: period-based verbose logging at fit time
             model.fit(features, target, verbose=period)
 
-    def _device_candidate_params(self, *, use_gpu: bool) -> list[dict[str, Any]]:
+    def _device_candidate_params(
+        self, *, use_gpu: bool, n_features: int
+    ) -> list[dict[str, Any]]:
         if not use_gpu:
-            return [self._resolved_params(use_gpu=False)]
+            return [self._resolved_params(use_gpu=False, n_features=n_features)]
         if self._config.backend == "catboost":
             # CPU-only by design: catboost rejects `rsm` on GPU (non-pairwise
             # modes) and every canonical preset ships colsample_bytree -> rsm,
             # so a GPU candidate can never fit. Never attempt one.
-            return [self._resolved_params(use_gpu=False)]
-        gpu_params = self._resolved_params(use_gpu=True)
+            return [self._resolved_params(use_gpu=False, n_features=n_features)]
+        gpu_params = self._resolved_params(use_gpu=True, n_features=n_features)
         if self._config.device == "gpu":
             # Forced GPU: a failing GPU fit raises — no silent CPU fallback.
             return [gpu_params]
-        cpu_params = self._resolved_params(use_gpu=False)
+        cpu_params = self._resolved_params(use_gpu=False, n_features=n_features)
         if gpu_params == cpu_params:
             return [cpu_params]
         return [gpu_params, cpu_params]
 
-    def _resolved_params(self, *, use_gpu: bool) -> dict[str, Any]:
+    def _resolved_params(
+        self, *, use_gpu: bool, n_features: int
+    ) -> dict[str, Any]:
         base = resolve_model_params(self._config.preset, self._config.params)
 
         if self._config.backend == "lightgbm":
@@ -493,11 +535,25 @@ class ModelOrchestrator:
                 **base,
             }
             params["device_type"] = "gpu" if use_gpu else "cpu"
+            # Floor every present member of the LightGBM sampling-alias group
+            # ({colsample_bytree, feature_fraction, sub_feature} — one
+            # _ConfigAliases group in the installed wrapper, and unknown
+            # kwargs flow through **kwargs into the native engine). Flooring
+            # all present members is precedence-proof.
+            for alias in _LGBM_COLSAMPLE_ALIASES:
+                if alias in params:
+                    params[alias] = _raise_to_colsample_floor(
+                        float(params[alias]), n_features
+                    )
             return params
 
         if self._config.backend == "catboost":
             base = resolve_model_params(self._config.preset, self._config.params)
-            return _translate_catboost(base, seed=self._seed, use_gpu=use_gpu)
+            translated = _translate_catboost(base, seed=self._seed, use_gpu=use_gpu)
+            translated["rsm"] = _raise_to_colsample_floor(
+                float(translated["rsm"]), n_features
+            )
+            return translated
 
         params = {
             "objective": "reg:squarederror",
@@ -516,6 +572,9 @@ class ModelOrchestrator:
             params.setdefault("max_leaves", num_leaves)
         if min_data_in_leaf is not None:
             params.setdefault("min_child_weight", float(min_data_in_leaf))
+        params["colsample_bytree"] = _raise_to_colsample_floor(
+            float(params["colsample_bytree"]), n_features
+        )
         # xgboost >= 3.0 unified GPU acceleration under device='cuda';
         # tree_method='gpu_hist' was removed and raises Invalid Input.
         params["tree_method"] = "hist"

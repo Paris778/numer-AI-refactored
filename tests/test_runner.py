@@ -26,16 +26,16 @@ def _build_train_frame() -> pl.DataFrame:
     rows: list[dict[str, float | str]] = []
     for era in range(1, 13):
         for idx in range(6):
-            f1 = (era * 0.03) + (idx * 0.02)
-            f2 = (era * -0.02) + (idx * 0.01)
+            f1 = (idx * 0.02)
+            f2 = ((idx % 3) * 0.01)
             rows.append(
                 {
                     "era": str(era),
                     "id": f"{era}_{idx}",
                     "f1": f1,
                     "f2": f2,
-                    "target": 0.6 * f1 - 0.3 * f2 + 0.05 * era,
-                    "target_alt": 0.2 * f1 + 0.7 * f2 - 0.04 * era,
+                    "target": (0.6 + 0.03 * era) * f1 - (0.3 + 0.01 * era) * f2 + 0.3 * f1 * f1 + 0.05 * era,
+                    "target_alt": (0.2 + 0.02 * era) * f1 + (0.7 - 0.01 * era) * f2 - 0.2 * f2 * f2 - 0.04 * era,
                 }
             )
     return pl.DataFrame(rows)
@@ -66,16 +66,16 @@ def _write_synthetic_data(root) -> None:
             # exactly 0.0 — making the F-019 fidelity test's Spearman rho
             # undefined. Shifted features keep eras/assertions unchanged while
             # yielding non-degenerate predictions.
-            f1 = ((era - 11) * 0.03) + (idx * 0.02)
-            f2 = ((era - 11) * -0.02) + (idx * 0.01)
+            f1 = (idx * 0.02)
+            f2 = ((idx % 3) * 0.01)
             val_rows.append(
                 {
                     "era": str(era),
                     "id": f"{era}_{idx}",
                     "f1": f1,
                     "f2": f2,
-                    "target": 0.6 * f1 - 0.3 * f2 + 0.05 * era,
-                    "target_alt": 0.2 * f1 + 0.7 * f2 - 0.04 * era,
+                    "target": (0.6 + 0.03 * era) * f1 - (0.3 + 0.01 * era) * f2 + 0.3 * f1 * f1 + 0.05 * era,
+                    "target_alt": (0.2 + 0.02 * era) * f1 + (0.7 - 0.01 * era) * f2 - 0.2 * f2 * f2 - 0.04 * era,
                 }
             )
     val = pl.DataFrame(val_rows)
@@ -141,7 +141,8 @@ def test_runner_deploy_serializes_reloadable_predict(tmp_path) -> None:
     assert result.artifact is not None
     loaded_predict = load_predict(result.artifact.path)
     live_features = pd.DataFrame(
-        {"f1": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6], "f2": [0.3, 0.4, 0.5, 0.6, 0.7, 0.8]},
+        # in-envelope live features (train support: f1 in [0, 0.1], f2 in [0, 0.02])
+        {"f1": [0.0, 0.02, 0.04, 0.06, 0.08, 0.1], "f2": [0.0, 0.01, 0.02, 0.0, 0.01, 0.02]},
         index=[f"id_{i}" for i in range(6)],
     )
     prediction = loaded_predict(live_features)
@@ -313,14 +314,11 @@ def test_compute_run_id_public_accessor_matches_private(tmp_path) -> None:
 def test_runner_catboost_end_to_end(tmp_path) -> None:
     """CatBoost end-to-end: deterministic run, deploy roundtrip, oof_device.
 
-    NOTE: unlike the lightgbm deploy test, the live features must lie inside
-    the training envelope (f2 in [-0.24, 0.03]) and the model needs >10
-    iterations. With the out-of-envelope f2 of [0.3, 0.4, 0.5], a shallow
-    CatBoost model collapses to a single extrapolation leaf per target, which
-    rank-gaussianization maps to exactly 0.0 (nunique()==1) — the same
-    degeneracy the shifted validation fixture below guards against. At
-    n_estimators=30+ (cliff at 25) the full-history model splits the envelope
-    and the loaded pipeline emits genuinely non-constant predictions.
+    NOTE: the synthetic features are era-independent (f1 in [0, 0.1],
+    f2 in [0, 0.02]), so any train window covers the live envelope and
+    out-of-envelope constant-leaf collapse is structurally impossible.
+    The era variation lives in the target coefficients instead, keeping
+    per-era CORR series non-degenerate.
     """
     cfg = _config(tmp_path)
     catboost_cfg = ExperimentConfig(
@@ -338,7 +336,7 @@ def test_runner_catboost_end_to_end(tmp_path) -> None:
     assert first.artifact is not None
     loaded = load_predict(first.artifact.path)
     live_features = pd.DataFrame(
-        {"f1": [0.1, 0.2, 0.3], "f2": [-0.1, -0.05, 0.0]}, index=["a", "b", "c"]
+        {"f1": [0.0, 0.02, 0.04], "f2": [0.0, 0.01, 0.02]}, index=["a", "b", "c"]
     )
     pred = loaded(live_features)
     assert pred["prediction"].notna().all()

@@ -435,9 +435,11 @@ def test_resolve_model_params_matches_orchestrator_resolution():
     cfg = ModelConfig(backend="lightgbm", preset="fast",
                       params={"n_estimators": 2500, "colsample_bytree": 0.2})
     orch = ModelOrchestrator(cfg, seed=42)
-    # _resolved_params(use_gpu=False) adds backend boilerplate; the preset+params
-    # core must equal resolve_model_params for the same inputs.
-    resolved = orch._resolved_params(use_gpu=False)
+    # _resolved_params(use_gpu=False, n_features=1000) adds backend boilerplate;
+    # the preset+params core must equal resolve_model_params for the same inputs.
+    # n_features=1000 keeps the colsample floor at its 0.1 no-op, so the
+    # resolved core stays identical to the raw resolution.
+    resolved = orch._resolved_params(use_gpu=False, n_features=1000)
     for key, value in resolve_model_params("fast", cfg.params).items():
         assert resolved[key] == value
 
@@ -454,13 +456,18 @@ def test_xgboost_gpu_params_use_cuda_device() -> None:
     GPU acceleration is device='cuda' with tree_method='hist'."""
     cfg = ModelConfig(backend="xgboost", preset="fast")
     orchestrator = ModelOrchestrator(cfg, seed=3)
-    gpu = orchestrator._resolved_params(use_gpu=True)
-    cpu = orchestrator._resolved_params(use_gpu=False)
+    gpu = orchestrator._resolved_params(use_gpu=True, n_features=1000)
+    cpu = orchestrator._resolved_params(use_gpu=False, n_features=1000)
     assert gpu["tree_method"] == "hist"
     assert gpu["device"] == "cuda"
     assert cpu["tree_method"] == "hist"
     assert cpu["device"] == "cpu"
-    assert orchestrator._device_candidate_params(use_gpu=True)[0]["device"] == "cuda"
+    assert (
+        orchestrator._device_candidate_params(use_gpu=True, n_features=1000)[0][
+            "device"
+        ]
+        == "cuda"
+    )
 
 
 # --- catboost backend (Task 3) -------------------------------------------------
@@ -529,7 +536,7 @@ def test_catboost_is_cpu_only_by_construction() -> None:
         ModelConfig(backend="catboost", preset="fast", params={"n_estimators": 10}),
         seed=29,
     )
-    candidates = orchestrator._device_candidate_params(use_gpu=True)
+    candidates = orchestrator._device_candidate_params(use_gpu=True, n_features=1000)
     assert len(candidates) == 1
     assert candidates[0]["task_type"] == "CPU"
 
@@ -801,3 +808,109 @@ def test_full_history_spawn_requires_data_config() -> None:
             _model_frame(), feature_cols=["f1", "f2", "f3"],
             target_col="target", era_col="era", data=None,  # type: ignore[arg-type]
         )
+
+
+# --- dynamic colsample_bytree floor (Phase 1, item 3) -------------------------
+
+
+def test_colsample_floor_values_and_guard() -> None:
+    from nmr.models import _colsample_floor
+
+    assert _colsample_floor(1) == pytest.approx(1.0)
+    assert _colsample_floor(3) == pytest.approx(1.0)
+    assert _colsample_floor(10) == pytest.approx(1.0)
+    assert _colsample_floor(42) == pytest.approx(10.0 / 42.0)
+    assert _colsample_floor(780) == pytest.approx(0.1)
+    with pytest.raises(ValueError, match="n_features"):
+        _colsample_floor(0)
+
+
+def test_resolved_params_raises_colsample_on_small_sets() -> None:
+    orch = ModelOrchestrator(ModelConfig(backend="lightgbm", preset="fast"), seed=1)
+    cpu = orch._resolved_params(use_gpu=False, n_features=3)
+    gpu = orch._resolved_params(use_gpu=True, n_features=3)
+    assert cpu["colsample_bytree"] == pytest.approx(1.0)
+    assert gpu["colsample_bytree"] == pytest.approx(1.0)  # cross-device parity
+
+
+def test_resolved_params_preserves_explicit_override_above_floor() -> None:
+    cfg = ModelConfig(
+        backend="lightgbm", preset="fast", params={"colsample_bytree": 0.5}
+    )
+    orch = ModelOrchestrator(cfg, seed=1)
+    resolved = orch._resolved_params(use_gpu=False, n_features=42)
+    assert resolved["colsample_bytree"] == pytest.approx(0.5)
+
+
+def test_resolved_params_floor_noop_for_large_sets() -> None:
+    orch = ModelOrchestrator(ModelConfig(backend="lightgbm", preset="fast"), seed=1)
+    resolved = orch._resolved_params(use_gpu=False, n_features=780)
+    assert resolved["colsample_bytree"] == pytest.approx(0.1)
+
+
+def test_resolved_params_floors_xgboost_and_catboost_rsm() -> None:
+    xgb_orch = ModelOrchestrator(
+        ModelConfig(backend="xgboost", preset="fast"), seed=1
+    )
+    assert xgb_orch._resolved_params(use_gpu=True, n_features=3)[
+        "colsample_bytree"
+    ] == pytest.approx(1.0)
+    cb_orch = ModelOrchestrator(
+        ModelConfig(backend="catboost", preset="fast"), seed=1
+    )
+    assert cb_orch._resolved_params(use_gpu=False, n_features=3)["rsm"] == pytest.approx(
+        1.0
+    )
+
+
+def test_resolved_params_floors_user_native_rsm() -> None:
+    # A CatBoost-native `rsm` supplied directly in params must be bounded
+    # identically (floor applied post-translation on the final key).
+    cfg = ModelConfig(backend="catboost", preset="fast", params={"rsm": 0.05})
+    orch = ModelOrchestrator(cfg, seed=1)
+    resolved = orch._resolved_params(use_gpu=False, n_features=42)
+    assert resolved["rsm"] == pytest.approx(10.0 / 42.0)
+
+
+def test_colsample_floor_survives_float32_truncation() -> None:
+    from nmr.models import _colsample_floor
+
+    # The C++ backends compute static_cast<int>(n_features * fraction) in
+    # single precision; the 1e-7 expansion must survive the float32
+    # round-trip so the sampled count never truncates below 10.
+    assert int(np.float32(_colsample_floor(42)) * 42) == 10
+    assert int(np.float32(_colsample_floor(11)) * 11) >= 10
+    assert int(np.float32(_colsample_floor(99)) * 99) >= 10
+    assert _colsample_floor(780) == pytest.approx(0.1)  # ε stays inside max(0.1, ...)
+
+
+def test_resolved_params_floors_lightgbm_feature_fraction_alias() -> None:
+    cfg = ModelConfig(
+        backend="lightgbm", preset="fast", params={"feature_fraction": 0.05}
+    )
+    orch = ModelOrchestrator(cfg, seed=1)
+    resolved = orch._resolved_params(use_gpu=False, n_features=42)
+    assert resolved["feature_fraction"] >= 10.0 / 42.0
+
+
+def test_resolved_params_floors_lightgbm_sub_feature_alias() -> None:
+    cfg = ModelConfig(backend="lightgbm", preset="fast", params={"sub_feature": 0.05})
+    orch = ModelOrchestrator(cfg, seed=1)
+    resolved = orch._resolved_params(use_gpu=False, n_features=3)
+    assert resolved["sub_feature"] == pytest.approx(1.0)
+
+
+def test_resolved_params_floors_all_present_alias_members() -> None:
+    # Precedence-proof: with the preset's colsample_bytree AND user-supplied
+    # aliases all present, every member of the alias group is floored, so no
+    # alias resolution rule can bypass the lower bound.
+    cfg = ModelConfig(
+        backend="lightgbm",
+        preset="fast",
+        params={"feature_fraction": 0.05, "sub_feature": 0.05},
+    )
+    orch = ModelOrchestrator(cfg, seed=1)
+    resolved = orch._resolved_params(use_gpu=False, n_features=42)
+    assert resolved["colsample_bytree"] >= 10.0 / 42.0
+    assert resolved["feature_fraction"] >= 10.0 / 42.0
+    assert resolved["sub_feature"] >= 10.0 / 42.0
