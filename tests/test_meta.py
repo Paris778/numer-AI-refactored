@@ -444,3 +444,60 @@ def test_campaign_evidence_assembles_variants_and_pairwise(
     assert row["mean_diff"] < 0.0
     assert row["ci_high"] < 0.0
     assert row["ci_low"] <= row["mean_diff"] <= row["ci_high"]
+
+def _variant_row(label, sharpe, skew, kurt, n_eras, std=0.1, status="recorded"):
+    return {
+        "variant": label, "status": status,
+        "ic_sharpe": sharpe, "ic_std": std, "ic_skew": skew,
+        "ic_kurt": kurt, "ic_n_eras": n_eras,
+    }
+
+def test_attach_campaign_dsr_computes_fleet_deflation() -> None:
+    import numpy as np
+    from nmr.inference import deflated_sharpe
+    from nmr.meta import _attach_campaign_dsr
+
+    rows = [
+        _variant_row("a", 0.4, 0.0, 3.0, 600),
+        _variant_row("b", 0.6, 0.1, 3.2, 649),
+        _variant_row("c", 0.5, -0.1, 2.9, 620),
+    ]
+    out = {r["variant"]: r for r in _attach_campaign_dsr(rows)}
+    var = np.var([0.4, 0.6, 0.5], ddof=1)
+    expected = deflated_sharpe(
+        0.4, n_trials=3, n_obs=600, skew=0.0, kurt=3.0, trials_sr_var=var
+    )
+    assert out["a"]["dsr_campaign_aware"] == pytest.approx(expected)
+    assert out["a"]["dsr_pass_campaign"] is (out["a"]["dsr_campaign_aware"] >= 0.95)
+    assert out["a"]["dsr_reason"] is None
+    assert out["a"]["dsr_n_trials"] == 3
+    assert out["a"]["dsr_trials_sr_var"] == pytest.approx(var)
+
+def test_attach_campaign_dsr_zero_variance_guard() -> None:
+    from nmr.meta import _attach_campaign_dsr
+
+    rows = [
+        _variant_row("a", 0.5, 0.0, 3.0, 600),
+        _variant_row("b", 0.5, 0.0, 3.0, 600),
+    ]
+    for r in _attach_campaign_dsr(rows):
+        assert r["dsr_campaign_aware"] is None
+        assert r["dsr_pass_campaign"] is False
+        assert r["dsr_reason"] == "zero_cross_trial_sharpe_variance"
+
+def test_attach_campaign_dsr_degenerate_and_error_rows() -> None:
+    from nmr.meta import _attach_campaign_dsr
+
+    rows = [
+        _variant_row("good1", 0.4, 0.0, 3.0, 600),
+        _variant_row("good2", 0.6, 0.1, 3.2, 649),
+        _variant_row("const", 0.0, 0.0, 3.0, 600, std=0.0),
+        _variant_row("short", 0.5, 0.0, 3.0, 3),
+        {"variant": "err", "status": "error", "error": "boom"},
+    ]
+    out = {r["variant"]: r for r in _attach_campaign_dsr(rows)}
+    assert out["good1"]["dsr_campaign_aware"] is not None
+    assert out["const"]["dsr_campaign_aware"] is None
+    assert out["const"]["dsr_reason"] == "degenerate_series"
+    assert out["short"]["dsr_reason"] == "degenerate_series"
+    assert out["err"]["dsr_campaign_aware"] is None

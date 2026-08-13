@@ -19,7 +19,7 @@ import polars as pl
 
 from nmr.config import DataConfig
 from nmr.evaluation import MIN_OVERLAP_ERAS, NonVacuityError
-from nmr.inference import Horizon, block_bootstrap_ci, resolve_block_len
+from nmr.inference import Horizon, block_bootstrap_ci, era_series_stats, resolve_block_len
 
 __all__ = [
     "PairedResult",
@@ -288,6 +288,80 @@ def _series_max_drawdown(series: np.ndarray) -> float | None:
     return float(np.min(cum - np.maximum.accumulate(cum)))
 
 
+def _attach_campaign_dsr(
+    rows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Attach post-hoc campaign-aware DSR columns to campaign variant rows.
+
+    Valid cells: status ``"recorded"`` with finite ``ic_sharpe``/``ic_skew``/
+    ``ic_kurt``/``ic_std``, ``ic_std > 0`` and ``ic_n_eras >= 4`` (degenerate
+    or too-short IC series cannot carry higher-order moments). The fleet DSR
+    uses ``n_trials`` = the valid cell count and the empirical cross-cell
+    Sharpe variance (ddof=1) — never an analytic fallback. Guard A: a fleet
+    with zero cross-trial Sharpe variance yields DSR None with reason
+    ``"zero_cross_trial_sharpe_variance"``; evidence assembly never crashes.
+    """
+    from nmr.inference import deflated_sharpe_fleet
+
+    def _is_valid(row: dict[str, object]) -> bool:
+        try:
+            return (
+                row.get("status") == "recorded"
+                and all(
+                    np.isfinite(float(row[key]))
+                    for key in ("ic_sharpe", "ic_skew", "ic_kurt", "ic_std")
+                )
+                and float(row["ic_std"]) > 0.0
+                and int(row["ic_n_eras"]) >= 4
+            )
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    valid = [r for r in rows if _is_valid(r)]
+    n_trials = len(valid)
+    if n_trials:
+        sharpe_vec = np.asarray([float(r["ic_sharpe"]) for r in valid], dtype=float)
+        dsr, reasons = deflated_sharpe_fleet(
+            sharpe_vec,
+            skew=np.asarray([float(r["ic_skew"]) for r in valid], dtype=float),
+            kurt=np.asarray([float(r["ic_kurt"]) for r in valid], dtype=float),
+            n_obs=np.asarray([float(r["ic_n_eras"]) for r in valid], dtype=float),
+        )
+        trials_var = float(np.var(sharpe_vec, ddof=1)) if n_trials >= 2 else None
+    else:
+        dsr, reasons = np.array([]), np.array([])
+        trials_var = None
+
+    fleet = {
+        str(r["variant"]): {"dsr": d, "reason": rr}
+        for r, d, rr in zip(valid, dsr, reasons)
+    }
+    out: list[dict[str, object]] = []
+    for row in rows:
+        entry = fleet.get(str(row.get("variant")))
+        attached = dict(row)
+        attached["dsr_n_trials"] = n_trials if n_trials >= 2 else None
+        attached["dsr_trials_sr_var"] = trials_var
+        if entry is not None:
+            dsr_value = float(entry["dsr"])
+            attached["dsr_campaign_aware"] = (
+                None if np.isnan(dsr_value) else dsr_value
+            )
+            attached["dsr_pass_campaign"] = bool(
+                attached["dsr_campaign_aware"] is not None
+                and attached["dsr_campaign_aware"] >= 0.95
+            )
+            attached["dsr_reason"] = str(entry["reason"]) or None
+        else:
+            attached["dsr_campaign_aware"] = None
+            attached["dsr_pass_campaign"] = False
+            attached["dsr_reason"] = (
+                "degenerate_series" if row.get("status") == "recorded" else None
+            )
+        out.append(attached)
+    return out
+
+
 def campaign_evidence(
     campaign_log_path: str | Path,
     registry_root: str | Path,
@@ -388,6 +462,7 @@ def campaign_evidence(
         ic_frames[label] = series
         ics = series["ic"].to_numpy()
         n_eras = int(ics.size)
+        series_stats = era_series_stats(ics.tolist()) if ics.size else None
         ic_ci_lo = ic_ci_hi = None
         if n_eras >= 2:
             ci = block_bootstrap_ci(
@@ -442,6 +517,9 @@ def campaign_evidence(
                     if ics.size >= 2 and np.std(ics, ddof=0) > 0
                     else None
                 ),
+                "ic_std": float(series_stats.std) if series_stats else None,
+                "ic_skew": float(series_stats.skew) if series_stats else None,
+                "ic_kurt": float(series_stats.kurt) if series_stats else None,
                 "max_drawdown": _series_max_drawdown(ics),
                 "n_eras": n_eras,
                 "scorecard_ic_86era": scorecard.get("corr"),
@@ -452,6 +530,7 @@ def campaign_evidence(
             }
         )
 
+    variant_rows = _attach_campaign_dsr(variant_rows)
     variants = pl.DataFrame(variant_rows)
 
     pairwise_rows: list[dict[str, object]] = []

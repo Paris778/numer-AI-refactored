@@ -309,6 +309,71 @@ def test_block_bootstrap_ci_rejects_non_finite_point_estimate() -> None:
         )
 
 
+def test_deflated_sharpe_fleet_matches_single_computation() -> None:
+    from nmr.inference import deflated_sharpe, deflated_sharpe_fleet
+
+    sharpe = np.array([0.4, 0.6, 0.5])
+    skew = np.array([0.0, 0.1, -0.1])
+    kurt = np.array([3.0, 3.2, 2.9])
+    n_obs = np.array([600, 649, 620])
+    dsr, reason = deflated_sharpe_fleet(
+        sharpe, skew=skew, kurt=kurt, n_obs=n_obs
+    )
+    var = np.var(sharpe, ddof=1)
+    expected = deflated_sharpe(
+        0.4, n_trials=3, n_obs=600, skew=0.0, kurt=3.0, trials_sr_var=var
+    )
+    assert dsr[0] == pytest.approx(expected)
+    assert np.isfinite(dsr).all()
+    assert reason.tolist() == ["", "", ""]
+
+
+def test_deflated_sharpe_fleet_zero_variance_guard() -> None:
+    # Guard A: identical Sharpes -> zero cross-trial variance -> no DSR, no crash.
+    from nmr.inference import deflated_sharpe_fleet
+
+    dsr, reason = deflated_sharpe_fleet(
+        np.array([0.5, 0.5, 0.5]),
+        skew=np.zeros(3),
+        kurt=np.full(3, 3.0),
+        n_obs=np.full(3, 600),
+    )
+    assert np.isnan(dsr).all()
+    assert set(reason.tolist()) == {"zero_cross_trial_sharpe_variance"}
+
+
+def test_deflated_sharpe_fleet_insufficient_trials() -> None:
+    from nmr.inference import deflated_sharpe_fleet
+
+    dsr, reason = deflated_sharpe_fleet(
+        np.array([0.4]),
+        skew=np.array([0.0]),
+        kurt=np.array([3.0]),
+        n_obs=np.array([600]),
+    )
+    assert np.isnan(dsr).all()
+    assert reason.tolist() == ["insufficient_trials"]
+
+
+def test_deflated_sharpe_fleet_validation() -> None:
+    from nmr.inference import deflated_sharpe_fleet
+
+    with pytest.raises(ValueError, match="same length"):
+        deflated_sharpe_fleet(
+            np.array([0.4, 0.5]),
+            skew=np.array([0.0]),
+            kurt=np.array([3.0]),
+            n_obs=np.array([600]),
+        )
+    with pytest.raises(ValueError, match="finite"):
+        deflated_sharpe_fleet(
+            np.array([0.4, np.nan]),
+            skew=np.array([0.0, 0.0]),
+            kurt=np.array([3.0, 3.0]),
+            n_obs=np.array([600, 600]),
+        )
+
+
 def test_benjamini_hochberg_known_example() -> None:
     # Classic BH step-up example: n=6, q=0.05 rejects the first five.
     p = np.array([0.001, 0.01, 0.02, 0.03, 0.04, 0.5])

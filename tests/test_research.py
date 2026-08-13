@@ -247,3 +247,25 @@ def test_held_out_partition_preserves_zero_padded_labels() -> None:
     assert held_out_eras == ["0017", "0018", "0019", "0020"]
     assert purge_eras == ["0015", "0016"]
     assert max(map(int, train_eras)) == 14
+
+
+def test_held_out_metric_full_matches_metric_and_carries_moments(tmp_path) -> None:
+    from nmr.research import _held_out_metric, _held_out_metric_full
+
+    cfg = _write_data(tmp_path)
+    value, moments = _held_out_metric_full(cfg, metric_name="sharpe")
+    assert value == _held_out_metric(cfg, metric_name="sharpe")
+    assert moments.ic_n_eras >= 1
+    assert moments.ic_std >= 0.0
+    assert np.isfinite(moments.ic_sharpe) and np.isfinite(moments.ic_skew)
+    assert np.isfinite(moments.ic_kurt)
+
+
+def test_held_out_metric_full_corr_sharpe_ac_consistent(tmp_path) -> None:
+    from nmr.research import _held_out_metric, _held_out_metric_full
+
+    cfg = _write_data(tmp_path)
+    value, moments = _held_out_metric_full(cfg, metric_name="corr_sharpe_ac")
+    assert value == _held_out_metric(cfg, metric_name="corr_sharpe_ac")
+    assert moments.ic_n_eras >= 2  # AC Sharpe requires >= 2 eras
+    assert moments.ic_std >= 0.0

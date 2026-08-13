@@ -18,7 +18,7 @@ from nmr.config import ExperimentConfig, set_global_seeds
 from nmr.data import IngestionAgent
 from nmr.ensemble import Ensembler
 from nmr.evaluation import EvaluationEngine, MetricSummary
-from nmr.inference import ac_adjusted_sharpe
+from nmr.inference import ac_adjusted_sharpe, era_series_stats
 from nmr.models import ModelOrchestrator, coerce_float32_features
 from nmr.risk import NeutralizationEngine
 from nmr.splitter import PurgedEraSplitter
@@ -76,13 +76,20 @@ class HyperparameterSweep:
         trials: list[dict[str, Any]] = []
         for trial_idx, params in enumerate(chosen):
             cfg = _override_config(self._base_config, params)
-            metric_value = _held_out_metric(cfg, metric_name=self._metric)
+            metric_value, moments = _held_out_metric_full(
+                cfg, metric_name=self._metric
+            )
             trials.append(
                 {
                     "trial_id": trial_idx,
                     "params_json": json.dumps(params, sort_keys=True),
                     "metric_value": float(metric_value),
                     "metric": self._metric,
+                    "ic_sharpe": moments.ic_sharpe,
+                    "ic_skew": moments.ic_skew,
+                    "ic_kurt": moments.ic_kurt,
+                    "ic_n_eras": moments.ic_n_eras,
+                    "ic_std": moments.ic_std,
                 }
             )
 
@@ -216,6 +223,29 @@ def _per_era_ac_sharpe(per_era: dict[str, float], *, horizon: str = "20D") -> fl
 
 
 def _held_out_metric(config: ExperimentConfig, *, metric_name: str) -> float:
+    """Held-out metric scalar (the public contract used by sweeps).
+
+    Delegates to :func:`_held_out_metric_full`; the per-era series moments are
+    computed in the same training pass and discarded here.
+    """
+    return _held_out_metric_full(config, metric_name=metric_name)[0]
+
+
+@dataclass(frozen=True)
+class _HeldOutMoments:
+    """Per-era IC series moments of the held-out partition (same series that
+    produced the metric — the same-distribution invariant for fleet DSR)."""
+
+    ic_sharpe: float
+    ic_skew: float
+    ic_kurt: float
+    ic_n_eras: int
+    ic_std: float
+
+
+def _held_out_metric_full(
+    config: ExperimentConfig, *, metric_name: str
+) -> tuple[float, _HeldOutMoments]:
     set_global_seeds(config.run.seed)
     agent = IngestionAgent(config.data)
     feature_cols = agent.features(config.data.resolved_feature_set)
@@ -319,12 +349,20 @@ def _held_out_metric(config: ExperimentConfig, *, metric_name: str) -> float:
         target_col=main_target,
         era_col="era",
     )
+    stats = era_series_stats([per_era[k] for k in sorted(per_era, key=int)])
+    moments = _HeldOutMoments(
+        ic_sharpe=stats.sharpe,
+        ic_skew=stats.skew,
+        ic_kurt=stats.kurt,
+        ic_n_eras=stats.n,
+        ic_std=stats.std,
+    )
     if metric_name == "corr_sharpe_ac":
-        return _per_era_ac_sharpe(per_era, horizon="20D")
+        return _per_era_ac_sharpe(per_era, horizon="20D"), moments
     summary = evaluator.summarize(per_era)
     if not hasattr(summary, metric_name):
         raise ValueError(f"Unknown metric {metric_name!r}")
-    return float(getattr(summary, metric_name))
+    return float(getattr(summary, metric_name)), moments
 
 
 def _train_multi_target_oof(

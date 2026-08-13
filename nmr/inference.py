@@ -27,6 +27,7 @@ __all__ = [
     "benjamini_hochberg",
     "ac_adjusted_sharpe",
     "deflated_sharpe",
+    "deflated_sharpe_fleet",
 ]
 
 Horizon = Literal["20D", "60D"]
@@ -298,6 +299,72 @@ def deflated_sharpe(
 
     z_score = (sharpe_f - sr0) * math.sqrt(float(n_obs - 1)) / math.sqrt(radicand)
     return float(norm.cdf(z_score))
+
+
+def deflated_sharpe_fleet(
+    sharpe: ArrayLike1D,
+    *,
+    skew: ArrayLike1D,
+    kurt: ArrayLike1D,
+    n_obs: ArrayLike1D,
+    sr0_benchmark: float = 0.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Fleet DSR: deflates each trial's Sharpe against the empirical cross-trial
+    Sharpe distribution (Bailey-Lopez de Prado; ``n_trials`` = fleet size).
+
+    Inputs are aligned per trial and must be finite. The cross-trial variance
+    is the sample variance of the fleet's Sharpes (ddof=1) — never an analytic
+    fallback (evaluation bible §4.3). Returns ``(dsr, reason)`` arrays of the
+    same length; ``dsr[i]`` is NaN when trial ``i`` cannot be deflated and
+    ``reason[i]`` carries the code (empty string when computed):
+
+    - ``"insufficient_trials"`` — fewer than 2 trials in the fleet;
+    - ``"zero_cross_trial_sharpe_variance"`` — fleet Sharpes are identical
+      (std < 1e-12): no multiple-testing bar is estimable (Guard A);
+    - ``"radicand"`` — the BLP radicand is non-positive for that trial.
+    """
+    s = np.asarray(sharpe, dtype=float)
+    sk = np.asarray(skew, dtype=float)
+    ku = np.asarray(kurt, dtype=float)
+    n = np.asarray(n_obs, dtype=float)
+    if len({s.size, sk.size, ku.size, n.size}) != 1:
+        raise ValueError("sharpe, skew, kurt, and n_obs must have the same length")
+    if s.size == 0:
+        raise ValueError("fleet must contain at least one trial")
+    if not (
+        np.isfinite(s).all()
+        and np.isfinite(sk).all()
+        and np.isfinite(ku).all()
+        and np.isfinite(n).all()
+    ):
+        raise ValueError("fleet inputs must contain only finite values")
+    if not np.isfinite(sr0_benchmark):
+        raise ValueError("sr0_benchmark must be finite")
+
+    reasons = np.full(s.size, "", dtype=object)
+    dsr = np.full(s.size, np.nan)
+    n_trials = int(s.size)
+    if n_trials < 2:
+        reasons[:] = "insufficient_trials"
+        return dsr, reasons
+    trials_var = float(np.var(s, ddof=1))
+    if float(np.std(s, ddof=1)) < 1e-12:
+        reasons[:] = "zero_cross_trial_sharpe_variance"
+        return dsr, reasons
+    for i in range(n_trials):
+        try:
+            dsr[i] = deflated_sharpe(
+                float(s[i]),
+                n_trials=n_trials,
+                n_obs=int(n[i]),
+                skew=float(sk[i]),
+                kurt=float(ku[i]),
+                trials_sr_var=trials_var,
+                sr0_benchmark=float(sr0_benchmark),
+            )
+        except ValueError:
+            reasons[i] = "radicand"
+    return dsr, reasons
 
 
 def block_bootstrap_pvalue(

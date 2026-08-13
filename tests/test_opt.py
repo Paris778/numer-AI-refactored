@@ -361,3 +361,67 @@ def test_bayesian_sweep_forwards_n_startup_trials_to_sampler(
         n_startup_trials=2,
     )
     assert seen["n_startup_trials"] == 2
+
+def test_hyperparameter_sweep_trials_carry_held_out_moments(tmp_path) -> None:
+    from nmr.research import HyperparameterSweep
+
+    cfg = _sweep_config(tmp_path)
+    result = HyperparameterSweep(cfg, metric="sharpe").run(
+        {"n_estimators": [10, 12]}, n_trials=2, seed=3
+    )
+    for col in ("ic_sharpe", "ic_skew", "ic_kurt", "ic_n_eras", "ic_std"):
+        assert col in result.trials.columns, col
+    assert result.trials["ic_n_eras"].min() >= 1
+    assert result.trials["ic_std"].min() > 0.0
+
+def test_sweep_dsr_computes_fleet_deflation() -> None:
+    from nmr.inference import deflated_sharpe
+    from nmr.opt import sweep_dsr
+
+    trials = pl.DataFrame({
+        "trial_id": [0, 1, 2],
+        "metric_value": [0.4, 0.6, 0.5],
+        "ic_sharpe": [0.4, 0.6, 0.5],
+        "ic_skew": [0.0, 0.1, -0.1],
+        "ic_kurt": [3.0, 3.2, 2.9],
+        "ic_n_eras": [600, 649, 620],
+        "ic_std": [0.1, 0.1, 0.1],
+        "metric": ["sharpe", "sharpe", "sharpe"],
+    })
+    out = sweep_dsr(trials)
+    var = np.var([0.4, 0.6, 0.5], ddof=1)
+    expected = deflated_sharpe(
+        0.4, n_trials=3, n_obs=600, skew=0.0, kurt=3.0, trials_sr_var=var
+    )
+    assert out["dsr_sweep_aware"][0] == pytest.approx(expected)
+    assert out["dsr_pass_sweep"].dtype == pl.Boolean
+    assert "dsr_reason" in out.columns
+    assert out["dsr_n_trials"][0] == 3
+
+def test_sweep_dsr_zero_variance_guard() -> None:
+    from nmr.opt import sweep_dsr
+
+    trials = pl.DataFrame({
+        "trial_id": [0, 1, 2],
+        "metric_value": [0.5, 0.5, 0.5],
+        "ic_sharpe": [0.5, 0.5, 0.5],
+        "ic_skew": [0.0, 0.0, 0.0],
+        "ic_kurt": [3.0, 3.0, 3.0],
+        "ic_n_eras": [600, 600, 600],
+        "ic_std": [0.1, 0.1, 0.1],
+        "metric": ["sharpe"] * 3,
+    })
+    out = sweep_dsr(trials)
+    assert out["dsr_sweep_aware"].null_count() == 3
+    assert (out["dsr_reason"] == "zero_cross_trial_sharpe_variance").all()
+
+def test_bayesian_sweep_trials_carry_held_out_moments(tmp_path) -> None:
+    from nmr.opt import bayesian_sweep
+
+    cfg = _sweep_config(tmp_path)
+    result = bayesian_sweep(
+        cfg, {"num_leaves": {"kind": "int", "low": 8, "high": 16}},
+        n_trials=2, seed=7, n_startup_trials=1,
+    )
+    for col in ("ic_sharpe", "ic_skew", "ic_kurt", "ic_n_eras", "ic_std"):
+        assert col in result.trials.columns, col

@@ -15,11 +15,12 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 import optuna
+import numpy as np
 import polars as pl
 
 from nmr.config import ExperimentConfig
 from nmr.models import resolve_model_params
-from nmr.research import SweepResult, _held_out_metric, _override_config
+from nmr.research import SweepResult, _held_out_metric_full, _override_config
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -149,11 +150,14 @@ def bayesian_sweep(
         if anchor:
             study.enqueue_trial(anchor)
 
+    moments_by_trial: dict[int, object] = {}
+
     def objective(trial: optuna.Trial) -> float:
         params = {p.name: _suggest(trial, p) for p in parsed}
         cfg = _override_config(base_config, params)
         try:
-            value = _held_out_metric(cfg, metric_name=metric)
+            value, moments = _held_out_metric_full(cfg, metric_name=metric)
+            moments_by_trial[trial.number] = moments
         except Exception as exc:
             logger.error("[bayesian_sweep] trial %s failed: %s", trial.number, exc)
             raise optuna.exceptions.TrialPruned(f"trial failed: {exc}") from exc
@@ -166,12 +170,18 @@ def bayesian_sweep(
     rows = []
     for t in study.trials:
         value = t.value if t.state == optuna.trial.TrialState.COMPLETE else None
+        moments = moments_by_trial.get(t.number)
         rows.append(
             {
                 "trial_id": t.number,
                 "params_json": json.dumps(t.params, sort_keys=True),
                 "metric_value": value,
                 "metric": metric,
+                "ic_sharpe": getattr(moments, "ic_sharpe", None),
+                "ic_skew": getattr(moments, "ic_skew", None),
+                "ic_kurt": getattr(moments, "ic_kurt", None),
+                "ic_n_eras": getattr(moments, "ic_n_eras", None),
+                "ic_std": getattr(moments, "ic_std", None),
             }
         )
     # Explicit Float64: when every trial fails, `rows` has only None metric
@@ -187,4 +197,71 @@ def bayesian_sweep(
         trials=trial_df,
         best_params=best.params if best is not None else {},
         best_value=float(best.value) if best is not None else float("nan"),
+    )
+
+
+def sweep_dsr(trials: pl.DataFrame) -> pl.DataFrame:
+    """Post-hoc sweep-aware DSR over COMPLETE trials with held-out moments.
+
+    Requires the moment columns emitted by ``HyperparameterSweep`` /
+    ``bayesian_sweep`` (``ic_sharpe``, ``ic_skew``, ``ic_kurt``, ``ic_n_eras``,
+    ``ic_std``). Valid trials: finite moments, ``ic_std > 0``, ``ic_n_eras >= 4``.
+    Returns ``trials`` with ``dsr_sweep_aware``, ``dsr_pass_sweep`` (>= 0.95),
+    ``dsr_reason``, ``dsr_n_trials``, ``dsr_trials_sr_var`` appended. Guard A:
+    zero cross-trial Sharpe variance (or fewer than 2 valid trials) yields
+    None DSR with the fleet reason — never a crash, never an analytic fallback.
+    """
+    from nmr.inference import deflated_sharpe_fleet
+
+    required = {
+        "trial_id", "ic_sharpe", "ic_skew", "ic_kurt", "ic_n_eras", "ic_std",
+    }
+    missing = required - set(trials.columns)
+    if missing:
+        raise ValueError(f"trials missing required columns: {sorted(missing)}")
+
+    valid_mask = (
+        trials["ic_sharpe"].is_not_null()
+        & trials["ic_skew"].is_not_null()
+        & trials["ic_kurt"].is_not_null()
+        & trials["ic_std"].is_not_null()
+        & (trials["ic_std"] > 0.0)
+        & (trials["ic_n_eras"] >= 4)
+    )
+    for col in ("ic_sharpe", "ic_skew", "ic_kurt", "ic_std"):
+        valid_mask &= trials[col].is_finite()
+
+    idxs = np.flatnonzero(valid_mask.to_numpy())
+    dsr_arr = np.full(trials.height, np.nan)
+    reason_arr = np.full(trials.height, None, dtype=object)
+    n_trials = int(idxs.size)
+    trials_var: float | None = None
+    if n_trials:
+        sharpe_vec = trials["ic_sharpe"].to_numpy()[idxs].astype(float)
+        if n_trials >= 2:
+            trials_var = float(np.var(sharpe_vec, ddof=1))
+        dsr, reasons = deflated_sharpe_fleet(
+            sharpe_vec,
+            skew=trials["ic_skew"].to_numpy()[idxs].astype(float),
+            kurt=trials["ic_kurt"].to_numpy()[idxs].astype(float),
+            n_obs=trials["ic_n_eras"].to_numpy()[idxs].astype(float),
+        )
+        dsr_arr[idxs] = dsr
+        reason_arr[idxs] = reasons
+
+    return trials.with_columns(
+        [
+            pl.Series("dsr_sweep_aware", dsr_arr)
+            .fill_nan(None)
+            .alias("dsr_sweep_aware"),
+            pl.Series("dsr_pass_sweep", (dsr_arr >= 0.95).astype(bool)),
+            pl.Series("dsr_reason", reason_arr).alias("dsr_reason"),
+            pl.Series(
+                "dsr_n_trials", [n_trials if n_trials >= 2 else None] * trials.height,
+                dtype=pl.Int64,
+            ).alias("dsr_n_trials"),
+            pl.Series(
+                "dsr_trials_sr_var", [trials_var] * trials.height, dtype=pl.Float64,
+            ).alias("dsr_trials_sr_var"),
+        ]
     )
