@@ -439,6 +439,7 @@ class ExperimentRunner:
                 feature_cols=feature_cols,
                 target_col=target,
                 era_col="era",
+                data=self._config.data,
             )
         ordered_features = list(feature_cols)
         target_order = list(target_cols)

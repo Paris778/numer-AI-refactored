@@ -686,3 +686,118 @@ def test_predict_model_chunked_empty_frame() -> None:
     empty = _model_frame().clear()
     out = orchestrator._predict_model_chunked(None, empty, ["f1"])  # type: ignore[arg-type]
     assert out.size == 0
+
+
+def test_full_history_subprocess_fit_matches_in_process() -> None:
+    """The spawned-process fit (bounded commit for full-universe runs) must be
+    bit-identical to the in-process fit — same code path, same seed."""
+    from nmr.models import ModelOrchestrator, _full_history_fit_worker
+
+    df = _model_frame(n_eras=10, rows_per_era=6)
+    cfg = ModelConfig(backend="lightgbm", preset="fast", params=_tiny_model_params())
+    orchestrator = ModelOrchestrator(cfg, seed=7)
+    in_process = orchestrator.train_full_history(
+        df, feature_cols=["f1", "f2", "f3"], target_col="target", in_process=True
+    )
+
+    import json
+    import multiprocessing as mp
+    from pathlib import Path
+
+    # the worker re-reads the train split from its own data dir
+    import tempfile
+
+    data_root = Path(tempfile.mkdtemp()) / "data" / "vtest"
+    data_root.mkdir(parents=True)
+    (data_root / "features.json").write_text(
+        json.dumps({
+            "feature_sets": {"small": ["f1", "f2", "f3"],
+                             "medium": ["f1", "f2", "f3"],
+                             "all": ["f1", "f2", "f3"]},
+            "targets": ["target"],
+        }),
+        encoding="utf-8",
+    )
+    df.write_parquet(data_root / "train.parquet")
+
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue()
+    spec = {
+        "data": {
+            "version": "vtest", "feature_set": "small", "feature_subset": None,
+            "targets": ("target",), "data_dir": str(data_root.parent),
+            "supplemental_feature_sets": None,
+        },
+        "feature_cols": ["f1", "f2", "f3"],
+        "target_col": "target",
+        "era_col": "era",
+        "backend": "lightgbm",
+        "preset": "fast",
+        "params": _tiny_model_params(),
+        "seed": 7,
+    }
+    proc = ctx.Process(target=_full_history_fit_worker, args=(spec, q))
+    proc.start()
+    status, payload = q.get()
+    proc.join()
+    assert status == "ok", payload
+
+    import cloudpickle
+
+    subprocess_model = cloudpickle.loads(payload)
+    feats = orchestrator._feature_frame(df, feature_cols=["f1", "f2", "f3"])
+    a = in_process.predict(feats)
+    b = subprocess_model.predict(feats)
+    assert np.array_equal(a, b)
+
+
+def test_full_history_spawn_path_with_data_config(tmp_path) -> None:
+    """The parent-side spawner must accept the DataConfig from the caller
+    (regression: it read self._config.data — the orchestrator holds a
+    ModelConfig, which has no .data, and lgbm_v1 died with AttributeError
+    after 4h of CV)."""
+    import json
+    from pathlib import Path
+
+    from nmr.config import DataConfig
+
+    data_root = tmp_path / "data" / "vtest"
+    data_root.mkdir(parents=True)
+    (data_root / "features.json").write_text(
+        json.dumps({
+            "feature_sets": {"small": ["f1", "f2", "f3"],
+                             "medium": ["f1", "f2", "f3"],
+                             "all": ["f1", "f2", "f3"]},
+            "targets": ["target"],
+        }),
+        encoding="utf-8",
+    )
+    df = _model_frame(n_eras=10, rows_per_era=6)
+    df.write_parquet(data_root / "train.parquet")
+
+    orch = ModelOrchestrator(
+        ModelConfig(backend="lightgbm", preset="fast", params=_tiny_model_params()),
+        seed=7,
+    )
+    data_cfg = DataConfig(version="vtest", data_dir=tmp_path / "data")
+    model = orch._fit_full_history_subprocess(
+        df, feature_cols=["f1", "f2", "f3"], target_col="target",
+        era_col="era", data=data_cfg,
+    )
+    feats = orch._feature_frame(df, feature_cols=["f1", "f2", "f3"])
+    preds = np.asarray(model.predict(feats), dtype=float)
+    assert preds.size == df.height
+    assert np.isfinite(preds).all()
+    assert orch.resolved_device == "cpu"
+
+
+def test_full_history_spawn_requires_data_config() -> None:
+    orch = ModelOrchestrator(
+        ModelConfig(backend="lightgbm", preset="fast", params=_tiny_model_params()),
+        seed=7,
+    )
+    with pytest.raises(ValueError, match="DataConfig"):
+        orch._fit_full_history_subprocess(
+            _model_frame(), feature_cols=["f1", "f2", "f3"],
+            target_col="target", era_col="era", data=None,  # type: ignore[arg-type]
+        )

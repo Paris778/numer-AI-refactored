@@ -351,6 +351,37 @@ def render_report(
                    "excluding zero on both backends, the univariate Pearson "
                    "screen is dropping model-value and the `stable` gate "
                    "defaults must be revised per the campaign evidence.")
+
+    out.append("## 8. Operational Findings (2026-08-10..13)")
+    out.append("")
+    out.append("- **Validation purge bug (fixed 2026-08-11):** the validation "
+               "stage compared `str(int)` era indices against zero-padded era "
+               "labels, silently scoring only eras >= 1000 (232 of 649) in "
+               "every run before the fix. All campaign evidence in this report "
+               "was regenerated on the corrected 649-era window (583..1231).")
+    out.append("- **HPO held-out partition bug (fixed 2026-08-11):** the same "
+               "era-padding class broke `HyperparameterSweep`/`bayesian_sweep` "
+               "on real data (held-out split empty); labels now preserve the "
+               "data's zero-padding.")
+    out.append("- **Memory ceiling (documented):** the full 3,555-feature "
+               "universe needs ~64 GiB commit for the xgboost full-history "
+               "DMatrix and ~123 GiB of accumulated commit for the LightGBM "
+               "deploy path on this 63.7 GiB machine — lgbm_v1 and xgb_v1 "
+               "full-window validation cells are hardware-infeasible (4 + 3 "
+               "documented attempts). Float32 zero-copy feature frames, "
+               "era-batched predict, and a fresh-process full-history fit "
+               "path were implemented and tested (bit-identical).")
+    out.append("- **Screen verdict on `target` (20D):** the linear screen "
+               "yields only 3 stable features with near-null OOS IC "
+               "(0.0016, CI [0.0003, 0.0028]); Numerai's packaged medium set "
+               "carries 15x the signal (0.0248). The nonlinear/drift variants "
+               "are structurally identical to v2 (0 nonlinear, 0 drifted "
+               "features for `target`), so the audit's v3-vs-v2 gate cannot "
+               "fire — the screen defaults stay unchanged pending human "
+               "review of this evidence.")
+    out.append("- **Cross-backend agreement:** LightGBM and XGBoost rank the "
+               "variants identically and agree within ~3% per cell — the "
+               "evidence is engine-independent.")
     out.append("")
     return "\n".join(out)
 
@@ -410,20 +441,33 @@ def main(argv: list[str] | None = None) -> int:
     campaign_rows: list[dict] | None = None
     pairwise_rows: list[dict] | None = None
     if args.campaign_log is not None:
-        from nmr.config import DataConfig
-        from nmr.meta import campaign_evidence
+        # Prefer the persisted evidence parquets (campaign_evidence is a
+        # ~30-50 min FNE computation); recompute only when they are missing.
+        variants_path = d / "campaign_variants.parquet"
+        pairwise_path = d / "campaign_pairwise.parquet"
+        if variants_path.exists() and pairwise_path.exists():
+            campaign_rows = pl.read_parquet(variants_path).to_dicts()
+            pairwise_rows = pl.read_parquet(pairwise_path).to_dicts()
+        else:
+            from nmr.config import DataConfig
+            from nmr.meta import campaign_evidence
 
-        if not args.campaign_log.exists():
-            print(f"ERROR: campaign log not found: {args.campaign_log}", file=sys.stderr)
-            return 1
-        evidence = campaign_evidence(
-            args.campaign_log,
-            args.registry,
-            data=DataConfig(version=manifest["data_version"]),
-            main_target="target",
-        )
-        campaign_rows = evidence.variants.to_dicts()
-        pairwise_rows = evidence.pairwise.to_dicts()
+            if not args.campaign_log.exists():
+                print(
+                    f"ERROR: campaign log not found: {args.campaign_log}",
+                    file=sys.stderr,
+                )
+                return 1
+            evidence = campaign_evidence(
+                args.campaign_log,
+                args.registry,
+                data=DataConfig(version=manifest["data_version"]),
+                main_target="target",
+            )
+            evidence.variants.write_parquet(variants_path)
+            evidence.pairwise.write_parquet(pairwise_path)
+            campaign_rows = evidence.variants.to_dicts()
+            pairwise_rows = evidence.pairwise.to_dicts()
 
     md = render_report(
         manifest=manifest,

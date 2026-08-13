@@ -275,6 +275,19 @@ def _identity_era_ic(df: pl.DataFrame) -> dict[str, float]:
     return dict(zip(df.get_column("era"), df.get_column("ic")))
 
 
+def _series_max_drawdown(series: np.ndarray) -> float | None:
+    """Max peak-to-trough decline of the cumulative mean-centered IC line.
+
+    Same convention as the scorecard's max_drawdown but computed on the
+    caller's series (the full validation window here), so all headline
+    metrics share one window.
+    """
+    if series.size < 2:
+        return None
+    cum = np.cumsum(series - np.mean(series))
+    return float(np.min(cum - np.maximum.accumulate(cum)))
+
+
 def campaign_evidence(
     campaign_log_path: str | Path,
     registry_root: str | Path,
@@ -412,18 +425,27 @@ def campaign_evidence(
                 "variant": label,
                 "status": "recorded",
                 "backend": (config.get("model") or {}).get("backend"),
-                # actual resolved device (manifest) over config intent: an
-                # auto-configured run that fell back to CPU must be compared
-                # as CPU, not "auto"
-                "device": manifest.get("oof_device")
-                or (config.get("model") or {}).get("device", "auto"),
+                # config device intent: the manifest's oof_device reflects the
+                # LAST fit (full-history is always CPU), so it would mask GPU
+                # CV training — intent is the honest label here
+                "device": (config.get("model") or {}).get("device", "auto"),
                 "n_features": len(manifest.get("feature_cols") or []),
-                "mean_ic": scorecard.get("corr"),
-                "ic_ci_lo": scorecard.get("corr_ci_low", ic_ci_lo),
-                "ic_ci_hi": scorecard.get("corr_ci_high", ic_ci_hi),
-                "ic_sharpe": scorecard.get("corr_sharpe_ac"),
-                "max_drawdown": scorecard.get("max_drawdown"),
-                "n_eras": scorecard.get("n_eras", n_eras),
+                # headline metrics from the FULL validation window (numeric-
+                # ordered per-era IC series) — the scorecard's corr cells are
+                # the 86-era meta-model overlap and would re-introduce the
+                # truncated-window bias this pipeline was corrected for
+                "mean_ic": float(np.mean(ics)) if ics.size else None,
+                "ic_ci_lo": ic_ci_lo,
+                "ic_ci_hi": ic_ci_hi,
+                "ic_sharpe": (
+                    float(np.mean(ics) / np.std(ics, ddof=0))
+                    if ics.size >= 2 and np.std(ics, ddof=0) > 0
+                    else None
+                ),
+                "max_drawdown": _series_max_drawdown(ics),
+                "n_eras": n_eras,
+                "scorecard_ic_86era": scorecard.get("corr"),
+                "scorecard_sharpe_ac_86era": scorecard.get("corr_sharpe_ac"),
                 "fne100": float(np.mean(fne_ics)) if fne_ics.size else None,
                 "fne100_ci_lo": fne_ci_lo,
                 "fne100_ci_hi": fne_ci_hi,

@@ -30,7 +30,7 @@ These four files obey a strict **Single Source of Truth (SSOT) hierarchy**. One 
 
 ## 1. Agent Identity & Mission
 
-You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (577 tests). No lint/type-check tooling is configured — pytest is the sole automated gate, enforced by CI (`.github/workflows/ci.yml`).
+You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (580 tests). No lint/type-check tooling is configured — pytest is the sole automated gate, enforced by CI (`.github/workflows/ci.yml`).
 
 Your mission:
 
@@ -167,6 +167,7 @@ The `docs/` tree is a curated Numerai domain library; `docs/DOCS_README.md` is i
 | Refresh the Numerai datasets / era ledger | `nmr/refresh.py` + `refresh_data.py` |
 | Plan research work | `docs/04-research/research-program.md` (E0–E8 grid), `docs/04-research/advanced-ideas.md` (ideas incl. NN directions), `docs/04-research/State-of-the-Art Deep Learning for Obfuscated, Non-Stationary Tabular Regression.md` (tabular-DL survey) |
 | Seek domain intuition | `docs/02-strategy/strategy-bible.md` + `docs/02-strategy/why-it-works.md` |
+| Design/train a model — start here | `docs/04-research/dataset-analysis-2026-08.md` — the **joined pre-modeling document**: dataset diagnostics (§1–6), feature-campaign evidence (§7: 10 variants × 2 backends, full 649-era validation window, CIs + FNE), operational findings incl. hardware ceilings (§8) |
 
 Start with the agent reading order in `docs/DOCS_README.md` §1; the 15-minute version is §2–§3.
 
@@ -196,7 +197,7 @@ Never invent a `numerai_tools` / `numerapi` signature — open the installed sou
 .\.venv\Scripts\python -m pytest tests/test_benchmark_slice1.py -q                    # determinism hashes
 
 # Pre-sign-off gate (mandatory before delivering work)
-.\.venv\Scripts\python -m pytest -q                                                    # full 577-test suite
+.\.venv\Scripts\python -m pytest -q                                                    # full 580-test suite
 .\.venv\Scripts\python benchmark_runner.py --fast-mode --output artifacts/benchmark_scores_smoke.csv --labels-output artifacts/benchmark_test_era_labels_smoke.csv   # real-data smoke (writes artifacts/*_smoke.csv)
 ```
 

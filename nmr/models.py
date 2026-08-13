@@ -26,7 +26,7 @@ import pandas as pd
 import polars as pl
 import xgboost as xgb
 
-from nmr.config import ModelConfig
+from nmr.config import DataConfig, ModelConfig
 from nmr.splitter import Fold, PurgedEraSplitter
 
 logger = logging.getLogger("nmr.models")
@@ -36,6 +36,11 @@ __all__ = ["CVResult", "ModelOrchestrator", "coerce_float32_features"]
 
 _FIT_PROGRESS_PERIOD = 100  # print one training progress line every N iterations
 _PREDICT_ERA_BATCH = 20  # eras per predict call (bounds GPU VRAM / RAM)
+
+# Full-history fits whose float32 matrix exceeds this run in a fresh process
+# (see ModelOrchestrator.train_full_history docstring for the VA-accumulation
+# rationale). 8 GiB covers medium (780) and smaller; all (3,555) spawns.
+_FULL_HISTORY_SUBPROCESS_MIN_BYTES = 8 * 2**30
 
 # Dtypes that are exactly representable in float32 (the Numerai v5.x integer
 # feature bins). Casting these to a single Float32 block BEFORE pandas makes
@@ -240,11 +245,23 @@ class ModelOrchestrator:
         feature_cols: Sequence[str],
         target_col: str,
         era_col: str = "era",
+        in_process: bool = False,
+        data: DataConfig | None = None,
     ) -> object:
         """Fit a single CPU-only model on every era (deployment/validation artifact).
 
         CPU-only by design: determinism is per-device and the deployed model must
         reproduce identically on any hosted runtime (which may lack a GPU).
+
+        Memory discipline (2026-08-12): when the float32 feature matrix would
+        exceed ``_FULL_HISTORY_SUBPROCESS_MIN_BYTES`` the fit runs in a freshly
+        spawned process with its own address space. A full-universe fit peaks at
+        ~71 GiB of commit (polars frame + LightGBM construction copy + bins);
+        running it in the long-lived campaign process stacks that on the run's
+        accumulated commit (CV + neutralization) and crosses the machine's
+        commit limit — Windows then thrashes (measured: 1.1 iters/s vs ~50).
+        The child re-reads the data itself and returns the pickled booster;
+        results are bit-identical (same code path, same seed).
         """
         train_df = df.filter(pl.col(era_col).is_not_null())
         train_df = train_df.filter(
@@ -259,6 +276,17 @@ class ModelOrchestrator:
             )
         if train_df.is_empty():
             raise ValueError("No usable training rows after null-target filtering")
+        if not in_process and self._should_spawn_full_history(train_df, feature_cols):
+            if data is None:
+                raise ValueError(
+                    "subprocess full-history fit requires the DataConfig — pass "
+                    "data=<ExperimentConfig.data> (the orchestrator only holds "
+                    "the ModelConfig)"
+                )
+            return self._fit_full_history_subprocess(
+                train_df, feature_cols=feature_cols, target_col=target_col,
+                era_col=era_col, data=data,
+            )
         model = self._fit_model(
             features=self._feature_frame(train_df, feature_cols=feature_cols),
             target=train_df.get_column(target_col).to_numpy(),
@@ -434,10 +462,6 @@ class ModelOrchestrator:
         else:  # catboost: period-based verbose logging at fit time
             model.fit(features, target, verbose=period)
 
-    def _predict_model(self, model: object, *, features: np.ndarray) -> np.ndarray:
-        prediction = model.predict(features)
-        return np.asarray(prediction, dtype=float).reshape(-1)
-
     def _device_candidate_params(self, *, use_gpu: bool) -> list[dict[str, Any]]:
         if not use_gpu:
             return [self._resolved_params(use_gpu=False)]
@@ -522,3 +546,115 @@ class ModelOrchestrator:
                 f"Fold {fold.index} violates purge invariant: gap "
                 f"{val_min - train_max} <= purge_eras={purge_eras}"
             )
+
+
+    def _should_spawn_full_history(
+        self, train_df: pl.DataFrame, feature_cols: Sequence[str]
+    ) -> bool:
+        """True when the float32 feature matrix would exceed the spawn threshold."""
+        return (
+            train_df.height * len(feature_cols) * 4
+            > _FULL_HISTORY_SUBPROCESS_MIN_BYTES
+        )
+
+    def _fit_full_history_subprocess(
+        self,
+        train_df: pl.DataFrame,
+        *,
+        feature_cols: Sequence[str],
+        target_col: str,
+        era_col: str,
+        data: DataConfig,
+    ) -> object:
+        """Fit the full-history model in a fresh process (bounded commit)."""
+        if data is None:
+            raise ValueError(
+                "subprocess full-history fit requires the DataConfig — pass "
+                "data=<ExperimentConfig.data>"
+            )
+        import multiprocessing as mp
+
+        import cloudpickle
+
+        ctx = mp.get_context("spawn")
+        out_q = ctx.Queue()
+        spec = {
+            "data": {
+                "version": data.version,
+                "feature_set": data.feature_set,
+                "feature_subset": data.feature_subset,
+                "targets": (target_col,),
+                "data_dir": str(data.data_dir),
+                "supplemental_feature_sets": (
+                    str(data.supplemental_feature_sets)
+                    if data.supplemental_feature_sets is not None
+                    else None
+                ),
+            },
+            "feature_cols": list(feature_cols),
+            "target_col": target_col,
+            "era_col": era_col,
+            "backend": self._config.backend,
+            "preset": self._config.preset,
+            "params": dict(self._config.params),
+            "seed": self._seed,
+        }
+        logger.info(
+            "[train_full_history] spawning fresh-process fit "
+            "(%d rows x %d features > %d GiB float32)",
+            train_df.height, len(feature_cols),
+            _FULL_HISTORY_SUBPROCESS_MIN_BYTES // 2**30,
+        )
+        proc = ctx.Process(target=_full_history_fit_worker, args=(spec, out_q))
+        proc.start()
+        status, payload = out_q.get()
+        proc.join()
+        if proc.exitcode != 0 or status != "ok":
+            raise RuntimeError(
+                f"full-history subprocess fit failed (exit={proc.exitcode}): {payload}"
+            )
+        self.resolved_device = "cpu"  # train_full_history is CPU-only by design
+        return cloudpickle.loads(payload)
+
+
+def _full_history_fit_worker(spec: dict, out_q) -> None:
+    """Spawned-process fitter for memory-bounded full-history training.
+
+    Runs in a fresh address space: re-loads the train split via
+    ``IngestionAgent``, fits the same CPU-only model (identical code path and
+    seed as the in-process variant), and returns the cloudpickled booster.
+    """
+    try:
+        import cloudpickle
+
+        from nmr.config import DataConfig, ModelConfig, set_global_seeds
+        from nmr.data import IngestionAgent
+
+        set_global_seeds(spec["seed"])
+        data = DataConfig(**spec["data"])
+        agent = IngestionAgent(data)
+        df = agent.load(
+            "train",
+            columns=["era", "id", *spec["feature_cols"], spec["target_col"]],
+        )
+        orch = ModelOrchestrator(
+            ModelConfig(
+                backend=spec["backend"],
+                preset=spec["preset"],
+                params=spec["params"],
+                device="cpu",
+            ),
+            seed=spec["seed"],
+        )
+        model = orch.train_full_history(
+            df,
+            feature_cols=spec["feature_cols"],
+            target_col=spec["target_col"],
+            era_col=spec["era_col"],
+            in_process=True,
+        )
+        out_q.put(("ok", cloudpickle.dumps(model)))
+    except Exception as exc:  # surface the child's failure loudly in the parent
+        out_q.put(("error", repr(exc)))
+
+

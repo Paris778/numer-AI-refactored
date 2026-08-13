@@ -417,11 +417,19 @@ def test_campaign_evidence_assembles_variants_and_pairwise(
     recorded = variants.filter(pl.col("status") == "recorded")
     assert recorded.height == 2
     v2 = recorded.filter(pl.col("variant") == "lgbm_v2").row(0, named=True)
-    assert v2["mean_ic"] == pytest.approx(0.05)
-    assert v2["ic_sharpe"] == pytest.approx(0.6)
-    assert v2["max_drawdown"] == pytest.approx(-0.12)
+    # headline metrics now come from the FULL-window per-era IC series
+    # (numeric-ordered, own bootstrap CI); the scorecard's 86-era cells are
+    # kept as explicit secondary columns
+    assert v2["mean_ic"] > 0.5  # fixture pred = 0.7*f1 vs target incl. 0.7*f1
+    assert v2["ic_ci_lo"] <= v2["mean_ic"] <= v2["ic_ci_hi"]
+    assert v2["ic_sharpe"] is not None and v2["ic_sharpe"] > 0
+    assert v2["max_drawdown"] is not None and v2["max_drawdown"] <= 0.0
+    assert v2["n_eras"] == 12
+    assert v2["scorecard_ic_86era"] == pytest.approx(0.05)
+    assert v2["scorecard_sharpe_ac_86era"] == pytest.approx(0.6)
     assert v2["n_features"] == 1
     assert v2["backend"] == "lightgbm"
+    assert v2["device"] == "cpu"
     assert v2["fne100"] is not None and np.isfinite(v2["fne100"])
     err = variants.filter(pl.col("variant") == "lgbm_v4").row(0, named=True)
     assert "boom" in err["error"]
