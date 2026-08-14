@@ -17,6 +17,7 @@ from nmr.payout import (
     calmar,
     cvar,
     gain_to_pain_ratio,
+    kelly_fraction,
     max_burn_streak,
     max_drawdown,
     payout_report,
@@ -333,3 +334,30 @@ def test_gain_to_pain_zero_burn_states() -> None:
     assert math.isinf(gain_to_pain_ratio(np.array([0.02, 0.01])))
     # all zero -> 0.0
     assert gain_to_pain_ratio(np.array([0.0, 0.0])) == 0.0
+
+
+def test_kelly_fraction_bounds_and_degenerate() -> None:
+    # zero variance -> 0.0
+    assert kelly_fraction(np.array([0.01, 0.01, 0.01])) == 0.0
+    # non-positive mean -> 0.0
+    assert kelly_fraction(np.array([-0.01, 0.01])) == 0.0
+    # mid-range: mu=0.02, sigma=0.2 -> 0.5
+    series = np.array([0.2, -0.2, 0.2, -0.2, 0.2, -0.2, 0.2, -0.2, 0.2, -0.1])
+    mu = float(np.mean(series))
+    var = float(np.var(series, ddof=0))
+    assert kelly_fraction(series) == pytest.approx(min(1.0, mu / var))
+    # saturation: mu=0.1, var=1e-6 -> mu/var = 100,000 -> capped at 1.0
+    # (a constant array would have zero variance -> 0.0, so use a
+    #  low-variance positive-drift sequence)
+    assert kelly_fraction(np.array([0.101, 0.099, 0.101, 0.099])) == 1.0
+
+
+def test_kelly_uses_raw_not_clipped() -> None:
+    # Raw series: 19 x +0.03 and one -0.5. Raw Kelly = 0.0035 / 0.01334275
+    # ~ 0.2623 (< 1). The clipped variant compresses variance so its Kelly
+    # saturates at 1.0. Locks the director-approved raw-series contract.
+    raw = np.array([0.03] * 19 + [-0.5])
+    clipped = np.clip(raw, -0.05, 0.05)
+    kelly_raw = kelly_fraction(raw)
+    assert 0.0 < kelly_raw < 1.0
+    assert kelly_fraction(clipped) == 1.0

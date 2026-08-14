@@ -29,6 +29,7 @@ __all__ = [
     "payout_series",
     "annual_compounded_return",
     "gain_to_pain_ratio",
+    "kelly_fraction",
     "burn_rate",
     "cvar",
     "sortino",
@@ -141,6 +142,24 @@ def gain_to_pain_ratio(
     if neg_sum == 0.0:
         return float("inf") if pos_sum > 0.0 else 0.0
     return float(pos_sum / neg_sum)
+
+
+def kelly_fraction(
+    raw: np.ndarray | list[float] | tuple[float, ...],
+) -> float:
+    """Bounded discrete Kelly stake fraction: min(1.0, max(0.0, mu / var)).
+
+    Computed on the RAW (unclipped) payout series. The clipped series has
+    Popoviciu-bounded variance (sigma^2 <= 0.0025 under the +-5% clip), so
+    mu/sigma^2 there saturates at 1.0 for every viable model and carries no
+    discrimination. ``payout_report`` passes ``series.raw``.
+    """
+    x = _as_finite_1d(raw, name="raw")
+    mu = float(np.mean(x))
+    var = float(np.var(x, ddof=0))
+    if var == 0.0 or mu <= 0.0:
+        return 0.0
+    return float(min(1.0, max(0.0, mu / var)))
 
 
 def burn_rate(clipped: np.ndarray | list[float] | tuple[float, ...]) -> float:
