@@ -239,8 +239,13 @@ New public symbols added to imports **and** `__all__`: `OverlappingSimulationRes
 5. `test_kelly_fraction_bounds` — bounded [0, 1]; σ²=0 or μ≤0 → 0.0.
 6. `test_kelly_uses_raw_not_clipped` — contract: a series whose clipped variant saturates
    (returns 1.0) must yield a strictly smaller raw-series fraction (director-locked input).
-7. `test_overlapping_sim_drag` — volatile 20D lockup series: portfolio CAGR below the serial
-   geometric product (volatility drag).
+7. `test_overlapping_sim_drag` — volatile 20D lockup series `[0.08, −0.04] × 30` (positive
+   drift, K=20, n=60): portfolio CAGR (≈ 0.0348) strictly below the serial geometric
+   product CAGR (≈ 1.559) — cash drag dominates for positive-drift volatile series.
+   Deviation from the RFC's ±5% alternating example: with zero-mean alternating returns,
+   the tranche structure *beats* serial compounding (capital exposure is 1/K per era), so
+   the RFC's example violates the invariant and is rejected (verified numerically
+   2026-08-15).
 8. `test_overlapping_sim_short_series` — `n < horizon_eras` → zeroed result.
 9. `test_overlapping_sim_lockup_math` — constant positive returns: tranche accounting
    verified against hand-computed equity path.

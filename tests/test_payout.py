@@ -10,6 +10,7 @@ import pytest
 from nmr.evaluation import EvaluationEngine
 from nmr.inference import deflated_sharpe, era_series_stats
 from nmr.payout import (
+    OverlappingSimulationResult,
     PayoutResult,
     PayoutSeries,
     annual_compounded_return,
@@ -22,6 +23,7 @@ from nmr.payout import (
     max_drawdown,
     payout_report,
     payout_series,
+    simulate_overlapping_portfolio,
     sortino,
     time_to_recovery,
 )
@@ -361,3 +363,38 @@ def test_kelly_uses_raw_not_clipped() -> None:
     kelly_raw = kelly_fraction(raw)
     assert 0.0 < kelly_raw < 1.0
     assert kelly_fraction(clipped) == 1.0
+
+
+def test_overlapping_sim_zero_return_lockup() -> None:
+    # K=20, n=100, all returns zero. Steady-state utilization (pre-deployment)
+    # is (K-1)/K = 0.95; 20 warm-up eras average 0.475 -> overall 0.855 exactly.
+    result = simulate_overlapping_portfolio(
+        np.zeros(100), horizon_eras=20
+    )
+    assert isinstance(result, OverlappingSimulationResult)
+    assert result.final_equity == pytest.approx(1.0)
+    assert result.portfolio_cagr == 0.0
+    assert result.portfolio_max_drawdown == pytest.approx(0.0, abs=1e-12)
+    assert result.avg_capital_utilization == pytest.approx(0.855, abs=1e-9)
+
+
+def test_overlapping_sim_short_series() -> None:
+    result = simulate_overlapping_portfolio(np.full(5, 0.01), horizon_eras=20)
+    assert result.portfolio_cagr == 0.0
+    assert result.portfolio_max_drawdown == 0.0
+    assert result.avg_capital_utilization == 0.0
+    assert result.final_equity == 1.0
+
+
+def test_overlapping_sim_drag() -> None:
+    # Positive-drift volatile series: cash drag makes the tranched portfolio
+    # CAGR strictly below the serial geometric product CAGR.
+    # (Verified numerically: port_cagr ~ 0.0348 vs serial_cagr ~ 1.559.)
+    series = np.array([0.08, -0.04] * 30)
+    result = simulate_overlapping_portfolio(series, horizon_eras=20)
+    serial_final = float(np.prod(1.0 + series))
+    serial_cagr = serial_final ** (52.0 / 60.0) - 1.0
+    assert result.portfolio_cagr == pytest.approx(
+        result.final_equity ** (52.0 / 60.0) - 1.0
+    )
+    assert result.portfolio_cagr < serial_cagr

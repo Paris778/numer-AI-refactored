@@ -3,6 +3,11 @@
 This module converts per-era CORR/MMC series into an economic payout proxy and
 downside shape metrics. Inference statistics (bootstrap CI, AC-adjusted Sharpe,
 Deflated Sharpe) are delegated to `nmr.inference`.
+
+Terminal-tranche accounting convention (simulator): tranches still locked at
+the end of the series are carried at par principal in ``final_equity`` and the
+equity curve — no mark-to-market and no unrealized payoff for the final
+``horizon_eras`` tranches.
 """
 
 from __future__ import annotations
@@ -26,10 +31,12 @@ from nmr.inference import (
 __all__ = [
     "PayoutSeries",
     "PayoutResult",
+    "OverlappingSimulationResult",
     "payout_series",
     "annual_compounded_return",
     "gain_to_pain_ratio",
     "kelly_fraction",
+    "simulate_overlapping_portfolio",
     "burn_rate",
     "cvar",
     "sortino",
@@ -76,6 +83,17 @@ def _as_finite_1d(
     if not np.isfinite(x).all():
         raise ValueError(f"{name} must contain only finite values")
     return x
+
+
+_HORIZON_ERAS: dict[str, int] = {"20D": 20, "60D": 60}
+
+
+@dataclass(frozen=True)
+class OverlappingSimulationResult:
+    portfolio_cagr: float
+    portfolio_max_drawdown: float
+    avg_capital_utilization: float
+    final_equity: float
 
 
 def payout_series(
@@ -160,6 +178,79 @@ def kelly_fraction(
     if var == 0.0 or mu <= 0.0:
         return 0.0
     return float(min(1.0, max(0.0, mu / var)))
+
+
+def simulate_overlapping_portfolio(
+    clipped: np.ndarray | list[float] | tuple[float, ...],
+    *,
+    horizon_eras: int = 20,
+    initial_capital: float = 1.0,
+    eras_per_year: float = 52.0,
+) -> OverlappingSimulationResult:
+    """Simulate multi-round concurrent capital lockup and dynamic reinvestment.
+
+    Each era deploys min(cash, total_equity / horizon_eras) into a new tranche
+    that matures ``horizon_eras`` eras later with the initiating era's return
+    (1 + r_{t - K}) — Numerai round semantics. Equity and utilization are
+    recorded BEFORE the era's deployment. Tranches still locked at the end of
+    the series are carried at par principal (no unrealized payoff). Series
+    shorter than the horizon return a zeroed result.
+    """
+    x = _as_finite_1d(clipped, name="clipped")
+    n = int(x.size)
+    horizon = int(horizon_eras)
+    if horizon < 1:
+        raise ValueError("horizon_eras must be >= 1")
+    if n < horizon:
+        return OverlappingSimulationResult(
+            portfolio_cagr=0.0,
+            portfolio_max_drawdown=0.0,
+            avg_capital_utilization=0.0,
+            final_equity=float(initial_capital),
+        )
+
+    cash = float(initial_capital)
+    active_stakes: list[tuple[int, float]] = []
+    equity_curve = np.zeros(n, dtype=float)
+    utilization = np.zeros(n, dtype=float)
+
+    for t in range(n):
+        still_active: list[tuple[int, float]] = []
+        for maturity_t, principal in active_stakes:
+            if maturity_t == t:
+                cash += principal * (1.0 + x[maturity_t - horizon])
+            else:
+                still_active.append((maturity_t, principal))
+        active_stakes = still_active
+
+        locked_capital = sum(p for _, p in active_stakes)
+        total_equity = cash + locked_capital
+        equity_curve[t] = total_equity
+        utilization[t] = (
+            locked_capital / total_equity if total_equity > 0 else 0.0
+        )
+
+        allocated = min(cash, total_equity / float(horizon))
+        cash -= allocated
+        active_stakes.append((t + horizon, allocated))
+
+    final_eq = float(equity_curve[-1])
+    cagr = (
+        float(final_eq / initial_capital) ** (float(eras_per_year) / float(n))
+        - 1.0
+        if final_eq > 0.0
+        else -1.0
+    )
+    running_max = np.maximum.accumulate(equity_curve)
+    drawdowns = np.where(
+        running_max > 0, (running_max - equity_curve) / running_max, 0.0
+    )
+    return OverlappingSimulationResult(
+        portfolio_cagr=cagr,
+        portfolio_max_drawdown=float(np.max(drawdowns)),
+        avg_capital_utilization=float(np.mean(utilization)),
+        final_equity=final_eq,
+    )
 
 
 def burn_rate(clipped: np.ndarray | list[float] | tuple[float, ...]) -> float:
