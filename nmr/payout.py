@@ -28,6 +28,7 @@ __all__ = [
     "PayoutResult",
     "payout_series",
     "annual_compounded_return",
+    "gain_to_pain_ratio",
     "burn_rate",
     "cvar",
     "sortino",
@@ -123,6 +124,23 @@ def annual_compounded_return(
     if cum_growth <= 0.0:
         return -1.0
     return float(cum_growth ** (float(eras_per_year) / float(n)) - 1.0)
+
+
+def gain_to_pain_ratio(
+    clipped: np.ndarray | list[float] | tuple[float, ...],
+) -> float:
+    """Gain-to-pain ratio: sum(positive returns) / sum(|negative returns|).
+
+    Zero-loss states return +inf (precedented by ``calmar``; the canonical
+    JSON sanitizer maps non-finite floats to strings) or 0.0 when the series
+    is entirely flat.
+    """
+    x = _as_finite_1d(clipped, name="clipped")
+    pos_sum = float(np.sum(np.maximum(x, 0.0)))
+    neg_sum = float(np.sum(np.abs(np.minimum(x, 0.0))))
+    if neg_sum == 0.0:
+        return float("inf") if pos_sum > 0.0 else 0.0
+    return float(pos_sum / neg_sum)
 
 
 def burn_rate(clipped: np.ndarray | list[float] | tuple[float, ...]) -> float:

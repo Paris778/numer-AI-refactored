@@ -16,6 +16,7 @@ from nmr.payout import (
     burn_rate,
     calmar,
     cvar,
+    gain_to_pain_ratio,
     max_burn_streak,
     max_drawdown,
     payout_report,
@@ -320,3 +321,15 @@ def test_annual_cagr_input_validation() -> None:
         annual_compounded_return(np.array([0.01, np.nan]))
     with pytest.raises(ValueError):
         annual_compounded_return(np.zeros((2, 2)))
+
+
+def test_gain_to_pain_ratio() -> None:
+    series = np.array([0.03, 0.03, 0.03, -0.01])
+    assert gain_to_pain_ratio(series) == pytest.approx(9.0)
+
+
+def test_gain_to_pain_zero_burn_states() -> None:
+    # all positive -> +inf
+    assert math.isinf(gain_to_pain_ratio(np.array([0.02, 0.01])))
+    # all zero -> 0.0
+    assert gain_to_pain_ratio(np.array([0.0, 0.0])) == 0.0
