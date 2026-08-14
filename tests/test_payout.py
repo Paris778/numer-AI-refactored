@@ -386,6 +386,21 @@ def test_overlapping_sim_short_series() -> None:
     assert result.final_equity == 1.0
 
 
+def test_overlapping_sim_lockup_math() -> None:
+    # K=2, n=3, returns [0.1, 0.2, 0.3]: hand-traced equity path.
+    # t=0: deploy 0.5 -> tranche maturing at t=2; t=1: deploy 0.5 -> (3, 0.5).
+    # t=2: tranche-2 matures paying x[0] = 0.1 -> cash = 0.5 * 1.1 = 0.55;
+    # equity = 0.55 + 0.5 (still-locked tranche 3) = 1.05.
+    # A payoff-index off-by-one (paying x[2] = 0.3 instead of x[0] = 0.1)
+    # would produce equity 1.15, so this pins the x[maturity_t - horizon] index.
+    result = simulate_overlapping_portfolio(
+        np.array([0.1, 0.2, 0.3]), horizon_eras=2
+    )
+    assert result.final_equity == pytest.approx(1.05)
+    assert result.portfolio_max_drawdown == 0.0
+    assert result.portfolio_cagr == pytest.approx(1.05 ** (52.0 / 3.0) - 1.0)
+
+
 def test_overlapping_sim_drag() -> None:
     # Positive-drift volatile series: cash drag makes the tranched portfolio
     # CAGR strictly below the serial geometric product CAGR.

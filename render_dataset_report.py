@@ -353,7 +353,7 @@ def _artifact_map_section() -> list[str]:
         "./.venv/Scripts/python benchmark_runner.py --fast-mode "
         "--output artifacts/benchmark_scores_smoke.csv",
         "",
-        "# 6. Tests (650-collection guard enforced by tests/test_docs_hygiene.py)",
+        "# 6. Tests (651-collection guard enforced by tests/test_docs_hygiene.py)",
         "./.venv/Scripts/python -m pytest -q",
         "```",
         "",
