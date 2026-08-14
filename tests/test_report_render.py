@@ -55,6 +55,17 @@ def _fixture() -> dict:
                 "nonlinear": False,
             }
         ],
+        "ic_screen_train_rows": [
+            {
+                "feature": "f1",
+                "target": "target",
+                "mean_corr": 0.05,
+                "mean_spearman": 0.06,
+                "n_eras": 2,
+                "stable": True,
+                "nonlinear": False,
+            }
+        ],
         "split_ic_rows": [
             {
                 "feature": "f1",

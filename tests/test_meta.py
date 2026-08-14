@@ -449,7 +449,7 @@ def _variant_row(label, sharpe, skew, kurt, n_eras, std=0.1, status="recorded"):
     return {
         "variant": label, "status": status,
         "ic_sharpe": sharpe, "ic_std": std, "ic_skew": skew,
-        "ic_kurt": kurt, "ic_n_eras": n_eras,
+        "ic_kurt": kurt, "n_eras": n_eras,
     }
 
 def test_attach_campaign_dsr_computes_fleet_deflation() -> None:
@@ -501,3 +501,23 @@ def test_attach_campaign_dsr_degenerate_and_error_rows() -> None:
     assert out["const"]["dsr_reason"] == "degenerate_series"
     assert out["short"]["dsr_reason"] == "degenerate_series"
     assert out["err"]["dsr_campaign_aware"] is None
+
+
+def test_pair_backend_tolerates_v2_error_rows() -> None:
+    from nmr.meta import _pair_backend
+
+    rows = [
+        {"variant": "lgbm_v2", "status": "error", "error": "empty subset"},
+        {"variant": "lgbm_v3", "backend": "lightgbm", "status": "recorded"},
+        {"variant": "xgb_v2", "status": "error", "error": "empty subset"},
+        {"variant": "xgb_v3", "backend": "xgboost", "status": "recorded"},
+    ]
+    assert _pair_backend(rows, "lgbm") == "lightgbm"
+    assert _pair_backend(rows, "xgb") == "xgboost"
+
+
+def test_pair_backend_falls_back_to_prefix_without_recorded_cell() -> None:
+    from nmr.meta import _pair_backend
+
+    rows = [{"variant": "lgbm_v2", "status": "error", "error": "empty subset"}]
+    assert _pair_backend(rows, "lgbm") == "lgbm"

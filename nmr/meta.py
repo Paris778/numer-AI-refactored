@@ -288,13 +288,27 @@ def _series_max_drawdown(series: np.ndarray) -> float | None:
     return float(np.min(cum - np.maximum.accumulate(cum)))
 
 
+def _pair_backend(variant_rows: list[dict[str, object]], prefix: str) -> object:
+    """Backend label for a pair group: first recorded cell of the prefix.
+
+    Error rows (e.g. an empty `screen_stable` v2 cell) carry no ``backend``
+    key; skip them instead of KeyError-ing. Falls back to the prefix when
+    no recorded cell of the prefix exists.
+    """
+    for variant in (f"{prefix}_v2", f"{prefix}_v3"):
+        for row in variant_rows:
+            if row.get("variant") == variant and row.get("backend"):
+                return row["backend"]
+    return prefix
+
+
 def _attach_campaign_dsr(
     rows: list[dict[str, object]],
 ) -> list[dict[str, object]]:
     """Attach post-hoc campaign-aware DSR columns to campaign variant rows.
 
     Valid cells: status ``"recorded"`` with finite ``ic_sharpe``/``ic_skew``/
-    ``ic_kurt``/``ic_std``, ``ic_std > 0`` and ``ic_n_eras >= 4`` (degenerate
+    ``ic_kurt``/``ic_std``, ``ic_std > 0`` and ``n_eras >= 4`` (degenerate
     or too-short IC series cannot carry higher-order moments). The fleet DSR
     uses ``n_trials`` = the valid cell count and the empirical cross-cell
     Sharpe variance (ddof=1) — never an analytic fallback. Guard A: a fleet
@@ -312,7 +326,7 @@ def _attach_campaign_dsr(
                     for key in ("ic_sharpe", "ic_skew", "ic_kurt", "ic_std")
                 )
                 and float(row["ic_std"]) > 0.0
-                and int(row["ic_n_eras"]) >= 4
+                and int(row["n_eras"]) >= 4
             )
         except (KeyError, TypeError, ValueError):
             return False
@@ -325,7 +339,7 @@ def _attach_campaign_dsr(
             sharpe_vec,
             skew=np.asarray([float(r["ic_skew"]) for r in valid], dtype=float),
             kurt=np.asarray([float(r["ic_kurt"]) for r in valid], dtype=float),
-            n_obs=np.asarray([float(r["ic_n_eras"]) for r in valid], dtype=float),
+            n_obs=np.asarray([float(r["n_eras"]) for r in valid], dtype=float),
         )
         trials_var = float(np.var(sharpe_vec, ddof=1)) if n_trials >= 2 else None
     else:
@@ -542,11 +556,7 @@ def campaign_evidence(
             if "_v" in label:
                 prefixes.setdefault(label.rsplit("_v", 1)[0], []).append(label)
         for prefix, labels in sorted(prefixes.items()):
-            backend = next(
-                (r["backend"] for r in variant_rows
-                 if r.get("variant") == f"{prefix}_v2"),
-                prefix,
-            )
+            backend = _pair_backend(variant_rows, prefix)
             for pair in (("v2", "v3"), ("v2", "v4"), ("v3", "v4")):
                 key_a = f"{prefix}_{pair[0]}"
                 key_b = f"{prefix}_{pair[1]}"

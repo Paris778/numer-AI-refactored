@@ -53,6 +53,7 @@ def _executive_summary(
     overview: dict,
     targets: dict,
     ic_screen_rows: list[dict],
+    ic_screen_train_rows: list[dict],
     campaign_rows: list[dict] | None,
     benchmark_rows: list[dict],
 ) -> list[str]:
@@ -84,24 +85,41 @@ def _executive_summary(
                    "3,555-feature universe is memory-marginal on this machine — see "
                    "§8 for the hardware ceiling.")
 
-    # Screen headline: stable / nonlinear counts per target.
-    by_target: dict[str, dict[str, int]] = {}
-    for r in ic_screen_rows:
-        t = r.get("target")
-        if t is None:
-            continue
-        counts = by_target.setdefault(t, {"stable": 0, "nonlinear": 0})
-        counts["stable"] += 1 if r.get("stable") else 0
-        counts["nonlinear"] += 1 if r.get("nonlinear") else 0
-    for t in sorted(by_target):
-        c = by_target[t]
-        out.append(f"- **Stability screen (`{t}`):** {c['stable']} stable, "
+    # Screen headline: the train-only screen drives subset derivation; the
+    # full-span screen is descriptive only (never used for selection).
+    def _screen_counts(rows: list[dict]) -> dict[str, dict[str, int]]:
+        by_target: dict[str, dict[str, int]] = {}
+        for r in rows:
+            t = r.get("target")
+            if t is None:
+                continue
+            counts = by_target.setdefault(t, {"stable": 0, "nonlinear": 0})
+            counts["stable"] += 1 if r.get("stable") else 0
+            counts["nonlinear"] += 1 if r.get("nonlinear") else 0
+        return by_target
+
+    train_counts = _screen_counts(ic_screen_train_rows)
+    for t in sorted(train_counts):
+        c = train_counts[t]
+        out.append(f"- **Train-only stability screen (`{t}`, eras 0001..0574 — "
+                   f"drives subset derivation):** {c['stable']} stable, "
                    f"{c['nonlinear']} nonlinear of {n_features} features. "
-                   "`stable` requires the full gate: |mean_corr| >= 0.01 and "
-                   "|decay_slope| <= 0.001 on valid eras AND the 95% block-bootstrap "
-                   "CI strictly excluding zero AND Benjamini-Hochberg FDR pass at "
-                   "q=0.05 (per target); `nonlinear` = |Pearson| <= 0.01 but "
-                   "|Spearman| > 0.01.")
+                   "`stable` requires the full gate on TRAIN eras only: "
+                   "|mean_corr| >= 0.01 AND |decay_slope| <= 0.001 AND the 95% "
+                   "block-bootstrap CI strictly excluding zero AND "
+                   "Benjamini-Hochberg FDR pass at q=0.05 (per target); "
+                   "`nonlinear` = |Pearson| <= 0.01 but |Spearman| > 0.01. "
+                   "An empty `screen_stable` is a valid scientific result — "
+                   "cells training on it fail loudly at ingestion (§7.1).")
+    desc_counts = _screen_counts(ic_screen_rows)
+    if desc_counts:
+        parts = "; ".join(
+            f"{t}: {desc_counts[t]['stable']} stable / "
+            f"{desc_counts[t]['nonlinear']} nonlinear"
+            for t in sorted(desc_counts)
+        )
+        out.append(f"- **Descriptive full-span screen (eras 0001..1231, NOT "
+                   f"used for subset selection):** {parts}.")
 
     if benchmark_rows:
         bm = {b.get("benchmark"): b for b in benchmark_rows if b.get("mean_corr") is not None}
@@ -124,26 +142,30 @@ def _executive_summary(
             small = [r for r in rec if abs((r.get("n_features") or 0) - 42) < 1]
             screen = [r for r in rec if (r.get("n_features") or 0) <= 3]
 
-            def _range_ic(rows: list[dict]) -> str:
-                ics = sorted(r["mean_ic"] for r in rows if r.get("mean_ic") is not None)
-                return f"{ics[0]:.4f}..{ics[-1]:.4f}" if ics else "n/a"
+            def _range(rows: list[dict], key: str) -> str:
+                vals = sorted(r[key] for r in rows if r.get(key) is not None)
+                return f"{vals[0]:.4f}..{vals[-1]:.4f}" if vals else "n/a"
 
-            verdict = ("- **Feature-campaign verdict (validation eras 0583..1231, "
-                       "8-era purge, identical params per backend, both engines "
-                       "agree <=3%):** ")
+            verdict = ("- **Feature-campaign verdict (validation eras, 8-era "
+                       "purge, identical params per backend):** ")
             parts: list[str] = []
             if medium:
-                parts.append(f"`medium` (780) mean IC {_range_ic(medium)}, "
-                             f"IC Sharpe "
-                             f"{min(r['ic_sharpe'] for r in medium if r.get('ic_sharpe') is not None):.2f}.."
-                             f"{max(r['ic_sharpe'] for r in medium if r.get('ic_sharpe') is not None):.2f}, "
-                             f"FNE@100% {_range_ic(medium)} — signal survives full "
-                             "neutralization = non-linear structure")
+                parts.append(
+                    f"`medium` (780) mean IC {_range(medium, 'mean_ic')}, "
+                    f"IC Sharpe {_range(medium, 'ic_sharpe')}, "
+                    f"FNE@100% {_range(medium, 'fne100')} — signal survives "
+                    "full neutralization = non-linear structure"
+                )
             if small:
-                parts.append(f"`small` (42) mean IC {_range_ic(small)}")
+                parts.append(f"`small` (42) mean IC {_range(small, 'mean_ic')}")
             if screen:
-                parts.append(f"the 3-feature screen variants mean IC {_range_ic(screen)} "
-                             "(near-null)")
+                sizes = sorted({int(r["n_features"]) for r in screen})
+                size_txt = ", ".join(str(s) for s in sizes)
+                feat_word = "feature" if len(sizes) == 1 and sizes[0] == 1 else "features"
+                parts.append(
+                    f"screen-derived variants ({size_txt} {feat_word}) mean IC "
+                    f"{_range(screen, 'mean_ic')}"
+                )
             out.append(verdict + "; ".join(parts) + f". Best cell: "
                        f"`{best['variant']}` ({best['backend']}).")
             errs = [r for r in campaign_rows if r.get("status") != "recorded"]
@@ -151,7 +173,7 @@ def _executive_summary(
                 out.append(f"- **Unavailable cells:** {len(errs)} — "
                            + "; ".join(f"`{e.get('variant')}`: "
                                        f"{(e.get('error') or '')[:90]}" for e in errs)
-                           + " (full failure modes in §8).")
+                           + " (full failure modes in §7.1).")
     out.append("")
     return out
 
@@ -170,23 +192,30 @@ def _methodology_section() -> list[str]:
         "gates. `validation.parquet` expands every week; `live.parquet` changes daily; "
         "`train.parquet` is static. Run: `./.venv/Scripts/python refresh_data.py "
         "--version v5.3`.",
-        "- **Analysis pipeline (2026-08-09..10):** `analyze_dataset.py` — 16 modular "
-        "stages (`overview, targets, ic_by_era, screens, summary, psi, drift, "
-        "derived_sets, corr_medium, corr_all, set_membership, ic_by_split, regimes, "
-        "benchmarks, meta_ortho, manifest`) with auto-included dependencies and "
-        "`--only/--skip` so a single metric can be recomputed without a full run. "
+        "- **Analysis pipeline (2026-08-09..14):** `analyze_dataset.py` — 17 modular "
+        "stages (`overview, targets, ic_by_era, screens, screens_train, summary, psi, "
+        "drift, derived_sets, corr_medium, corr_all, set_membership, ic_by_split, "
+        "regimes, benchmarks, meta_ortho, manifest`) with auto-included dependencies "
+        "and `--only/--skip` so a single metric can be recomputed without a full run. "
         "GPU: cupy `rankdata` (bit-identical to scipy on finite data, ~5.8x) with "
-        "automatic scipy fallback. Full-universe run is ~4-5 h (three 3,555-feature "
-        "streaming passes); `--max-eras` truncates for fast iteration.",
-        "- **Feature campaign (2026-08-12..13):** 12 cells = 6 feature subsets x 2 "
-        "backends, identical model params per backend (fast preset, seed 20260810, "
-        "walk_forward 4 folds, 8-era purge, 20D target only): v1 `all` (3,555) — "
-        "baseline floor; v2 `screen_stable` (3); v3 `screen_linear_or_nonlinear` (3); "
-        "v4 `screen_drift_filtered` (3); v5 `small` (42); v6 `medium` (780). "
-        "Configs: `configs/campaigns/benchmark-rebuild-v1/`. Evidence assembled by "
-        "`nmr.meta.campaign_evidence` from each run's `validation_preds.parquet` — "
-        "per-era validation IC, block-bootstrap 95% CI, IC Sharpe, max drawdown, and "
-        "FNE@100% (residual IC after full linear neutralization against `medium`).",
+        "automatic scipy fallback. Per the 2026-08-14 feature-universe policy the "
+        "report dumps are generated with `--features medium`; a full-universe (`all`) "
+        "run is ~4-5 h (three 3,555-feature streaming passes) and is policy-"
+        "prohibited for routine work. `screens_train` (train eras only) feeds "
+        "`derived_sets`; the full-span `screens` is descriptive only.",
+        "- **Feature campaign (2026-08-14, corrected):** 10 cells = 5 feature subsets "
+        "x 2 backends (lightgbm/xgboost), identical model params per backend (fast "
+        "preset, seed 20260810, walk_forward 4 folds, 8-era purge, 20D target only): "
+        "v2 `screen_stable` (empty — train-only full gate found 0 stable features); "
+        "v3 `screen_linear_or_nonlinear` (1); v4 `screen_drift_filtered` (1); v5 "
+        "`small` (42); v6 `medium` (780). v1 (`all`, 3,555) is excluded by the "
+        "feature-universe policy. Configs: `configs/campaigns/benchmark-rebuild-v1/`. "
+        "Evidence assembled by `nmr.meta.campaign_evidence` from each run's "
+        "`validation_preds.parquet` — per-era validation IC, block-bootstrap 95% CI, "
+        "IC Sharpe, max drawdown, FNE@100% (residual IC after full linear "
+        "neutralization against `medium`), and post-hoc campaign-aware DSR (fleet "
+        "deflation with n_trials = recorded-cell count and empirical cross-cell "
+        "Sharpe variance).",
         "- **Benchmark rebuild (2026-08-10..13):** `benchmark_runner.py` re-run on "
         "v5.3 (null baselines + lgbm ender20/60) → `artifacts/benchmark_scores.csv` "
         "(8 rows: constant-0.5, gaussian-random, uniform-random, trivial, linear, "
@@ -273,11 +302,14 @@ def _artifact_map_section() -> list[str]:
         _table(
             ["path", "contents"],
             [
-                {"path": "artifacts/campaigns/a19577a6...c6ba9.json",
-                 "contents": "campaign log: per-config sha256, status (recorded/error), run_id, "
-                 "error reasons — the source for §7 cells"},
-                {"path": "artifacts/campaigns/rebuild_v53_corrected.log",
-                 "contents": "full campaign console log on the corrected 649-era window"},
+                {"path": "artifacts/campaigns/a8dcabc5...e6b.json",
+                 "contents": "campaign log `rebuild_v53_step2`: per-config sha256, status "
+                 "(recorded/error), run_id, error reasons — the source for §7 cells"},
+                {"path": "artifacts/campaigns/rebuild_v53_step2.log",
+                 "contents": "full campaign console log (corrected, train-only screen subsets)"},
+                {"path": "artifacts/reports/dataset_analysis/campaign_parquets_meta.json",
+                 "contents": "campaign-id guard for the §7.1 evidence cache (stale-cache "
+                 "protection for the renderer)"},
                 {"path": "artifacts/registry/<run_id>/run.json",
                  "contents": "run manifest + scorecard + metrics (immutable record)"},
                 {"path": "artifacts/registry/<run_id>/validation_preds.parquet",
@@ -302,15 +334,16 @@ def _artifact_map_section() -> list[str]:
         "# 1. Refresh data (new rounds)",
         "./.venv/Scripts/python refresh_data.py --version v5.3",
         "",
-        "# 2. Full analysis (16 stages, ~4-5 h) or a subset",
-        "./.venv/Scripts/python analyze_dataset.py --features all "
+        "# 2. Full analysis (17 stages on medium, ~1 h) or a subset. `all` is",
+        "#    policy-prohibited for routine work (feature-universe policy, §8).",
+        "./.venv/Scripts/python analyze_dataset.py --features medium "
         "--output-dir artifacts/reports/dataset_analysis",
         "./.venv/Scripts/python analyze_dataset.py --only screens_train,drift,derived_sets "
-        "--features all --output-dir artifacts/reports/dataset_analysis",
+        "--features medium --output-dir artifacts/reports/dataset_analysis",
         "",
-        "# 3. Render this report (campaign evidence reads persisted parquets)",
+        "# 3. Render this report (campaign evidence cached per campaign id)",
         "./.venv/Scripts/python render_dataset_report.py --campaign-log "
-        "artifacts/campaigns/a19577a60700ce94209343aa244f2582e8aeda1df995482a9591a4a5aa6c6ba9.json",
+        "artifacts/campaigns/a8dcabc548a56993d97836745b2659d10717474b355df9ad33886315aea12e6b.json",
         "",
         "# 4. Run a campaign (dry-run first; training is not cheap)",
         "./.venv/Scripts/python run_campaign.py --config a.yaml --config b.yaml "
@@ -320,7 +353,7 @@ def _artifact_map_section() -> list[str]:
         "./.venv/Scripts/python benchmark_runner.py --fast-mode "
         "--output artifacts/benchmark_scores_smoke.csv",
         "",
-        "# 6. Tests (580-collection guard enforced by tests/test_docs_hygiene.py)",
+        "# 6. Tests (626-collection guard enforced by tests/test_docs_hygiene.py)",
         "./.venv/Scripts/python -m pytest -q",
         "```",
         "",
@@ -335,6 +368,7 @@ def render_report(
     target_corr_rows: list[dict],
     feature_summary_rows: list[dict],
     ic_screen_rows: list[dict],
+    ic_screen_train_rows: list[dict],
     split_ic_rows: list[dict],
     drift_rows: list[dict],
     redundancy_rows: list[dict],
@@ -363,8 +397,8 @@ def render_report(
     out.append("> Generated from `artifacts/reports/dataset_analysis/` dumps. All numbers "
                "have full precision in the dumps; tables are display-rounded. Schema "
                "lines precede every table. Regenerate: `analyze_dataset.py --features "
-               "all` then `render_dataset_report.py --campaign-log "
-               "artifacts/campaigns/<campaign_id>.json`.")
+               "medium` (feature-universe policy, §8) then `render_dataset_report.py "
+               "--campaign-log artifacts/campaigns/<campaign_id>.json`.")
     out.append("")
     out.append(f"- Data version: `{manifest['data_version']}`")
     out.append(f"- Feature set: `{manifest['feature_set']}` ({manifest['feature_count']} features)")
@@ -377,6 +411,7 @@ def render_report(
         overview=overview,
         targets=targets,
         ic_screen_rows=ic_screen_rows,
+        ic_screen_train_rows=ic_screen_train_rows,
         campaign_rows=campaign_rows,
         benchmark_rows=benchmark_rows,
     ))
@@ -456,13 +491,13 @@ def render_report(
         ["feature", "pooled_mean", "pooled_std", "missing_rate"], feature_summary_rows
     ))
     out.append("")
-    out.append("### 4.2 Feature-Target IC Screen")
+    out.append("### 4.2 Feature-Target IC Screen (descriptive, full span)")
     out.append("")
     out.append(_schema_block(
         "feature | target | mean_corr | mean_corr_ci_lo | mean_corr_ci_hi | "
         "ci_excludes_zero | p_value | fdr_q | fdr_pass | corr_std | decay_slope | "
         "cross_regime_variance | mean_spearman | n_eras | stable | nonlinear "
-        "(per-era Pearson/Spearman IC, valid eras only; CI = 95% stationary "
+        "(per-era Pearson/Spearman IC over eras 0001..1231; CI = 95% stationary "
         "block-bootstrap on the era-mean IC with horizon-aware block floors; "
         "p_value = Hall null-shifted block-bootstrap p (same seed/budget); "
         "fdr_q = Benjamini-Hochberg adjusted, per target; stable = classic "
@@ -482,6 +517,17 @@ def render_report(
                "whose 95% CI spans zero, or whose Benjamini-Hochberg q-value exceeds 0.05, "
                "is never called stable (p_value/fdr_q/fdr_pass carry the full precision in "
                "the parquet dumps; the table shows the headline columns only).")
+    out.append("")
+    out.append("**Train-only screen — the subset-derivation authority.** The same "
+               "full-gate predicate computed over train eras only (0001..0574, "
+               "`feature_ic_screen_train.parquet`, `screens_train` stage) is the "
+               "sole input to `derived_feature_sets.json`. The full-span table "
+               "above is descriptive characterization only and is never used for "
+               "subset selection — using validation-era labels to pick features "
+               "would be look-ahead leakage. Derived-set membership is recorded "
+               "in `artifacts/reports/dataset_analysis/derived_feature_sets.json`; "
+               "an empty `screen_stable` there is a valid scientific result and "
+               "cells training on it fail loudly at ingestion.")
     out.append("")
     out.append("### 4.3 Cross-Split Drift (PSI + W1 + Adversarial AUC)")
     out.append("")
@@ -531,8 +577,11 @@ def render_report(
                f"min eigenvalue `{_fmt(corr_summary.get('min_eigenvalue'))}` (PSD guard); "
                "top pairs in `feature_corr_medium.parquet` / `feature_corr_all_summary.json`; "
                "full medium matrix in `feature_corr_medium_matrix.parquet`.")
-    out.append("- **Key takeaways:** prefer features passing the stability screen "
-               "(`stable=True`); avoid highly redundant families.")
+    out.append("- **Key takeaways:** the correlation structure is descriptive. "
+               "Under the corrected train-only screen the `stable` set can be "
+               "empty for 20D targets (see §4.2) — treat the screen as a "
+               "diagnostic filter, not a selector, prefer the packaged "
+               "`medium` set, and avoid highly redundant families.")
     out.append("")
 
     out.append("## 5. Regimes & Signal Dynamics")
@@ -599,7 +648,11 @@ def render_report(
     out.append("- Validate **era-grouped with purge** (8 eras for 20D, 16 for 60D); "
                "random row-level CV is leakage.")
     out.append("- Rank-gaussianize per era before ensembling; never blend raw outputs.")
-    out.append("- Select features from the stability screen, not pooled correlation.")
+    out.append("- Treat the stability screen as a diagnostic, not a selector: "
+               "under the corrected train-only full gate it can be empty for "
+               "20D targets (§4.2, §7.1) — the packaged `medium` set is the "
+               "working representation, and any screen-derived subset must "
+               "be non-empty before training (ingestion fails loudly).")
     out.append("- Watch auxiliary-target era coverage before including them.")
     if campaign_rows:
         out.append("")
@@ -608,17 +661,23 @@ def render_report(
         out.append(_schema_block(
             "variant | backend | device | n_features | mean_ic | ic_ci_lo | "
             "ic_ci_hi | ic_sharpe | max_drawdown | fne100 | fne100_ci_lo | "
-            "fne100_ci_hi | n_eras "
+            "fne100_ci_hi | n_eras | dsr_campaign_aware | dsr_pass_campaign | "
+            "dsr_n_trials | dsr_trials_sr_var | dsr_reason "
             "(identical model params per backend, fixed seed, 8-era purge; "
-            "mean_ic CI from the run scorecard; FNE = residual IC after 100% "
-            "linear neutralization against the medium feature set, own "
-            "block-bootstrap CI)"
+            "mean_ic CI = 95% block-bootstrap on the full validation-window "
+            "per-era IC series; FNE = residual IC after 100% linear "
+            "neutralization against the medium feature set, own block-"
+            "bootstrap CI; DSR = post-hoc deflated Sharpe over the whole "
+            "campaign fleet — n_trials = recorded-cell count, trials_sr_var = "
+            "empirical cross-cell Sharpe variance (ddof=1), pass = DSR >= 0.95)"
         ))
         out.append("")
         out.append(_table(
             ["variant", "backend", "device", "n_features", "mean_ic",
              "ic_ci_lo", "ic_ci_hi", "ic_sharpe", "max_drawdown",
-             "fne100", "fne100_ci_lo", "fne100_ci_hi", "n_eras"],
+             "fne100", "fne100_ci_lo", "fne100_ci_hi", "n_eras",
+             "dsr_campaign_aware", "dsr_pass_campaign", "dsr_n_trials",
+             "dsr_trials_sr_var", "dsr_reason"],
             [r for r in campaign_rows if r.get("status") == "recorded"],
         ))
         error_rows = [r for r in campaign_rows if r.get("status") != "recorded"]
@@ -633,7 +692,13 @@ def render_report(
                    "survives full neutralization against the medium set — the "
                    "orthogonal, non-linearizable component. `ic_sharpe` is the "
                    "risk-adjusted consistency; `max_drawdown` of the cumulative "
-                   "IC line shows crash-era fragility.")
+                   "IC line shows crash-era fragility. `dsr_campaign_aware` "
+                   "deflates each cell's Sharpe by the number of cells actually "
+                   "tried and the empirical cross-cell Sharpe variance — the "
+                   "honest multiple-testing version of the strategy-level "
+                   "p-value; cells with `dsr_reason` did not carry valid "
+                   "higher-order moments and are excluded from the fleet "
+                   "deflation.")
     if pairwise_rows:
         out.append("")
         out.append("### 7.2 Paired Screen Verdicts (validation IC)")
@@ -649,13 +714,16 @@ def render_report(
             pairwise_rows,
         ))
         out.append("")
-        out.append("- **Verdict rule (screen gate):** if v3 (nonlinear rescue) or "
-                   "v4 (drift-filtered) beats v2 (linear stable) with a CI "
-                   "excluding zero on both backends, the univariate Pearson "
-                   "screen is dropping model-value and the `stable` gate "
-                   "defaults must be revised per the campaign evidence.")
+        out.append("- **Verdict rule (screen gate):** pairs are computed only "
+                   "between recorded cells. When `screen_stable` (v2) is empty "
+                   "under the train-only full gate, the v2 cells fail loudly at "
+                   "ingestion (recorded as error rows, never silently dropped) "
+                   "and only the v3-vs-v4 pair is testable; a v3-vs-v4 CI "
+                   "excluding zero means the nonlinear rescue or the drift "
+                   "filter changes model value. The v2-vs-vX gates can only "
+                   "fire when `screen_stable` is non-empty.")
 
-    out.append("## 8. Operational Findings & Decision Log (2026-08-08..13)")
+    out.append("## 8. Operational Findings & Decision Log (2026-08-08..14)")
     out.append("")
     out.append("- **2026-08-08 — Dataset refresh to v5.3.** `refresh_data.py` "
                "downloaded the current tournament assets; era ledger updated "
@@ -665,7 +733,7 @@ def render_report(
                "would misorder v5.10 vs v5.3), live-round reconciliation, per-file "
                "refresh plans, atomic swaps, exit code 3 for `--check-only`.")
     out.append("- **2026-08-09..10 — Full-universe analysis.** `analyze_dataset.py` "
-               "ran all 16 stages on 3,555 features (~4-5 h): pooled moments, per-era "
+               "ran all stages on 3,555 features (~4-5 h): pooled moments, per-era "
                "IC screens (Pearson + Spearman + CI), PSI/W1/adversarial-AUC drift, "
                "regimes, correlation structure, benchmark/meta orthogonality. GPU "
                "rankdata (cupy) verified bit-identical to scipy and ~5.8x faster.")
@@ -693,13 +761,16 @@ def render_report(
                "era-padding class broke `HyperparameterSweep`/`bayesian_sweep` on "
                "real data (held-out split empty); labels now preserve the data's "
                "zero-padding.")
-    out.append("- **2026-08-12..13 — Feature campaign (12 cells).** 6 subsets x 2 "
-               "backends with identical params per backend (fast preset, seed "
-               "20260810, walk_forward 4 folds, 8-era purge, 20D target). 10 cells "
-               "recorded; both `v1` (all 3,555) cells are hardware-infeasible on this "
-               "machine (4 + 3 documented attempts, see below). Campaign log: "
-               "`artifacts/campaigns/a19577a6...c6ba9.json`; console log: "
-               "`artifacts/campaigns/rebuild_v53_corrected.log`.")
+    out.append("- **2026-08-12..13 — Feature campaign (12 cells, superseded).** "
+               "6 subsets x 2 backends with identical params per backend (fast "
+               "preset, seed 20260810, walk_forward 4 folds, 8-era purge, 20D "
+               "target). 10 cells recorded; both `v1` (all 3,555) cells are "
+               "hardware-infeasible on this machine (4 + 3 documented attempts, "
+               "see below). Campaign log: `artifacts/campaigns/a19577a6...c6ba9.json`; "
+               "console log: `artifacts/campaigns/rebuild_v53_corrected.log`. "
+               "**Superseded** — its screen cells were derived from the "
+               "pre-correction full-span screen (validation-era leakage); see the "
+               "2026-08-14 corrected campaign below.")
     out.append("- **Memory ceiling (documented):** the full 3,555-feature "
                "universe needs ~64 GiB commit for the xgboost full-history "
                "DMatrix and ~123 GiB of accumulated commit for the LightGBM "
@@ -715,17 +786,59 @@ def render_report(
                "zero-copy feature frames, era-batched predict, and a "
                "fresh-process full-history fit path were implemented and tested "
                "(bit-identical).")
-    out.append("- **Screen verdict on `target` (20D):** the linear screen "
-               "yields only 3 stable features with near-null OOS IC "
-               "(0.0016, CI [0.0003, 0.0028]); Numerai's packaged medium set "
-               "carries 15x the signal (0.0248). The nonlinear/drift variants "
-               "are structurally identical to v2 (0 nonlinear, 0 drifted "
-               "features for `target`), so the audit's v3-vs-v2 gate cannot "
-               "fire — the screen defaults stay unchanged pending human "
-               "review of this evidence.")
-    out.append("- **Cross-backend agreement:** LightGBM and XGBoost rank the "
-               "variants identically and agree within ~3% per cell — the "
-               "evidence is engine-independent.")
+    out.append("- **2026-08-13..14 — Phase 1 corrections (committee review; commits "
+               "`7c43e1b`, `9ceee4e`, `5c520cd`).** (1) Feature screening is now "
+               "train-only: the `screens_train` stage computes the full gate "
+               "(classic predicate AND 95% CI strictly excluding zero AND "
+               "Benjamini-Hochberg FDR at q=0.05, per target) on eras 0001..0574, "
+               "and `derived_sets` reads only that parquet — validation-era label "
+               "leakage eliminated. (2) Dynamic `colsample_bytree` floor "
+               "`max(0.1, min(10,|S|)/|S| + 1e-7)` so small feature sets never "
+               "degenerate to 1-of-N split sampling (LightGBM aliases + CatBoost "
+               "`rsm` post-translation). (3) Post-hoc campaign-aware DSR: fleet "
+               "deflation over recorded cells with empirical cross-cell Sharpe "
+               "variance (§7.1). 624 tests green per commit (626 after the meta "
+               "regression tests below).")
+    out.append("- **2026-08-14 — Feature-universe operational policy.** All routine "
+               "research, screening, HPO, and model iteration uses `medium` (780), "
+               "`small` (42), or screen-derived subsets. The full `all` universe "
+               "(3,555) is prohibited for routine iteration (RAM ceiling, ~3.5 h "
+               "per-era neutralization, and empirically weaker OOF IC 0.0178 vs "
+               "medium 0.0254); approved exceptions are feature-bagged "
+               "sub-ensembles or single-shot offline deploy fits only. The "
+               "analysis dumps and this report are therefore generated with "
+               "`--features medium`.")
+    out.append("- **2026-08-14 — Corrected campaign `rebuild_v53_step2`.** 10 cells "
+               "(v2..v6 x lightgbm/xgboost; v1 `all` excluded per the universe "
+               "policy above). Both `screen_stable` cells failed loudly at "
+               "ingestion with the empty-subset guard — `screen_stable` is empty "
+               "under the corrected train-only full gate, which is a valid "
+               "scientific result, and the guard records it as an immutable "
+               "error row rather than silently skipping. The other 8 cells "
+               "recorded (evidence in §7.1). Campaign log "
+               "`artifacts/campaigns/a8dcabc5...e6b.json`; console log "
+               "`artifacts/campaigns/rebuild_v53_step2.log`.")
+    out.append("- **Screen verdict on `target` (20D, corrected):** under the "
+               "train-only full gate the screen yields **0 stable features out of "
+               "780** (1 classic-only candidate, 350 pass the CI gate, 244 pass "
+               "FDR — the conjunction is empty). For `target_agnes_60` it yields "
+               "70 (vs 423 under the old leaky full-span screen). This confirms "
+               "the committee's core diagnosis: univariate linear screening under "
+               "multiplicity control finds no tradeable 20D subset; the packaged "
+               "`medium` set remains the working representation (§7.1).")
+    out.append("- **Cross-backend agreement:** LightGBM and XGBoost agree closely "
+               "on every recorded cell (§7.1).")
+    out.append("- **2026-08-14 — Meta evidence hardening (2 production bugs fixed, "
+               "TDD).** Real-data execution of `campaign_evidence` on "
+               "`rebuild_v53_step2` exposed two defects in the item-4 wiring: "
+               "(1) `_attach_campaign_dsr` read `ic_n_eras` while production rows "
+               "carry `n_eras` — the fleet DSR silently never fired (unit tests "
+               "fed the helper a synthetic fixture mirroring the bug); (2) the "
+               "pairwise backend lookup KeyError-ed on v2 error rows — the "
+               "branch is only reachable when `screen_stable` is empty, which "
+               "first happened with the corrected train-only screen. Both fixed "
+               "with failing-tests-first regression coverage (key contract + "
+               "v2-error-row cases); suite green at 626.")
     out.append("")
     out.extend(_methodology_section())
     out.extend(_artifact_map_section())
@@ -768,7 +881,8 @@ def main(argv: list[str] | None = None) -> int:
     required_dumps = (
         "overview.json", "era_structure.parquet", "targets.json",
         "target_corr.parquet", "feature_summary.parquet",
-        "feature_ic_screen.parquet", "feature_ic_by_split.parquet",
+        "feature_ic_screen.parquet", "feature_ic_screen_train.parquet",
+        "feature_ic_by_split.parquet",
         "feature_drift_profile.parquet", "feature_set_redundancy.json",
         "regimes.json", "era_signal.parquet",
         "benchmarks.json", "meta_ortho.parquet",
@@ -787,23 +901,32 @@ def main(argv: list[str] | None = None) -> int:
     campaign_rows: list[dict] | None = None
     pairwise_rows: list[dict] | None = None
     if args.campaign_log is not None:
+        if not args.campaign_log.exists():
+            print(
+                f"ERROR: campaign log not found: {args.campaign_log}",
+                file=sys.stderr,
+            )
+            return 1
         # Prefer the persisted evidence parquets (campaign_evidence is a
-        # ~30-50 min FNE computation); recompute only when they are missing.
+        # ~30-50 min FNE computation) but only when they belong to THIS
+        # campaign log — a stale cache would silently render another
+        # campaign's numbers (regression class 2026-08-14).
         variants_path = d / "campaign_variants.parquet"
         pairwise_path = d / "campaign_pairwise.parquet"
-        if variants_path.exists() and pairwise_path.exists():
+        meta_path = d / "campaign_parquets_meta.json"
+        log_id = _load_json(args.campaign_log).get("campaign_id")
+        cache_meta = _load_json(meta_path) if meta_path.exists() else {}
+        cache_ok = (
+            cache_meta.get("campaign_id") == log_id
+            and variants_path.exists() and pairwise_path.exists()
+        )
+        if cache_ok:
             campaign_rows = pl.read_parquet(variants_path).to_dicts()
             pairwise_rows = pl.read_parquet(pairwise_path).to_dicts()
         else:
             from nmr.config import DataConfig
             from nmr.meta import campaign_evidence
 
-            if not args.campaign_log.exists():
-                print(
-                    f"ERROR: campaign log not found: {args.campaign_log}",
-                    file=sys.stderr,
-                )
-                return 1
             evidence = campaign_evidence(
                 args.campaign_log,
                 args.registry,
@@ -812,6 +935,9 @@ def main(argv: list[str] | None = None) -> int:
             )
             evidence.variants.write_parquet(variants_path)
             evidence.pairwise.write_parquet(pairwise_path)
+            meta_path.write_text(
+                json.dumps({"campaign_id": log_id}), encoding="utf-8"
+            )
             campaign_rows = evidence.variants.to_dicts()
             pairwise_rows = evidence.pairwise.to_dicts()
 
@@ -823,6 +949,9 @@ def main(argv: list[str] | None = None) -> int:
         target_corr_rows=pl.read_parquet(d / "target_corr.parquet").to_dicts(),
         feature_summary_rows=pl.read_parquet(d / "feature_summary.parquet").to_dicts(),
         ic_screen_rows=pl.read_parquet(d / "feature_ic_screen.parquet").to_dicts(),
+        ic_screen_train_rows=pl.read_parquet(
+            d / "feature_ic_screen_train.parquet"
+        ).to_dicts(),
         split_ic_rows=pl.read_parquet(d / "feature_ic_by_split.parquet").to_dicts(),
         drift_rows=pl.read_parquet(d / "feature_drift_profile.parquet").to_dicts(),
         redundancy_rows=_load_json(d / "feature_set_redundancy.json"),
