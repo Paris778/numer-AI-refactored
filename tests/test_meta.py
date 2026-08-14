@@ -521,3 +521,84 @@ def test_pair_backend_falls_back_to_prefix_without_recorded_cell() -> None:
 
     rows = [{"variant": "lgbm_v2", "status": "error", "error": "empty subset"}]
     assert _pair_backend(rows, "lgbm") == "lgbm"
+
+
+_EVIDENCE_PARQUET = Path("artifacts/reports/dataset_analysis/campaign_variants.parquet")
+
+
+@pytest.mark.skipif(
+    not _EVIDENCE_PARQUET.exists(),
+    reason="campaign evidence parquet absent (built by campaign_evidence); "
+    "skipped in CI",
+)
+def test_campaign_evidence_parquet_matches_dsr_key_contract() -> None:
+    """The persisted production evidence must satisfy the key contract
+    ``_attach_campaign_dsr._is_valid`` consumes, and the fleet DSR must have
+    actually fired (regression: the ``ic_n_eras`` vs ``n_eras`` mismatch left
+    every DSR column null in production while unit tests stayed green)."""
+    df = pl.read_parquet(_EVIDENCE_PARQUET)
+    for key in ("ic_sharpe", "ic_skew", "ic_kurt", "ic_std", "n_eras"):
+        assert key in df.columns, f"production evidence missing key {key!r}"
+    recorded = df.filter(pl.col("status") == "recorded")
+    assert recorded.height >= 2
+    fired = recorded["dsr_campaign_aware"].drop_nulls().len()
+    assert fired >= 1, "fleet DSR did not fire on any recorded row"
+
+
+def _pair_ic_frame(n_eras: int, base: float = 0.01) -> pl.DataFrame:
+    return pl.DataFrame(
+        [
+            {"era": f"{i:04d}", "ic": base + 0.0001 * (i % 7)}
+            for i in range(1, n_eras + 1)
+        ],
+        schema={"era": pl.Utf8, "ic": pl.Float64},
+    )
+
+
+def test_assemble_pairwise_skips_missing_v2_and_tolerates_error_rows() -> None:
+    from nmr.meta import _assemble_pairwise
+
+    ic_frames = {
+        "lgbm_v3": _pair_ic_frame(30),
+        "lgbm_v4": _pair_ic_frame(30, base=0.012),
+    }
+    variant_rows = [
+        {"variant": "lgbm_v2", "status": "error", "error": "empty subset"},
+        {"variant": "lgbm_v3", "status": "recorded", "backend": "lightgbm",
+         "device": "auto"},
+        {"variant": "lgbm_v4", "status": "recorded", "backend": "lightgbm",
+         "device": "auto"},
+    ]
+    rows = _assemble_pairwise(
+        ic_frames, variant_rows, n_boot=50, seed=0, min_overlap_eras=2
+    )
+    assert [r["pair"] for r in rows] == ["lgbm_v3 vs lgbm_v4"]
+    row = rows[0]
+    assert row["backend"] == "lightgbm"
+    assert row["error"] is None
+    assert row["n_eras"] == 30
+
+
+def test_assemble_pairwise_records_vacuity_as_error_row() -> None:
+    from nmr.meta import _assemble_pairwise
+
+    ic_frames = {
+        "lgbm_v3": _pair_ic_frame(5),
+        "lgbm_v4": pl.DataFrame(
+            [{"era": f"{i:04d}", "ic": 0.01} for i in range(10, 16)],
+            schema={"era": pl.Utf8, "ic": pl.Float64},
+        ),
+    }
+    variant_rows = [
+        {"variant": "lgbm_v3", "status": "recorded", "backend": "lightgbm",
+         "device": "auto"},
+        {"variant": "lgbm_v4", "status": "recorded", "backend": "lightgbm",
+         "device": "auto"},
+    ]
+    rows = _assemble_pairwise(
+        ic_frames, variant_rows, n_boot=50, seed=0, min_overlap_eras=2
+    )
+    assert rows[0]["pair"] == "lgbm_v3 vs lgbm_v4"
+    assert rows[0]["mean_diff"] is None
+    assert rows[0]["error"] is not None
+    assert rows[0]["n_eras"] == 0

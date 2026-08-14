@@ -27,6 +27,7 @@ disableModelInvocation: false
 | 8 | Doc SSOT | Docs updated in the same change-set (AGENTS.md Self-Update Directive; ARCHITECTURE.md §P–§R for these skills) | AGENTS.md/ARCHITECTURE.md/README.md/CONTRIBUTING.md drift |
 | 9 | Artifact trust | cloudpickle loads only from `artifacts/` | Loading untrusted `.pkl` |
 | 10 | Device-aware comparison | `oof_device` logged and checked before any cross-run numeric comparison | GPU vs CPU OOF compared silently |
+| 11 | Meta smoke | Any change to derived sets / screen outputs / `nmr.meta` → `campaign_evidence` run against the NEWEST campaign log; persisted `campaign_variants.parquet` keys must match the DSR contract and `dsr_campaign_aware` must fire (enforced by `test_campaign_evidence_parquet_matches_dsr_key_contract`) | Evidence cache from another campaign, or DSR columns silently all-null |
 
 ## Hard Rules
 - [ ] Never claim tests passed without executing them and reading the output.

@@ -302,6 +302,79 @@ def _pair_backend(variant_rows: list[dict[str, object]], prefix: str) -> object:
     return prefix
 
 
+def _assemble_pairwise(
+    ic_frames: dict[str, pl.DataFrame],
+    variant_rows: list[dict[str, object]],
+    *,
+    n_boot: int,
+    seed: int,
+    min_overlap_eras: int,
+) -> list[dict[str, object]]:
+    """Build the §7.2 paired-verdict rows from per-variant era-IC frames.
+
+    Pair keys derive from the config-filename prefix (e.g. ``lgbm_v2``),
+    never from the backend name, so renames cannot silently drop pairs.
+    Pairs whose frames are missing (e.g. an error cell with no IC series)
+    are skipped; ``NonVacuityError`` becomes an error row, never a crash.
+    """
+    pairwise_rows: list[dict[str, object]] = []
+    if not ic_frames:
+        return pairwise_rows
+    prefixes: dict[str, list[str]] = {}
+    for label in ic_frames:
+        if "_v" in label:
+            prefixes.setdefault(label.rsplit("_v", 1)[0], []).append(label)
+    for prefix, labels in sorted(prefixes.items()):
+        backend = _pair_backend(variant_rows, prefix)
+        for pair in (("v2", "v3"), ("v2", "v4"), ("v3", "v4")):
+            key_a = f"{prefix}_{pair[0]}"
+            key_b = f"{prefix}_{pair[1]}"
+            if key_a not in labels or key_b not in labels:
+                continue
+            try:
+                res = paired_era_comparison(
+                    ic_frames[key_a], ic_frames[key_b],
+                    metric_fn=_identity_era_ic,
+                    horizon="20D",
+                    n_boot=n_boot,
+                    seed=seed,
+                    min_overlap_eras=min_overlap_eras,
+                    device_a=next(
+                        (r["device"] for r in variant_rows
+                         if r.get("variant") == key_a), None
+                    ),
+                    device_b=next(
+                        (r["device"] for r in variant_rows
+                         if r.get("variant") == key_b), None
+                    ),
+                )
+            except NonVacuityError as exc:
+                pairwise_rows.append(
+                    {
+                        "pair": f"{key_a} vs {key_b}",
+                        "backend": backend,
+                        "mean_diff": None,
+                        "ci_low": None,
+                        "ci_high": None,
+                        "n_eras": 0,
+                        "error": str(exc),
+                    }
+                )
+                continue
+            pairwise_rows.append(
+                {
+                    "pair": f"{key_a} vs {key_b}",
+                    "backend": backend,
+                    "mean_diff": res.mean_diff,
+                    "ci_low": res.ci_low,
+                    "ci_high": res.ci_high,
+                    "n_eras": res.n_eras,
+                    "error": None,
+                }
+            )
+    return pairwise_rows
+
+
 def _attach_campaign_dsr(
     rows: list[dict[str, object]],
 ) -> list[dict[str, object]]:
@@ -547,61 +620,12 @@ def campaign_evidence(
     variant_rows = _attach_campaign_dsr(variant_rows)
     variants = pl.DataFrame(variant_rows)
 
-    pairwise_rows: list[dict[str, object]] = []
-    if ic_frames:
-        # pair keys derive from the config-filename prefix (e.g. 'lgbm_v2'),
-        # never from the backend name, so renames cannot silently drop pairs.
-        prefixes: dict[str, list[str]] = {}
-        for label in ic_frames:
-            if "_v" in label:
-                prefixes.setdefault(label.rsplit("_v", 1)[0], []).append(label)
-        for prefix, labels in sorted(prefixes.items()):
-            backend = _pair_backend(variant_rows, prefix)
-            for pair in (("v2", "v3"), ("v2", "v4"), ("v3", "v4")):
-                key_a = f"{prefix}_{pair[0]}"
-                key_b = f"{prefix}_{pair[1]}"
-                if key_a not in labels or key_b not in labels:
-                    continue
-                try:
-                    res = paired_era_comparison(
-                        ic_frames[key_a], ic_frames[key_b],
-                        metric_fn=_identity_era_ic,
-                        horizon="20D",
-                        n_boot=n_boot,
-                        seed=seed,
-                        min_overlap_eras=min_overlap_eras,
-                        device_a=next(
-                            (r["device"] for r in variant_rows
-                             if r.get("variant") == key_a), None
-                        ),
-                        device_b=next(
-                            (r["device"] for r in variant_rows
-                             if r.get("variant") == key_b), None
-                        ),
-                    )
-                except NonVacuityError as exc:
-                    pairwise_rows.append(
-                        {
-                            "pair": f"{key_a} vs {key_b}",
-                            "backend": backend,
-                            "mean_diff": None,
-                            "ci_low": None,
-                            "ci_high": None,
-                            "n_eras": 0,
-                            "error": str(exc),
-                        }
-                    )
-                    continue
-                pairwise_rows.append(
-                    {
-                        "pair": f"{key_a} vs {key_b}",
-                        "backend": backend,
-                        "mean_diff": res.mean_diff,
-                        "ci_low": res.ci_low,
-                        "ci_high": res.ci_high,
-                        "n_eras": res.n_eras,
-                        "error": None,
-                    }
-                )
+    pairwise_rows = _assemble_pairwise(
+        ic_frames,
+        variant_rows,
+        n_boot=n_boot,
+        seed=seed,
+        min_overlap_eras=min_overlap_eras,
+    )
     pairwise = pl.DataFrame(pairwise_rows)
     return CampaignEvidence(variants=variants, pairwise=pairwise)

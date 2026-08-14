@@ -30,7 +30,7 @@ These four files obey a strict **Single Source of Truth (SSOT) hierarchy**. One 
 
 ## 1. Agent Identity & Mission
 
-You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (626 tests). No lint/type-check tooling is configured — pytest is the sole automated gate, enforced by CI (`.github/workflows/ci.yml`).
+You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (629 tests). No lint/type-check tooling is configured — pytest is the sole automated gate, enforced by CI (`.github/workflows/ci.yml`).
 
 Your mission:
 
@@ -192,7 +192,7 @@ Three gates, in order of rigor — **exact commands live only in [`CONTRIBUTING.
 
 1. **Fast gate** — full `pytest -q` after every meaningful change.
 2. **Targeted subsets** while iterating — oracle parity (`tests/test_parity.py` + `tests/test_risk_parity.py`) and determinism hashes (`tests/test_benchmark_slice1.py`).
-3. **Pre-sign-off gate** (mandatory before delivering work) — full 626-test suite plus the real-data benchmark smoke (`benchmark_runner.py --fast-mode` → `artifacts/*_smoke.csv`).
+3. **Pre-sign-off gate** (mandatory before delivering work) — full 629-test suite plus the real-data benchmark smoke (`benchmark_runner.py --fast-mode` → `artifacts/*_smoke.csv`).
 
 Real-data tests require the `data/v5.3/` parquet assets (see [`README.md`](README.md#data-assets)). If they are missing, report which tests were skipped — never claim full verification. CI (`.github/workflows/ci.yml`) enforces the fast gate on every push/PR (see [`CONTRIBUTING.md`](CONTRIBUTING.md#testing--verification)).
 </verification_gates>
