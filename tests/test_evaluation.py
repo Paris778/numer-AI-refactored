@@ -440,3 +440,19 @@ def test_per_era_turnover_missing_columns_raises() -> None:
             pl.DataFrame({"era": ["0001"], "prediction": [0.5]}),
             pred_col="prediction",
         )
+
+
+def test_public_api_exports_v25_capital_symbols() -> None:
+    import nmr
+
+    for name in [
+        "OverlappingSimulationResult",
+        "annual_compounded_return",
+        "gain_to_pain_ratio",
+        "kelly_fraction",
+        "simulate_overlapping_portfolio",
+        "downside_era_indices",
+        "per_era_turnover",
+    ]:
+        assert name in nmr.__all__
+        assert getattr(nmr, name) is not None
