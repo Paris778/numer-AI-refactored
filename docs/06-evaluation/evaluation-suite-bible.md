@@ -5,6 +5,8 @@
 > **Scope:** *How we judge a Numerai model or strategy in this repository.* This is the single source of truth for the metric suite, its mathematics, its design decisions, and its build plan. If any other doc disagrees with this one about evaluation, this one wins.
 >
 > **Revision v2.1 (2026-06-21) — five hardening amendments** (red-team review, all verified): (1) adversarial perturbation is now a **discrete bin-shift / block-swap** — continuous Gaussian + re-quantize is a verified no-op on Int8 bins (§9); (2) the **DSR is computed on the unclipped** raw payout series, consistently (§4.3, §5.0); (3) **horizon-floor clamps** on bootstrap block length and Bartlett bandwidth (§4.1–4.2); (4) the **cross-trial Sharpe variance** must not fall back to the single-series analytic variance (§4.3); (5) the **non-vacuity guard is a hard `ValueError`** (§11 E3/E4).
+>
+> **Revision v2.5 (2026-08-15) — capital-readiness metrics added** (§16): CAGR 1Y, gain-to-pain, bounded Kelly, MMC-down, per-era turnover, and the overlapping lockup simulator, plus their twelve `MetricScorecard` fields. Locked contracts: design spec §3 (`docs/superpowers/specs/2026-08-15-evaluation-suite-v25-capital-readiness-design.md`).
 
 This document is exhaustive by intent. It defines **what** we measure, **why** each metric exists, the **exact mathematics**, the **edge cases**, the **grading gates**, and the **ordered build slices** (E1–E6) that implement it. Nothing is left implicit. Read top to bottom once; thereafter use the Table of Contents.
 
@@ -27,6 +29,7 @@ This document is exhaustive by intent. It defines **what** we measure, **why** e
 13. [Grading Protocol and Probe Discipline](#13-grading-protocol-and-probe-discipline)
 14. [Symbols and Glossary](#14-symbols-and-glossary)
 15. [Standing Deferrals / Ledger](#15-standing-deferrals--ledger)
+16. [v2.5 Capital-Readiness Metrics](#16-v25-capital-readiness-metrics)
 
 ---
 
@@ -496,6 +499,26 @@ Logged, non-blocking. Revisit deliberately, not by accident.
 - **Regime variable choice** (§6.2) must be offline-computable; the exact proxy (target-vol vs feature-vol vs market-vol) is to be fixed in E4 and recorded here once chosen.
 - **Block length $\ell$ and bandwidth $K$** (§4.1–4.2) are now **clamped to horizon floors** (5/13 and 4/12 for 20D/60D); finer per-target tuning above the floor is deferred.
 - **S11 benchmark ladder** (null/trivial/linear/tree baselines) is specced and couples to E6 (every baseline emits a scorecard); build it alongside E5/E6.
+
+---
+
+## 16) v2.5 Capital-Readiness Metrics
+
+Added 2026-08-15. Six new metrics extend the payout proxy and the scorecard to judge capital readiness: compounded annual growth, gain-to-pain, a bounded Kelly stake, downside-MMC, prediction turnover, and a multi-round lockup simulator. Each is defined by the locked mathematical contracts in the design spec §3 (`docs/superpowers/specs/2026-08-15-evaluation-suite-v25-capital-readiness-design.md`); this file remains the evaluation spec of record. Let $r_t = \operatorname{clip}(\text{pf}\cdot(0.75\,\text{CORR}_t + 2.25\,\text{MMC}_t), \pm 0.05)$ be the clipped round return and $\text{raw}_t$ the same sum unclipped.
+
+**CAGR 1Y** (`nmr.payout.annual_compounded_return`; scorecard column `cagr_1y`). Geometric compounded growth of the clipped series annualized at 52 eras/year: $\text{CAGR} = (\prod_t (1 + r_t))^{52/n} - 1$ when $\prod_t (1 + r_t) > 0$. A non-positive wealth product — total ruin, which the geometric form could not otherwise express — maps to $-1.0$. Fewer than 2 observations return 0.0. All arithmetic is float64 on the finite-only validated input (`_as_finite_1d`: 1-D, non-empty, finite-only, else `ValueError`).
+
+**Gain-to-pain ratio** (`nmr.payout.gain_to_pain_ratio`; `gain_to_pain_ratio`). $\text{GPR} = \sum_t \max(0, r_t) \,/\, \sum_t |\min(0, r_t)|$. Zero-pain conventions: $+\infty$ when the pain denominator is 0 while gains are positive (precedented — `calmar` already returns `+inf` for zero MDD with positive mean), and 0.0 when the series is entirely flat. The canonical JSON sanitizer maps non-finite floats to `"Infinity"` strings in canonical bytes; parquet/CSV carry `inf` natively. No crash path.
+
+**Kelly fraction** (`nmr.payout.kelly_fraction`; `kelly_fraction`) — director-locked. Bounded discrete Kelly on the **raw** (unclipped) payout series: $\min(1.0, \max(0.0, \mu / \sigma^2))$ with population variance (ddof=0), and 0.0 when $\sigma^2 = 0$ or $\mu \le 0$ — always in [0, 1]. The raw-series input is deliberate: the clipped series has Popoviciu-bounded variance ($\sigma^2 \le 0.0025$ under the ±5% clip), so $\mu/\sigma^2$ there saturates at 1.0 for every viable model and carries no discrimination between candidates. `payout_report` passes `series.raw`.
+
+**MMC-down** (`nmr.evaluation.downside_era_indices`; columns `mmc_down`, `mmc_down_n_eras`, `mmc_down_reason`) — director-locked. Let $E_{\text{down}} = \{ t : \text{CORR}_{\text{meta}}(t) < 0.0 \}$ — the **strict** inequality, using the same custom per-era CORR path as the model's own CORR against the main target. $\text{mmc\_down} = \operatorname{mean}(\text{MMC}_t : t \in E_{\text{down}})$ when $|E_{\text{down}}| \ge 5$ (`_MMC_DOWN_MIN_ERAS`); otherwise `mmc_down = None` and `mmc_down_reason = "insufficient_downside_eras"`. `mmc_down_n_eras` always records $|E_{\text{down}}|$, and the reason is `None` whenever the metric is computable.
+
+**Turnover** (`nmr.evaluation.per_era_turnover`; `turnover_mean`, `turnover_std`, `turnover_reason`). For each consecutive chronological era pair $(e_{k-1}, e_k)$, Spearman $\rho_k$ between the two eras' predictions over the shared stock-ID intersection; per-era turnover is $1 - \rho_k$, bounded in [0, 2]. Transitions with fewer than `_TURNOVER_MIN_SHARED_IDS` (10) shared IDs are skipped; a non-finite (degenerate) $\rho_k$ maps to 0.0, yielding turnover 1.0. Missing `era_col`/`id_col`/`pred_col` raise `ValueError`. The scorecard aggregates mean and population std (ddof=0) over the valid transitions; fewer than 2 valid transitions (or a missing id column in the join) yield both `None`, with reason `"insufficient_transitions"` or `"id column unavailable"`.
+
+**Overlapping lockup simulator** (`nmr.payout.simulate_overlapping_portfolio`; `sim_portfolio_cagr`, `sim_portfolio_mdd`, `sim_capital_utilization`). Multi-round concurrent capital lockup with dynamic reinvestment. At each era, tranches maturing at $t$ pay $\text{principal} \cdot (1 + r_{t-K})$ — the **initiating** era's return, correct Numerai round semantics — then $\min(\text{cash}, \text{total\_equity}/K)$ is deployed as a new tranche maturing at $t + K$. Equity and utilization are recorded **before** the era's deployment. Tranches initiated in the final $K$ eras remain locked at series end and are carried at par principal (at-cost convention: no mark-to-market, no unrealized payoff) in `final_equity` and the equity curve. The horizon $K$ derives from the report's `horizon` argument via `_HORIZON_ERAS = {"20D": 20, "60D": 60}`; a series shorter than the horizon returns a zeroed result. Outputs: `portfolio_cagr` (geometric growth of final equity, annualized), `portfolio_max_drawdown` (peak-to-trough of the equity curve), `avg_capital_utilization` (mean locked/total-equity), `final_equity`.
+
+**Determinism & canonical bytes.** All twelve new scorecard fields are deterministic functions of the input frame — float64 pure math, rank-based Spearman invariant to row order within an era, no wall-clock, no RNG — and are therefore included in the canonical scorecard bytes. Only the `timing_*` / `quality_metric_*` columns remain stripped from canonical serialization.
 
 ---
 
