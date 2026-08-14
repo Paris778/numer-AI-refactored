@@ -398,3 +398,25 @@ def test_overlapping_sim_drag() -> None:
         result.final_equity ** (52.0 / 60.0) - 1.0
     )
     assert result.portfolio_cagr < serial_cagr
+
+
+def test_payout_report_includes_capital_metrics() -> None:
+    corr = {f"{i:04d}": 0.02 + 0.01 * ((i % 5) - 2) for i in range(1, 41)}
+    mmc = {f"{i:04d}": 0.01 for i in range(1, 41)}
+    report = payout_report(corr, mmc, horizon="20D", n_trials=1, seed=7)
+    series = payout_series(corr, mmc)
+    assert report.cagr_1y == pytest.approx(
+        annual_compounded_return(series.clipped)
+    )
+    assert report.gain_to_pain_ratio == pytest.approx(
+        gain_to_pain_ratio(series.clipped)
+    )
+    assert report.kelly_fraction == pytest.approx(kelly_fraction(series.raw))
+    assert report.overlapping_sim is not None
+    expected_sim = simulate_overlapping_portfolio(series.clipped, horizon_eras=20)
+    assert report.overlapping_sim.final_equity == pytest.approx(
+        expected_sim.final_equity
+    )
+    assert report.overlapping_sim.avg_capital_utilization == pytest.approx(
+        expected_sim.avg_capital_utilization
+    )

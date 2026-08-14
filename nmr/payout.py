@@ -70,6 +70,10 @@ class PayoutResult:
     mmc_sharpe: float
     max_burn_streak: int
     time_to_recovery: int
+    cagr_1y: float
+    gain_to_pain_ratio: float
+    kelly_fraction: float
+    overlapping_sim: OverlappingSimulationResult | None = None
 
 
 def _as_finite_1d(
@@ -390,6 +394,7 @@ def payout_report(
         raise ValueError("mmc_by_era must contain only finite values on aligned eras")
 
     clipped = series.clipped
+    horizon_eras = _HORIZON_ERAS[horizon]
     return PayoutResult(
         n_eras=n,
         pf=float(pf),
@@ -404,4 +409,10 @@ def payout_report(
         mmc_sharpe=ac_adjusted_sharpe(mmc_aligned, horizon=horizon),
         max_burn_streak=max_burn_streak(clipped),
         time_to_recovery=time_to_recovery(clipped),
+        cagr_1y=annual_compounded_return(clipped),
+        gain_to_pain_ratio=gain_to_pain_ratio(clipped),
+        kelly_fraction=kelly_fraction(series.raw),
+        overlapping_sim=simulate_overlapping_portfolio(
+            clipped, horizon_eras=horizon_eras
+        ),
     )
