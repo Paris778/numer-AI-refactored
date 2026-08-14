@@ -22,6 +22,7 @@ from dataclasses import dataclass
 
 import numpy as np
 import polars as pl
+from scipy.stats import spearmanr
 
 from nmr._transforms import power_1_5, rank_gaussianize
 
@@ -35,6 +36,7 @@ __all__ = [
     "clean_frame",
     "sorted_era_labels",
     "downside_era_indices",
+    "per_era_turnover",
 ]
 
 _VALID_BACKENDS = ("custom", "official")
@@ -93,6 +95,52 @@ def downside_era_indices(
         for era in sorted_era_labels(list(meta_corr.keys()))
         if float(meta_corr[era]) < threshold_f
     ]
+
+
+def per_era_turnover(
+    df: pl.DataFrame,
+    *,
+    pred_col: str,
+    era_col: str = "era",
+    id_col: str = "id",
+) -> dict[str, float]:
+    """Spearman prediction rank turnover: 1 - rho(pred_{t-1}, pred_t) on shared IDs.
+
+    For each consecutive chronological era pair, ranks the predictions of the
+    previous and current era over the intersection of stock IDs (>= 10 rows
+    required) and returns 1 - Spearman rho, bounded in [0, 2]. Non-finite rho
+    (degenerate era) maps to 0.0 -> turnover 1.0.
+    """
+    missing = [c for c in (era_col, id_col, pred_col) if c not in df.columns]
+    if missing:
+        raise ValueError(f"Missing required columns: {missing}")
+
+    eras = sorted_era_labels(df.get_column(era_col).to_list())
+    if len(eras) < 2:
+        return {}
+
+    parts = {
+        str(part.get_column(era_col).to_list()[0]): part.select(
+            [id_col, pred_col]
+        )
+        for part in df.partition_by(era_col, maintain_order=True)
+    }
+
+    turnovers: dict[str, float] = {}
+    for prev_era, curr_era in zip(eras, eras[1:]):
+        joined = parts[prev_era].join(
+            parts[curr_era], on=id_col, how="inner", suffix="_curr"
+        )
+        if joined.height < 10:
+            continue
+        rho, _ = spearmanr(
+            joined.get_column(pred_col).to_numpy(),
+            joined.get_column(f"{pred_col}_curr").to_numpy(),
+        )
+        if not math.isfinite(rho):
+            rho = 0.0
+        turnovers[curr_era] = float(1.0 - rho)
+    return turnovers
 
 
 def clean_frame(df: pl.DataFrame, columns: Sequence[str]) -> pl.DataFrame:

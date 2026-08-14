@@ -13,6 +13,7 @@ from nmr.evaluation import (
     MetricSummary,
     clean_frame,
     downside_era_indices,
+    per_era_turnover,
     sorted_era_labels,
 )
 
@@ -401,3 +402,41 @@ def test_downside_era_indices_rejects_non_numeric_and_nonfinite() -> None:
         downside_era_indices({"X": 0.1})
     with pytest.raises(ValueError, match="threshold"):
         downside_era_indices({"0001": -0.1}, threshold=np.nan)
+
+
+def _turnover_frame() -> pl.DataFrame:
+    rows: list[dict[str, float | str]] = []
+    for j in range(12):
+        rows.append({"era": "0001", "id": f"id{j:03d}", "prediction": float(j)})
+        rows.append({"era": "0002", "id": f"id{j:03d}", "prediction": float(j)})
+        rows.append(
+            {"era": "0003", "id": f"id{j:03d}", "prediction": float(11 - j)}
+        )
+    return pl.DataFrame(rows)
+
+
+def test_per_era_turnover_identical_and_inverse() -> None:
+    out = per_era_turnover(_turnover_frame(), pred_col="prediction")
+    assert out["0002"] == pytest.approx(0.0)  # identical -> rho=1
+    assert out["0003"] == pytest.approx(2.0)  # inverted -> rho=-1
+
+
+def test_per_era_turnover_skips_small_intersection() -> None:
+    rows: list[dict[str, float | str]] = []
+    for j in range(12):
+        rows.append({"era": "0001", "id": f"id{j:03d}", "prediction": float(j)})
+    for j in range(12, 17):  # only 5 shared ids -> skipped
+        rows.append({"era": "0002", "id": f"id{j:03d}", "prediction": float(j)})
+    out = per_era_turnover(pl.DataFrame(rows), pred_col="prediction")
+    assert out == {}
+
+
+def test_per_era_turnover_missing_columns_raises() -> None:
+    # pred_col is a required keyword-only argument; pass it so the missing
+    # id column triggers the ValueError path (omitting pred_col would raise
+    # TypeError for the wrong reason).
+    with pytest.raises(ValueError, match="Missing required columns"):
+        per_era_turnover(
+            pl.DataFrame({"era": ["0001"], "prediction": [0.5]}),
+            pred_col="prediction",
+        )
