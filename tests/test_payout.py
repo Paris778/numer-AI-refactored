@@ -12,6 +12,7 @@ from nmr.inference import deflated_sharpe, era_series_stats
 from nmr.payout import (
     PayoutResult,
     PayoutSeries,
+    annual_compounded_return,
     burn_rate,
     calmar,
     cvar,
@@ -296,3 +297,26 @@ def test_payout_report_rejects_non_finite_mmc_on_aligned_eras() -> None:
     mmc = {"0001": 0.05, "0002": float("nan")}
     with pytest.raises(ValueError, match="mmc_by_era must contain only finite"):
         payout_report(corr, mmc, horizon="20D", n_trials=1, seed=1)
+
+
+def test_annual_cagr_math() -> None:
+    series = np.full(52, 0.01)
+    expected = (1.01) ** 52 - 1.0
+    assert annual_compounded_return(series) == pytest.approx(expected, rel=1e-12)
+
+
+def test_annual_cagr_ruin_and_short_series() -> None:
+    # product <= 0 -> -1.0 (total loss)
+    assert annual_compounded_return(np.array([-1.0, 0.05])) == -1.0
+    assert annual_compounded_return(np.array([-1.5, 0.05])) == -1.0
+    # fewer than 2 observations -> 0.0
+    assert annual_compounded_return(np.array([0.01])) == 0.0
+
+
+def test_annual_cagr_input_validation() -> None:
+    with pytest.raises(ValueError):
+        annual_compounded_return(np.array([]))
+    with pytest.raises(ValueError):
+        annual_compounded_return(np.array([0.01, np.nan]))
+    with pytest.raises(ValueError):
+        annual_compounded_return(np.zeros((2, 2)))

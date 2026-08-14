@@ -27,6 +27,7 @@ __all__ = [
     "PayoutSeries",
     "PayoutResult",
     "payout_series",
+    "annual_compounded_return",
     "burn_rate",
     "cvar",
     "sortino",
@@ -101,6 +102,27 @@ def payout_series(
     raw = pf_f * ((0.75 * corr) + (2.25 * mmc))
     clipped = np.clip(raw, -clip_f, clip_f)
     return PayoutSeries(eras=eras, raw=raw, clipped=clipped)
+
+
+def annual_compounded_return(
+    clipped: np.ndarray | list[float] | tuple[float, ...],
+    *,
+    eras_per_year: float = 52.0,
+) -> float:
+    """Annualized geometric compounded return on stake.
+
+    Computes (prod(1 + r_t)) ** (eras_per_year / n) - 1 in float64 over the
+    clipped round-return series. Returns -1.0 when the wealth product is
+    <= 0 (total loss) and 0.0 when fewer than 2 observations exist.
+    """
+    x = _as_finite_1d(clipped, name="clipped")
+    n = int(x.size)
+    if n < 2:
+        return 0.0
+    cum_growth = float(np.prod(1.0 + x))
+    if cum_growth <= 0.0:
+        return -1.0
+    return float(cum_growth ** (float(eras_per_year) / float(n)) - 1.0)
 
 
 def burn_rate(clipped: np.ndarray | list[float] | tuple[float, ...]) -> float:
