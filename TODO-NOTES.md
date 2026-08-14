@@ -35,3 +35,14 @@
   full-universe fits (63.7 GiB RAM ceiling — see AGENTS.md hazards).
 - Registry holds 21 runs (11 old + 10 new campaign cells); champion is empty by design
   (purged 2026-08-10, no promotion without human decision).
+
+---------------------------------------
+
+Add numerAI MCP for agents 
+
+Purge old benchamrk results 
+
+Do new benchmark models (simple and trivial) 
+
+Update libraries (lgbm etc) 
+
