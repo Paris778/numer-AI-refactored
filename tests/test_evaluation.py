@@ -12,6 +12,7 @@ from nmr.evaluation import (
     EvaluationEngine,
     MetricSummary,
     clean_frame,
+    downside_era_indices,
     sorted_era_labels,
 )
 
@@ -387,3 +388,16 @@ def test_pearson_corr_constant_input_returns_zero() -> None:
     left = np.array([1.0, 2.0, 3.0, 4.0])
     right = np.array([2.0, 4.0, 6.0, 8.0])
     assert engine._pearson_corr(left, right) == pytest.approx(1.0, abs=1e-12)
+
+
+def test_downside_era_indices_strict() -> None:
+    meta_corr = {"0002": 0.01, "0001": -0.02, "0003": 0.0, "0004": -0.01}
+    assert downside_era_indices(meta_corr) == ["0001", "0004"]
+    assert downside_era_indices(meta_corr, threshold=0.0) == ["0001", "0004"]
+
+
+def test_downside_era_indices_rejects_non_numeric_and_nonfinite() -> None:
+    with pytest.raises(ValueError, match="Non-numeric era label"):
+        downside_era_indices({"X": 0.1})
+    with pytest.raises(ValueError, match="threshold"):
+        downside_era_indices({"0001": -0.1}, threshold=np.nan)

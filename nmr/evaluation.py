@@ -34,6 +34,7 @@ __all__ = [
     "EvaluationEngine",
     "clean_frame",
     "sorted_era_labels",
+    "downside_era_indices",
 ]
 
 _VALID_BACKENDS = ("custom", "official")
@@ -71,6 +72,27 @@ def sorted_era_labels(labels: Sequence[str]) -> list[str]:
             )
         numeric_to_label[numeric_label] = label
     return [numeric_to_label[num] for num in sorted(numeric_to_label)]
+
+
+def downside_era_indices(
+    meta_corr: Mapping[str, float],
+    *,
+    threshold: float = 0.0,
+) -> list[str]:
+    """Chronological eras where the meta model's CORR is strictly below threshold.
+
+    Strict comparison (CORR_meta < threshold) per the director-locked
+    MMC-down contract. Era labels must be numeric (fail-loud via
+    ``sorted_era_labels``).
+    """
+    threshold_f = float(threshold)
+    if not math.isfinite(threshold_f):
+        raise ValueError("threshold must be finite")
+    return [
+        era
+        for era in sorted_era_labels(list(meta_corr.keys()))
+        if float(meta_corr[era]) < threshold_f
+    ]
 
 
 def clean_frame(df: pl.DataFrame, columns: Sequence[str]) -> pl.DataFrame:
