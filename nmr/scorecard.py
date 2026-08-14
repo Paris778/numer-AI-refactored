@@ -12,9 +12,17 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 import polars as pl
 
-from nmr.evaluation import MIN_OVERLAP_ERAS, EvaluationEngine, NonVacuityError
+from nmr.evaluation import (
+    MIN_OVERLAP_ERAS,
+    EvaluationEngine,
+    NonVacuityError,
+    downside_era_indices,
+    per_era_turnover,
+    sorted_era_labels,
+)
 from nmr.inference import (
     BootstrapCI,
     Horizon,
@@ -32,6 +40,8 @@ from nmr.robustness import (
     regime_conditioned_corr,
     time_horizon_stability,
 )
+
+_MMC_DOWN_MIN_ERAS = 5
 
 __all__ = ["MetricCell", "MetricScorecard", "evaluate_model"]
 
@@ -78,6 +88,20 @@ class MetricScorecard:
     cwmm: MetricCell | None
     cwmm_reason: str | None
     book_correlation: object | None
+
+    cagr_1y: float
+    gain_to_pain_ratio: float
+    kelly_fraction: float
+    mmc_down: float | None
+    mmc_down_n_eras: int | None
+    mmc_down_reason: str | None
+    turnover_mean: float | None
+    turnover_std: float | None
+    turnover_reason: str | None
+    sim_portfolio_cagr: float
+    sim_portfolio_mdd: float
+    sim_capital_utilization: float
+
     metric_timing_seconds: dict[str, float] | None
     eval_total_seconds: float
 
@@ -99,6 +123,18 @@ class MetricScorecard:
             "time_to_recovery": self.time_to_recovery,
             "max_feature_exposure": self.max_feature_exposure,
             "book_correlation": self.book_correlation,
+            "cagr_1y": self.cagr_1y,
+            "gain_to_pain_ratio": self.gain_to_pain_ratio,
+            "kelly_fraction": self.kelly_fraction,
+            "mmc_down": self.mmc_down,
+            "mmc_down_n_eras": self.mmc_down_n_eras,
+            "mmc_down_reason": self.mmc_down_reason,
+            "turnover_mean": self.turnover_mean,
+            "turnover_std": self.turnover_std,
+            "turnover_reason": self.turnover_reason,
+            "sim_portfolio_cagr": self.sim_portfolio_cagr,
+            "sim_portfolio_mdd": self.sim_portfolio_mdd,
+            "sim_capital_utilization": self.sim_capital_utilization,
             "quality_metric_total_seconds": self.eval_total_seconds,
         }
 
@@ -425,6 +461,50 @@ def evaluate_model(
     _mark("mmc_by_era", t0)
 
     t0 = time.perf_counter()
+    meta_corr_by_era = evaluator.per_era_corr(
+        base,
+        pred_col=meta_col,
+        target_col=main_target,
+        era_col=era_col,
+    )
+    _mark("meta_corr_by_era", t0)
+
+    t0 = time.perf_counter()
+    downside_eras = downside_era_indices(meta_corr_by_era)
+    mmc_down_n = len(downside_eras)
+    if mmc_down_n >= _MMC_DOWN_MIN_ERAS:
+        mmc_down_value = float(np.mean([mmc_by_era[e] for e in downside_eras]))
+        mmc_down_reason = None
+    else:
+        mmc_down_value = None
+        mmc_down_reason = "insufficient_downside_eras"
+    _mark("mmc_down", t0)
+
+    t0 = time.perf_counter()
+    turnover_mean: float | None = None
+    turnover_std: float | None = None
+    if id_col in base.columns:
+        turnover_by_era = per_era_turnover(
+            base,
+            pred_col=pred_col,
+            era_col=era_col,
+            id_col=id_col,
+        )
+        turnover_values = [
+            turnover_by_era[e]
+            for e in sorted_era_labels(list(turnover_by_era.keys()))
+        ]
+        if len(turnover_values) >= 2:
+            turnover_mean = float(np.mean(turnover_values))
+            turnover_std = float(np.std(turnover_values, ddof=0))
+            turnover_reason = None
+        else:
+            turnover_reason = "insufficient_transitions"
+    else:
+        turnover_reason = "id column unavailable"
+    _mark("turnover", t0)
+
+    t0 = time.perf_counter()
     fnc_by_era = evaluator.per_era_fnc(
         base,
         pred_col=pred_col,
@@ -637,6 +717,18 @@ def evaluate_model(
         cwmm=cwmm_cell,
         cwmm_reason=cwmm_reason,
         book_correlation=None,
+        cagr_1y=payout.cagr_1y,
+        gain_to_pain_ratio=payout.gain_to_pain_ratio,
+        kelly_fraction=payout.kelly_fraction,
+        mmc_down=mmc_down_value,
+        mmc_down_n_eras=mmc_down_n,
+        mmc_down_reason=mmc_down_reason,
+        turnover_mean=turnover_mean,
+        turnover_std=turnover_std,
+        turnover_reason=turnover_reason,
+        sim_portfolio_cagr=payout.overlapping_sim.portfolio_cagr,
+        sim_portfolio_mdd=payout.overlapping_sim.portfolio_max_drawdown,
+        sim_capital_utilization=payout.overlapping_sim.avg_capital_utilization,
         metric_timing_seconds=metric_timing_seconds,
         eval_total_seconds=eval_total_seconds,
     )

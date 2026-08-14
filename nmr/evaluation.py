@@ -41,6 +41,7 @@ __all__ = [
 
 _VALID_BACKENDS = ("custom", "official")
 MIN_OVERLAP_ERAS = 20
+_TURNOVER_MIN_SHARED_IDS = 10
 
 
 class NonVacuityError(ValueError):
@@ -131,7 +132,7 @@ def per_era_turnover(
         joined = parts[prev_era].join(
             parts[curr_era], on=id_col, how="inner", suffix="_curr"
         )
-        if joined.height < 10:
+        if joined.height < _TURNOVER_MIN_SHARED_IDS:
             continue
         rho, _ = spearmanr(
             joined.get_column(pred_col).to_numpy(),

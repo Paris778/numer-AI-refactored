@@ -40,7 +40,13 @@ def _scorecard(sharpe_ac: float, *, max_drawdown: float = 0.1) -> MetricScorecar
         horizon_stability=None, horizon_reason=None, regime_corr=None,
         regime_reason=None, perturbation=None, max_feature_exposure=0.0,
         bmc=None, bmc_reason=None, cwmm=None, cwmm_reason=None,
-        book_correlation=None, metric_timing_seconds=None, eval_total_seconds=0.0,
+        book_correlation=None,
+        cagr_1y=0.0, gain_to_pain_ratio=0.0, kelly_fraction=0.0,
+        mmc_down=None, mmc_down_n_eras=0, mmc_down_reason=None,
+        turnover_mean=None, turnover_std=None, turnover_reason=None,
+        sim_portfolio_cagr=0.0, sim_portfolio_mdd=0.0,
+        sim_capital_utilization=0.0,
+        metric_timing_seconds=None, eval_total_seconds=0.0,
     )
 
 

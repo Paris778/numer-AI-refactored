@@ -12,9 +12,16 @@ import polars as pl
 import pytest
 from numerai_tools.scoring import correlation_contribution
 
-from nmr.evaluation import EvaluationEngine
+from nmr.evaluation import EvaluationEngine, downside_era_indices
 from nmr.inference import block_bootstrap_ci, era_series_stats, resolve_block_len
-from nmr.payout import payout_report
+from nmr.payout import (
+    annual_compounded_return,
+    gain_to_pain_ratio,
+    kelly_fraction,
+    payout_report,
+    payout_series,
+    simulate_overlapping_portfolio,
+)
 from nmr.scorecard import MetricScorecard, evaluate_model
 
 
@@ -208,6 +215,18 @@ def test_scorecard_to_frame_one_row_and_columns() -> None:
         "cwmm_reason",
         "horizon_reason",
         "regime_reason",
+        "cagr_1y",
+        "gain_to_pain_ratio",
+        "kelly_fraction",
+        "mmc_down",
+        "mmc_down_n_eras",
+        "mmc_down_reason",
+        "turnover_mean",
+        "turnover_std",
+        "turnover_reason",
+        "sim_portfolio_cagr",
+        "sim_portfolio_mdd",
+        "sim_capital_utilization",
     }
     assert required.issubset(set(frame.columns))
 
@@ -486,3 +505,162 @@ def test_sorted_numeric_keys_rejects_non_numeric_eras() -> None:
     assert _sorted_numeric_keys({"0575": 1.0, "0583": 2.0}) == ["0575", "0583"]
     with pytest.raises(ValueError, match="Non-numeric era keys"):
         _sorted_numeric_keys({"0575": 1.0, "X": 0.0})
+
+
+def _mmc_down_frames(n_down: int) -> tuple[pl.DataFrame, ...]:
+    """30 eras x 4 rows; meta CORR < 0 in exactly the LAST n_down eras.
+
+    Sign guarantee (holds for ANY corr(pred, target) in [-1, 1]):
+      up eras:   meta =  target + 0.5*pred -> corr(meta, target) >= 0.5 > 0
+      down eras: meta = -target + 0.5*pred -> corr(meta, target) <= -0.5 < 0
+    Target is era-varying ((i + j) % 5) so the per-era CORR series is
+    non-degenerate — payout_report's deflated_sharpe requires finite skew/kurt,
+    and an era-invariant target makes the series constant and raises ValueError.
+    """
+    rows: list[dict[str, float | str]] = []
+    for i in range(1, 31):
+        era = f"{i:04d}"
+        downside = i > (30 - n_down)
+        for j in range(4):
+            pred = 0.1 + 0.1 * j
+            target = float((i + j) % 5) / 4.0
+            meta = -target + 0.5 * pred if downside else target + 0.5 * pred
+            rows.append(
+                {
+                    "era": era,
+                    "id": f"id{j}",
+                    "prediction": pred,
+                    "numerai_meta_model": meta,
+                    "target": target,
+                    "f1": float(j),
+                }
+            )
+    full = pl.DataFrame(rows)
+    return (
+        full.select(["era", "id", "prediction"]),
+        full.select(["era", "id", "numerai_meta_model"]),
+        full.select(["era", "id", "f1"]),
+        full.select(["era", "id", "target"]),
+    )
+
+
+def test_mmc_down_filtering() -> None:
+    predictions, meta_model, features, targets = _mmc_down_frames(10)
+    full = predictions.join(meta_model, on=["era", "id"]).join(
+        targets, on=["era", "id"]
+    )
+    engine = EvaluationEngine("custom")
+    mmc_by_era = engine.per_era_mmc(
+        full, pred_col="prediction", meta_col="numerai_meta_model",
+        target_col="target",
+    )
+    expected_down = [f"{i:04d}" for i in range(21, 31)]
+    expected_value = float(np.mean([mmc_by_era[e] for e in expected_down]))
+
+    score = evaluate_model(
+        predictions,
+        meta_model=meta_model,
+        benchmarks=None,
+        features=features,
+        targets=targets,
+        n_trials=1,
+        seed=7,
+    )
+    assert score.mmc_down == pytest.approx(expected_value)
+    assert score.mmc_down_n_eras == 10
+    assert score.mmc_down_reason is None
+
+
+def test_mmc_down_insufficient() -> None:
+    predictions, meta_model, features, targets = _mmc_down_frames(2)
+    score = evaluate_model(
+        predictions,
+        meta_model=meta_model,
+        benchmarks=None,
+        features=features,
+        targets=targets,
+        n_trials=1,
+        seed=7,
+    )
+    assert score.mmc_down is None
+    assert score.mmc_down_n_eras == 2
+    assert score.mmc_down_reason == "insufficient_downside_eras"
+
+
+def _turnover_scorecard_frames() -> tuple[pl.DataFrame, ...]:
+    rows: list[dict[str, float | str]] = []
+    for i in range(1, 26):
+        era = f"{i:04d}"
+        for j in range(12):
+            pred = 0.1 * i + 0.01 * j
+            rows.append(
+                {
+                    "era": era,
+                    "id": f"id{j:03d}",
+                    "prediction": pred,
+                    "numerai_meta_model": pred * 0.5,
+                    "target": float((i + j) % 5) / 4.0,
+                    "f1": float(j % 5),
+                }
+            )
+    full = pl.DataFrame(rows)
+    return (
+        full.select(["era", "id", "prediction"]),
+        full.select(["era", "id", "numerai_meta_model"]),
+        full.select(["era", "id", "f1"]),
+        full.select(["era", "id", "target"]),
+    )
+
+
+def test_turnover_flows_into_scorecard() -> None:
+    predictions, meta_model, features, targets = _turnover_scorecard_frames()
+    score = evaluate_model(
+        predictions,
+        meta_model=meta_model,
+        benchmarks=None,
+        features=features,
+        targets=targets,
+        n_trials=1,
+        seed=7,
+    )
+    # pred is a constant per-era shift -> Spearman rho = 1 every transition
+    assert score.turnover_mean == 0.0
+    assert score.turnover_std == 0.0
+    assert score.turnover_reason is None
+
+
+def test_capital_metrics_flow_from_payout() -> None:
+    predictions, meta_model, benchmarks, features, targets = _tiny_inputs()
+    score = evaluate_model(
+        predictions,
+        meta_model=meta_model,
+        benchmarks=benchmarks,
+        features=features,
+        targets=targets,
+        n_trials=1,
+        seed=7,
+    )
+    engine = EvaluationEngine("custom")
+    full = (
+        predictions.join(meta_model, on=["era", "id"])
+        .join(targets, on=["era", "id"])
+    )
+    corr = engine.per_era_corr(full, pred_col="prediction", target_col="target")
+    mmc = engine.per_era_mmc(
+        full, pred_col="prediction", meta_col="numerai_meta_model",
+        target_col="target",
+    )
+    series = payout_series(corr, mmc)
+    assert score.cagr_1y == pytest.approx(annual_compounded_return(series.clipped))
+    assert score.gain_to_pain_ratio == pytest.approx(
+        gain_to_pain_ratio(series.clipped)
+    )
+    assert score.kelly_fraction == pytest.approx(kelly_fraction(series.raw))
+    expected_sim = simulate_overlapping_portfolio(series.clipped, horizon_eras=20)
+    assert score.sim_portfolio_cagr == pytest.approx(expected_sim.portfolio_cagr)
+    assert score.sim_portfolio_mdd == pytest.approx(
+        expected_sim.portfolio_max_drawdown
+    )
+    assert score.sim_capital_utilization == pytest.approx(
+        expected_sim.avg_capital_utilization
+    )
