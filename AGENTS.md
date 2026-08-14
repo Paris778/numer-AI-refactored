@@ -133,7 +133,7 @@ When modifying or generating code, enforce these seven invariants:
 | Change submission build/validation | `nmr/submission.py` |
 | Change deployment artifact format | `nmr/deployment.py` — `serialize_predict` / `load_predict` |
 | Change statistical machinery (bootstrap, DSR) | `nmr/inference.py` |
-| Change cross-run meta-analysis / promotion verdicts | `nmr/meta.py` — `paired_era_comparison`, `promotion_verdict`, `fleet_summary` (spec: `ARCHITECTURE.md` §Q) |
+| Change cross-run meta-analysis / promotion verdicts | `nmr/meta.py` — `paired_era_comparison`, `promotion_verdict`, `fleet_summary`, `campaign_evidence` (spec: `ARCHITECTURE.md` §Q) |
 | Change payout proxy / downside metrics | `nmr/payout.py` |
 | Change scorecard fields / evaluation flow | `nmr/scorecard.py` — `MetricScorecard`, `evaluate_model` |
 | Change HPO sweeps / neutralization frontier | `nmr/research.py` |
@@ -224,6 +224,9 @@ Real v5.3 scorecard fixtures are flaky if rows are limited **before** establishi
 ### RAM ceiling & full-universe training (recorded 2026-08-10)
 - **Machine:** 63.7 GiB RAM total. The **full 3,555-feature universe is memory-marginal**: a dense float32 feature array alone is ~28 GiB (2.12M train rows), and the deploy/validation path's float64 `to_numpy` is ~54 GiB. Peak for a solo full-universe fit ≈ 40–45 GiB — **run full-universe jobs only when the machine is otherwise idle** (a concurrent analysis/benchmark job caused the `lgbm_v1` campaign OOM: `_ArrayMemoryError: 28.1 GiB, shape (3555, 2123070)`).
 - **Memory guards live in code** (`coerce_float32_features`, zero-copy numpy views, era-batched predicts — full spec: `ARCHITECTURE.md` §G). OOF neutralization at 3,555 features is compute-bound (per-era pinv, ~3.5 h) — not a memory issue, do not "optimize" the math (oracle parity).
+
+### Feature-universe policy (director directive, 2026-08-14)
+All routine research, screening, HPO, and model iteration uses `medium` (780), `small` (42), or screen-derived subsets (`derived_feature_sets.json`). The full `all` universe (3,555) is **prohibited** for routine iteration (RAM ceiling above; ~3.5 h per-era neutralization; empirically weaker OOF IC). Approved exceptions: feature-bagged sub-ensembles, or single-shot offline deploy fits. Analysis dumps and the pre-modelling study are generated with `--features medium`.
 - **Full-universe campaign cells:** if a 3,555-feature variant OOMs, re-run it solo with the current code; never run two full-universe jobs concurrently.
 
 ### `embargo_eras` is structurally inert

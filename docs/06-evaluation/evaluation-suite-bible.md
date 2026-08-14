@@ -158,6 +158,7 @@ where $\gamma_e \approx 0.5772$ is the Euler–Mascheroni constant and $e$ is Eu
   - *Directional note:* over-stating this variance raises $SR_0$ and **over-deflates** (false rejection); under-stating it lets overfits pass. The analytic-temporal fallback is wrong in either direction, which is why it is struck entirely.
 - **Monotonicity (hard gate):** $SR_0$ increases in $N$, so DSR is **monotonically decreasing** in `n_trials`. More things you tried ⇒ higher bar to clear.
 - **Signature:** `deflated_sharpe(sharpe, *, n_trials, n_obs, skew, kurt, trials_sr_var=None, sr0_benchmark=0.0) -> float`. When `n_trials == 1`, ignore `trials_sr_var` and force $SR_0=0$; when `n_trials > 1` and `trials_sr_var is None`, raise rather than silently inventing a temporal-variance fallback.
+- **Fleet deflation (2026-08-14):** `deflated_sharpe_fleet(sharpe_vec, *, skew, kurt, n_obs) -> (dsr_vec, reason_vec)` applies the same BLP z-stat per trial using the empirical cross-trial Sharpe variance (ddof=1) and each trial's own `n_obs`/moments — the same-distribution invariant holds because every trial's moments come from its own series. Reason codes: `insufficient_trials` (<2 trials), `zero_cross_trial_sharpe_variance` (identical trial Sharpes), `radicand` (non-positive BLP radicand) — never an analytic fallback, never a crash. Consumed by `nmr.meta.campaign_evidence` (post-hoc campaign DSR) and `nmr.opt.sweep_dsr` (post-hoc sweep DSR).
 
 > **Why this layer is non-negotiable:** without it, a Sharpe of 1.3 found by trying 200 configs on 60 autocorrelated eras looks like genius and is actually noise. The inference layer is what makes the framework "Jane Street," not "Kaggle."
 
@@ -386,7 +387,7 @@ Same workflow as the S0–S10 build: the spec is fixed here, an engineer impleme
 ### E1 — Inference Core *(blocks E2, E3, E4)*
 
 - **Files:** `nmr/inference.py`, `tests/test_inference.py`.
-- **Surface:** `era_series_stats(series)`; `block_bootstrap_ci(series, stat_fn, *, block_len, n_boot, seed, alpha=0.05)`; `ac_adjusted_sharpe(series, *, bandwidth=None)`; `deflated_sharpe(sharpe, *, n_trials, n_obs, skew, kurt, trials_sr_var=None, sr0_benchmark=0.0)`.
+- **Surface:** `era_series_stats(series)`; `block_bootstrap_ci(series, stat_fn, *, block_len, n_boot, seed, alpha=0.05)`; `ac_adjusted_sharpe(series, *, bandwidth=None)`; `deflated_sharpe(sharpe, *, n_trials, n_obs, skew, kurt, trials_sr_var=None, sr0_benchmark=0.0)`; `deflated_sharpe_fleet(sharpe_vec, *, skew, kurt, n_obs) -> (dsr, reasons)`.
 - **Gates (hardest first):**
   1. **Bootstrap determinism** — same seed ⇒ identical CI across two process invocations.
   2. **AC direction** — `ac_adjusted_sharpe < naive Sharpe` on a synthetic AR(1) series with $\rho>0$.
