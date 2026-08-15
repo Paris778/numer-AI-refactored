@@ -38,7 +38,7 @@ A candidate's scorecard is only interesting **relative to where it lands on this
 
 - **G — Null floor on every metric (incl. new ones).** constant-0.5 / uniform-random / gaussian-random ⇒ CORR≈0, payout≈0, FNC≈0, MMC≈0, BMC≈0, and **well-defined** (non-NaN) rank stability, max-drawdown, burn rate, CVaR, book correlation. Any null baseline scoring meaningfully above 0 on a skill metric ⇒ **Red** (broken metric).
 - **G — Every ladder rung emits Tier-1 + Tier-2.** No rung is allowed to skip metrics; the ladder must be directly comparable row-for-row with a real candidate's scorecard.
-- **G — Monotone sanity.** null ≤ trivial ≤ linear ≤ tree ≤ benchmark on the headline rank scalar (the Deflated Payout Proxy), within CI. A gross inversion (e.g. random > tree) ⇒ investigate before trusting the suite.
+- **G — Tutorial-chain monotonicity (implemented).** `assert_slice1_monotone` (`nmr/benchmark.py`) enforces **null ≤ hello-numerai ≤ sunshine** on the rank scalar, within CI. The full null ≤ trivial ≤ linear ≤ tree ≤ benchmark ladder is **aspirational, not implemented** — do not assume a gate exists that the code does not enforce.
 - **G — Determinism.** Same data-version + seed ⇒ identical baseline scorecards across process invocations.
 
 ## 5) Reference numbers (sanity anchors, not gates)
@@ -49,9 +49,8 @@ A candidate's scorecard is only interesting **relative to where it lands on this
 
 ## 6) Where this lives in the build
 
-- **Specced, deferred to E5/E6** (bible §15 deferral ledger). The `BenchmarkSuite` (S11) is the home; E6 wires the full scorecard into every baseline and adds the null-floor gate.
-- **Couples to E6** because the new Tier-3 metrics (book correlation, BMC, CWMM) must *also* floor on the null baselines — not just the Tier-1 metrics.
-- **Build alongside E5/E6, not after** — the scorecard aggregator (E5) and the baselines (S11) are mutually validating: the baselines are the first real consumers of the scorecard, and they prove the scorecard composes correctly.
+- **Built.** The `BenchmarkSuite` (S11) ladder — null/hello-numerai/sunshine, classical linear/tree, and benchmark models — is implemented and tested (`tests/test_benchmark_*.py`); the null floor and tutorial-chain monotonicity run as `assert_null_floor` / `assert_slice1_monotone` (`nmr/benchmark.py`).
+- **Known gap:** Tier-3 metrics (book correlation, BMC, CWMM) flooring on the null baselines is not yet wired into the gates — see the bible's deferral ledger for status.
 
 ---
 

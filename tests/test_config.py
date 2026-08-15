@@ -152,3 +152,13 @@ def test_model_config_device_validation() -> None:
         ModelConfig(device="quantum")
     # the default preserves the legacy GPU-first behavior
     assert ModelConfig().device == "auto"
+
+
+def test_eval_metrics_rejects_unknown_names() -> None:
+    with pytest.raises(ValueError, match="metrics"):
+        EvalConfig(metrics=("cor",))  # typo must fail loudly, not silently compute nothing
+
+
+def test_eval_metrics_accepts_known_names() -> None:
+    for names in (("corr",), ("corr", "mmc", "fnc", "sharpe")):
+        assert EvalConfig(metrics=names).metrics == tuple(names)

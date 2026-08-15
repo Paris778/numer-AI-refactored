@@ -337,6 +337,38 @@ def test_feature_ic_screen_empty_targets_raises() -> None:
         feature_ic_screen(_ic_frame().partition_by("era", maintain_order=True), ["feature_alpha"], [])
 
 
+def test_feature_ic_screen_rejects_one_shot_iterator() -> None:
+    """A generator/iterator is one-shot: the first target consumes it and
+    later targets would silently screen nothing. Must raise instead of
+    silently dropping whole target blocks."""
+    frame = _ic_frame().with_columns(pl.col("target").alias("target_alt"))
+    chunks = iter(frame.partition_by("era", maintain_order=True))
+    with pytest.raises(TypeError, match="re-iterable"):
+        feature_ic_screen(
+            chunks, ["feature_alpha", "feature_beta"], ["target", "target_alt"]
+        )
+
+
+def test_feature_ic_screen_allows_one_shot_iterator_for_single_target() -> None:
+    """Single-target screens may stream a one-shot iterator (the analysis
+    stages pass a fresh per-era generator per target call) — it is consumed
+    exactly once."""
+    frame = _ic_frame()
+    chunks = iter(frame.partition_by("era", maintain_order=True))
+    out = feature_ic_screen(chunks, ["feature_alpha", "feature_beta"], ["target"])
+    assert out.height == 2
+
+
+def test_feature_ic_screen_reiterable_chunks_produce_all_target_blocks() -> None:
+    frame = _ic_frame().with_columns(pl.col("target").alias("target_alt"))
+    chunks = tuple(frame.partition_by("era", maintain_order=True))
+    out = feature_ic_screen(
+        chunks, ["feature_alpha", "feature_beta"], ["target", "target_alt"]
+    )
+    assert set(out["target"].to_list()) == {"target", "target_alt"}
+    assert out.height == 4  # 2 features x 2 targets — no silently missing block
+
+
 def _screen_gate_frame() -> pl.DataFrame:
     """Three features with EXACT engineered per-era IC profiles over 13 eras.
 

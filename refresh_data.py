@@ -43,7 +43,7 @@ _VERSION_ALERT = (
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Refresh Numerai v5.2 datasets and the era ledger."
+        description="Refresh Numerai datasets and the era ledger."
     )
     parser.add_argument("--data-dir", type=Path, default=Path("data"))
     parser.add_argument("--version", default=CURRENT_DATA_VERSION)

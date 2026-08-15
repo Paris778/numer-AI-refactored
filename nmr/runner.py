@@ -347,8 +347,19 @@ class ExperimentRunner:
     ) -> tuple[MetricScorecard, pl.DataFrame, int]:
         data = self._config.data
         agent = IngestionAgent(data)
+        # Config targets + main target + every horizon target column present in
+        # the validation schema (benchmark_runner convention). Horizon stability
+        # (and BMC) can only run when the scorecard receives the target_*_20/60
+        # pairs; loading only config targets silently disabled the flagship
+        # diagnostic on every runner-produced scorecard.
+        schema_cols = list(pl.read_parquet_schema(data.path("validation.parquet")).keys())
+        schema_target_cols = [
+            c for c in schema_cols if c == "target" or c.startswith("target_")
+        ]
         target_cols = list(
-            dict.fromkeys([*self._config.data.targets, self._config.evaluation.main_target])
+            dict.fromkeys(
+                [*self._config.data.targets, self._config.evaluation.main_target, *schema_target_cols]
+            )
         )
         val_df = agent.load(
             "validation", columns=["era", "id", *feature_cols, *target_cols]
@@ -507,16 +518,36 @@ class ExperimentRunner:
     def _compute_run_id(config: ExperimentConfig) -> str:
         config_payload = _to_jsonable(dataclasses.asdict(config))
         _strip_path_dependent_fields(config_payload)
-        payload = {
+        supp_path = config.data.supplemental_feature_sets
+        payload: dict[str, Any] = {
             "config": config_payload,
             "data_version": config.data.version,
             "code_fingerprint": ExperimentRunner._code_fingerprint(),
             "environment": ExperimentRunner._environment_fingerprint(config.model.backend),
         }
+        # Content identity for derived feature sets: the absolute path is
+        # stripped above (never hashed), while the resolved file's SHA256 is
+        # included so editing the file changes run identity (ARCHITECTURE.md
+        # §P). The key is present only when a supplemental set is configured,
+        # so configs without one keep their legacy run_ids byte-identical.
+        if supp_path is not None:
+            payload["supplemental_feature_sets_sha256"] = (
+                ExperimentRunner._supplemental_fingerprint(supp_path)
+            )
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
             "utf-8"
         )
         return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _supplemental_fingerprint(path: Path) -> str:
+        """SHA256 of a resolved supplemental feature-sets file, CRLF-normalized.
+
+        Line endings are normalized (CRLF -> LF) before hashing so Windows and
+        POSIX checkouts of the same derived-sets file produce the same run_id —
+        the same normalization ``_code_fingerprint`` applies to source files.
+        """
+        return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
     @staticmethod
     def compute_run_id(config: ExperimentConfig) -> str:
@@ -580,6 +611,7 @@ def _strip_path_dependent_fields(config_payload: dict[str, Any]) -> None:
     data_section = config_payload.get("data")
     if isinstance(data_section, dict):
         data_section.pop("data_dir", None)
+        data_section.pop("supplemental_feature_sets", None)
 
     run_section = config_payload.get("run")
     if isinstance(run_section, dict):

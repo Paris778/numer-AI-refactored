@@ -53,7 +53,8 @@ Described below are the vast majority of definitions for functions and statistic
     * m\` = tie-kept rank then gaussianize m
     * s\` = tie-kept rank then gaussianize s
     * s\`\` = orthogonalize s\` with respect to m\`
-  * get the covariance of s\`\` and t
+    * t\` = t rescaled to [0, 4] if t is a bucket-style target on [0, 1], then centered
+  * get the covariance of s\`\` and t\`
 
 ### Factors & Features
 

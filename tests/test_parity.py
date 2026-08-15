@@ -99,7 +99,7 @@ _REAL_FEATURES = Path("data/v5.3/features.json")
     not (_REAL_VALIDATION.exists() and _REAL_META.exists() and _REAL_FEATURES.exists()),
     reason="v5.3 parity inputs not on disk; skipped in CI",
 )
-def test_real_v52_sampled_parity() -> None:
+def test_real_v53_sampled_parity() -> None:
     data_cfg = DataConfig(version="v5.3", feature_set="small", targets=("target",))
     agent = IngestionAgent(data_cfg)
     feature_cols = agent.features("small")[:5]

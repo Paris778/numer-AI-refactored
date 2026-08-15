@@ -7,6 +7,7 @@ single structured scorecard. It does not define new statistical metrics.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass
@@ -40,6 +41,8 @@ from nmr.robustness import (
     regime_conditioned_corr,
     time_horizon_stability,
 )
+
+logger = logging.getLogger("nmr.scorecard")
 
 _MMC_DOWN_MIN_ERAS = 5
 
@@ -607,6 +610,13 @@ def evaluate_model(
             _mark("horizon_stability", t0)
         else:
             horizon_reason = "horizon target columns unavailable"
+            logger.warning(
+                "[scorecard] benchmark column %r present but horizon diagnostics "
+                "disabled: no matching target_<name>_20/60 pair found in the "
+                "targets frame — load all target_* columns when building "
+                "validation payloads",
+                bench_col,
+            )
     else:
         horizon_reason = "benchmark unavailable"
 

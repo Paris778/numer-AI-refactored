@@ -75,7 +75,12 @@ def main(argv: list[str] | None = None) -> int:
             continue
 
         try:
-            assert registry is not None  # constructed whenever not args.dry_run
+            if registry is None:
+                # constructed whenever not args.dry_run — never rely on assert
+                # for control flow (stripped under python -O)
+                raise RuntimeError(
+                    "internal error: registry is None outside dry-run mode"
+                )
             result = ExperimentRunner(cfg).run(deploy=args.deploy)
             registry.record(result)
             existing.add(result.run_id)

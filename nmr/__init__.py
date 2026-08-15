@@ -45,12 +45,26 @@ from .benchmark import (
     write_scorecards_csv,
 )
 from .campaign import (
+    CampaignConfig,
     CampaignLog,
+    CampaignRun,
     build_campaign_log,
     campaign_id,
     write_campaign_log,
 )
-from .config import ExperimentConfig, load_config, set_global_seeds
+from .config import (
+    REPO_ROOT,
+    DataConfig,
+    EnsembleConfig,
+    EvalConfig,
+    ExperimentConfig,
+    ModelConfig,
+    RiskConfig,
+    RunConfig,
+    SplitConfig,
+    load_config,
+    set_global_seeds,
+)
 from .data import IngestionAgent
 from .deployment import DeploymentArtifact, load_predict, serialize_predict
 from .ensemble import Ensembler
@@ -67,6 +81,7 @@ from .evaluation import (
 from .features import (
     feature_stability_screen,
     resolve_feature_sets,
+    resolve_small_feature_set,
     select_stable_features,
 )
 from .hardware import (
@@ -77,6 +92,10 @@ from .hardware import (
     gpu_devices,
     gpu_status,
     hardware_status,
+    parse_cpu_times,
+    parse_gpu_devices,
+    parse_gpu_status,
+    parse_meminfo,
 )
 from .inference import (
     BootstrapCI,
@@ -92,12 +111,14 @@ from .inference import (
     resolve_block_len,
 )
 from .meta import (
+    CampaignEvidence,
     PairedResult,
+    campaign_evidence,
     fleet_summary,
     paired_era_comparison,
     promotion_verdict,
 )
-from .models import CVResult, ModelOrchestrator
+from .models import CVResult, ModelOrchestrator, coerce_float32_features
 from .opt import bayesian_sweep
 from .payout import (
     OverlappingSimulationResult,
@@ -170,6 +191,14 @@ __all__ = [
     "target_correlation_matrix",
     "target_profile",
     "within_set_redundancy",
+    "REPO_ROOT",
+    "DataConfig",
+    "SplitConfig",
+    "ModelConfig",
+    "EvalConfig",
+    "RiskConfig",
+    "EnsembleConfig",
+    "RunConfig",
     "ExperimentConfig",
     "load_config",
     "set_global_seeds",
@@ -188,6 +217,8 @@ __all__ = [
     "bayesian_sweep",
     "canonical_scorecards_bytes",
     "scorecards_sha256",
+    "CampaignConfig",
+    "CampaignRun",
     "CampaignLog",
     "build_campaign_log",
     "campaign_id",
@@ -198,6 +229,7 @@ __all__ = [
     "load_predict",
     "Ensembler",
     "CVResult",
+    "coerce_float32_features",
     "CURRENT_DATA_VERSION",
     "EXPANDING_FILES",
     "ModelOrchestrator",
@@ -211,6 +243,7 @@ __all__ = [
     "sorted_era_labels",
     "feature_stability_screen",
     "resolve_feature_sets",
+    "resolve_small_feature_set",
     "select_stable_features",
     "GpuDevice",
     "HardwareSpec",
@@ -219,6 +252,10 @@ __all__ = [
     "gpu_devices",
     "gpu_status",
     "hardware_status",
+    "parse_cpu_times",
+    "parse_gpu_devices",
+    "parse_gpu_status",
+    "parse_meminfo",
     "SeriesStats",
     "BootstrapCI",
     "era_series_stats",
@@ -236,7 +273,9 @@ __all__ = [
     "classify_refresh_plan",
     "detect_newer_version",
     "needs_live_refresh",
+    "CampaignEvidence",
     "PairedResult",
+    "campaign_evidence",
     "fleet_summary",
     "paired_era_comparison",
     "promotion_verdict",

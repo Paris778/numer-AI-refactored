@@ -13,6 +13,7 @@ from nmr.features import (
     DEFAULT_MIN_MEAN_CORR,
     feature_stability_screen,
     resolve_feature_sets,
+    resolve_small_feature_set,
     select_stable_features,
 )
 
@@ -218,3 +219,37 @@ def test_ingestion_rejects_unknown_feature_subset_with_valid_options(tmp_path) -
     agent = IngestionAgent(cfg)
     with pytest.raises(ValueError, match="sunshine"):
         agent.features()
+
+
+def test_resolve_small_feature_set_intersects_with_available_columns(tmp_path) -> None:
+    _write_features(
+        tmp_path,
+        sets={"small": ["feature_a", "feature_b", "feature_extra"]},
+    )
+    resolved = resolve_small_feature_set(
+        tmp_path / "features.json", ["feature_b", "feature_a"]
+    )
+    assert resolved == ["feature_a", "feature_b"]  # declared order, filtered
+
+
+def test_resolve_small_feature_set_raises_on_missing_file(tmp_path) -> None:
+    with pytest.raises(FileNotFoundError):
+        resolve_small_feature_set(tmp_path / "features.json", ["feature_a"])
+
+
+def test_resolve_small_feature_set_raises_on_corrupt_json(tmp_path) -> None:
+    (tmp_path / "features.json").write_text("{not json", encoding="utf-8")
+    with pytest.raises(json.JSONDecodeError):
+        resolve_small_feature_set(tmp_path / "features.json", ["feature_a"])
+
+
+def test_resolve_small_feature_set_raises_when_small_absent(tmp_path) -> None:
+    _write_features(tmp_path, sets={"medium": ["feature_a"]})
+    with pytest.raises(ValueError, match="small"):
+        resolve_small_feature_set(tmp_path / "features.json", ["feature_a"])
+
+
+def test_resolve_small_feature_set_raises_on_empty_intersection(tmp_path) -> None:
+    _write_features(tmp_path, sets={"small": ["feature_a"]})
+    with pytest.raises(ValueError, match="no overlap"):
+        resolve_small_feature_set(tmp_path / "features.json", ["feature_zzz"])

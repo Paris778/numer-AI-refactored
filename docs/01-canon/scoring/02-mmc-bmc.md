@@ -52,6 +52,11 @@ def contribution(
     # orthogonalize predictions wrt meta model
     neutral_preds = orthogonalize(p, m)
     
+    # Match numerai_tools: bucket-style targets on [0, 1] are rescaled to
+    # [0, 4] before centering — omitting this is the classic MMC parity bug.
+    if ((live_targets >= 0) & (live_targets <= 1)).all():
+        live_targets = live_targets * 4
+
     # center the target
     live_targets -= live_targets.mean()
 

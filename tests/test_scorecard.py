@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from pathlib import Path
 
 import numpy as np
 import polars as pl
@@ -343,15 +342,10 @@ def test_scorecard_degenerate_predictions_no_nan() -> None:
             assert value == value
 
 
-@pytest.mark.skipif(
-    not (
-        Path("data/v5.3/validation.parquet").exists()
-        and Path("data/v5.3/validation_benchmark_models.parquet").exists()
-        and Path("data/v5.3/meta_model.parquet").exists()
-    ),
-    reason="v5.3 inputs not on disk; skipped in CI",
-)
-def test_scorecard_real_v52_determinism_cross_process() -> None:
+def test_scorecard_synthetic_determinism_cross_process() -> None:
+    """Cross-process determinism: two fresh interpreters over the same
+    synthetic payload must produce identical scorecard output. Fully hermetic
+    — no real-data files are read, so CI always executes this gate."""
     code = r"""
 import json
 import polars as pl

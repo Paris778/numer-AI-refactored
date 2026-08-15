@@ -695,10 +695,10 @@ def test_predict_model_chunked_empty_frame() -> None:
     assert out.size == 0
 
 
-def test_full_history_subprocess_fit_matches_in_process() -> None:
+def test_full_history_subprocess_fit_matches_in_process(tmp_path) -> None:
     """The spawned-process fit (bounded commit for full-universe runs) must be
     bit-identical to the in-process fit — same code path, same seed."""
-    from nmr.models import ModelOrchestrator, _full_history_fit_worker
+    from nmr.models import ModelOrchestrator, _full_history_fit_worker, _receive_subprocess_result
 
     df = _model_frame(n_eras=10, rows_per_era=6)
     cfg = ModelConfig(backend="lightgbm", preset="fast", params=_tiny_model_params())
@@ -712,9 +712,7 @@ def test_full_history_subprocess_fit_matches_in_process() -> None:
     from pathlib import Path
 
     # the worker re-reads the train split from its own data dir
-    import tempfile
-
-    data_root = Path(tempfile.mkdtemp()) / "data" / "vtest"
+    data_root = tmp_path / "data" / "vtest"
     data_root.mkdir(parents=True)
     (data_root / "features.json").write_text(
         json.dumps({
@@ -745,7 +743,7 @@ def test_full_history_subprocess_fit_matches_in_process() -> None:
     }
     proc = ctx.Process(target=_full_history_fit_worker, args=(spec, q))
     proc.start()
-    status, payload = q.get()
+    status, payload = _receive_subprocess_result(q, proc)
     proc.join()
     assert status == "ok", payload
 
@@ -756,6 +754,27 @@ def test_full_history_subprocess_fit_matches_in_process() -> None:
     a = in_process.predict(feats)
     b = subprocess_model.predict(feats)
     assert np.array_equal(a, b)
+
+
+def test_full_history_subprocess_raises_when_child_dies_without_reporting() -> None:
+    """A child that crashes before enqueuing its result must raise promptly in
+    the parent — never block forever on an unanswered queue."""
+    import multiprocessing as mp
+    import os
+    import time
+
+    from nmr.models import _receive_subprocess_result
+
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue()
+    proc = ctx.Process(target=os._exit, args=(3,))
+    proc.start()
+    t0 = time.perf_counter()
+    with pytest.raises(RuntimeError, match="died without reporting"):
+        _receive_subprocess_result(q, proc)
+    elapsed = time.perf_counter() - t0
+    proc.join()
+    assert elapsed < 20.0  # bounded: poll interval + drain grace
 
 
 def test_full_history_spawn_path_with_data_config(tmp_path) -> None:

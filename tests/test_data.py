@@ -360,7 +360,7 @@ _REAL_FEATURES_JSON = Path("data/v5.3/features.json")
     not (_REAL_TRAIN.exists() and _REAL_FEATURES_JSON.exists()),
     reason="v5.3 dataset not on disk (git-ignored); skipped in CI",
 )
-def test_real_v52_smoke() -> None:
+def test_real_v53_smoke() -> None:
     cfg = DataConfig(version="v5.3", feature_set="small", targets=("target",))
     ag = IngestionAgent(cfg)
 

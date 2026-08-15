@@ -70,8 +70,7 @@ If you only have 15 minutes, read sections 2 and 3 below, then read items 1-8 ab
 ### Staking and economics laws
 
 - NMR stake is optional but required for rewards/burn and influence on meta-model weighting.
-- Per-round payout/burn is clipped at +/-5%. Canonical formula:
-  `payout = stake * clip(payout_factor * (0.5*corr + 2*mmc), -0.05, 0.05)` (updated weighting: `0.75*corr + 2.25*mmc`).
+- Per-round payout/burn is clipped at +/-5%. Formula and stake thresholds: [`01-canon/staking.md`](01-canon/staking.md) (authoritative).
 - `payout_factor = min(1, stake_threshold / total_at_risk)`. Thresholds: Numerai 72000, Signals 36000, Crypto 10000.
 - Negative outcomes burn stake irreversibly (sent to a null address, removed from supply; not taken by Numerai).
 - Releasing a stake takes ~1 month (one scoring round).

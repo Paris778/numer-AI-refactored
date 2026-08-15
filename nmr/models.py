@@ -42,6 +42,14 @@ _PREDICT_ERA_BATCH = 20  # eras per predict call (bounds GPU VRAM / RAM)
 # rationale). 8 GiB covers medium (780) and smaller; all (3,555) spawns.
 _FULL_HISTORY_SUBPROCESS_MIN_BYTES = 8 * 2**30
 
+# Parent-side guard for the spawned full-history fit: poll the child's
+# liveness while waiting on the result queue so a child that dies before
+# reporting raises promptly instead of blocking the parent forever. A
+# still-alive child is waited on indefinitely — a legitimate full-history
+# fit can run for hours, so no overall timeout is applied.
+_SUBPROCESS_POLL_INTERVAL_SECONDS = 5.0
+_SUBPROCESS_DRAIN_GRACE_SECONDS = 5.0
+
 # Dtypes that are exactly representable in float32 (the Numerai v5.x integer
 # feature bins). Casting these to a single Float32 block BEFORE pandas makes
 # LightGBM/XGBoost's `to_numpy(dtype=float32)` a zero-copy view instead of a
@@ -666,14 +674,50 @@ class ModelOrchestrator:
         )
         proc = ctx.Process(target=_full_history_fit_worker, args=(spec, out_q))
         proc.start()
-        status, payload = out_q.get()
-        proc.join()
+        try:
+            status, payload = _receive_subprocess_result(out_q, proc)
+        finally:
+            proc.join()
         if proc.exitcode != 0 or status != "ok":
             raise RuntimeError(
                 f"full-history subprocess fit failed (exit={proc.exitcode}): {payload}"
             )
         self.resolved_device = "cpu"  # train_full_history is CPU-only by design
         return cloudpickle.loads(payload)
+
+
+def _receive_subprocess_result(out_q, proc) -> tuple:
+    """Block until the spawned child reports ``(status, payload)`` — or dies.
+
+    Polls ``proc.is_alive()`` while waiting on the queue, so a child that
+    crashes before enqueuing its result raises promptly instead of leaving
+    the parent blocked forever on an unanswered ``get()`` (a documented OOM
+    failure mode in long campaign jobs). A still-alive child is waited on
+    indefinitely: a legitimate full-history fit runs for hours, so no overall
+    timeout is applied by design.
+    """
+    from queue import Empty
+
+    result = None
+    while proc.is_alive():
+        try:
+            result = out_q.get(timeout=_SUBPROCESS_POLL_INTERVAL_SECONDS)
+            break
+        except Empty:
+            continue
+    if result is None:
+        # Child exited; a result may still be in flight through the queue's
+        # feeder thread (child put, then died between parent polls).
+        try:
+            result = out_q.get(timeout=_SUBPROCESS_DRAIN_GRACE_SECONDS)
+        except Empty:
+            pass
+    if result is None:
+        raise RuntimeError(
+            "full-history subprocess died without reporting a result "
+            f"(exitcode={proc.exitcode})"
+        )
+    return result
 
 
 def _full_history_fit_worker(spec: dict, out_q) -> None:

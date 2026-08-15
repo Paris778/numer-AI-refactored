@@ -1,10 +1,10 @@
 """Feature-set resolution and stability screening for research campaigns.
 
 Pure functions over ``features.json`` and the train frame; no model logic and
-no file state beyond the explicit ``features_json`` argument. Subset
-derivation adds no inputs to the run_id fingerprint beyond the config itself:
-the fingerprint is fully determined by config (including
-``data.feature_subset``) + data_version + ``nmr/*.py`` + environment.
+no file state beyond the explicit ``features_json`` argument. When
+``data.supplemental_feature_sets`` is configured, the resolved file's
+CRLF-normalized SHA256 enters the run_id fingerprint with the path stripped
+(schema: ARCHITECTURE.md §N/§P).
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import polars as pl
 
 __all__ = [
     "resolve_feature_sets",
+    "resolve_small_feature_set",
     "feature_stability_screen",
     "select_stable_features",
 ]
@@ -49,6 +50,31 @@ def resolve_feature_sets(features_json: Path) -> dict[str, list[str]]:
             )
         result[name] = list(values)
     return result
+
+
+def resolve_small_feature_set(
+    features_json: Path, available: Sequence[str]
+) -> list[str]:
+    """Resolve the tutorial-style 'small' set restricted to ``available`` columns.
+
+    Fails loudly on missing/corrupt metadata, a missing 'small' set, or an
+    empty intersection — never substitutes an arbitrary feature list, because
+    a silent fallback would corrupt benchmark baselines and downstream
+    scorecards (no hidden defaults).
+    """
+    sets = resolve_feature_sets(features_json)
+    if "small" not in sets:
+        raise ValueError(
+            f"{features_json}: feature set 'small' not found; "
+            f"available sets: {sorted(sets)}"
+        )
+    selected = [c for c in sets["small"] if c in available]
+    if not selected:
+        raise ValueError(
+            f"{features_json}: 'small' feature set has no overlap with the "
+            "dataset columns — refusing to substitute an arbitrary feature set"
+        )
+    return selected
 
 
 DEFAULT_MIN_MEAN_CORR = 0.01

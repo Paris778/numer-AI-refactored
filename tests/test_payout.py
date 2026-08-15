@@ -435,3 +435,10 @@ def test_payout_report_includes_capital_metrics() -> None:
     assert report.overlapping_sim.avg_capital_utilization == pytest.approx(
         expected_sim.avg_capital_utilization
     )
+
+
+def test_payout_series_sorts_eras_numerically() -> None:
+    """Era keys are numeric strings; ordering must be numeric (2 < 10), not
+    lexicographic ("10" < "2") — the documented regression class."""
+    series = payout_series({"10": 0.1, "2": 0.2}, {"10": 0.05, "2": 0.06})
+    assert series.eras == ("2", "10")

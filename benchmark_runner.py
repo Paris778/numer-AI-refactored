@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import time
@@ -12,6 +11,7 @@ from pathlib import Path
 import polars as pl
 
 from nmr.benchmark import BenchmarkSuite, scorecards_to_frame
+from nmr.features import resolve_small_feature_set
 
 try:
     import psutil
@@ -65,22 +65,6 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--fast-mode", action="store_true")
     return parser.parse_args()
-
-
-def _resolve_small_feature_set(data_dir: Path, available: list[str]) -> list[str]:
-    """Resolve tutorial-style small feature set with safe local fallback."""
-    feature_json = data_dir / "features.json"
-    if feature_json.exists():
-        try:
-            payload = json.loads(feature_json.read_text(encoding="utf-8"))
-            small = payload.get("feature_sets", {}).get("small", [])
-            selected = [c for c in small if c in available]
-            if selected:
-                return selected
-        except (OSError, json.JSONDecodeError, TypeError):
-            pass
-
-    return sorted(available)[:42]
 
 
 def _candidate_strategies(
@@ -158,7 +142,9 @@ def main() -> int:
     all_cols = list(schema.keys())
 
     all_feature_cols = [c for c in all_cols if c.startswith("feature_")]
-    small_feature_cols = _resolve_small_feature_set(args.data_dir, all_feature_cols)
+    small_feature_cols = resolve_small_feature_set(
+        args.data_dir / "features.json", all_feature_cols
+    )
     target_cols = [c for c in all_cols if c == "target" or c.startswith("target_")]
 
     targets = pl.read_parquet(

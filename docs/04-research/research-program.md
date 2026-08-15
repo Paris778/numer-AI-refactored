@@ -113,17 +113,24 @@ The initial exploration phase should test diverse yet tractable model families a
 
 The table below defines a structured experimental grid. Metric cells are left blank for the engineer to fill in after running; the ranking column is intended to be sorted by a primary objective such as mean CORR or payout proxy.
 
+> **Feature-universe policy (director directive, 2026-08-14):** all routine research,
+> screening, HPO, and model iteration in this grid uses `medium` (780), `small` (42), or
+> screen-derived subsets (`derived_feature_sets.json`). The full `all` universe (3,555) is
+> **prohibited** for routine iteration — RAM-marginal (~40–45 GiB), ~3.5 h per-era
+> neutralization, empirically weaker OOF IC. Approved exceptions: feature-bagged
+> sub-ensembles, or single-shot offline deploy fits (AGENTS.md §8).
+
 | ID | Model Class | Features | Targets | Post-Processing | Benchmark Use | Notes |
 |----|-------------|----------|---------|-----------------|---------------|-------|
 | E0 | Single LGBM (fast) | small | MAINTARGET | None | None | Baseline as described above |
-| E1 | Single LGBM (deep) | all | MAINTARGET | None | None | Deep params mirroring v5 benchmarks |
+| E1 | Single LGBM (deep) | medium | MAINTARGET | None | None | Deep params mirroring v5 benchmarks |
 | E2 | Target ensemble (fast) | medium | 4×20D (ender, victor, xerxes, teager2b) | Rank-mean per era | None | LightGBM fast params per target, then ensemble |
-| E3 | Target ensemble (deep) | all | 4×20D | Rank-mean per era | None | Deep params per target; production candidate |
-| E4 | Target ensemble + neutralization | all | 4×20D | Per-era neutralize to all features, 100% | None | Measures FNC-driven robustness, drawdown impact |
-| E5 | Target ensemble + partial neutralization | all | 4×20D | Per-era neutralize at 50–75% | None | Trade-off between mean CORR and stability |
-| E6 | Target ensemble + benchmark | all | 4×20D | Rank-mean ensemble with best benchmark LGBM | Validation-only | Tests BMC and MMC improvement |
-| E7 | Target+benchmark neutralized | all | 4×20D + benchmark | Neutralized ensemble | Validation-only | Decorrelated-from-benchmark candidate |
-| E8 | 20D+60D mixed ensemble | all | 4×20D + 2×60D | Rank-mean per era | None | Tests regime robustness and drawdown |
+| E3 | Target ensemble (deep) | medium | 4×20D | Rank-mean per era | None | Deep params per target; production candidate |
+| E4 | Target ensemble + neutralization | medium | 4×20D | Per-era neutralize to all features, 100% | None | Measures FNC-driven robustness, drawdown impact |
+| E5 | Target ensemble + partial neutralization | medium | 4×20D | Per-era neutralize at 50–75% | None | Trade-off between mean CORR and stability |
+| E6 | Target ensemble + benchmark | medium | 4×20D | Rank-mean ensemble with best benchmark LGBM | Validation-only | Tests BMC and MMC improvement |
+| E7 | Target+benchmark neutralized | medium | 4×20D + benchmark | Neutralized ensemble | Validation-only | Decorrelated-from-benchmark candidate |
+| E8 | 20D+60D mixed ensemble | medium | 4×20D + 2×60D | Rank-mean per era | None | Tests regime robustness and drawdown |
 
 Each experiment should be run under the same walk-forward validation regime, with standardized metric extraction, to support direct comparisons and deltas versus E0.
 

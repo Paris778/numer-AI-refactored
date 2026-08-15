@@ -14,30 +14,45 @@ To calculate a user's FNC for a given round we
 * Neutralize their submission to Numerai's features for that round
 * Calculate the Spearman rank-order correlation of their neutralized submission to the target
 
+The current (FNCv3) calculation follows the canonical chain in
+[`00-definitions.md`](00-definitions.md) and is implemented in
+`nmr/evaluation.py` (`_custom_fnc`), parity-tested against
+`numerai_tools.scoring`:
+
 ```python
 def calculate_fnc(sub, targets, features):
-    """    
-    Args:
-        sub (pd.Series)
-        targets (pd.Series)
-        features (pd.DataFrame)
-    """
-    
-    # Normalize submission
-    sub = (sub.rank(method="first").values - 0.5) / len(sub)
+    """FNCv3 — canonical chain: tie-kept rank -> gaussianize ->
+    neutralize vs [F | intercept] -> variance normalize -> numerai corr."""
+    from scipy.stats import rankdata
+    from scipy.stats import norm as gaussian_ppf
 
-    # Neutralize submission to features
-    f = features.values
-    sub -= f.dot(np.linalg.pinv(f).dot(sub))
-    sub /= sub.std()
-    
-    sub = pd.Series(np.squeeze(sub)) # Convert np.ndarray to pd.Series
+    n = len(sub)
 
-    # FNC: Spearman rank-order correlation of neutralized submission to target
-    fnc = np.corrcoef(sub.rank(pct=True, method="first"), targets)[0, 1]
+    # 1. tie-kept rank, then gaussianize
+    ranked = (rankdata(sub.values, method="average") - 0.5) / n
+    s = gaussian_ppf(ranked.clip(1e-12, 1 - 1e-12))
+
+    # 2. neutralize to features WITH an intercept column, then variance
+    #    normalize (regression against [F | 1] via least squares)
+    f = np.column_stack([features.values, np.ones(n)])
+    neutral = s - f @ np.linalg.lstsq(f, s, rcond=1e-6)[0]
+    neutral = neutral / neutral.std()
+
+    # 3. numerai corr: tie-kept rank -> gaussianize -> pow 1.5 on the
+    #    prediction; target is centered then pow 1.5; Pearson correlation
+    r = (rankdata(neutral, method="average") - 0.5) / n
+    sp = gaussian_ppf(r.clip(1e-12, 1 - 1e-12)) ** 1.5
+    tp = (targets.values - targets.values.mean()) ** 1.5
+    fnc = float(np.corrcoef(sp, tp)[0, 1])
 
     return fnc
 ```
+
+Historical note: older samples in the wild used `rank(method="first")`,
+no gaussianize, a pinv without intercept, and a plain Spearman correlation.
+That chain does **not** match the current oracle and will fail the repo's
+parity tests — do not copy it.
+
 
 ## FNC on the website
 

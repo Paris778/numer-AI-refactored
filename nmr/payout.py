@@ -114,7 +114,9 @@ def payout_series(
     if not np.isfinite(clip_f) or clip_f <= 0.0:
         raise ValueError("clip must be finite and > 0")
 
-    eras = tuple(sorted(set(corr_by_era) & set(mmc_by_era)))
+    # Era keys are numeric strings — sort numerically (the repo has a
+    # documented regression class from lexicographic era ordering).
+    eras = tuple(sorted(set(corr_by_era) & set(mmc_by_era), key=int))
     if not eras:
         raise ValueError("corr_by_era and mmc_by_era must share at least one era")
 

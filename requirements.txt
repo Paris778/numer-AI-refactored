@@ -4,6 +4,7 @@ pytest-cov==7.1.0
 pandas==2.3.3
 polars==1.41.2
 pyarrow==23.0.1
+psutil==7.2.1
 matplotlib==3.10.8
 lightgbm==4.6.0
 xgboost==3.2.0

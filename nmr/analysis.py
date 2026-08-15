@@ -8,7 +8,7 @@ in, frames/dicts out — no I/O, no wall-clock, no stochastic operations.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 
 import numpy as np
@@ -510,6 +510,13 @@ def feature_ic_screen(
 
     if not targets:
         raise ValueError("targets must contain at least one target column")
+    if isinstance(chunks, Iterator) and len(targets) > 1:
+        raise TypeError(
+            "feature_ic_screen requires a re-iterable collection of era chunks "
+            "(e.g. list or tuple) when screening multiple targets; a one-shot "
+            "iterator/generator would be silently exhausted by the first target "
+            "and every later target's screen block would be dropped"
+        )
     feature_list = list(feature_cols)
     blocks = []
     for t in targets:

@@ -469,3 +469,245 @@ def test_code_fingerprint_normalizes_line_endings(tmp_path) -> None:
 
     (pkg / "a.py").write_bytes(b"x = 99\n")
     assert ExperimentRunner._code_fingerprint(pkg) != lf
+
+
+def _with_supplemental(cfg: ExperimentConfig, supp_path) -> ExperimentConfig:
+    """Clone ``cfg`` with a ``supplemental_feature_sets`` path attached."""
+    return ExperimentConfig(
+        data=DataConfig(
+            version=cfg.data.version,
+            feature_set=cfg.data.feature_set,
+            feature_subset=cfg.data.feature_subset,
+            supplemental_feature_sets=supp_path,
+            targets=cfg.data.targets,
+            data_dir=cfg.data.data_dir,
+        ),
+        split=cfg.split,
+        model=cfg.model,
+        evaluation=cfg.evaluation,
+        run=cfg.run,
+    )
+
+
+def test_run_id_is_path_independent_with_supplemental_feature_sets(tmp_path) -> None:
+    """Identical derived-set files at different absolute paths must produce
+    the same run_id — the path must never leak into the canonical hash."""
+    supp_a = tmp_path / "a" / "derived_feature_sets.json"
+    supp_b = tmp_path / "b" / "derived_feature_sets.json"
+    supp_a.parent.mkdir(parents=True)
+    supp_b.parent.mkdir(parents=True)
+    payload = json.dumps({"feature_sets": {"screen_stable": ["f1"]}})
+    supp_a.write_text(payload, encoding="utf-8")
+    supp_b.write_text(payload, encoding="utf-8")
+
+    cfg_a = _with_supplemental(_config(tmp_path), supp_a)
+    cfg_b = _with_supplemental(_config(tmp_path), supp_b)
+
+    assert ExperimentRunner(cfg_a)._run_id == ExperimentRunner(cfg_b)._run_id
+
+
+def test_run_id_changes_when_supplemental_file_contents_change(tmp_path) -> None:
+    """Editing the derived-sets file in place must change run identity —
+    the canonical hash must cover file contents, not the path string."""
+    supp = tmp_path / "derived_feature_sets.json"
+    supp.write_text(
+        json.dumps({"feature_sets": {"screen_stable": ["f1"]}}), encoding="utf-8"
+    )
+    cfg = _with_supplemental(_config(tmp_path), supp)
+    first = ExperimentRunner(cfg)._run_id
+
+    supp.write_text(
+        json.dumps({"feature_sets": {"screen_stable": ["f1", "f2"]}}),
+        encoding="utf-8",
+    )
+    assert ExperimentRunner(cfg)._run_id != first
+
+
+def test_run_id_supplemental_hash_is_line_ending_insensitive(tmp_path) -> None:
+    """CRLF and LF checkouts of the same derived-sets file must hash
+    identically (mirrors the code-fingerprint normalization)."""
+    supp_a = tmp_path / "a" / "derived_feature_sets.json"
+    supp_b = tmp_path / "b" / "derived_feature_sets.json"
+    supp_a.parent.mkdir(parents=True)
+    supp_b.parent.mkdir(parents=True)
+    supp_a.write_bytes(b'{"feature_sets": {"screen_stable": ["f1"]}}\n')
+    supp_b.write_bytes(b'{"feature_sets": {"screen_stable": ["f1"]}}\r\n')
+
+    cfg_a = _with_supplemental(_config(tmp_path), supp_a)
+    cfg_b = _with_supplemental(_config(tmp_path), supp_b)
+
+    assert ExperimentRunner(cfg_a)._run_id == ExperimentRunner(cfg_b)._run_id
+
+
+def test_runner_cross_process_determinism(tmp_path) -> None:
+    """Two fresh interpreters running the full ExperimentRunner pipeline over
+    identical synthetic data must produce the same run_id, OOF bytes, and
+    metrics — the entry-point determinism guarantee. In-process re-runs cannot
+    catch import-order, global-RNG, or hash-seed coupling."""
+    import subprocess
+    import sys
+
+    _write_synthetic_data(tmp_path / "data")
+    (tmp_path / "config.yaml").write_text(
+        f"""
+data:
+  version: vtest
+  feature_set: small
+  targets: [target, target_alt]
+  data_dir: {str(tmp_path / "data").replace(chr(92), "/")}
+split:
+  scheme: walk_forward
+  purge_eras: 1
+  embargo_eras: 0
+  n_folds: 2
+model:
+  backend: lightgbm
+  preset: fast
+  params:
+    n_estimators: 10
+    learning_rate: 0.05
+    min_data_in_leaf: 2
+evaluation:
+  backend: custom
+  main_target: target
+  metrics: [corr, fnc, sharpe]
+  validation_scorecard: false
+run:
+  seed: 17
+  name: cross-process-determinism
+""",
+        encoding="utf-8",
+    )
+
+    def _run_script(artifacts_dir) -> str:
+        code = f"""
+import dataclasses
+import hashlib
+import json
+
+from nmr.config import ExperimentConfig, RunConfig, load_config
+from nmr.runner import ExperimentRunner
+
+cfg = load_config({str(tmp_path / "config.yaml")!r})
+cfg = ExperimentConfig(
+    data=cfg.data,
+    split=cfg.split,
+    model=cfg.model,
+    evaluation=cfg.evaluation,
+    risk=cfg.risk,
+    ensemble=cfg.ensemble,
+    run=RunConfig(
+        seed=cfg.run.seed,
+        name=cfg.run.name,
+        artifacts_dir={str(artifacts_dir)!r},
+    ),
+)
+result = ExperimentRunner(cfg).run(deploy=False)
+oof_bytes = json.dumps(
+    result.oof.sort("id").to_dicts(), sort_keys=True, default=str
+).encode("utf-8")
+print(
+    json.dumps(
+        {{
+            "run_id": result.run_id,
+            "oof_sha256": hashlib.sha256(oof_bytes).hexdigest(),
+            "metrics": dataclasses.asdict(result.metrics),
+        }},
+        sort_keys=True,
+        default=str,
+    )
+)
+"""
+        return subprocess.run(
+            [sys.executable, "-c", code], capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    # Distinct artifact dirs per process (the path is stripped from run_id;
+    # path-independence is covered by the dedicated run_id tests above).
+    run1 = _run_script(tmp_path / "artifacts_a")
+    run2 = _run_script(tmp_path / "artifacts_b")
+    assert run1 == run2
+
+
+def test_validation_stage_enables_horizon_diagnostics(tmp_path) -> None:
+    """Runner validation scorecards must enable horizon stability whenever the
+    validation schema carries horizon target columns — not silently disable the
+    flagship diagnostic (regression: the runner loaded only config targets, so
+    every runner-produced scorecard reported 'horizon target columns
+    unavailable')."""
+    import json as _json
+
+    data_root = tmp_path / "data" / "vtest"
+    data_root.mkdir(parents=True)
+    (_json_features := {
+        "feature_sets": {
+            "small": ["f1", "f2"],
+            "medium": ["f1", "f2"],
+            "all": ["f1", "f2"],
+        },
+        "targets": ["target", "target_ender_20", "target_ender_60"],
+    }) and (data_root / "features.json").write_text(
+        _json.dumps(_json_features), encoding="utf-8"
+    )
+
+    train_rows = []
+    for era in range(1, 13):
+        for idx in range(6):
+            train_rows.append(
+                {
+                    "era": str(era),
+                    "id": f"{era}_{idx}",
+                    "f1": idx * 0.02,
+                    "f2": (idx % 3) * 0.01,
+                    "target": 0.6 * idx * 0.02 + 0.05 * era,
+                }
+            )
+    pl.DataFrame(train_rows).write_parquet(data_root / "train.parquet")
+
+    val_rows = []
+    for era in range(13, 19):
+        for idx in range(6):
+            f1 = idx * 0.02
+            f2 = (idx % 3) * 0.01
+            val_rows.append(
+                {
+                    "era": str(era),
+                    "id": f"{era}_{idx}",
+                    "f1": f1,
+                    "f2": f2,
+                    "target": (0.6 + 0.03 * era) * f1 - (0.3 + 0.01 * era) * f2,
+                    "target_ender_20": (0.5 + 0.02 * era) * f1,
+                    "target_ender_60": (0.4 + 0.01 * era) * f1,
+                }
+            )
+    val = pl.DataFrame(val_rows)
+    val.write_parquet(data_root / "validation.parquet")
+    val.select(["era", "id"]).with_columns(
+        pl.lit(0.35).alias("numerai_meta_model")
+    ).write_parquet(data_root / "meta_model.parquet")
+    val.select(["era", "id"]).with_columns(
+        pl.lit(0.2).alias("v53_lgbm_ender20")
+    ).write_parquet(data_root / "validation_benchmark_models.parquet")
+
+    cfg = ExperimentConfig(
+        data=DataConfig(
+            version="vtest", feature_set="small", targets=("target",),
+            data_dir=tmp_path / "data",
+        ),
+        split=SplitConfig(scheme="walk_forward", purge_eras=1, embargo_eras=0, n_folds=2),
+        model=ModelConfig(
+            backend="lightgbm", preset="fast",
+            params={"n_estimators": 10, "learning_rate": 0.05, "min_data_in_leaf": 2},
+        ),
+        evaluation=EvalConfig(
+            backend="custom", main_target="target", validation_scorecard=True
+        ),
+        run=RunConfig(seed=17, artifacts_dir=tmp_path / "artifacts", name="horizon-test"),
+    )
+    result = ExperimentRunner(cfg).run(deploy=True)
+    reason = result.scorecard.horizon_reason
+    assert reason != "horizon target columns unavailable", (
+        "horizon target columns were present in the validation schema but the "
+        "runner did not load them"
+    )
+    assert reason != "benchmark unavailable"

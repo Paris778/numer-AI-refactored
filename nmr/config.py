@@ -24,6 +24,7 @@ VALID_MODEL_BACKENDS = ("lightgbm", "xgboost", "catboost")
 VALID_MODEL_PRESETS = ("fast", "standard", "deep")
 VALID_MODEL_DEVICES = ("auto", "gpu", "cpu")
 VALID_EVAL_BACKENDS = ("custom", "official")
+VALID_EVAL_METRICS = ("corr", "mmc", "fnc", "sharpe")
 VALID_SPLIT_SCHEMES = ("walk_forward", "anchor")
 VALID_ENSEMBLE_METHODS = ("ridge", "non_negative")
 
@@ -166,6 +167,12 @@ class EvalConfig:
             )
         if not self.metrics:
             raise ValueError("evaluation.metrics must contain at least one metric")
+        unknown = sorted(set(self.metrics) - set(VALID_EVAL_METRICS))
+        if unknown:
+            raise ValueError(
+                f"evaluation.metrics contains unknown names {unknown}; "
+                f"valid metrics: {VALID_EVAL_METRICS}"
+            )
 
 
 @dataclass(frozen=True)
