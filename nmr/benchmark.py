@@ -11,6 +11,7 @@ support cross-process determinism checks.
 from __future__ import annotations
 
 import dataclasses
+import gc
 import hashlib
 import json
 import logging
@@ -453,12 +454,24 @@ def generate_null_predictions(
 def _standardize_feature_block(
     train_values: np.ndarray, val_values: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Standardize with train statistics; zero-variance features -> 0.0."""
-    mu = np.mean(train_values, axis=0)
-    sigma = np.std(train_values, axis=0)
+    """Standardize with train statistics; zero-variance features -> 0.0.
+
+    Float32 end-to-end with in-place updates: inputs are float32 arrays and are
+    mutated in place (and returned) so no large float64 temporaries are created.
+    Statistics are computed as float64 on the float32 block (tiny per-column
+    transient), then downcast before the in-place subtract/multiply.
+    """
+    mu = np.mean(train_values, axis=0, dtype=np.float64)
+    sigma = np.std(train_values, axis=0, dtype=np.float64)
     mu = np.where(np.isfinite(mu), mu, 0.0)
     scale = np.where((sigma > 0.0) & np.isfinite(sigma), 1.0 / sigma, 0.0)
-    return (train_values - mu) * scale, (val_values - mu) * scale
+    mu32 = mu.astype(np.float32)
+    scale32 = scale.astype(np.float32)
+    np.subtract(train_values, mu32, out=train_values)
+    np.multiply(train_values, scale32, out=train_values)
+    np.subtract(val_values, mu32, out=val_values)
+    np.multiply(val_values, scale32, out=val_values)
+    return train_values, val_values
 
 
 def generate_ridge_predictions(
@@ -494,15 +507,25 @@ def generate_ridge_predictions(
     if missing_feats:
         raise ValueError(f"missing feature columns: {missing_feats}")
 
-    x_train_raw = train_rows.select(feature_cols).cast(pl.Float64).to_numpy()
-    x_val_raw = val_rows.select(feature_cols).cast(pl.Float64).to_numpy()
+    x_train_raw = train_rows.select(feature_cols).cast(pl.Float32).to_numpy(writable=True)
+    x_val_raw = val_rows.select(feature_cols).cast(pl.Float32).to_numpy(writable=True)
+
+    # Extract targets and the val index up front, then release the polars frames
+    # before standardization so peak memory stays float32-bound.
+    y_by_target: dict[str, np.ndarray] = {}
+    for target in targets:
+        if target not in train.columns:
+            raise ValueError(f"missing target column: {target!r}")
+        y_by_target[target] = train_rows.get_column(target).cast(pl.Float64).to_numpy()
+    val_index = val_rows.select([era_col, id_col])
+    del train_rows, val_rows
+    gc.collect()
+
     x_train, x_val = _standardize_feature_block(x_train_raw, x_val_raw)
 
     component_preds: dict[str, np.ndarray] = {}
     for target in targets:
-        if target not in train.columns:
-            raise ValueError(f"missing target column: {target!r}")
-        y = train_rows.get_column(target).cast(pl.Float64).to_numpy()
+        y = y_by_target[target]
         mask = np.isfinite(y)
         if mask.sum() < 2:
             raise ValueError(
@@ -512,7 +535,7 @@ def generate_ridge_predictions(
         model.fit(x_train[mask], y[mask])
         component_preds[target] = np.asarray(model.predict(x_val), dtype=float)
 
-    frame = val_rows.select([era_col, id_col]).with_columns(
+    frame = val_index.with_columns(
         [pl.Series(target, component_preds[target]) for target in targets]
     )
     weights = [1.0 / len(targets)] * len(targets)
@@ -569,12 +592,12 @@ def generate_tree_predictions(
     if missing_feats:
         raise ValueError(f"missing feature columns: {missing_feats}")
 
-    x_train = train_rows.select(feature_cols).cast(pl.Float64).to_pandas()
+    x_train = train_rows.select(feature_cols).cast(pl.Float32).to_pandas()
     y = train_rows.get_column(target).cast(pl.Float64).to_numpy()
     mask = np.isfinite(y)
     if mask.sum() < 2:
         raise ValueError(f"target {target!r} has fewer than 2 finite train rows after purge")
-    x_val = val_rows.select(feature_cols).cast(pl.Float64).to_pandas()
+    x_val = val_rows.select(feature_cols).cast(pl.Float32).to_pandas()
 
     model = construct_tree_model(
         backend, dict(params), seed=seed, n_features=len(feature_cols),
@@ -1005,6 +1028,9 @@ class BenchmarkHierarchy:
         self._min_overlap_eras = int(min_overlap_eras)
         self._fast_mode = bool(fast_mode)
         self._schema_cols = pl.read_parquet_schema(data.validation_path).names()
+        self._target_cols = ["era", "id"] + [
+            c for c in self._schema_cols if c == "target" or c.startswith("target_")
+        ]
 
     def _feature_cols(self, cell: BenchmarkCellConfig) -> list[str]:
         return resolve_benchmark_feature_cols(
@@ -1106,7 +1132,7 @@ class BenchmarkHierarchy:
                 features=val_features,
                 targets=pl.read_parquet(
                     self._data.validation_path,
-                    columns=["era", "id", "target"],
+                    columns=self._target_cols,
                 ),
                 n_trials=1,
                 seed=cell.seed,
@@ -1139,7 +1165,7 @@ class BenchmarkHierarchy:
                 features=ref_features,
                 targets=pl.read_parquet(
                     self._data.validation_path,
-                    columns=["era", "id", "target"],
+                    columns=self._target_cols,
                 ),
                 n_trials=1,
                 seed=self._seed,
