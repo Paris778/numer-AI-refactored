@@ -10,7 +10,7 @@ from pathlib import Path
 
 import polars as pl
 
-from nmr.benchmark import BenchmarkSuite, scorecards_to_frame
+from nmr.benchmark import scorecards_to_frame
 from nmr.features import resolve_small_feature_set
 
 try:
