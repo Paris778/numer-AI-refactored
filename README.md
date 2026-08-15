@@ -16,7 +16,7 @@ A **lean, deterministic research framework** for the [Numerai Classic tournament
 - **Rank-domain ensembling** — per-era rank-gaussianized component blending with ridge/NNLS weight learning.
 - **Feature neutralization** — intercept-aware per-era least squares with a content-addressed pseudo-inverse cache.
 - **Institution-grade evaluation** — block-bootstrap CIs, AC-adjusted Sharpe, Deflated Sharpe, payout proxy with burn/drawdown/CVaR/sortino diagnostics, perturbation / horizon / regime robustness.
-- **Benchmark harness** — null + classical baselines and Numerai benchmark models scored through the same pipeline, with monotone-sanity and null-floor gates.
+- **5-tier benchmark hierarchy** — tier-0 null baselines (constant/uniform/gaussian + small feature-mean), tier-1 purged Ridge baselines, tier-2 shallow trees, tier-3 canonical community models (hello-numerai / neutralized-50 / sunshine), tier-4 production gate against the `v53_lgbm_ender60` benchmark column; tier-0 null-floor, tier-4 production-threshold (`configs/benchmarks/tier4_gate.yaml`), and tier-monotonicity (mean CORR) gates.
 - **Run registry & deployment** — atomic filesystem registry with champion promotion; cloudpickled `predict()` artifacts with SHA256 integrity manifests.
 
 ---
@@ -43,7 +43,7 @@ A **lean, deterministic research framework** for the [Numerai Classic tournament
 │   ├── research.py            # HPO sweeps, neutralization frontier, exposure report
 │   ├── opt.py                 # Bayesian HPO — bayesian_sweep (Optuna, user-granted dep)
 │   ├── robustness.py          # perturbation, horizon-stability, regime diagnostics
-│   ├── benchmark.py           # benchmark suite: null/classical baselines + gates
+│   ├── benchmark.py           # 5-tier benchmark hierarchy: tier-0..tier-4 cells, hard gates, scorecards_sha256
 │   ├── campaign.py            # campaign orchestration — trial-lineage logs
 │   ├── runner.py              # ExperimentRunner — deterministic end-to-end pipeline
 │   ├── registry.py            # RunRegistry — atomic run store + champion promotion
@@ -58,7 +58,7 @@ A **lean, deterministic research framework** for the [Numerai Classic tournament
 ├── docs/                      # curated Numerai knowledge base — start at docs/DOCS_README.md
 ├── notebooks/                 # researcher control plane (thin, zero business logic)
 ├── .kimi-code/skills/          # project Kimi skills — research protocols for agents (map: ARCHITECTURE.md §T)
-├── benchmark_runner.py        # CLI: score null/classical/benchmark baselines → CSV
+├── benchmark_runner.py        # CLI: python benchmark_runner.py [--fast-mode] → artifacts/reports/benchmark_hierarchy_scorecard.csv + benchmark_gate_report.csv
 ├── run_campaign.py            # CLI: run a named batch of configs → artifacts/campaigns/
 ├── train_first_model.py       # CLI: train, register, and promote the first model
 ├── generate_dashboard.py      # CLI: validation-scorecard leaderboard → artifacts/dashboard.html
