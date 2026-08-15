@@ -27,6 +27,7 @@ import polars as pl
 from sklearn.linear_model import Ridge
 
 from nmr.evaluation import MIN_OVERLAP_ERAS
+from nmr.ensemble import Ensembler
 from nmr.inference import block_bootstrap_ci, resolve_block_len
 from nmr.scorecard import MetricScorecard, evaluate_model
 
@@ -1460,3 +1461,89 @@ def generate_null_predictions(
         )
 
     return index.with_columns(pl.Series(pred_col, values))
+
+
+def _standardize_feature_block(
+    train_values: np.ndarray, val_values: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Standardize with train statistics; zero-variance features -> 0.0."""
+    mu = np.mean(train_values, axis=0)
+    sigma = np.std(train_values, axis=0)
+    mu = np.where(np.isfinite(mu), mu, 0.0)
+    scale = np.where((sigma > 0.0) & np.isfinite(sigma), 1.0 / sigma, 0.0)
+    return (train_values - mu) * scale, (val_values - mu) * scale
+
+
+def generate_ridge_predictions(
+    train: pl.DataFrame,
+    val: pl.DataFrame,
+    *,
+    targets: Sequence[str],
+    feature_cols: Sequence[str],
+    alpha: float,
+    seed: int,
+    purge_eras: int = DEFAULT_BENCHMARK_PURGE_ERAS,
+    era_col: str = "era",
+    id_col: str = "id",
+    pred_col: str = "prediction",
+) -> pl.DataFrame:
+    """Fit purged Ridge models per target and blend in rank-Gaussian domain."""
+    if not isinstance(alpha, (int, float)) or isinstance(alpha, bool) or alpha < 0:
+        raise ValueError(f"alpha must be a non-negative number, got {alpha!r}")
+    if not feature_cols:
+        raise ValueError("feature_cols must be non-empty")
+    if not targets:
+        raise ValueError("targets must be non-empty")
+
+    trimmed_train_eras, val_eras = train_validation_purged_split(
+        train.get_column(era_col).unique().to_list(),
+        val.get_column(era_col).unique().to_list(),
+        purge_eras=purge_eras,
+    )
+
+    train_rows = train.filter(pl.col(era_col).is_in(trimmed_train_eras))
+    val_rows = val.sort([era_col, id_col])
+    missing_feats = [c for c in feature_cols if c not in train.columns or c not in val.columns]
+    if missing_feats:
+        raise ValueError(f"missing feature columns: {missing_feats}")
+
+    x_train_raw = train_rows.select(feature_cols).cast(pl.Float64).to_numpy()
+    x_val_raw = val_rows.select(feature_cols).cast(pl.Float64).to_numpy()
+    x_train, x_val = _standardize_feature_block(x_train_raw, x_val_raw)
+
+    component_preds: dict[str, np.ndarray] = {}
+    for target in targets:
+        if target not in train.columns:
+            raise ValueError(f"missing target column: {target!r}")
+        y = train_rows.get_column(target).cast(pl.Float64).to_numpy()
+        mask = np.isfinite(y)
+        if mask.sum() < 2:
+            raise ValueError(
+                f"target {target!r} has fewer than 2 finite train rows after purge"
+            )
+        model = Ridge(alpha=float(alpha), fit_intercept=True, random_state=seed)
+        model.fit(x_train[mask], y[mask])
+        component_preds[target] = np.asarray(model.predict(x_val), dtype=float)
+
+    frame = val_rows.select([era_col, id_col]).with_columns(
+        [pl.Series(target, component_preds[target]) for target in targets]
+    )
+    weights = [1.0 / len(targets)] * len(targets)
+    ensembler = Ensembler()
+    blended = ensembler.blend(
+        Ensembler.rank_normalize(frame, pred_cols=list(targets), era_col=era_col),
+        pred_cols=list(targets),
+        weights=weights,
+        era_col=era_col,
+        out_col=pred_col,
+    )
+    # Ensembler.blend re-gaussianizes with plain rank_gaussianize (no unit-variance
+    # standardization), so small eras come out with std slightly below 1.0. Apply the
+    # unit-variance rank-Gaussian form once more: the blend output is already
+    # gaussianized ranks, so this rescales only (rank order unchanged) and guarantees
+    # every era has mean 0 and std 1, per the tier contract.
+    gaussianized = Ensembler.rank_normalize(
+        blended, pred_cols=[pred_col], era_col=era_col
+    )
+    return gaussianized.select([era_col, id_col, pred_col]).sort([era_col, id_col])
+
