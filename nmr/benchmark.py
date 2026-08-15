@@ -1680,3 +1680,150 @@ def generate_canonical_predictions(
             proportion=float(neutralization),
         ).select([era_col, id_col, pred_col]).sort([era_col, id_col])
     return out
+
+
+def score_benchmark_column(
+    benchmarks: pl.DataFrame,
+    *,
+    column: str,
+    era_col: str = "era",
+    id_col: str = "id",
+    pred_col: str = "prediction",
+) -> pl.DataFrame:
+    """Wrap a benchmark-model column as a predictions frame."""
+    if column not in benchmarks.columns:
+        raise ValueError(f"Unknown benchmark column {column!r}")
+    missing = [c for c in (era_col, id_col) if c not in benchmarks.columns]
+    if missing:
+        raise ValueError(f"benchmarks missing required columns: {missing}")
+    return (
+        benchmarks.select([era_col, id_col, pl.col(column).alias(pred_col)])
+        .drop_nulls()
+        .with_columns(pl.col(pred_col).cast(pl.Float64, strict=False))
+        .filter(pl.col(pred_col).is_finite())
+        .sort([era_col, id_col])
+    )
+
+
+def assert_tier0_null_floor(
+    scorecards: Mapping[str, MetricScorecard],
+    *,
+    corr_tol: float = 0.005,
+    sharpe_tol: float = 0.10,
+    dsr_tol: float = 0.05,
+) -> None:
+    """Tier-0 sanity gate: null baselines must score at the statistical floor."""
+    for name in NULL_KINDS:
+        if name not in scorecards:
+            raise ValueError(f"Missing null baseline scorecard {name!r}")
+
+    for name in NULL_KINDS:
+        score = scorecards[name]
+        _assert_scorecard_finite(score, model_id=name)
+        checks = (
+            ("corr", float(score.corr.value), float(corr_tol)),
+            ("corr_sharpe_ac", float(score.corr_sharpe_ac.value), float(sharpe_tol)),
+            ("deflated_sharpe", float(score.deflated_sharpe), float(dsr_tol)),
+        )
+        for metric_name, observed, tolerance in checks:
+            if abs(observed) > tolerance:
+                raise ValueError(
+                    "Null floor violation for "
+                    f"{name}.{metric_name}: |{observed:.8f}| > {tolerance:.8f}"
+                )
+
+
+def assert_tier4_gate(scorecard: MetricScorecard, gate: Tier4GateConfig) -> None:
+    """Production capital gate: reject candidates below the 7 hard thresholds."""
+    _assert_scorecard_finite(scorecard, model_id=scorecard.model_id)
+    violations: list[str] = []
+
+    def _check(field: str, observed: float, threshold: float, strict: bool) -> None:
+        if strict:
+            if observed <= threshold:
+                violations.append(
+                    f"{field}: observed={observed:.8f}, need > {threshold:.8f}"
+                )
+        elif observed < threshold:
+            violations.append(
+                f"{field}: observed={observed:.8f}, need >= {threshold:.8f}"
+            )
+
+    if scorecard.turnover_mean is None:
+        violations.append(
+            f"turnover_mean: unavailable (reason={scorecard.turnover_reason!r}); "
+            f"cannot verify <= {gate.turnover_max:.4f}"
+        )
+    else:
+        if float(scorecard.turnover_mean) > float(gate.turnover_max):
+            violations.append(
+                "turnover_mean: "
+                f"observed={float(scorecard.turnover_mean):.8f}, "
+                f"need <= {gate.turnover_max:.4f}"
+            )
+
+    _check("corr", float(scorecard.corr.value), float(gate.corr_min), strict=False)
+    _check(
+        "corr_sharpe_ac",
+        float(scorecard.corr_sharpe_ac.value),
+        float(gate.corr_sharpe_ac_min),
+        strict=False,
+    )
+    _check("fnc", float(scorecard.fnc), float(gate.fnc_min), strict=False)
+    _check(
+        "deflated_sharpe",
+        float(scorecard.deflated_sharpe),
+        float(gate.deflated_sharpe_min),
+        strict=False,
+    )
+    _check(
+        "gain_to_pain_ratio",
+        float(scorecard.gain_to_pain_ratio),
+        float(gate.gain_to_pain_min),
+        strict=False,
+    )
+    _check("cagr_1y", float(scorecard.cagr_1y), float(gate.cagr_min), strict=True)
+
+    if violations:
+        raise ValueError(
+            f"Tier-4 gate violations for {scorecard.model_id!r}: "
+            + "; ".join(violations)
+        )
+
+
+def assert_hierarchy_monotone(
+    scorecards: Mapping[str, MetricScorecard],
+    *,
+    tier_of: Mapping[str, int],
+    atol: float = 1e-5,
+) -> None:
+    """Assert escalating tier ordering on the rank scalar (T0 < T1 < T2 < T3 <= T4)."""
+    tiers_present = sorted(set(tier_of.values()))
+    if tiers_present != [0, 1, 2, 3, 4]:
+        raise ValueError(f"tier_of must cover all tiers 0..4, got {tiers_present}")
+
+    scalar_by_tier: dict[int, float] = {}
+    for tier in (0, 1, 2, 3, 4):
+        members = [mid for mid, t in tier_of.items() if t == tier]
+        if not members:
+            raise ValueError(f"No scorecards for tier {tier}")
+        missing = [mid for mid in members if mid not in scorecards]
+        if missing:
+            raise ValueError(f"Missing scorecards for tier {tier}: {missing}")
+        scalar_by_tier[tier] = max(
+            float(scorecards[mid].rank_scalar) for mid in members
+        )
+
+    for lower in (0, 1, 2):
+        if scalar_by_tier[lower] + atol > scalar_by_tier[lower + 1]:
+            raise ValueError(
+                "Monotone violation: tier "
+                f"{lower}={scalar_by_tier[lower]:.8f} not < tier "
+                f"{lower + 1}={scalar_by_tier[lower + 1]:.8f} (atol={atol:.2e})"
+            )
+    if scalar_by_tier[3] > scalar_by_tier[4] + atol:
+        raise ValueError(
+            "Monotone violation: tier "
+            f"3={scalar_by_tier[3]:.8f} not <= tier "
+            f"4={scalar_by_tier[4]:.8f} (atol={atol:.2e})"
+        )
