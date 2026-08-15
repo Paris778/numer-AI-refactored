@@ -86,6 +86,12 @@ def test_gpu_devices_without_nvidia_smi(monkeypatch) -> None:
 
 
 def test_gpu_devices_live(monkeypatch) -> None:
+    # Gate on which("nvidia-smi") too — the CLI patch alone only works on
+    # machines where the binary exists; CI containers have no NVIDIA tooling.
+    monkeypatch.setattr(
+        "shutil.which",
+        lambda name: "nvidia-smi" if name == "nvidia-smi" else None,
+    )
     monkeypatch.setattr("nmr.hardware._run_cli", lambda args: _GPU_QUERY)
     devs = gpu_devices()
     assert len(devs) == 2

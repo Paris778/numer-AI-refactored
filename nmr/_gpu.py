@@ -136,12 +136,38 @@ def _rankdata_gpu_matrix(values: np.ndarray, axis: int) -> np.ndarray:
     return cp.asnumpy(out)
 
 
+def _rankdata_scipy_isolated(array: np.ndarray, axis: int | None) -> np.ndarray:
+    """scipy average-rank with NaN isolated at NaN positions (no poisoning).
+
+    Matches the GPU path's NaN semantics: finite values are ranked exactly as
+    scipy would rank them, and NaN slots stay NaN. On finite input this is
+    bit-identical to ``scipy.stats.rankdata(method="average")``.
+    """
+    if axis is None:
+        flat = array.reshape(-1)
+        out = np.full(flat.size, np.nan, dtype=np.float64)
+        finite = np.isfinite(flat)
+        if finite.any():
+            out[finite] = scipy.stats.rankdata(flat[finite], method="average")
+        return out.reshape(array.shape)
+    ax = axis % array.ndim
+    moved = np.moveaxis(array, ax, -1)
+    out = np.full(moved.shape, np.nan, dtype=np.float64)
+    for idx in np.ndindex(moved.shape[:-1]):
+        sl = moved[idx]
+        finite = np.isfinite(sl)
+        if finite.any():
+            out[idx][finite] = scipy.stats.rankdata(sl[finite], method="average")
+    return np.moveaxis(out, -1, ax)
+
+
 def rankdata(values: np.ndarray, axis: int | None = None) -> np.ndarray:
     """Average-rank matching scipy.stats.rankdata(method="average") exactly.
 
     GPU when cupy is available, scipy otherwise; outputs are bit-identical
-    on finite data (with NaN present, scipy 1.17 poisons the whole output
-    while this path isolates NaN — intentionally more correct). ``axis``
+    on finite data. With NaN present, scipy 1.17 poisons the whole output
+    while this function isolates NaN at NaN positions on **both** paths —
+    intentionally more correct, and uniform across machines. ``axis``
     mirrors scipy's semantics: None ranks the flattened array.
     """
     array = np.asarray(values, dtype=float)
@@ -149,7 +175,7 @@ def rankdata(values: np.ndarray, axis: int | None = None) -> np.ndarray:
         return array.copy()
     cp = _load_cupy()
     if cp is None:
-        return scipy.stats.rankdata(array, method="average", axis=axis)
+        return _rankdata_scipy_isolated(array, axis=axis)
     try:
         if axis is None:
             return _rankdata_gpu_1d(array.reshape(-1))
@@ -158,4 +184,4 @@ def rankdata(values: np.ndarray, axis: int | None = None) -> np.ndarray:
         raise ValueError(f"unsupported axis {axis!r}")
     except Exception as exc:  # GPU runtime failure (OOM, driver): CPU fallback
         logger.warning("[rankdata] GPU path failed (%s); falling back to scipy", exc)
-        return scipy.stats.rankdata(array, method="average", axis=axis)
+        return _rankdata_scipy_isolated(array, axis=axis)
