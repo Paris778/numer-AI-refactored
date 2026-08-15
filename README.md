@@ -16,7 +16,7 @@ A **lean, deterministic research framework** for the [Numerai Classic tournament
 - **Rank-domain ensembling** — per-era rank-gaussianized component blending with ridge/NNLS weight learning.
 - **Feature neutralization** — intercept-aware per-era least squares with a content-addressed pseudo-inverse cache.
 - **Institution-grade evaluation** — block-bootstrap CIs, AC-adjusted Sharpe, Deflated Sharpe, payout proxy with burn/drawdown/CVaR/sortino diagnostics, perturbation / horizon / regime robustness.
-- **5-tier benchmark hierarchy** — tier-0 null baselines (constant/uniform/gaussian + small feature-mean), tier-1 purged Ridge baselines, tier-2 shallow trees, tier-3 canonical community models (hello-numerai / neutralized-50 / sunshine), tier-4 production gate against the `v53_lgbm_ender60` benchmark column; tier-0 null-floor, tier-4 production-threshold (`configs/benchmarks/tier4_gate.yaml`), and tier-monotonicity (mean CORR) gates.
+- **5-tier benchmark hierarchy** — tier-0 null baselines (constant/uniform/gaussian + small feature-mean), tier-1 purged Ridge baselines, tier-2 shallow trees, tier-3 canonical community models (hello-numerai / neutralized-50 / sunshine), tier-4 production gate against the `v53_lgbm_ender60` benchmark column; tier-0 null-floor, tier-4 production-threshold (`configs/benchmarks/tier4_gate.yaml`), and tier-monotonicity (per-tier max of mean CORR) gates.
 - **Run registry & deployment** — atomic filesystem registry with champion promotion; cloudpickled `predict()` artifacts with SHA256 integrity manifests.
 
 ---

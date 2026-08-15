@@ -27,7 +27,6 @@ import polars as pl
 from sklearn.linear_model import Ridge
 
 from nmr.ensemble import Ensembler
-from nmr.evaluation import MIN_OVERLAP_ERAS
 from nmr.features import resolve_feature_sets, resolve_small_feature_set
 from nmr.models import construct_tree_model
 from nmr.risk import NeutralizationEngine
@@ -1118,10 +1117,15 @@ class BenchmarkHierarchy:
 
         train, val = self._domain_frames(cell, feature_cols)
         if cell.model_kind == "ridge":
+            if "alpha" not in params:
+                raise ValueError(
+                    f"ridge cell {cell.benchmark_id!r} requires params.alpha"
+                )
+            alpha = float(params["alpha"])
             preds = generate_ridge_predictions(
                 train, val, targets=list(cell.targets),
                 feature_cols=feature_cols,
-                alpha=float(params.get("alpha", 1.0)),
+                alpha=alpha,
                 seed=cell.seed,
             )
         elif cell.model_kind == "lightgbm":
@@ -1170,6 +1174,17 @@ class BenchmarkHierarchy:
                 model_id=cell.benchmark_id,
             )
             tier_of[cell.benchmark_id] = cell.tier
+            if cell.anchors:
+                measured_corr = float(scorecards[cell.benchmark_id].corr.value)
+                logger.info(
+                    "[hierarchy] tier %d: %s anchors — measured corr=%.6f",
+                    cell.tier, cell.benchmark_id, measured_corr,
+                )
+                for key, anchor in cell.anchors.items():
+                    logger.info(
+                        "    anchor %s=%.4f (measured=%.6f)",
+                        key, float(anchor), measured_corr,
+                    )
 
         reference_id = "v53_lgbm_ender60"
         if self._spec.reference_column:
