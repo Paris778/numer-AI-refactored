@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -684,6 +684,33 @@ class ModelOrchestrator:
             )
         self.resolved_device = "cpu"  # train_full_history is CPU-only by design
         return cloudpickle.loads(payload)
+
+
+def construct_tree_model(
+    backend: str,
+    params: Mapping[str, Any],
+    *,
+    seed: int,
+    n_features: int,
+    device: str = "cpu",
+) -> object:
+    """Build a deterministic, CPU-default tree estimator from raw params.
+
+    Applies the same backend param mapping, colsample flooring, and
+    determinism flags as ``ModelOrchestrator``. Used by the benchmark
+    hierarchy so benchmark cells never hand-duplicate param resolution.
+    """
+    config = ModelConfig(
+        backend=backend,
+        preset="fast",
+        params=dict(params),
+        device=device,
+    )
+    orchestrator = ModelOrchestrator(config, seed=seed)
+    resolved = orchestrator._resolved_params(
+        use_gpu=device != "cpu", n_features=int(n_features)
+    )
+    return orchestrator._build_model(resolved)
 
 
 def _receive_subprocess_result(out_q, proc) -> tuple:

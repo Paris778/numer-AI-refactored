@@ -29,6 +29,7 @@ from sklearn.linear_model import Ridge
 from nmr.evaluation import MIN_OVERLAP_ERAS
 from nmr.ensemble import Ensembler
 from nmr.inference import block_bootstrap_ci, resolve_block_len
+from nmr.models import construct_tree_model
 from nmr.scorecard import MetricScorecard, evaluate_model
 
 logger = logging.getLogger("nmr.benchmark")
@@ -1547,3 +1548,62 @@ def generate_ridge_predictions(
     )
     return gaussianized.select([era_col, id_col, pred_col]).sort([era_col, id_col])
 
+
+
+def generate_tree_predictions(
+    train: pl.DataFrame,
+    val: pl.DataFrame,
+    *,
+    target: str,
+    feature_cols: Sequence[str],
+    backend: str,
+    params: Mapping[str, Any],
+    seed: int,
+    purge_eras: int = DEFAULT_BENCHMARK_PURGE_ERAS,
+    era_col: str = "era",
+    id_col: str = "id",
+    pred_col: str = "prediction",
+) -> pl.DataFrame:
+    """Fit one shallow tree on purged train eras and predict validation rows."""
+    if backend not in ("lightgbm", "xgboost"):
+        raise ValueError(f"Unsupported tree backend: {backend!r}")
+    if not feature_cols:
+        raise ValueError("feature_cols must be non-empty")
+
+    trimmed_train_eras, _ = train_validation_purged_split(
+        train.get_column(era_col).unique().to_list(),
+        val.get_column(era_col).unique().to_list(),
+        purge_eras=purge_eras,
+    )
+
+    train_rows = train.filter(pl.col(era_col).is_in(trimmed_train_eras))
+    val_rows = val.sort([era_col, id_col])
+    if target not in train.columns:
+        raise ValueError(f"missing target column: {target!r}")
+    missing_feats = [c for c in feature_cols if c not in train.columns or c not in val.columns]
+    if missing_feats:
+        raise ValueError(f"missing feature columns: {missing_feats}")
+
+    x_train = train_rows.select(feature_cols).cast(pl.Float64).to_pandas()
+    y = train_rows.get_column(target).cast(pl.Float64).to_numpy()
+    mask = np.isfinite(y)
+    if mask.sum() < 2:
+        raise ValueError(f"target {target!r} has fewer than 2 finite train rows after purge")
+    x_val = val_rows.select(feature_cols).cast(pl.Float64).to_pandas()
+
+    model = construct_tree_model(
+        backend, dict(params), seed=seed, n_features=len(feature_cols),
+        device="cpu",
+    )
+    model.fit(x_train[mask], y[mask])
+    raw = np.asarray(model.predict(x_val), dtype=float)
+
+    frame = val_rows.select([era_col, id_col]).with_columns(pl.Series(pred_col, raw))
+    blended = Ensembler().blend(
+        Ensembler.rank_normalize(frame, pred_cols=[pred_col], era_col=era_col),
+        pred_cols=[pred_col],
+        weights=[1.0],
+        era_col=era_col,
+        out_col=pred_col,
+    )
+    return blended.select([era_col, id_col, pred_col]).sort([era_col, id_col])
