@@ -1319,3 +1319,82 @@ def load_benchmark_suite_config(config_dir: str | Path) -> BenchmarkSuiteSpec:
         gate=gate,
         reference_column=reference_column,
     )
+
+
+def _ordered_numeric_eras(eras: Sequence[str]) -> list[str]:
+    """Dedupe, validate, and numerically sort era labels."""
+    if not eras:
+        raise ValueError("era universe is empty")
+    mapping: dict[int, str] = {}
+    for era in eras:
+        if not isinstance(era, str):
+            raise ValueError(
+                f"Era labels must be strings, got {type(era).__name__}"
+            )
+        try:
+            era_num = int(era)
+        except ValueError as exc:
+            raise ValueError(f"Non-numeric era label {era!r}") from exc
+        if era_num in mapping and mapping[era_num] != era:
+            raise ValueError(
+                "Inconsistent zero-padding in era labels: "
+                f"{mapping[era_num]!r} vs {era!r}"
+            )
+        mapping[era_num] = era
+    labels = [mapping[num] for num in sorted(mapping)]
+    widths = {len(label) for label in labels}
+    if len(widths) != 1 or any(
+        label != str(int(label)).zfill(len(labels[0])) for label in labels
+    ):
+        raise ValueError(
+            "Inconsistent zero-padding in era labels: " + ", ".join(labels)
+        )
+    return labels
+
+
+def train_validation_purged_split(
+    train_eras: Sequence[str],
+    val_eras: Sequence[str],
+    *,
+    purge_eras: int = DEFAULT_BENCHMARK_PURGE_ERAS,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Return the purged train->validation era partition for benchmark fits.
+
+    Mirrors ``PurgedEraSplitter`` invariants for the fixed one-shot split:
+    the final ``purge_eras`` train eras are excluded (the purge buffer), the
+    remaining train eras strictly precede validation eras, and exactly
+    ``purge_eras`` eras separate the trimmed train tail from validation.
+    """
+    if isinstance(purge_eras, bool) or not isinstance(purge_eras, int) or purge_eras < 0:
+        raise ValueError(f"purge_eras must be a non-negative int, got {purge_eras!r}")
+
+    ordered_train = _ordered_numeric_eras(train_eras)
+    ordered_val = _ordered_numeric_eras(val_eras)
+
+    overlap = set(ordered_train) & set(ordered_val)
+    if overlap:
+        raise ValueError(f"train/validation era overlap: {sorted(overlap)[:5]}")
+
+    if len(ordered_train) <= purge_eras:
+        raise ValueError(
+            "Not enough train eras after purge: "
+            f"train={len(ordered_train)}, purge={purge_eras}"
+        )
+
+    trimmed = ordered_train[: len(ordered_train) - purge_eras]
+    train_max = int(trimmed[-1])
+    val_min = int(ordered_val[0])
+    if train_max >= val_min:
+        raise ValueError(
+            "train eras must be strictly earlier than validation eras: "
+            f"max(train)={train_max} >= min(val)={val_min}"
+        )
+
+    gap_width = val_min - train_max - 1
+    if gap_width != purge_eras:
+        raise ValueError(
+            f"purge buffer is not exactly {purge_eras} eras wide: got {gap_width} "
+            f"(max(train)={train_max}, min(val)={val_min})"
+        )
+
+    return tuple(trimmed), tuple(ordered_val)
