@@ -64,7 +64,7 @@ A **lean, deterministic research framework** for the [Numerai Classic tournament
 ├── generate_dashboard.py      # CLI: validation-scorecard leaderboard → artifacts/dashboard.html
 ├── dashboard_app.py           # interactive dashboard — streamlit run dashboard_app.py (registry/benchmarks/campaigns, read-only)
 ├── pytest.ini                 # pytest configuration
-├── requirements.txt           # runtime + dev dependencies
+├── requirements.txt           # runtime + dev dependencies (all exact-pinned)
 ├── AGENTS.md                  # authoritative reference for AI coding agents
 ├── ARCHITECTURE.md            # pipeline topology, formulas, schemas
 └── CONTRIBUTING.md            # human contributor workflow + test commands

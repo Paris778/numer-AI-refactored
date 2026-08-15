@@ -1,24 +1,24 @@
 numerapi==2.22.0
-pytest
-pytest-cov
-pandas
-polars
-pyarrow
-matplotlib
-lightgbm
-xgboost
-scikit-learn
-scipy
-numpy
-pyyaml
+pytest==9.0.2
+pytest-cov==7.1.0
+pandas==2.3.3
+polars==1.41.2
+pyarrow==23.0.1
+matplotlib==3.10.8
+lightgbm==4.6.0
+xgboost==3.2.0
+scikit-learn==1.8.0
+scipy==1.17.1
+numpy==2.4.1
+pyyaml==6.0.3
 cloudpickle==3.1.1
 numerai-tools==0.5.3
 optuna==4.9.0
 catboost==1.2.10
 streamlit==1.61.1
 plotly==6.6.0
-ipykernel
-tqdm
+ipykernel==7.1.0
+tqdm==4.67.1
 # GPU acceleration (user-granted deps): cupy rankdata for the analysis
 # pipeline; nvidia-* wheels provide the CUDA runtime DLLs cupy needs on
 # Windows. Optional at runtime — everything degrades to scipy without them.

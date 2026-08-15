@@ -1,9 +1,7 @@
 # Requirements.txt Full Direct-Dependency Pinning — Design Spec
 
 - **Date:** 2026-08-15
-- **Status:** Design approved (Approach A locked: exact-pin 14 unpinned direct deps in
-  place; clean-room temp-venv verification). Implementation pending user review of this
-  spec.
+- **Status:** Design approved (Approach A locked). Implementation complete — all four plan tasks executed and reviewed; changeset staged for user authorization to commit.
 - **Scope:** Pin every unpinned direct dependency in `requirements.txt` to the exact
   versions in the verified venv (the versions behind 651 green tests), and prove the pin
   set installs and passes from a clean environment.
@@ -42,7 +40,7 @@ and the benchmark smoke gate — these are the versions to lock in.
    pytest from this file; a pytest major bump can break the suite on its own).
 3. **Existing pins untouched.** `numerapi==2.22.0`, `cloudpickle==3.1.1`,
    `numerai-tools==0.5.3`, `optuna==4.9.0`, `catboost==1.2.10`, `streamlit==1.61.1`,
-   `plotly==6.6.0`, `cupy-cuda12x==14.1.1`, and all nine `nvidia-*` wheels stay exactly
+   `plotly==6.6.0`, `cupy-cuda12x==14.1.1`, and all eight `nvidia-*` wheels stay exactly
    as-is.
 4. **File order preserved.** In-place edits only — the diff is 14 line changes.
 5. **Transitive deps remain unpinned.** Accepted residual risk, consistent with the

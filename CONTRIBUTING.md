@@ -24,6 +24,16 @@ All code must follow the eight non-negotiable principles in [`AGENTS.md`](AGENTS
 
 5. Ensure the `data/v5.3/` parquet assets are present (see [`README.md`](README.md#data-assets)) — real-data tests and the benchmark runner require them.
 
+### Dependency pinning policy
+
+All direct dependencies in `requirements.txt` are exact-pinned (`==x.y.z`) to the
+versions in the verified venv (2026-08-15: the versions behind the green 651-test
+suite). Upgrading a pin is a deliberate act, never a casual `pip install -U`:
+
+1. Edit the pin in `requirements.txt`.
+2. Reinstall: `.\.venv\Scripts\python -m pip install -r requirements.txt`
+3. Re-run the full suite and the pre-sign-off gate.
+
 ### Making changes
 
 1. **Write tests first.** Follow the TDD cycle: failing test → smallest fix → verify → refactor.
