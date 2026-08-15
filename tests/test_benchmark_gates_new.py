@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import inspect
 
 import numpy as np
 import polars as pl
@@ -86,6 +87,16 @@ def _null_scorecards() -> dict[str, MetricScorecard]:
     return out
 
 
+def _null_scorecards_unzeroed() -> dict[str, MetricScorecard]:
+    """Raw synthetic null scorecards (no floor normalization).
+
+    The fixture's noise metrics (|corr| ~ 0.013, |deflated_sharpe| ~ 0.79
+    on 60x16 rows) are realistic for small-sample noise but exceed the
+    strict audit defaults, so callers must pass explicit tolerances.
+    """
+    return {kind: _make_scorecard(model_id=kind) for kind in NULL_KINDS}
+
+
 def test_score_benchmark_column_wraps_predictions() -> None:
     _, _, benchmarks, _, _ = _synthetic_inputs()
     out = score_benchmark_column(benchmarks, column="bench")
@@ -120,6 +131,52 @@ def test_tier0_null_floor_requires_all_four() -> None:
         assert_tier0_null_floor(cards)
 
 
+def test_tier0_null_floor_defaults_are_pinned() -> None:
+    params = inspect.signature(assert_tier0_null_floor).parameters
+    assert params["corr_tol"].default == 0.005
+    assert params["sharpe_tol"].default == 0.10
+    assert params["dsr_tol"].default == 0.05
+
+
+def test_hierarchy_monotone_atol_default_is_pinned() -> None:
+    params = inspect.signature(assert_hierarchy_monotone).parameters
+    assert params["atol"].default == 1e-5
+
+
+def test_tier0_null_floor_passes_unzeroed_cards_at_explicit_tolerances() -> None:
+    # Realistic synthetic values: corr ~ -0.0126, corr_sharpe_ac ~ -0.044,
+    # deflated_sharpe ~ +0.7885 (fixed seed). Explicit tolerances reflect
+    # the small-sample noise floor; the strict defaults stay pinned by the
+    # signature test above and exercised by the reject tests below.
+    assert_tier0_null_floor(
+        _null_scorecards_unzeroed(),
+        corr_tol=0.02,
+        sharpe_tol=0.10,
+        dsr_tol=0.80,
+    )
+
+
+def test_tier0_null_floor_rejects_high_corr_sharpe_at_strict_default() -> None:
+    cards = _null_scorecards()
+    cards["null_constant_05"] = dataclasses.replace(
+        cards["null_constant_05"],
+        corr_sharpe_ac=dataclasses.replace(
+            cards["null_constant_05"].corr_sharpe_ac, value=0.2
+        ),
+    )
+    with pytest.raises(ValueError, match="corr_sharpe_ac"):
+        assert_tier0_null_floor(cards)
+
+
+def test_tier0_null_floor_rejects_high_deflated_sharpe_at_strict_default() -> None:
+    cards = _null_scorecards()
+    cards["null_constant_05"] = dataclasses.replace(
+        cards["null_constant_05"], deflated_sharpe=0.1
+    )
+    with pytest.raises(ValueError, match="deflated_sharpe"):
+        assert_tier0_null_floor(cards)
+
+
 def test_tier4_gate_passes_on_strong_scorecard() -> None:
     card = _make_scorecard(
         corr=dataclasses.replace(_make_scorecard().corr, value=0.04),
@@ -147,7 +204,7 @@ def test_tier4_gate_reports_every_violation() -> None:
 
 def test_tier4_gate_missing_turnover_fails_loudly() -> None:
     card = _make_scorecard(turnover_mean=None, turnover_reason="no id column")
-    with pytest.raises(ValueError, match="turnover"):
+    with pytest.raises(ValueError, match=r"turnover.*no id column"):
         assert_tier4_gate(card, GATE)
 
 
@@ -169,4 +226,28 @@ def test_monotone_rejects_inverted_tiers() -> None:
         cards[model_id] = _make_scorecard(model_id=model_id, rank_scalar=scalar)
         tier_of[model_id] = tier
     with pytest.raises(ValueError, match="monotone|ordering|tier"):
+        assert_hierarchy_monotone(cards, tier_of=tier_of)
+
+
+def _monotone_fixture() -> tuple[dict[str, MetricScorecard], dict[str, int]]:
+    cards: dict[str, MetricScorecard] = {}
+    tier_of: dict[str, int] = {}
+    for tier, scalar in [(0, 0.0), (1, 0.2), (2, 0.4), (3, 0.6), (4, 0.7)]:
+        model_id = f"t{tier}_probe"
+        cards[model_id] = _make_scorecard(model_id=model_id, rank_scalar=scalar)
+        tier_of[model_id] = tier
+    return cards, tier_of
+
+
+def test_monotone_missing_tier_raises() -> None:
+    cards, tier_of = _monotone_fixture()
+    del tier_of["t2_probe"]
+    with pytest.raises(ValueError, match=r"0\.\.4"):
+        assert_hierarchy_monotone(cards, tier_of=tier_of)
+
+
+def test_monotone_missing_scorecard_raises() -> None:
+    cards, tier_of = _monotone_fixture()
+    del cards["t3_probe"]
+    with pytest.raises(ValueError, match="t3_probe"):
         assert_hierarchy_monotone(cards, tier_of=tier_of)
