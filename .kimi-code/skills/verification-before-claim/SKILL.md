@@ -18,8 +18,8 @@ disableModelInvocation: false
 | # | Gate | How | Fails if |
 |---|---|---|---|
 | 1 | Full suite green | `.\.venv\Scripts\python -m pytest -q` (repo root) | Any failure, error, or unexplained skip |
-| 2 | Benchmark smoke | `benchmark_runner.py --fast-mode --output artifacts/benchmark_scores_smoke.csv --labels-output artifacts/benchmark_test_era_labels_smoke.csv` for any data/evaluation/scorecard change | Error exit or empty outputs |
-| 3 | Canonical-hash purity | Any new scorecard/instrumentation field triaged into canonical-vs-excluded (`canonical_scorecards_bytes`) | Timing/path fields inside canonical bytes → `test_benchmark_slice1/3` flake |
+| 2 | Benchmark smoke | `benchmark_runner.py --fast-mode` (writes `artifacts/reports/benchmark_hierarchy_scorecard_smoke.csv` + `benchmark_gate_report_smoke.csv`) for any data/evaluation/scorecard change | Error exit or empty outputs |
+| 3 | Canonical-hash purity | Any new scorecard/instrumentation field triaged into canonical-vs-excluded (`canonical_scorecards_bytes`) | Timing/path fields inside canonical bytes → `tests/test_benchmark_hierarchy.py` / `tests/test_scorecard.py` flake |
 | 4 | Parity | Metric changes update `tests/test_parity.py` + `tests/test_risk_parity.py` | Custom metric diverges from `numerai_tools.scoring` |
 | 5 | Purge gate | `purge_eras >= 8` (20D targets) / `>= 16` (60D) in every config | Below threshold — protocol-enforced: code only checks the configured gap, it does not block weakening |
 | 6 | Determinism | Seed threading via config (`run.seed` → `set_global_seeds`); `deterministic=True`/`force_col_wise=True` preserved | Unseeded stochastic ops; weakened flags |

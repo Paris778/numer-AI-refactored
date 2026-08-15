@@ -1434,7 +1434,7 @@ def benchmark_era_corr(
     """Per-era CORR of benchmark models vs target.
 
     Lightweight context for the report (floors/ceilings), distinct from the
-    full ``BenchmarkSuite`` harness. Degenerate eras (fewer than 2 non-null
+    full ``BenchmarkHierarchy`` harness. Degenerate eras (fewer than 2 non-null
     rows or constant target) are silently absent — ``n_eras`` reflects the
     actual era overlap.
     """

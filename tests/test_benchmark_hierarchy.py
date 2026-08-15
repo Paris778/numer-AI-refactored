@@ -26,9 +26,10 @@ from nmr.benchmark import (
 def _data_dir(tmp_path: Path) -> Path:
     rng = np.random.default_rng(20260815)
     # Stable asset ids across eras (>= 10 per era) so per-era prediction-rank
-    # turnover is computable for the tier-4 reference (turnover_mean would
-    # otherwise be None -> "insufficient_transitions", an unconditional
-    # tier-4 gate violation).
+    # turnover is computable for the tier-4 reference. A None turnover is not a
+    # hard failure — it is reported as measured=None/pass=None in the gate
+    # report and excluded from `assert_tier4_gate` (v5.3 consecutive validation
+    # eras share zero ids, so turnover is structurally unavailable there).
     n_eras, rows_per_era = 60, 12
     rows = []
     for era_num in range(1, n_eras + 1):

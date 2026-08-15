@@ -30,7 +30,7 @@ These four files obey a strict **Single Source of Truth (SSOT) hierarchy**. One 
 
 ## 1. Agent Identity & Mission
 
-You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (677 tests). No lint/type-check tooling is configured — pytest is the sole automated gate, enforced by CI (`.github/workflows/ci.yml`).
+You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (717 tests). No lint/type-check tooling is configured — pytest is the sole automated gate, enforced by CI (`.github/workflows/ci.yml`).
 
 Your mission:
 
@@ -139,7 +139,7 @@ When modifying or generating code, enforce these seven invariants:
 | Change HPO sweeps / neutralization frontier | `nmr/research.py` |
 | Change HPO search strategy | `nmr/opt.py` — `bayesian_sweep` (Optuna, user-granted dep) |
 | Change perturbation/horizon/regime diagnostics | `nmr/robustness.py` |
-| Change benchmark baselines / gates | `nmr/benchmark.py` + `benchmark_runner.py` |
+| Change the benchmark hierarchy (cells, gates, thresholds) | `nmr/benchmark.py` + `configs/benchmarks/` + `benchmark_runner.py` |
 | Change campaign orchestration | `nmr/campaign.py` + `run_campaign.py` (spec: `ARCHITECTURE.md` §R) |
 | Inspect runs / campaigns interactively | `dashboard_app.py` — `streamlit run` (read-only) |
 | Analyze the dataset / run one analysis stage | `analyze_dataset.py` — modular stages, `--only`/`--skip` (deps auto-included), progress markers (stage registry: `ARCHITECTURE.md` §O) |
@@ -161,7 +161,7 @@ The `docs/` tree is a curated Numerai domain library; `docs/DOCS_README.md` is i
 | Change the payout proxy | `docs/01-canon/staking.md` (0.75/2.25 weights, ±5% clip, stake thresholds) |
 | Change model presets / params | `docs/01-canon/models.md` (benchmark walk-forward conventions; standard/deep params) |
 | Touch submission or deployment | `docs/01-canon/submissions.md` + `docs/02-strategy/strategy-bible.md` §8 (deployment contract) |
-| Change benchmark gates | `docs/06-evaluation/benchmark-line-in-the-sand.md` (null floor + S11 ladder) |
+| Change benchmark gates | `docs/06-evaluation/benchmark-line-in-the-sand.md` (5-tier hierarchy: tiers 0–4, hard gates) |
 | Change evaluation semantics | `docs/06-evaluation/evaluation-suite-bible.md` (evaluation spec of record) |
 | Use `numerapi` / `numerai_tools` | `docs/03-reference/numerapi.md` + `docs/03-reference/numerai-tools.md`; the installed source is the ultimate oracle (see below) |
 | Refresh the Numerai datasets / era ledger | `nmr/refresh.py` + `refresh_data.py` |
@@ -191,8 +191,8 @@ Never invent a `numerai_tools` / `numerapi` signature — open the installed sou
 Three gates, in order of rigor — **exact commands live only in [`CONTRIBUTING.md`](CONTRIBUTING.md#testing--verification)**:
 
 1. **Fast gate** — full `pytest -q` after every meaningful change.
-2. **Targeted subsets** while iterating — oracle parity (`tests/test_parity.py` + `tests/test_risk_parity.py`) and determinism hashes (`tests/test_benchmark_slice1.py`).
-3. **Pre-sign-off gate** (mandatory before delivering work) — full 677-test suite plus the real-data benchmark smoke (`benchmark_runner.py --fast-mode` → `artifacts/*_smoke.csv`).
+2. **Targeted subsets** while iterating — oracle parity (`tests/test_parity.py` + `tests/test_risk_parity.py`) and determinism hashes (`tests/test_benchmark_hierarchy.py`).
+3. **Pre-sign-off gate** (mandatory before delivering work) — full 717-test suite plus the real-data benchmark smoke (`benchmark_runner.py --fast-mode` → `artifacts/reports/benchmark_hierarchy_scorecard_smoke.csv` + `benchmark_gate_report_smoke.csv`).
 
 Real-data tests require the `data/v5.3/` parquet assets (see [`README.md`](README.md#data-assets)). If they are missing, report which tests were skipped — never claim full verification. CI (`.github/workflows/ci.yml`) enforces the fast gate on every push/PR (see [`CONTRIBUTING.md`](CONTRIBUTING.md#testing--verification)).
 </verification_gates>
@@ -205,10 +205,13 @@ Real-data tests require the `data/v5.3/` parquet assets (see [`README.md`](READM
 These are real, verified issues — do not "fix" them silently as a side effect.
 
 ### Timing fields poison canonical hashes (regression class, fixed 2026-07-13)
-`MetricScorecard.metric_timing_seconds` and `timing_*` / `quality_metric_*_seconds` columns capture wall-clock durations that differ across processes. `canonical_scorecards_bytes()` deliberately strips them. Any new instrumentation field must also be excluded from canonical serialization, or cross-process determinism tests (`test_benchmark_slice1.py`, `test_benchmark_slice3.py`, `test_scorecard.py`) will fail non-deterministically.
+`MetricScorecard.metric_timing_seconds` and `timing_*` / `quality_metric_*_seconds` columns capture wall-clock durations that differ across processes. `canonical_scorecards_bytes()` deliberately strips them. Any new instrumentation field must also be excluded from canonical serialization, or cross-process determinism tests (`tests/test_benchmark_hierarchy.py`, `tests/test_scorecard.py`) will fail non-deterministically.
 
 ### Benchmark parquet gap in early train eras
-`data/v5.3/train_benchmark_models.parquet` has **no rows for the first ~30 train eras**. Benchmark-backed BMC/benchmark-corr checks on early-era slices will produce empty joins — use validation data or a later overlapping era window.
+`data/v5.3/train_benchmark_models.parquet` has **no rows for the first ~30 train eras**. Benchmark-backed BMC/benchmark-corr checks on early-era slices will produce empty joins — use validation data or a later overlapping era window. The benchmark hierarchy reads `validation_benchmark_models.parquet` only (tier-4 reference); tiers 1–3 fit their own models on `train.parquet`.
+
+### Benchmark hierarchy runtime
+Full hierarchy runs are multi-hour (medium tree fits on ~2.1M train rows). Use `--fast-mode` for smoke; the FNE gate is FNC@medium per the feature-universe policy.
 
 ### Era-overlap-before-limit rule for real-data fixtures
 Real v5.3 scorecard fixtures are flaky if rows are limited **before** establishing era overlap across validation/meta/benchmarks. Always build test payloads from overlap eras first (join/filter by shared eras), then limit/window. `NonVacuityError` fires when overlap < `MIN_OVERLAP_ERAS` (20).

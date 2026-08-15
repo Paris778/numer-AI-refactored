@@ -65,7 +65,7 @@ graph TD
     E3[E3 contribution & uniqueness<br/>BMC, CWMM]
     E4[E4 nmr/robustness.py<br/>time-horizon, regime, adversarial perturb]
     E5[E5 nmr/scorecard.py<br/>MetricScorecard, evaluate_model, to_frame]
-    E6[E6 portfolio gate + integration<br/>book_correlation, S11 wiring]
+    E6[E6 portfolio gate + integration<br/>book_correlation, 5-tier benchmark hierarchy]
 
     HARNESS --> E1
     E1 --> E2
@@ -421,11 +421,8 @@ Same workflow as the S0–S10 build: the spec is fixed here, an engineer impleme
 - **Surface:** `MetricScorecard` (structured Tier-1 / Tier-2 / Tier-3 fields + the single deflated rank scalar); `evaluate_model(predictions, *, meta_model, benchmarks, features, targets, n_trials, seed) -> MetricScorecard`; `to_frame()` → one tidy leaderboard row.
 - **Gates:** end-to-end **determinism**; rank-scalar composition correct; **zero new math** — pure delegation to E1–E4 + `evaluation` (any inline statistic ⇒ Red); `coverage` / `n_eras` surfaced per metric.
 
-### E6 — Portfolio Gate + Integration *(needs E5)*
-
-- **Files:** `nmr/scorecard.py` (`book_correlation`) + integration into the S11 `BenchmarkSuite`, optionally `ExperimentRunner` / `RunRegistry` (scorecard into `run.json`).
-- **Surface:** `book_correlation(candidate_oof, book_oofs, *, primary_book_scores, seed)` → $(\rho_{\text{global}}, \rho_{\text{tail}}, \text{spread})$ with CI (§7.4), plus labeled cross-sectional redundancy `max`/`mean`; every benchmark baseline emits the full scorecard.
-- **Gates (hardest):** **null baselines floor on every metric** including the new ones (constant-0.5, uniform-random, gaussian-random ⇒ CORR≈0, payout≈0, FNC≈0, well-defined rank stability); **tail-conditional bootstrap correctness** — the worst-decile mask is recomputed *inside* `stat_fn` on the contiguous resampled joint series, never pre-sliced (§7.4); benchmark ladder emits Tier-1 + Tier-2 for all; end-to-end determinism.
+### E6 — Benchmark Hierarchy Gate *(needs E5)*
+The 5-tier benchmark ladder (`nmr/benchmark.py` `BenchmarkHierarchy`, configs in `configs/benchmarks/`): tier-0 null floor, tier-1 purged Ridge, tier-2 shallow trees, tier-3 canonical community models, tier-4 `v53_lgbm_ender60` production gate. Hard gates: tier-0 null floor, tier-4 thresholds, tier monotonicity; determinism via `scorecards_sha256`. Spec: `docs/06-evaluation/benchmark-line-in-the-sand.md`.
 
 ---
 
@@ -498,7 +495,7 @@ Logged, non-blocking. Revisit deliberately, not by accident.
 - **Ensemble weights** are learned in-sample on train OOF then scored on the purged held-out (S9); nested-CV weighting is a deferred feature.
 - **Regime variable choice** (§6.2) must be offline-computable; the exact proxy (target-vol vs feature-vol vs market-vol) is to be fixed in E4 and recorded here once chosen.
 - **Block length $\ell$ and bandwidth $K$** (§4.1–4.2) are now **clamped to horizon floors** (5/13 and 4/12 for 20D/60D); finer per-target tuning above the floor is deferred.
-- **S11 benchmark ladder** (null/trivial/linear/tree baselines) is specced and couples to E6 (every baseline emits a scorecard); build it alongside E5/E6.
+- **Benchmark hierarchy:** replaced the S11 ladder; tutorial-notebook ingestion and walk-forward classical baselines removed; tier ordering and tier-4 thresholds enforced by `BenchmarkHierarchy` (see §11 E6).
 
 ---
 

@@ -56,7 +56,7 @@ def _load_registry_runs(registry_dir: Path) -> pd.DataFrame:
 
 
 def _load_benchmarks(path: Path) -> pd.DataFrame:
-    """Load benchmark_scores.csv and normalize columns to the dashboard schema."""
+    """Load the benchmark scorecard CSV and normalize columns to the dashboard schema."""
     if not path.exists():
         return pd.DataFrame()
 
@@ -332,6 +332,18 @@ def _build_html(
 </html>"""
 
 
+def _resolve_benchmark_path(path: Path) -> Path:
+    """Prefer the 5-tier hierarchy scorecard; fall back to the legacy S11 CSV.
+
+    Old runs predating the hierarchy emitted ``artifacts/benchmark_scores.csv``;
+    the dashboard still loads them when the hierarchy scorecard is absent.
+    """
+    if path.exists():
+        return path
+    legacy = REPO_ROOT / "artifacts" / "benchmark_scores.csv"
+    return legacy if legacy.exists() else path
+
+
 def generate_dashboard(
     *,
     registry_dir: Path | None = None,
@@ -341,7 +353,10 @@ def generate_dashboard(
 ) -> Path:
     """Build the HTML dashboard and write it to disk."""
     registry_dir = registry_dir or REPO_ROOT / "artifacts" / "registry"
-    benchmark_path = benchmark_path or REPO_ROOT / "artifacts" / "benchmark_scores.csv"
+    benchmark_path = benchmark_path or (
+        REPO_ROOT / "artifacts" / "reports" / "benchmark_hierarchy_scorecard.csv"
+    )
+    benchmark_path = _resolve_benchmark_path(benchmark_path)
     output_path = output_path or REPO_ROOT / "artifacts" / "dashboard.html"
 
     trained = _load_registry_runs(registry_dir)

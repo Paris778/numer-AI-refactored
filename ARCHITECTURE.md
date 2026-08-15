@@ -42,9 +42,10 @@ RunRegistry.promote_if_better() ─> champion.json  (guarded: scorecard metric +
 generate_dashboard.py ─> artifacts/dashboard.html  (ranked leaderboard)
 
 Parallel harness:
-benchmark_runner.py ──> BenchmarkSuite (nmr/benchmark.py)
-   null baselines + classical baselines + Numerai benchmark cols
-   ──> evaluate_model() scorecards ──> artifacts/benchmark_scores.csv
+benchmark_runner.py ──> BenchmarkHierarchy (nmr/benchmark.py)
+   tiers 0-3 generator cells + tier-4 v53_lgbm_ender60 reference column
+   ──> evaluate_model() scorecards ──> artifacts/reports/benchmark_hierarchy_scorecard.csv
+                                     + artifacts/reports/benchmark_gate_report.csv
 ```
 
 **Key design decisions:**
@@ -224,18 +225,25 @@ The evaluation spec of record (metrics, gates, build slices E1–E6) is [docs/06
 - `time_horizon_stability(...) -> HorizonStabilityResult` — model vs benchmark AC-adjusted Sharpe on `_20` vs `_60` targets; decay and relative divergence.
 - `regime_conditioned_corr(...) -> dict[str, RegimeCorr]` — per-regime per-era CORR with block-bootstrap CIs.
 
-### M. Benchmark Harness — `nmr/benchmark.py`
+### M. Benchmark Hierarchy — nmr/benchmark.py
 
-`BenchmarkSuite` evaluates prediction sources through the same `evaluate_model` pipeline:
-
-- **Null baselines** — `NULL_BASELINES = ("constant-0.5", "uniform-random", "gaussian-random")` (seeded RNG).
-- **Classical baselines** (`run_classical_baselines`, `min_train_eras=10`, walk-forward era t−1 → t): trivial (row-mean of features), linear (`Ridge(alpha=1.0)`), tree (`LGBMRegressor(n_estimators=200, learning_rate=0.05, max_depth=5, num_leaves=15, colsample_bytree=0.1, subsample=0.8)`, lightgbm-only — a missing lightgbm propagates `ImportError`, no sklearn fallback). Walk-forward iteration logs INFO progress per era (`[walk_forward] ...`).
-- **Tutorial ingestion** — `TUTORIAL_NOTEBOOK_TO_MODEL_ID = {"1_hello_numerai.ipynb": "hello-numerai", "2_feature_neutralization.ipynb": "feature-neutralization", "example-model-sunshine.ipynb": "sunshine"}`; notebook anchor-string contract checks; `ingest_tutorial_prediction[_batch]` / `extract_oos_predictions` normalize arbitrary artifacts to `[era, id, prediction]`. Id-column inference falls back to the first non-metric column with a WARNING log (`[tutorial] ...`).
-- **Gates** — `assert_null_floor(scorecards, tolerance=0.05)`: every null baseline must have |value| ≤ tolerance on rank_scalar, mean_payout, corr, mmc, fnc, corr_sharpe_ac (+bmc/cwmm if present). `assert_slice1_monotone`: null ≤ hello-numerai ≤ sunshine.
-- **Determinism** — `canonical_scorecards_bytes()`: drops all timing columns, JSON with sorted keys, `separators=(",", ":")`, NaN/Inf as string sentinels, keyed by model_id; `scorecards_sha256()` digests it.
-- **Output** — `scorecards_to_frame` / `write_scorecards_csv` (column inventory = `MetricScorecard.to_frame()` §K).
-
-Benchmark ladder rationale (null floor, S11 rungs, hard gates): [docs/06-evaluation/benchmark-line-in-the-sand.md](docs/06-evaluation/benchmark-line-in-the-sand.md).
+The 5-tier escalating benchmark ladder ("the line in the sand"). Config-driven:
+`configs/benchmarks/*.yaml` → `load_benchmark_suite_config()` → frozen
+`BenchmarkCellConfig` / `Tier4GateConfig` dataclasses (unknown keys rejected,
+enum-validated). `BenchmarkHierarchy.run()` scores every cell plus the
+`v53_lgbm_ender60` reference column through `evaluate_model()` and evaluates
+three hard gates: `assert_tier0_null_floor` (|CORR| ≤ 0.005, |AC-Sharpe| ≤ 0.15
+over the three structural nulls; no DSR check — null DSRs span 0.11–1.0),
+`assert_tier4_gate` (7 production thresholds in `configs/benchmarks/tier4_gate.yaml`;
+turnover is structurally unavailable on v5.3 — reported as measured=None/pass=None,
+excluded from hard failure), and `assert_hierarchy_monotone` (per-tier max of
+`corr.value`, T0 < T1 < T2 < T3 ≤ T4, atol 1e-5; `rank_scalar` selectable via
+`metric=`). Tier 1–3 fits use `train_validation_purged_split()` (exact 8-era
+buffer, strict ordering); multi-target blends are equal-weight in the rank-Gaussian
+domain (`Ensembler`); tier-3 neutralization reuses `NeutralizationEngine`; tree
+params resolve through `nmr.models.construct_tree_model` (colsample floor,
+determinism flags). Determinism: `scorecards_sha256` (timing fields stripped).
+FNE is FNC@medium (full 3,555 is prohibited by the feature-universe policy).
 
 ### N. Runner, Registry, Submission, Deployment
 
@@ -273,7 +281,7 @@ def predict(live_features: pd.DataFrame, live_benchmark_models: pd.DataFrame | N
 | Script | What it does |
 |---|---|
 | [train_first_model.py](train_first_model.py) | `load_config("configs/first_model.yaml")` → `ExperimentRunner.run(deploy=True)` → `RunRegistry.record` + `promote_if_better` (prints promotion verdict) → prints summary, writes `summary.json` |
-| [benchmark_runner.py](benchmark_runner.py) | Flags: `--data-dir` (data/v5.3), `--output`, `--labels-output`, `--seed` (77), `--n-boot` (300), `--min-overlap-eras` (20), `--horizon` (20D/60D), `--min-train-eras` (10), `--log-level`, `--fast-mode` (n_boot=1, skips linear/tree). The tutorial small feature set is resolved via `nmr.features.resolve_small_feature_set` — missing/corrupt `features.json` or an empty intersection raises (no silent fallback to arbitrary columns). Loads validation/meta/benchmarks → `BenchmarkSuite` → scorecards CSV + per-era label profile CSV. Low-variance predictions (<1e-9) get a fallback scorecard. |
+| [benchmark_runner.py](benchmark_runner.py) | 5-tier hierarchy control plane: `--data-dir`, `--configs`, `--seed`, `--n-boot`, `--fast-mode`; writes `artifacts/reports/benchmark_hierarchy_scorecard.csv` + `benchmark_gate_report.csv`; exit 1 on hard-gate failure |
 | [generate_dashboard.py](generate_dashboard.py) | Aggregates registry runs + benchmark CSV → Sharpe-ranked dark-theme leaderboard at `artifacts/dashboard.html` |
 | [dashboard_app.py](dashboard_app.py) | Streamlit+Plotly interactive dashboard over registry scorecards, benchmark CSV, campaign logs, and `fleet_summary` (§Q); read-only; launch: `streamlit run dashboard_app.py`. Pure shaping helpers are unit-tested (tests/test_scripts.py). |
 | [run_campaign.py](run_campaign.py) | Run a named batch of configs and record trial lineage (see §R) |
@@ -403,7 +411,7 @@ research.py  ──> config, data, models, splitter, risk, evaluation
 opt.py       ──> config (ExperimentConfig), models (resolve_model_params), research (_held_out_metric, _override_config, SweepResult)
 robustness.py──> inference, _transforms
 scorecard.py ──> evaluation, inference, payout, research, robustness
-benchmark.py ──> scorecard, evaluation, data
+benchmark.py ──> scorecard, models, features, risk, ensemble, inference
 runner.py    ──> config, data, splitter, models, ensemble, risk, evaluation, deployment
 registry.py  ──> runner (RunResult)
 campaign.py  ──> _atomicio
@@ -437,6 +445,7 @@ missing. `--live-only` skips expanding files. Writes are atomic via `_atomicio`.
 - One typed config object (`ExperimentConfig`) parameterizes everything; nothing else reads YAML. Schema in §2A; live examples in [configs/](configs/).
 - Dataset: Numerai **v5.3** parquet assets under `data/v5.3/` (train/validation/live, meta_model, benchmark models, example preds, `features.json`). Asset inventory and download expectations live in [`README.md`](README.md#data-assets).
 - Feature sets from `features.json`: `small` (benchmark tutorial convention: 42-column `feature_sets.small`), `medium`, `all`; every named set is resolvable via `nmr.features.resolve_feature_sets` (§P). `data.feature_subset` optionally overrides `feature_set` — schema in §2A, semantics in §P.
+- Benchmark tiers: `configs/benchmarks/` — 8 tier YAMLs (`tier0_null` … `tier4_gate`) validated by `load_benchmark_suite_config` (§M); tier 1–3 `anchors` are report-only reference lines, tier-0/tier-4 thresholds are hard gates.
 
 ---
 
@@ -447,7 +456,7 @@ missing. `--live-only` skips expanding files. Writes are atomic via `_atomicio`.
 | Run an experiment | `nmr.runner.ExperimentRunner.run(deploy=...)` | Full pipeline §1 |
 | Record / promote a run | `nmr.registry.RunRegistry.record / best / promote / promote_if_better` | `artifacts/registry/` |
 | Score a prediction set | `nmr.scorecard.evaluate_model` | `MetricScorecard` |
-| Benchmark everything | `python benchmark_runner.py [--fast-mode]` | `artifacts/benchmark_scores.csv` |
+| Benchmark everything | `python benchmark_runner.py [--fast-mode] --output artifacts/reports/benchmark_hierarchy_scorecard.csv` | `artifacts/reports/benchmark_hierarchy_scorecard.csv` + `benchmark_gate_report.csv` |
 | First-model train + promote | `python train_first_model.py` | registry + champion |
 | Leaderboard | `python generate_dashboard.py` | `artifacts/dashboard.html` |
 | Build/validate a submission | `nmr.submission.build_submission / validate_submission / write_submission` | CSV in (0,1) |

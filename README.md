@@ -172,7 +172,7 @@ A curated, tiered Numerai knowledge base with a deterministic reading path:
 - [docs/03-reference/](docs/03-reference/numerai-tools.md) — `numerapi` and `numerai-tools` API references
 - [docs/04-research/](docs/04-research/research-program.md) — research program + consolidated research-ideas file (incl. neural-network directions), deep tabular-DL survey
 - [docs/05-notebooks/](docs/05-notebooks/) — onboarding notebooks (hello-numerai, neutralization, target ensembles, sunshine example)
-- [docs/06-evaluation/](docs/06-evaluation/evaluation-suite-bible.md) — **the evaluation spec of record**: how this repo judges a model; the benchmark null-floor / S11 ladder is [benchmark-line-in-the-sand.md](docs/06-evaluation/benchmark-line-in-the-sand.md)
+- [docs/06-evaluation/](docs/06-evaluation/evaluation-suite-bible.md) — **the evaluation spec of record**: how this repo judges a model; the 5-tier benchmark hierarchy (tier-0 null floor to tier-4 production gate) is [benchmark-line-in-the-sand.md](docs/06-evaluation/benchmark-line-in-the-sand.md)
 - [docs/99-archive/](docs/99-archive/) — archived, low-priority reference (bounty/security pointer, grandmaster-seasons summary, super-research prompt); surviving raw source originals under `docs/99-archive/raw-source/` (provenance policy: [docs/DOCS_README.md](docs/DOCS_README.md#6-provenance-and-merge-policy))
 
 The authoritative map — importance tiers, per-file table, and reading recipes — lives in [docs/DOCS_README.md](docs/DOCS_README.md); the bullets above are a directory summary, not the map itself.

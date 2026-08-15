@@ -295,10 +295,26 @@ def champion_run_id(registry_dir: Path) -> str | None:
 # ---------------------------------------------------------------------------
 
 _DEFAULT_REGISTRY_DIR = REPO_ROOT / "artifacts" / "registry"
-_DEFAULT_BENCHMARK_PATH = REPO_ROOT / "artifacts" / "benchmark_scores.csv"
+_DEFAULT_BENCHMARK_PATH = (
+    REPO_ROOT / "artifacts" / "reports" / "benchmark_hierarchy_scorecard.csv"
+)
+_LEGACY_BENCHMARK_PATH = REPO_ROOT / "artifacts" / "benchmark_scores.csv"
 _DEFAULT_CAMPAIGNS_DIR = REPO_ROOT / "artifacts" / "campaigns"
 
 _BAR_METRIC = "corr_sharpe_ac"
+
+
+def _resolve_benchmark_path(path: Path) -> Path:
+    """Prefer the 5-tier hierarchy scorecard; fall back to the legacy S11 CSV.
+
+    Old runs predating the hierarchy emitted ``artifacts/benchmark_scores.csv``;
+    the dashboard still loads them when the hierarchy scorecard is absent.
+    """
+    if path.exists():
+        return path
+    if _LEGACY_BENCHMARK_PATH.exists():
+        return _LEGACY_BENCHMARK_PATH
+    return path
 
 
 def _read_run_payload(run_dir: Path) -> dict | None:
@@ -528,7 +544,7 @@ def main() -> None:
     st.title("Numerai Model Dashboard")
 
     registry_dir = _DEFAULT_REGISTRY_DIR
-    benchmark_path = _DEFAULT_BENCHMARK_PATH
+    benchmark_path = _resolve_benchmark_path(_DEFAULT_BENCHMARK_PATH)
     campaigns_dir = _DEFAULT_CAMPAIGNS_DIR
 
     registry = load_registry_frame(registry_dir)

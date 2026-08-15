@@ -27,7 +27,7 @@ All code must follow the eight non-negotiable principles in [`AGENTS.md`](AGENTS
 ### Dependency pinning policy
 
 All direct dependencies in `requirements.txt` are exact-pinned (`==x.y.z`) to the
-versions in the verified venv (2026-08-15: the versions behind the green 677-test
+versions in the verified venv (2026-08-15: the versions behind the green 717-test
 suite). Upgrading a pin is a deliberate act, never a casual `pip install -U`:
 
 1. Edit the pin in `requirements.txt`.
@@ -67,7 +67,7 @@ Useful targeted runs while iterating:
 
 ```powershell
 .\.venv\Scripts\python -m pytest tests/test_parity.py tests/test_risk_parity.py -q   # oracle parity
-.\.venv\Scripts\python -m pytest tests/test_benchmark_slice1.py -q                    # determinism hashes
+.\.venv\Scripts\python -m pytest tests/test_benchmark_hierarchy.py -q              # benchmark determinism hashes
 .\.venv\Scripts\python -m pytest tests/test_runner.py tests/test_registry.py -q       # pipeline + registry
 ```
 
@@ -77,7 +77,7 @@ Before delivering completed work:
 
 ```powershell
 .\.venv\Scripts\python -m pytest -q                      # full suite, zero failures
-.\.venv\Scripts\python benchmark_runner.py --fast-mode --output artifacts/benchmark_scores_smoke.csv --labels-output artifacts/benchmark_test_era_labels_smoke.csv   # real-data smoke run (writes artifacts/*_smoke.csv)
+.\.venv\Scripts\python benchmark_runner.py --fast-mode   # real-data smoke run (writes artifacts/reports/benchmark_hierarchy_scorecard_smoke.csv + benchmark_gate_report_smoke.csv)
 ```
 
 A green unit run without the real-data smoke is not sufficient evidence for changes touching data loading, evaluation, scorecards, or the benchmark harness. Surface any pre-existing failures explicitly — never silently exclude them.

@@ -1,57 +1,36 @@
-# Benchmark "Line in the Sand" — Null Baselines & the S11 Ladder
+# Benchmark "Line in the Sand" — The 5-Tier Hierarchy
 
-> **Purpose of this file:** a standing memory aid so we do not forget the *floor* every metric and every model must clear. This is the cheap, brutal sanity layer that sits **underneath** the whole evaluation suite. It is referenced by the evaluation bible §11 (E6 gate) and §15 (deferral ledger), and it couples to the S11 `BenchmarkSuite`. Build it alongside E5/E6 — not after.
+> **Purpose of this file:** a standing memory aid for the tiered benchmark floor every model must clear before capital deployment. The authoritative spec is the evaluation bible (`evaluation-suite-bible.md`, §11 E6 gate) and the design spec `docs/superpowers/specs/2026-08-15-benchmark-hierarchy-design.md`. If a tier, gate, or threshold changes, change it in the bible first, then here.
 
 ## 1) The one idea
 
-Before we trust *any* number the suite produces, we prove that **worthless predictions score worthless**. If a constant or random "model" can post a non-trivial CORR, payout, MMC, BMC, or FNC, then the **metric is broken** (or leaking), not impressive. The null baselines are the line in the sand: every real model must clear them, and every metric must collapse to its null value on them.
+Tiers 0–3 exist so a candidate's scorecard can be read as a rung on a ladder; Tier 4 is the production gate. Every rung emits a complete scorecard through `evaluate_model()`, so the ladder is directly comparable row-for-row with a real candidate.
 
-Two failure modes this catches:
-- **A broken metric** — a scoring bug, a sign flip, a leak, a normalization error — surfaces as a null baseline scoring above its floor.
-- **A worthless model dressed up** — anything that cannot beat constant/random is not a model.
-
-## 2) Null / trivial baselines (the floor roster)
-
-All seeded and deterministic (fixed by data-version + seed, independent of any model under test).
-
-| Baseline | Definition | Expected result on every metric |
+| Tier | Rungs | Role |
 | --- | --- | --- |
-| **constant-0.5** | every prediction = 0.5 (or any constant) | CORR = 0, MMC ≈ 0, BMC ≈ 0, FNC = 0, payout ≈ 0; std=0 ⇒ Sharpe = 0; rank stability **well-defined, not NaN** |
-| **uniform-random** | i.i.d. `U(0,1)` per row, seeded | CORR ≈ 0, MMC ≈ 0, BMC ≈ 0, FNC ≈ 0, payout ≈ 0 (within bootstrap CI of 0) |
-| **gaussian-random** | i.i.d. `N(0,1)` per row, seeded | same as uniform-random — ≈ 0 on every skill metric |
+| 0 | constant-0.5, uniform-random, gaussian-random (clipped), feature-mean (small) | statistical zero-floor; a candidate indistinguishable from tier 0 is defective |
+| 1 | Ridge small / medium / 4-target blend (purged, standardized) | linear factor frontier; non-linear models must beat it |
+| 2 | shallow LightGBM/XGBoost + canonical fast preset | depth/interaction hurdle |
+| 3 | hello-numerai, neutralized-50, sunshine 4×20D ensemble (in-process re-fits) | canonical community references |
+| 4 | `v53_lgbm_ender60` benchmark column | the line in the sand for capital |
 
-**Non-negotiable rule:** a degenerate/constant prediction must yield **0.0, never NaN**, under `-W error` (already enforced in E2 G6 and the engine short-circuit). The null baselines re-verify this end-to-end through the full scorecard.
+## 2) Hard gates (enforced by `nmr/benchmark.py`)
 
-## 3) The full S11 ladder (rungs, low → high)
+- **G — Tier-0 null floor:** |CORR| ≤ 0.005 and |AC-Sharpe| ≤ 0.15 for the three structural nulls (constant-0.5, uniform-random, gaussian-random). `null_feature_mean` is scored but excluded from the gate — it is not structurally null on v5.3 (corr 0.0029, sharpe 0.257). There is **no DSR check**: null DSRs span 0.11–1.0, so deflated Sharpe has no constant null value. A structural null scoring above its floor means a broken metric.
+- **G — Tier-4 production gate:** measured on `v53_lgbm_ender60` over the shared meta-model overlap window — CORR ≥ 0.0286, AC-Sharpe ≥ 0.78, FNC@medium ≥ 0.020, DSR ≥ 0.95, GPR ≥ 1.50, CAGR > 0, turnover ≤ 0.35. Thresholds live in `configs/benchmarks/tier4_gate.yaml` and are re-pinned to measured v5.3 values with evidence when they deviate. Turnover is structurally unavailable on v5.3 (consecutive validation eras share zero ids): it is reported as measured=None/pass=None in the gate report, **excluded from hard failure**, and logged loudly.
+- **G — Monotonicity:** mean CORR orders Tier0 < Tier1 < Tier2 < Tier3 ≤ Tier4 (per-tier max of `corr.value`, atol 1e-5); `rank_scalar` is selectable via `metric="rank_scalar"` but its noise spread swamps the null-vs-ridge rung on real data (evidence in the design-spec amendments). Enforced in full runs; logged-only in `--fast-mode` (fast tree params degrade tiers 2–3 by design).
+- **G — Determinism:** same data-version + seed + configs ⇒ identical scorecard hashes across processes (`scorecards_sha256`).
 
-Every rung emits a **complete scorecard** (Tier-1 + Tier-2 at minimum), so we can read the gradient, not just a pass/fail:
+## 3) Fit topology (leakage rules)
 
-1. **Null** — constant-0.5, uniform-random, gaussian-random (§2). *Floor.*
-2. **Trivial** — single-feature predictor, mean-of-features. Should be barely above null; exposes any metric that rewards trivial feature beta.
-3. **Linear** — a plain linear/ridge model on the feature set. The "are you even trying" bar.
-4. **Tree** — a basic GBDT (default-ish params). The realistic "did your fancy model beat a default tree" bar.
-5. **Numerai benchmark models** — the real upper reference. **BMC is measured against these** (stake-weighted on the leaderboard; **highest-staked single benchmark in Diagnostics**, per canon `01-canon/scoring/02-mmc-bmc.md`). Beating these is the actual goal.
+Tiers 1–3 fit on `train.parquet` eras minus the final 8 (purge buffer) and predict `validation.parquet` eras. The split is asserted by `train_validation_purged_split()`: strict chronological ordering, exact 8-era buffer, numeric era labels only. Features are float32 end-to-end. Ridge features are standardized with trimmed-train statistics (zero-variance features → 0.0). Multi-target blends are equal-weight in the per-era rank-Gaussian domain (`Ensembler`), then re-gaussianized.
 
-A candidate's scorecard is only interesting **relative to where it lands on this ladder**.
+## 4) Tier anchors (report-only reference lines)
 
-## 4) Hard gates (these are the "lines")
+Tier 1–3 `anchors` in the YAMLs are sanity reference lines logged against measured values — they are **not** enforced gates. Measured tier-1..3 corrs on v5.3 are far below the spec's aspirational anchors; that is expected and documented. The only enforced absolute numbers are the tier-0 floor and the tier-4 thresholds.
 
-- **G — Null floor on every metric (incl. new ones).** constant-0.5 / uniform-random / gaussian-random ⇒ CORR≈0, payout≈0, FNC≈0, MMC≈0, BMC≈0, and **well-defined** (non-NaN) rank stability, max-drawdown, burn rate, CVaR, book correlation. Any null baseline scoring meaningfully above 0 on a skill metric ⇒ **Red** (broken metric).
-- **G — Every ladder rung emits Tier-1 + Tier-2.** No rung is allowed to skip metrics; the ladder must be directly comparable row-for-row with a real candidate's scorecard.
-- **G — Tutorial-chain monotonicity (implemented).** `assert_slice1_monotone` (`nmr/benchmark.py`) enforces **null ≤ hello-numerai ≤ sunshine** on the rank scalar, within CI. The full null ≤ trivial ≤ linear ≤ tree ≤ benchmark ladder is **aspirational, not implemented** — do not assume a gate exists that the code does not enforce.
-- **G — Determinism.** Same data-version + seed ⇒ identical baseline scorecards across process invocations.
+## 5) Notes & deviations
 
-## 5) Reference numbers (sanity anchors, not gates)
-
-- **"Good" mean CORR ≈ 0.01–0.03** (archive bible). A null baseline near this is a red flag; a real model near/above this is plausible.
-- **Purge convention: 8 eras (20D), 16 eras (60D)** — the benchmark walk-forward convention; also usable as a conservative bootstrap block-length floor.
-- **Payout proxy** floors at ~0 for null because `0.75·CORR + 2.25·MMC` ⇒ 0 when both are 0.
-
-## 6) Where this lives in the build
-
-- **Built.** The `BenchmarkSuite` (S11) ladder — null/hello-numerai/sunshine, classical linear/tree, and benchmark models — is implemented and tested (`tests/test_benchmark_*.py`); the null floor and tutorial-chain monotonicity run as `assert_null_floor` / `assert_slice1_monotone` (`nmr/benchmark.py`).
-- **Known gap:** Tier-3 metrics (book correlation, BMC, CWMM) flooring on the null baselines is not yet wired into the gates — see the bible's deferral ledger for status.
-
----
-
-*Memory aid only. The authoritative spec is `docs/06-evaluation/evaluation-suite-bible.md` (E6 gate §11, deferral ledger §15). If a floor changes, change it in the bible first, then here.*
+- **FNE is FNC@medium (780),** not the full 3,555 universe: full-universe validation FNC is memory-prohibited by the feature-universe policy. The tier-4 gate field `fnc_min` is measured against medium.
+- Tier-4 point estimates are identical between fast and full modes (the reference is a data column); only tier 1–3 rungs degrade in fast mode.
+- Run: `python benchmark_runner.py --data-dir data/v5.3 --seed 42 --n-boot 1000` (full) or `--fast-mode` (smoke). Outputs: `artifacts/reports/benchmark_hierarchy_scorecard.csv` + `benchmark_gate_report.csv`; the smoke convention writes `benchmark_hierarchy_scorecard_smoke.csv` + `benchmark_gate_report_smoke.csv`.

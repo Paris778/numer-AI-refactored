@@ -209,7 +209,8 @@ def _methodology_section() -> list[str]:
         "v2 `screen_stable` (empty — train-only full gate found 0 stable features); "
         "v3 `screen_linear_or_nonlinear` (1); v4 `screen_drift_filtered` (1); v5 "
         "`small` (42); v6 `medium` (780). v1 (`all`, 3,555) is excluded by the "
-        "feature-universe policy. Configs: `configs/campaigns/benchmark-rebuild-v1/`. "
+        "feature-universe policy. Configs: `configs/campaigns/benchmark-rebuild-v1/` "
+        "(removed 2026-08-15). "
         "Evidence assembled by `nmr.meta.campaign_evidence` from each run's "
         "`validation_preds.parquet` — per-era validation IC, block-bootstrap 95% CI, "
         "IC Sharpe, max drawdown, FNE@100% (residual IC after full linear "
@@ -217,9 +218,11 @@ def _methodology_section() -> list[str]:
         "deflation with n_trials = recorded-cell count and empirical cross-cell "
         "Sharpe variance).",
         "- **Benchmark rebuild (2026-08-10..13):** `benchmark_runner.py` re-run on "
-        "v5.3 (null baselines + lgbm ender20/60) → `artifacts/benchmark_scores.csv` "
-        "(8 rows: constant-0.5, gaussian-random, uniform-random, trivial, linear, "
-        "tree, v53_lgbm_ender20, v53_lgbm_ender60; 86-era meta-overlap window).",
+        "v5.3 (null baselines + lgbm ender20/60; 8 rows: constant-0.5, "
+        "gaussian-random, uniform-random, trivial, linear, tree, v53_lgbm_ender20, "
+        "v53_lgbm_ender60; 86-era meta-overlap window). Superseded 2026-08-15 by "
+        "the 5-tier benchmark hierarchy "
+        "(`artifacts/reports/benchmark_hierarchy_scorecard.csv`).",
         "- **Determinism:** every number above comes from persisted dumps "
         "(`artifacts/reports/dataset_analysis/`); the renderer is a pure function of "
         "those dumps. Registry runs are immutable and hashed (`run_id`); all registry "
@@ -316,10 +319,9 @@ def _artifact_map_section() -> list[str]:
                  "contents": "per-era validation predictions — the input to campaign_evidence"},
                 {"path": "artifacts/registry/<run_id>/oof.parquet",
                  "contents": "out-of-fold predictions"},
-                {"path": "artifacts/benchmark_scores.csv",
-                 "contents": "rebuilt benchmark suite output (8 model rows)"},
-                {"path": "configs/campaigns/benchmark-rebuild-v1/*.yaml",
-                 "contents": "the 12 campaign configs (lgbm/xgb x v1..v6)"},
+                {"path": "artifacts/reports/benchmark_hierarchy_scorecard.csv",
+                 "contents": "5-tier benchmark hierarchy scorecards (tier0..tier4); "
+                 "sibling `benchmark_gate_report.csv` carries the tier-4 gate rows"},
                 {"path": "data/v5.3/",
                  "contents": "downloaded tournament assets (train/validation/live parquet, "
                  "features.json, benchmark + meta-model parquets)"},
@@ -349,11 +351,11 @@ def _artifact_map_section() -> list[str]:
         "./.venv/Scripts/python run_campaign.py --config a.yaml --config b.yaml "
         "--name <campaign> --dry-run",
         "",
-        "# 5. Benchmark suite (smoke / full)",
-        "./.venv/Scripts/python benchmark_runner.py --fast-mode "
-        "--output artifacts/benchmark_scores_smoke.csv",
+        "# 5. Benchmark hierarchy (smoke / full) — writes "
+        "#    benchmark_hierarchy_scorecard*.csv + benchmark_gate_report*.csv",
+        "./.venv/Scripts/python benchmark_runner.py --fast-mode",
         "",
-        "# 6. Tests (651-collection guard enforced by tests/test_docs_hygiene.py)",
+        "# 6. Tests (717-collection guard enforced by tests/test_docs_hygiene.py)",
         "./.venv/Scripts/python -m pytest -q",
         "```",
         "",
@@ -740,8 +742,8 @@ def render_report(
     out.append("- **2026-08-10 — Benchmark & evidence purge (user-approved).** "
                "Registry (2 runs + champion), run outputs, benchmark CSVs and era "
                "labels were purged; `benchmark_runner.py` re-pointed to v5.3 and "
-               "re-run (null baselines + lgbm ender20/60) → "
-               "`artifacts/benchmark_scores.csv`.")
+               "re-run (null baselines + lgbm ender20/60); output superseded "
+               "2026-08-15 by the 5-tier benchmark hierarchy.")
     out.append("- **2026-08-10 — Audit of evaluation machinery.** 7 findings fixed "
                "(strict era-label validation in evaluation/splitter/scorecard — "
                "inconsistent zero-padding previously caused silent data loss; numeric "
@@ -839,6 +841,15 @@ def render_report(
                "first happened with the corrected train-only screen. Both fixed "
                "with failing-tests-first regression coverage (key contract + "
                "v2-error-row cases); suite green at 626.")
+    out.append("- **2026-08-15 — 5-tier benchmark hierarchy shipped (SDD tasks "
+               "1–11).** The S11-era benchmark suite was replaced by the 5-tier "
+               "hierarchy (`nmr/benchmark.py` `BenchmarkHierarchy`; configs "
+               "`configs/benchmarks/`; outputs "
+               "`artifacts/reports/benchmark_hierarchy_scorecard.csv` + "
+               "`benchmark_gate_report.csv`). The superseded benchmark CSVs, "
+               "era-label profiles, and the `benchmark-rebuild-v1` campaign "
+               "configs/logs were removed; the `rebuild_v53_step2` campaign "
+               "evidence (this report's §7) is retained.")
     out.append("")
     out.extend(_methodology_section())
     out.extend(_artifact_map_section())
