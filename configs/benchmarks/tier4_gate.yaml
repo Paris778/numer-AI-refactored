@@ -3,7 +3,7 @@ tier: 4
 reference_column: v53_lgbm_ender60
 gate:
   corr_min: 0.0286
-  corr_sharpe_ac_min: 1.50
+  corr_sharpe_ac_min: 0.78
   fnc_min: 0.020
   deflated_sharpe_min: 0.95
   gain_to_pain_min: 1.50

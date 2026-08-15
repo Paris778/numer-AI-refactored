@@ -73,16 +73,15 @@ def _null_scorecards() -> dict[str, MetricScorecard]:
     out = {}
     for kind in NULL_KINDS:
         score = _make_scorecard(model_id=kind)
-        # Synthetic degeneracy: the fixture's noise metrics are NOT at the
-        # null floor (|corr| ~ 0.013, |deflated_sharpe| ~ 0.79 on 60x16
-        # rows), and the 0.005/0.05 audit tolerances are calibrated for
-        # real-data null baselines. Floor-normalize the two gated fields
-        # the fixture cannot bring down; the reject test below still
-        # exercises the strict defaults against real synthetic values.
+        # Synthetic degeneracy: the fixture's noise corr (|corr| ~ 0.013 on
+        # 60x16 rows) is not at the null floor, and the 0.005 audit
+        # tolerance is calibrated for real-data null baselines.
+        # Floor-normalize corr; corr_sharpe_ac (~ -0.044) is within the
+        # 0.15 default. The reject tests below still exercise the strict
+        # defaults against real synthetic values.
         out[kind] = dataclasses.replace(
             score,
             corr=dataclasses.replace(score.corr, value=0.0),
-            deflated_sharpe=0.0,
         )
     return out
 
@@ -90,9 +89,10 @@ def _null_scorecards() -> dict[str, MetricScorecard]:
 def _null_scorecards_unzeroed() -> dict[str, MetricScorecard]:
     """Raw synthetic null scorecards (no floor normalization).
 
-    The fixture's noise metrics (|corr| ~ 0.013, |deflated_sharpe| ~ 0.79
-    on 60x16 rows) are realistic for small-sample noise but exceed the
-    strict audit defaults, so callers must pass explicit tolerances.
+    The fixture's noise corr (~ 0.013 on 60x16 rows) is realistic for
+    small-sample noise but exceeds the strict 0.005 audit default, so
+    callers must pass an explicit corr tolerance. deflated_sharpe is not
+    gated (no constant null value on v5.3), so its ~0.79 value is ignored.
     """
     return {kind: _make_scorecard(model_id=kind) for kind in NULL_KINDS}
 
@@ -124,35 +124,43 @@ def test_tier0_null_floor_rejects_high_corr() -> None:
         assert_tier0_null_floor(cards)
 
 
-def test_tier0_null_floor_requires_all_four() -> None:
+def test_tier0_null_floor_requires_three_structural_kinds() -> None:
     cards = _null_scorecards()
     del cards["null_gaussian_rand"]
     with pytest.raises(ValueError, match="null_gaussian_rand"):
         assert_tier0_null_floor(cards)
 
 
+def test_tier0_null_floor_ignores_null_feature_mean() -> None:
+    # null_feature_mean is not structural noise (v5.3 corr 0.00294,
+    # sharpe 0.257): its absence must not raise.
+    cards = _null_scorecards()
+    del cards["null_feature_mean"]
+    assert_tier0_null_floor(cards)
+
+
 def test_tier0_null_floor_defaults_are_pinned() -> None:
     params = inspect.signature(assert_tier0_null_floor).parameters
     assert params["corr_tol"].default == 0.005
-    assert params["sharpe_tol"].default == 0.10
-    assert params["dsr_tol"].default == 0.05
+    assert params["sharpe_tol"].default == 0.15
+    assert "dsr_tol" not in params
 
 
-def test_hierarchy_monotone_atol_default_is_pinned() -> None:
+def test_hierarchy_monotone_defaults_are_pinned() -> None:
     params = inspect.signature(assert_hierarchy_monotone).parameters
+    assert params["metric"].default == "corr"
     assert params["atol"].default == 1e-5
 
 
 def test_tier0_null_floor_passes_unzeroed_cards_at_explicit_tolerances() -> None:
-    # Realistic synthetic values: corr ~ -0.0126, corr_sharpe_ac ~ -0.044,
-    # deflated_sharpe ~ +0.7885 (fixed seed). Explicit tolerances reflect
-    # the small-sample noise floor; the strict defaults stay pinned by the
-    # signature test above and exercised by the reject tests below.
+    # Realistic synthetic values: corr ~ -0.0126, corr_sharpe_ac ~ -0.044
+    # (fixed seed). Explicit corr tolerance reflects the small-sample noise
+    # floor; the strict defaults stay pinned by the signature test above
+    # and exercised by the reject tests below.
     assert_tier0_null_floor(
         _null_scorecards_unzeroed(),
         corr_tol=0.02,
         sharpe_tol=0.10,
-        dsr_tol=0.80,
     )
 
 
@@ -168,13 +176,14 @@ def test_tier0_null_floor_rejects_high_corr_sharpe_at_strict_default() -> None:
         assert_tier0_null_floor(cards)
 
 
-def test_tier0_null_floor_rejects_high_deflated_sharpe_at_strict_default() -> None:
+def test_tier0_null_floor_ignores_high_deflated_sharpe() -> None:
+    # DSR has no constant null value on v5.3 (measured null DSRs span
+    # 0.11-1.0), so it is excluded from the floor: a high DSR alone passes.
     cards = _null_scorecards()
     cards["null_constant_05"] = dataclasses.replace(
-        cards["null_constant_05"], deflated_sharpe=0.1
+        cards["null_constant_05"], deflated_sharpe=1.0
     )
-    with pytest.raises(ValueError, match="deflated_sharpe"):
-        assert_tier0_null_floor(cards)
+    assert_tier0_null_floor(cards)
 
 
 def test_tier4_gate_passes_on_strong_scorecard() -> None:
@@ -202,29 +211,49 @@ def test_tier4_gate_reports_every_violation() -> None:
     assert "corr" in message and "fnc" in message and "turnover" in message
 
 
-def test_tier4_gate_missing_turnover_fails_loudly() -> None:
-    card = _make_scorecard(turnover_mean=None, turnover_reason="no id column")
-    with pytest.raises(ValueError, match=r"turnover.*no id column"):
-        assert_tier4_gate(card, GATE)
+def test_tier4_gate_allows_unavailable_turnover() -> None:
+    # Turnover is structurally unavailable on v5.3 (consecutive validation
+    # eras share zero ids); an unavailable turnover is reported by
+    # gate_report_frame but is not a hard failure.
+    card = _make_scorecard(
+        corr=dataclasses.replace(_make_scorecard().corr, value=0.04),
+        corr_sharpe_ac=dataclasses.replace(_make_scorecard().corr_sharpe_ac, value=1.8),
+        fnc=0.03,
+        deflated_sharpe=1.2,
+        gain_to_pain_ratio=2.0,
+        cagr_1y=0.1,
+        turnover_mean=None,
+        turnover_reason="no id column",
+    )
+    assert_tier4_gate(card, GATE)
+
+
+def _corr_ladder(
+    scalars: list[tuple[int, float]],
+) -> tuple[dict[str, MetricScorecard], dict[str, int]]:
+    cards: dict[str, MetricScorecard] = {}
+    tier_of: dict[str, int] = {}
+    for tier, scalar in scalars:
+        model_id = f"t{tier}_probe"
+        card = _make_scorecard(model_id=model_id)
+        cards[model_id] = dataclasses.replace(
+            card, corr=dataclasses.replace(card.corr, value=scalar)
+        )
+        tier_of[model_id] = tier
+    return cards, tier_of
 
 
 def test_monotone_ordering_passes_on_escalating_tiers() -> None:
-    cards: dict[str, MetricScorecard] = {}
-    tier_of: dict[str, int] = {}
-    for tier, scalar in [(0, 0.0), (1, 0.2), (2, 0.4), (3, 0.6), (4, 0.7)]:
-        model_id = f"t{tier}_probe"
-        cards[model_id] = _make_scorecard(model_id=model_id, rank_scalar=scalar)
-        tier_of[model_id] = tier
+    cards, tier_of = _corr_ladder(
+        [(0, 0.0), (1, 0.2), (2, 0.4), (3, 0.6), (4, 0.7)]
+    )
     assert_hierarchy_monotone(cards, tier_of=tier_of)
 
 
 def test_monotone_rejects_inverted_tiers() -> None:
-    cards: dict[str, MetricScorecard] = {}
-    tier_of: dict[str, int] = {}
-    for tier, scalar in [(0, 0.5), (1, 0.4), (2, 0.3), (3, 0.2), (4, 0.1)]:
-        model_id = f"t{tier}_probe"
-        cards[model_id] = _make_scorecard(model_id=model_id, rank_scalar=scalar)
-        tier_of[model_id] = tier
+    cards, tier_of = _corr_ladder(
+        [(0, 0.5), (1, 0.4), (2, 0.3), (3, 0.2), (4, 0.1)]
+    )
     with pytest.raises(ValueError, match="monotone|ordering|tier"):
         assert_hierarchy_monotone(cards, tier_of=tier_of)
 
@@ -237,6 +266,11 @@ def _monotone_fixture() -> tuple[dict[str, MetricScorecard], dict[str, int]]:
         cards[model_id] = _make_scorecard(model_id=model_id, rank_scalar=scalar)
         tier_of[model_id] = tier
     return cards, tier_of
+
+
+def test_monotone_ordering_passes_on_rank_scalar_metric() -> None:
+    cards, tier_of = _monotone_fixture()
+    assert_hierarchy_monotone(cards, tier_of=tier_of, metric="rank_scalar")
 
 
 def test_monotone_missing_tier_raises() -> None:

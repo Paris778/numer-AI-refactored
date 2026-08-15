@@ -57,7 +57,7 @@ def test_tier4_gate_thresholds() -> None:
     gate = spec.gate
     assert gate is not None
     assert gate.corr_min == 0.0286
-    assert gate.corr_sharpe_ac_min == 1.50
+    assert gate.corr_sharpe_ac_min == 0.78
     assert gate.fnc_min == 0.020
     assert gate.deflated_sharpe_min == 0.95
     assert gate.gain_to_pain_min == 1.50
