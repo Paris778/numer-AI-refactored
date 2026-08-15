@@ -17,6 +17,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import dataclasses
+from types import MappingProxyType
+
+import yaml
+
 import numpy as np
 import polars as pl
 from sklearn.linear_model import Ridge
@@ -1069,3 +1074,248 @@ def _sanitize_json_payload(value: object) -> object:
     if isinstance(value, np.integer):
         return int(value)
     return value
+
+
+# ---------------------------------------------------------------------------
+# 5-tier benchmark hierarchy: config schema (spec:
+# docs/superpowers/specs/2026-08-15-benchmark-hierarchy-design.md)
+# ---------------------------------------------------------------------------
+
+VALID_BENCHMARK_TIERS: tuple[int, ...] = (0, 1, 2, 3, 4)
+VALID_INPUT_SPACES: tuple[str, ...] = ("none", "small", "medium")
+VALID_BENCHMARK_MODEL_KINDS: tuple[str, ...] = (
+    "null_constant_05",
+    "null_uniform_rand",
+    "null_gaussian_rand",
+    "null_feature_mean",
+    "ridge",
+    "lightgbm",
+    "xgboost",
+)
+NULL_KINDS: tuple[str, ...] = (
+    "null_constant_05",
+    "null_uniform_rand",
+    "null_gaussian_rand",
+    "null_feature_mean",
+)
+DEFAULT_BENCHMARK_SEED: int = 42
+DEFAULT_BENCHMARK_PURGE_ERAS: int = 8
+
+
+def _reject_unknown_keys(cls: type, data: dict[str, Any]) -> None:
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"{cls.__name__} section must be a mapping, got {type(data).__name__}"
+        )
+    known = {f.name for f in dataclasses.fields(cls)}
+    unknown = set(data) - known
+    if unknown:
+        raise ValueError(f"Unknown {cls.__name__} keys: {sorted(unknown)}")
+
+
+def _freeze_mapping(value: Any, *, name: str) -> Mapping[str, Any]:
+    if value is None:
+        return MappingProxyType({})
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{name} must be a mapping, got {type(value).__name__}")
+    out = dict(value)
+    for key in out:
+        if not isinstance(key, str):
+            raise ValueError(f"{name} keys must be strings, got {key!r}")
+    return MappingProxyType(out)
+
+
+@dataclasses.dataclass(frozen=True)
+class Tier4GateConfig:
+    corr_min: float
+    corr_sharpe_ac_min: float
+    fnc_min: float
+    deflated_sharpe_min: float
+    gain_to_pain_min: float
+    cagr_min: float
+    turnover_max: float
+
+    def __post_init__(self) -> None:
+        for field in dataclasses.fields(self):
+            value = getattr(self, field.name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(
+                    f"Tier4GateConfig.{field.name} must be numeric, got {value!r}"
+                )
+            if not float(value) == float(value):  # NaN check
+                raise ValueError(f"Tier4GateConfig.{field.name} must be finite")
+        if not (-1.0 <= self.corr_min <= 1.0):
+            raise ValueError(f"corr_min out of range: {self.corr_min!r}")
+        if self.turnover_max < 0.0:
+            raise ValueError(f"turnover_max must be >= 0: {self.turnover_max!r}")
+
+
+@dataclasses.dataclass(frozen=True)
+class BenchmarkCellConfig:
+    benchmark_id: str
+    input_space: str
+    model_kind: str
+    tier: int
+    targets: tuple[str, ...] = ("target",)
+    params: Mapping[str, Any] = dataclasses.field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    seed: int = DEFAULT_BENCHMARK_SEED
+    neutralization: float = 0.0
+    anchors: Mapping[str, float] | None = None
+    fast_mode_params: Mapping[str, Any] | None = None
+
+    def __post_init__(self) -> None:
+        if not self.benchmark_id or not isinstance(self.benchmark_id, str):
+            raise ValueError(f"benchmark_id must be a non-empty string: {self.benchmark_id!r}")
+        if self.tier not in VALID_BENCHMARK_TIERS:
+            raise ValueError(f"tier={self.tier!r} not in {VALID_BENCHMARK_TIERS}")
+        if self.input_space not in VALID_INPUT_SPACES:
+            raise ValueError(
+                f"input_space={self.input_space!r} not in {VALID_INPUT_SPACES}"
+            )
+        if self.model_kind not in VALID_BENCHMARK_MODEL_KINDS:
+            raise ValueError(
+                f"model_kind={self.model_kind!r} not in {VALID_BENCHMARK_MODEL_KINDS}"
+            )
+        if self.model_kind == "null_feature_mean" and self.input_space != "small":
+            raise ValueError(
+                "null_feature_mean requires input_space='small', "
+                f"got {self.input_space!r}"
+            )
+        if self.model_kind in NULL_KINDS and self.input_space != "none" \
+                and self.model_kind != "null_feature_mean":
+            raise ValueError(
+                f"{self.model_kind} requires input_space='none', "
+                f"got {self.input_space!r}"
+            )
+        if not isinstance(self.targets, tuple) or not self.targets:
+            raise ValueError("targets must be a non-empty tuple")
+        if not all(isinstance(t, str) and t for t in self.targets):
+            raise ValueError(f"targets must be non-empty strings: {self.targets!r}")
+        if not isinstance(self.seed, int) or isinstance(self.seed, bool):
+            raise ValueError(f"seed must be an int, got {self.seed!r}")
+        if not 0.0 <= float(self.neutralization) <= 1.0:
+            raise ValueError(
+                f"neutralization must be in [0, 1], got {self.neutralization!r}"
+            )
+        object.__setattr__(self, "params", _freeze_mapping(self.params, name="params"))
+        if self.anchors is not None:
+            anchors = _freeze_mapping(self.anchors, name="anchors")
+            for key, value in anchors.items():
+                if not isinstance(value, (int, float)) or isinstance(value, bool):
+                    raise ValueError(f"anchor {key!r} must be numeric, got {value!r}")
+            object.__setattr__(self, "anchors", anchors)
+        if self.fast_mode_params is not None:
+            object.__setattr__(
+                self,
+                "fast_mode_params",
+                _freeze_mapping(self.fast_mode_params, name="fast_mode_params"),
+            )
+
+
+@dataclasses.dataclass(frozen=True)
+class BenchmarkFileConfig:
+    tier: int
+    cells: tuple[BenchmarkCellConfig, ...] = ()
+    reference_column: str | None = None
+    gate: Tier4GateConfig | None = None
+
+    def __post_init__(self) -> None:
+        if self.tier not in VALID_BENCHMARK_TIERS:
+            raise ValueError(
+                f"tier={self.tier!r} not in {VALID_BENCHMARK_TIERS}"
+            )
+        if self.tier == 4:
+            if self.gate is None:
+                raise ValueError("tier 4 config requires a 'gate' section")
+            if not self.reference_column:
+                raise ValueError("tier 4 config requires a non-empty reference_column")
+        else:
+            if not self.cells:
+                raise ValueError(
+                    f"tier {self.tier} config requires non-empty cells"
+                )
+            if self.gate is not None:
+                raise ValueError(f"gate section only allowed for tier 4, got tier {self.tier}")
+        ids = [cell.benchmark_id for cell in self.cells]
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"duplicate benchmark ids in file: {ids}")
+
+
+def _build_benchmark_cell(data: Any, tier: int) -> BenchmarkCellConfig:
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"benchmark cell must be a mapping, got {type(data).__name__}"
+        )
+    if "benchmark_id" not in data:
+        raise ValueError(f"benchmark cell missing 'benchmark_id': {data!r}")
+    if "tier" in data and int(data["tier"]) != int(tier):
+        raise ValueError(
+            f"cell tier {data['tier']!r} conflicts with file tier {tier!r}"
+        )
+    data["tier"] = int(tier)
+    _reject_unknown_keys(BenchmarkCellConfig, data)
+    if isinstance(data.get("targets"), list):
+        data["targets"] = tuple(data["targets"])
+    return BenchmarkCellConfig(**data)
+
+
+def load_benchmark_file(path: str | Path) -> BenchmarkFileConfig:
+    """Load and validate a single benchmark tier config file."""
+    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"benchmark config must be a mapping, got {type(raw).__name__}")
+    _reject_unknown_keys(BenchmarkFileConfig, raw)
+    if not isinstance(raw.get("cells", []), list):
+        raise ValueError("cells must be a list")
+    gate_raw = raw.get("gate")
+    gate = None
+    if gate_raw is not None:
+        _reject_unknown_keys(Tier4GateConfig, gate_raw)
+        gate = Tier4GateConfig(**gate_raw)
+    return BenchmarkFileConfig(
+        tier=int(raw["tier"]),
+        cells=tuple(
+            _build_benchmark_cell(c, int(raw["tier"]))
+            for c in raw.get("cells", [])
+        ),
+        reference_column=raw.get("reference_column"),
+        gate=gate,
+    )
+
+
+@dataclasses.dataclass(frozen=True)
+class BenchmarkSuiteSpec:
+    cells: tuple[BenchmarkCellConfig, ...]
+    gate: Tier4GateConfig | None
+    reference_column: str | None
+
+
+def load_benchmark_suite_config(config_dir: str | Path) -> BenchmarkSuiteSpec:
+    """Load every *.yaml file in config_dir and aggregate into a suite spec."""
+    directory = Path(config_dir)
+    files = sorted(p for p in directory.glob("*.yaml"))
+    if not files:
+        raise ValueError(f"no benchmark config files found in {directory}")
+    all_cells: list[BenchmarkCellConfig] = []
+    gate: Tier4GateConfig | None = None
+    reference_column: str | None = None
+    for path in files:
+        file_cfg = load_benchmark_file(path)
+        if file_cfg.gate is not None:
+            if gate is not None:
+                raise ValueError("multiple tier-4 gate configs found")
+            gate = file_cfg.gate
+            reference_column = file_cfg.reference_column
+        all_cells.extend(file_cfg.cells)
+    ids = [cell.benchmark_id for cell in all_cells]
+    if len(set(ids)) != len(ids):
+        seen = sorted({i for i in ids if ids.count(i) > 1})
+        raise ValueError(f"duplicate benchmark ids across configs: {seen}")
+    all_cells.sort(key=lambda c: (c.tier, c.benchmark_id))
+    return BenchmarkSuiteSpec(
+        cells=tuple(all_cells),
+        gate=gate,
+        reference_column=reference_column,
+    )

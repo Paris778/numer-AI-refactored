@@ -1,0 +1,22 @@
+# Tier 0 — Null & statistical invariants (the sanity gate).
+tier: 0
+cells:
+  - benchmark_id: null_constant_05
+    input_space: none
+    model_kind: null_constant_05
+    seed: 42
+
+  - benchmark_id: null_uniform_rand
+    input_space: none
+    model_kind: null_uniform_rand
+    seed: 42
+
+  - benchmark_id: null_gaussian_rand
+    input_space: none
+    model_kind: null_gaussian_rand
+    seed: 42
+
+  - benchmark_id: null_feature_mean
+    input_space: small
+    model_kind: null_feature_mean
+    seed: 42

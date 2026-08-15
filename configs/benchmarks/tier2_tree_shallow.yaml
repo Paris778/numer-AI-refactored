@@ -1,0 +1,31 @@
+# Tier 2 — Shallow non-linear trees.
+tier: 2
+cells:
+  - benchmark_id: tree_lgbm_shallow_small
+    input_space: small
+    model_kind: lightgbm
+    targets: ["target"]
+    params:
+      max_depth: 3
+      num_leaves: 7
+      learning_rate: 0.02
+      n_estimators: 500
+      colsample_bytree: 0.1
+      subsample: 0.8
+    seed: 42
+    fast_mode_params:
+      n_estimators: 50
+
+  - benchmark_id: tree_xgb_shallow_medium
+    input_space: medium
+    model_kind: xgboost
+    targets: ["target"]
+    params:
+      max_depth: 4
+      max_leaves: 15
+      n_estimators: 1000
+      learning_rate: 0.01
+      colsample_bytree: 0.1
+    seed: 42
+    fast_mode_params:
+      n_estimators: 50

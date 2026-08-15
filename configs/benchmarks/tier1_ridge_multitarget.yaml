@@ -1,0 +1,13 @@
+# Tier 1 — Four independent Ridge fits, equal-weight rank-Gaussian blend.
+tier: 1
+cells:
+  - benchmark_id: linear_ridge_multitarget
+    input_space: medium
+    model_kind: ridge
+    targets: ["target", "target_cyrusd_20", "target_sam_20", "target_victor_20"]
+    params:
+      alpha: 10.0
+    seed: 42
+    anchors:
+      corr: 0.0145
+      sharpe: 1.05

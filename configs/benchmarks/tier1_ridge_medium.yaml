@@ -1,0 +1,13 @@
+# Tier 1 — Convex linear baseline, medium universe (780 features).
+tier: 1
+cells:
+  - benchmark_id: linear_ridge_medium
+    input_space: medium
+    model_kind: ridge
+    targets: ["target"]
+    params:
+      alpha: 10.0
+    seed: 42
+    anchors:
+      corr: 0.0145
+      sharpe: 1.05

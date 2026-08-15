@@ -1,0 +1,52 @@
+# Tier 3 — Canonical community & tutorial baselines, in-process re-fits.
+tier: 3
+cells:
+  - benchmark_id: canon_hello_numerai
+    input_space: small
+    model_kind: lightgbm
+    targets: ["target"]
+    params:
+      max_depth: 5
+      num_leaves: 31
+      n_estimators: 2000
+      learning_rate: 0.01
+      colsample_bytree: 0.1
+    seed: 42
+    fast_mode_params:
+      n_estimators: 50
+    anchors:
+      corr: 0.0130
+
+  - benchmark_id: canon_neutralized_50
+    input_space: medium
+    model_kind: lightgbm
+    targets: ["target"]
+    params:
+      max_depth: 5
+      num_leaves: 31
+      n_estimators: 2000
+      learning_rate: 0.01
+      colsample_bytree: 0.1
+    seed: 42
+    neutralization: 0.5
+    fast_mode_params:
+      n_estimators: 50
+    anchors:
+      corr: 0.0220
+
+  - benchmark_id: canon_sunshine_ensemble
+    input_space: medium
+    model_kind: lightgbm
+    targets: ["target", "target_cyrusd_20", "target_sam_20", "target_victor_20"]
+    params:
+      max_depth: 5
+      num_leaves: 31
+      n_estimators: 2000
+      learning_rate: 0.01
+      colsample_bytree: 0.1
+    seed: 42
+    neutralization: 0.25
+    fast_mode_params:
+      n_estimators: 50
+    anchors:
+      corr: 0.0245
