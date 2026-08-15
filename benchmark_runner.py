@@ -1,38 +1,23 @@
+"""Control plane for the 5-tier benchmark hierarchy (the line in the sand).
+
+Thin wrapper only: argument parsing, data wiring, output writing, exit codes.
+All benchmark logic lives in ``nmr.benchmark``.
+"""
+
 from __future__ import annotations
 
 import argparse
 import logging
-import os
 import time
-from collections.abc import Iterator
-from dataclasses import dataclass
 from pathlib import Path
 
-import polars as pl
-
-from nmr.benchmark import scorecards_to_frame
-from nmr.features import resolve_small_feature_set
-
-try:
-    import psutil
-
-    _HAS_PSUTIL = True
-except ImportError:
-    _HAS_PSUTIL = False
-
-
-@dataclass(frozen=True)
-class StrategyContext:
-    model_id: str
-    group: str
-    raw_preds: pl.DataFrame
-    seed: int
-
-
-def _get_memory_usage_mb() -> float:
-    if _HAS_PSUTIL:
-        return psutil.Process(os.getpid()).memory_info().rss / (1024 * 1024)
-    return 0.0
+from nmr.benchmark import (
+    BenchmarkHierarchy,
+    gate_report_frame,
+    hierarchy_frame,
+    load_benchmark_data,
+    load_benchmark_suite_config,
+)
 
 
 def _min_one_int(value: str) -> int:
@@ -42,77 +27,45 @@ def _min_one_int(value: str) -> int:
     return parsed
 
 
-def _parse_args() -> argparse.Namespace:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Optimized low-memory real-data benchmark runner."
+        description="Deterministic 5-tier benchmark hierarchy runner."
     )
     parser.add_argument("--data-dir", type=Path, default=Path("data") / "v5.3")
     parser.add_argument(
-        "--output", type=Path, default=Path("artifacts") / "benchmark_scores.csv"
+        "--configs", type=Path, default=Path("configs") / "benchmarks"
     )
     parser.add_argument(
-        "--labels-output",
+        "--output",
         type=Path,
-        default=Path("artifacts") / "benchmark_test_era_labels.csv",
+        default=Path("artifacts")
+        / "reports"
+        / "benchmark_hierarchy_scorecard.csv",
     )
-    parser.add_argument("--seed", type=int, default=77)
-    parser.add_argument("--n-boot", type=_min_one_int, default=300)
+    parser.add_argument(
+        "--gate-report",
+        type=Path,
+        default=Path("artifacts") / "reports" / "benchmark_gate_report.csv",
+    )
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--n-boot", type=_min_one_int, default=1000)
     parser.add_argument("--min-overlap-eras", type=int, default=20)
     parser.add_argument("--horizon", choices=("20D", "60D"), default="20D")
-    parser.add_argument("--min-train-eras", type=int, default=10)
     parser.add_argument(
-        "--log-level", default="INFO", choices=("DEBUG", "INFO", "WARNING", "ERROR")
+        "--log-level", default="INFO",
+        choices=("DEBUG", "INFO", "WARNING", "ERROR"),
     )
     parser.add_argument("--fast-mode", action="store_true")
-    return parser.parse_args()
+    return parser
 
 
-def _candidate_strategies(
-    suite: BenchmarkSuite,
-    benchmarks: pl.DataFrame,
-    seed: int,
-    min_train_eras: int,
-    fast_mode: bool,
-) -> Iterator[StrategyContext]:
-    for model_id, group, raw_preds, r_seed in suite.iter_baseline_predictions(
-        include_classical=not fast_mode, min_train_eras=min_train_eras
-    ):
-        yield StrategyContext(model_id, group, raw_preds, r_seed)
-
-    benchmark_cols = sorted([c for c in benchmarks.columns if c not in {"era", "id"}])
-    for col in benchmark_cols:
-        preds = benchmarks.select(["era", "id", pl.col(col).alias("prediction")])
-        yield StrategyContext(col, "benchmark_model", preds, seed + 6)
+def _parse_args() -> argparse.Namespace:
+    return _build_parser().parse_args()
 
 
-def _profile_label_space(
-    df: pl.DataFrame, context: StrategyContext, space_name: str
-) -> pl.DataFrame:
-    """Vectorized calculation of label profiles per era without python-loop iteration."""
-    return (
-        df.group_by("era")
-        .len(name="n_rows")
-        .select(
-            [
-                pl.lit(context.model_id).alias("model_id"),
-                pl.lit(context.group).alias("strategy_group"),
-                pl.lit(space_name).alias("label_space"),
-                pl.col("era").cast(pl.String),
-                pl.col("n_rows"),
-            ]
-        )
-    )
-
-
-def _fallback_scorecard_frame(model_id: str, n_eras: int) -> pl.DataFrame:
-    return pl.DataFrame(
-        {
-            "model_id": [model_id],
-            "n_eras": [int(n_eras)],
-            "rank_scalar": [0.0],
-            "deflated_sharpe": [0.0],
-        }
-    )
+def _parse_args_with(argv: list[str]) -> argparse.Namespace:
+    """Test hook: parse an explicit argument vector."""
+    return _build_parser().parse_args(argv)
 
 
 def main() -> int:
@@ -124,139 +77,64 @@ def main() -> int:
     )
     log = logging.getLogger("benchmark_runner")
 
-    if args.fast_mode:
-        args.n_boot = 1
+    log.info("Loading benchmark suite config from %s", args.configs)
+    spec = load_benchmark_suite_config(args.configs)
+    log.info("Loading benchmark data from %s", args.data_dir)
+    data = load_benchmark_data(args.data_dir)
 
-    log.info("=" * 60)
-    log.info("RUNNER INITIALIZATION [Memory Status: %.2f MB]", _get_memory_usage_mb())
-    log.info("=" * 60)
-
-    for p in (args.output, args.labels_output):
-        p.parent.mkdir(parents=True, exist_ok=True)
-
-    log.info("Step 1/4: Loading inputs with tutorial small feature set")
-    t_load = time.perf_counter()
-
-    validation_path = args.data_dir / "validation.parquet"
-    schema = pl.read_parquet_schema(validation_path)
-    all_cols = list(schema.keys())
-
-    all_feature_cols = [c for c in all_cols if c.startswith("feature_")]
-    small_feature_cols = resolve_small_feature_set(
-        args.data_dir / "features.json", all_feature_cols
-    )
-    target_cols = [c for c in all_cols if c == "target" or c.startswith("target_")]
-
-    targets = pl.read_parquet(
-        validation_path, columns=["era", "id", *target_cols, *small_feature_cols]
-    )
-    meta_model = pl.read_parquet(args.data_dir / "meta_model.parquet").select(
-        ["era", "id", "numerai_meta_model"]
-    )
-    benchmarks = pl.read_parquet(args.data_dir / "validation_benchmark_models.parquet")
-
-    log.info(
-        "Inputs loaded in %.3fs [Memory Status: %.2f MB, feature_cols=%d]",
-        time.perf_counter() - t_load,
-        _get_memory_usage_mb(),
-        len(small_feature_cols),
-    )
-
-    features = targets.select(["era", "id", *small_feature_cols])
-    targets_subset = targets.select(["era", "id", *target_cols])
-
-    log.info("Step 2/4: Initializing BenchmarkSuite")
-    benchmark_cols = [c for c in benchmarks.columns if c not in {"era", "id"}]
-    suite = BenchmarkSuite(
-        meta_model=meta_model,
-        benchmarks=benchmarks,
-        features=features,
-        targets=targets_subset,
-        n_trials=1,
+    hierarchy = BenchmarkHierarchy(
+        spec=spec,
+        data=data,
         seed=args.seed,
         horizon=args.horizon,
-        benchmark_col=benchmark_cols[0] if benchmark_cols else None,
-        n_boot=args.n_boot,
+        n_boot=1 if args.fast_mode else args.n_boot,
         min_overlap_eras=args.min_overlap_eras,
+        fast_mode=args.fast_mode,
     )
 
-    log.info("Step 3/4: Processing strategies sequentially with safety guards")
-    scorecards, runtime_rows, label_profile_frames = {}, [], []
-    fallback_scorecard_frames: list[pl.DataFrame] = []
+    t0 = time.perf_counter()
+    log.info(
+        "Running %d benchmark cells%s",
+        len(spec.cells),
+        " (fast mode)" if args.fast_mode else "",
+    )
+    result = hierarchy.run()
+    log.info("Hierarchy scored in %.1fs", time.perf_counter() - t0)
 
-    for ctx in _candidate_strategies(
-        suite, benchmarks, args.seed, args.min_train_eras, args.fast_mode
-    ):
-        t0 = time.perf_counter()
+    for path in (args.output, args.gate_report):
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+    hierarchy_frame(result).write_csv(args.output)
+    gate_frame = gate_report_frame(result)
+    gate_frame.write_csv(args.gate_report)
+    log.info("Scorecard frame written to %s", args.output)
+    log.info("Gate report written to %s", args.gate_report)
+
+    for row in gate_frame.iter_rows(named=True):
         log.info(
-            "Starting Strategy: ID='%s' (%s) [Memory: %.2f MB]",
-            ctx.model_id,
-            ctx.group,
-            _get_memory_usage_mb(),
+            "tier4 gate %s: measured=%s threshold=%s pass=%s",
+            row["field"], row["measured"], row["threshold"], row["pass"],
         )
 
-        # Vectorized profiling step
-        label_profile_frames.append(_profile_label_space(ctx.raw_preds, ctx, "raw"))
-
-        norm_preds = suite.normalize_predictions(ctx.raw_preds)
-        label_profile_frames.append(_profile_label_space(norm_preds, ctx, "normalized"))
-
-        # Upgraded floating point check to use an epsilon threshold guard
-        pred_variance = norm_preds.select(pl.col("prediction").var()).item()
-        if pred_variance is None or pred_variance < 1e-9:
+    hard_failures: list[str] = []
+    if not result.null_floor_ok:
+        hard_failures.extend(result.null_floor_errors)
+    hard_failures.extend(result.tier4_violations)
+    if not result.monotone_ok:
+        if args.fast_mode:
             log.warning(
-                "  -> Low/Zero variance (< 1e-9) detected for '%s'. Short-circuiting metrics to avoid evaluation crashes.",
-                ctx.model_id,
-            )
-            n_eras_unique = norm_preds.select(pl.col("era").n_unique()).item()
-            fallback_scorecard_frames.append(
-                _fallback_scorecard_frame(
-                    model_id=ctx.model_id,
-                    n_eras=int(n_eras_unique) if n_eras_unique is not None else 0,
-                )
+                "Monotonicity not enforced in fast mode (degraded tier params): %s",
+                result.monotone_error,
             )
         else:
-            scorecards[ctx.model_id] = suite.evaluate_normalized_predictions(
-                norm_preds, model_id=ctx.model_id, seed=ctx.seed
-            )
+            hard_failures.append(result.monotone_error or "monotone failure")
 
-        elapsed = time.perf_counter() - t0
-        runtime_rows.append(
-            {
-                "model_id": ctx.model_id,
-                "strategy_group": ctx.group,
-                "runtime_seconds": round(elapsed, 4),
-                "prediction_rows": norm_preds.height,
-                "seed": ctx.seed,
-            }
-        )
-        log.info("Finished %s in %.3fs", ctx.model_id, elapsed)
+    if hard_failures:
+        for message in hard_failures:
+            log.error("GATE FAILURE: %s", message)
+        return 1
 
-    log.info("Step 4/4: Flushing output files to artifacts/")
-
-    # Pure columnar aggregation and save out
-    pl.concat(label_profile_frames).sort(["model_id", "era"]).write_csv(
-        args.labels_output
-    )
-
-    scorecard_frames: list[pl.DataFrame] = []
-    if scorecards:
-        scorecard_frames.append(scorecards_to_frame(scorecards))
-    scorecard_frames.extend(fallback_scorecard_frames)
-    if not scorecard_frames:
-        raise ValueError("No scorecards were produced.")
-
-    out = (
-        pl.concat(scorecard_frames, how="diagonal_relaxed")
-        .sort("model_id")
-        .join(
-            pl.DataFrame(runtime_rows),
-            on="model_id",
-            how="left",
-        )
-    )
-    out.write_csv(args.output)
-    log.info("Run successfully complete.")
+    log.info("All hard gates passed.")
     return 0
 
 

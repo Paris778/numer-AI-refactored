@@ -10,8 +10,8 @@ import train_first_model  # noqa: F401  (import-time smoke)
 
 
 def test_benchmark_runner_import_surface() -> None:
-    # Task 9 rewrites the runner CLI around BenchmarkHierarchy; until then the
-    # legacy runner must stay importable with its argument parser present.
+    # Task 9 rewrote the runner CLI around BenchmarkHierarchy; the runner
+    # must stay importable with its argument parser present.
     assert callable(benchmark_runner._parse_args)
 
 
@@ -258,3 +258,25 @@ def test_dashboard_app_imports_without_launching() -> None:
         "render_robustness_matrix",
     ):
         assert callable(getattr(dashboard_app, view)), f"missing render view: {view}"
+
+
+def test_benchmark_runner_cli_defaults() -> None:
+    import benchmark_runner
+
+    args = benchmark_runner._parse_args_with(
+        ["--data-dir", "data/v5.3", "--seed", "42", "--n-boot", "1000"]
+    )
+    assert args.seed == 42
+    assert args.n_boot == 1000
+    assert args.output.name == "benchmark_hierarchy_scorecard.csv"
+    assert "reports" in args.output.parts
+    assert args.configs.name == "benchmarks"
+    assert args.fast_mode is False
+
+
+def test_benchmark_runner_cli_fast_mode_and_horizon() -> None:
+    import benchmark_runner
+
+    args = benchmark_runner._parse_args_with(["--fast-mode", "--horizon", "60D"])
+    assert args.fast_mode is True
+    assert args.horizon == "60D"
