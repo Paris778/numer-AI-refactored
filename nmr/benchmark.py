@@ -1398,3 +1398,65 @@ def train_validation_purged_split(
         )
 
     return tuple(trimmed), tuple(ordered_val)
+
+
+def generate_null_predictions(
+    prediction_index: pl.DataFrame,
+    *,
+    kind: str,
+    seed: int,
+    features: pl.DataFrame | None = None,
+    feature_cols: Sequence[str] = (),
+    era_col: str = "era",
+    id_col: str = "id",
+    pred_col: str = "prediction",
+) -> pl.DataFrame:
+    """Generate deterministic tier-0 null predictions on the prediction index."""
+    if kind not in NULL_KINDS:
+        raise ValueError(f"Unknown null kind {kind!r}; expected one of {NULL_KINDS}")
+    missing_keys = [c for c in (era_col, id_col) if c not in prediction_index.columns]
+    if missing_keys:
+        raise ValueError(f"prediction_index missing required columns: {missing_keys}")
+
+    index = (
+        prediction_index.select([era_col, id_col])
+        .unique()
+        .sort([era_col, id_col])
+    )
+    n = index.height
+    rng = np.random.default_rng(seed)
+
+    if kind == "null_constant_05":
+        values = np.full(n, 0.5, dtype=float)
+    elif kind == "null_uniform_rand":
+        values = rng.uniform(0.0, 1.0, n)
+    elif kind == "null_gaussian_rand":
+        values = np.clip(rng.normal(0.5, 0.15, n), 0.0, 1.0)
+    else:  # null_feature_mean
+        if features is None:
+            raise ValueError("null_feature_mean requires a features frame")
+        if not feature_cols:
+            raise ValueError("null_feature_mean requires at least one feature column")
+        missing_feats = [c for c in feature_cols if c not in features.columns]
+        if missing_feats:
+            raise ValueError(f"features missing columns: {missing_feats}")
+        joined = index.join(
+            features.select([era_col, id_col, *feature_cols]),
+            on=[era_col, id_col],
+            how="inner",
+        )
+        if joined.height != n:
+            raise ValueError(
+                f"null_feature_mean join dropped {n - joined.height} rows"
+            )
+        values = (
+            joined.select(
+                pl.mean_horizontal(
+                    [pl.col(c).cast(pl.Float64, strict=False) for c in feature_cols]
+                )
+            )
+            .to_series()
+            .to_numpy()
+        )
+
+    return index.with_columns(pl.Series(pred_col, values))
