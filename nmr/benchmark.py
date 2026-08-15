@@ -30,6 +30,7 @@ from nmr.evaluation import MIN_OVERLAP_ERAS
 from nmr.ensemble import Ensembler
 from nmr.inference import block_bootstrap_ci, resolve_block_len
 from nmr.models import construct_tree_model
+from nmr.risk import NeutralizationEngine
 from nmr.scorecard import MetricScorecard, evaluate_model
 
 logger = logging.getLogger("nmr.benchmark")
@@ -1607,3 +1608,75 @@ def generate_tree_predictions(
         out_col=pred_col,
     )
     return blended.select([era_col, id_col, pred_col]).sort([era_col, id_col])
+
+
+def generate_canonical_predictions(
+    train: pl.DataFrame,
+    val: pl.DataFrame,
+    *,
+    targets: Sequence[str],
+    feature_cols: Sequence[str],
+    params: Mapping[str, Any],
+    seed: int,
+    neutralization: float,
+    purge_eras: int = DEFAULT_BENCHMARK_PURGE_ERAS,
+    era_col: str = "era",
+    id_col: str = "id",
+    pred_col: str = "prediction",
+) -> pl.DataFrame:
+    """Tier-3 canonical baselines: LightGBM fits + optional neutralization."""
+    if not targets:
+        raise ValueError("targets must be non-empty")
+    if not 0.0 <= float(neutralization) <= 1.0:
+        raise ValueError(f"neutralization must be in [0, 1], got {neutralization!r}")
+
+    if len(targets) == 1:
+        out = generate_tree_predictions(
+            train, val, target=targets[0], feature_cols=feature_cols,
+            backend="lightgbm", params=params, seed=seed,
+            purge_eras=purge_eras, era_col=era_col, id_col=id_col,
+            pred_col=pred_col,
+        )
+    else:
+        parts: list[pl.DataFrame] = []
+        for index, target in enumerate(targets):
+            parts.append(
+                generate_tree_predictions(
+                    train, val, target=target, feature_cols=feature_cols,
+                    backend="lightgbm", params=params, seed=seed + index,
+                    purge_eras=purge_eras, era_col=era_col, id_col=id_col,
+                    pred_col=pred_col,
+                ).rename({pred_col: f"__component_{index}"})
+            )
+        stacked = parts[0]
+        for part in parts[1:]:
+            stacked = stacked.join(part, on=[era_col, id_col], how="inner")
+        component_cols = [f"__component_{index}" for index in range(len(targets))]
+        weights = [1.0 / len(targets)] * len(targets)
+        ensembler = Ensembler()
+        out = ensembler.blend(
+            Ensembler.rank_normalize(
+                stacked, pred_cols=component_cols, era_col=era_col
+            ),
+            pred_cols=component_cols,
+            weights=weights,
+            era_col=era_col,
+            out_col=pred_col,
+        ).select([era_col, id_col, pred_col]).sort([era_col, id_col])
+
+    if float(neutralization) > 0.0:
+        # NeutralizationEngine requires the feature columns present in-frame.
+        with_features = out.join(
+            val.select([era_col, id_col, *feature_cols]),
+            on=[era_col, id_col],
+            how="inner",
+        )
+        engine = NeutralizationEngine()
+        out = engine.neutralize(
+            with_features,
+            pred_col=pred_col,
+            feature_cols=list(feature_cols),
+            era_col=era_col,
+            proportion=float(neutralization),
+        ).select([era_col, id_col, pred_col]).sort([era_col, id_col])
+    return out
