@@ -446,3 +446,19 @@ def test_real_reconcile_populates_all_capital_columns() -> None:
         assert row["cagr_1y"] is not None
         assert row["gain_to_pain_ratio"] is not None
         assert row["kelly_fraction"] is not None
+
+
+def test_dashboard_symbols_exported_from_package() -> None:
+    import nmr
+
+    for name in (
+        "UNIFIED_SCHEMA",
+        "evaluate_gate_status",
+        "extract_payout_timeseries",
+        "load_benchmark_frame",
+        "load_unified_leaderboard",
+        "reconcile_capital_metrics",
+        "resolve_benchmark_path",
+    ):
+        assert getattr(nmr, name) is not None, f"nmr.{name} not exported"
+        assert name in nmr.__all__

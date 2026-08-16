@@ -387,6 +387,12 @@ Measured on the dev box (RTX A1000 Laptop, 4 GiB VRAM, driver 580.97; recorded 2
 
 Long-running paths print console progress that never enters artifacts: `analyze_dataset.py` logs `[stage i/n] name ... done (Xs)` per stage and `[label] era k/N` ticks per 100 eras (stderr); `ModelOrchestrator` prints `[fit] lightgbm iteration N` every `_FIT_PROGRESS_PERIOD` (100) iterations (CatBoost: period `verbose`; xgboost 3.x's sklearn wrapper has no callback hook — start/elapsed markers only); `benchmark_runner.py` logs per-strategy start/memory/elapsed. Progress is wall-clock output only — excluded from all canonical hashes by construction (it never reaches artifacts).
 
+### W. Executive Dashboard Engine — `nmr/dashboard.py` + `dashboard_charts.py`
+
+`nmr/dashboard.py` — executive report engine: unified leaderboard schema (superset of the Streamlit leaderboard schema), tier-4 gate projection from `configs/benchmarks/tier4_gate.yaml`, stored-first capital recompute over the 86-era meta-overlap window, payout timeseries with downside mask; plotly/streamlit-free.
+
+`dashboard_charts.py` (top-level control plane) — plotly figure builders for the executive report (presentation only).
+
 ---
 
 ## 3. Module Dependency Graph
