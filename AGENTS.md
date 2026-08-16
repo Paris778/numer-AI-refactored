@@ -188,11 +188,12 @@ Never invent a `numerai_tools` / `numerapi` signature — open the installed sou
 <verification_gates>
 ## 7. Verification Gates
 
-Three gates, in order of rigor — **exact commands live only in [`CONTRIBUTING.md`](CONTRIBUTING.md#testing--verification)**:
+Four gates, in order of rigor — **exact commands live only in [`CONTRIBUTING.md`](CONTRIBUTING.md#testing--verification)**:
 
 1. **Fast gate** — `ruff check .` + full `pytest -q` after every meaningful change.
 2. **Targeted subsets** while iterating — oracle parity (`tests/test_parity.py` + `tests/test_risk_parity.py`) and determinism hashes (`tests/test_benchmark_hierarchy.py`).
 3. **Pre-sign-off gate** (mandatory before delivering work) — full 717-test suite plus the real-data benchmark smoke (`benchmark_runner.py --fast-mode` → `artifacts/reports/benchmark_hierarchy_scorecard_smoke.csv` + `benchmark_gate_report_smoke.csv`).
+4. **End-of-session gate (mandatory)** — after finishing a coding session (before stopping or handing off for review), run the linter and functional gate on the final state: `ruff check .` + `pytest -q`. Never end a session with unverified changes; report the actual results, including any skips or pre-existing failures.
 
 Real-data tests require the `data/v5.3/` parquet assets (see [`README.md`](README.md#data-assets)). If they are missing, report which tests were skipped — never claim full verification. CI (`.github/workflows/ci.yml`) enforces the fast gate on every push/PR (see [`CONTRIBUTING.md`](CONTRIBUTING.md#testing--verification)).
 </verification_gates>

@@ -67,6 +67,8 @@ Run the full gate after every change (from the repo root):
 
 CI (`.github/workflows/ci.yml`) runs `ruff check .` + `pytest -q` on Python 3.12 for every push/PR; real-data tests self-skip without `data/v5.3/`.
 
+**End-of-session requirement:** at the end of a coding session (before stopping or handing off for review), re-run `ruff check .` and `pytest -q` on the final state and confirm both are clean. A session is not finished while the linter or test suite is dirty.
+
 Useful targeted runs while iterating:
 
 ```powershell
