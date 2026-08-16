@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -93,5 +94,86 @@ def test_load_benchmark_frame_full_and_minimal(tmp_path: Path) -> None:
 
 def test_load_benchmark_frame_missing_file_returns_empty_schema_frame(tmp_path: Path) -> None:
     frame = dash.load_benchmark_frame(tmp_path / "missing.csv")
+    assert frame.height == 0
+    assert frame.schema == dash.UNIFIED_SCHEMA
+
+
+def _registry_entry(run_id: str, *, scorecard: bool = True) -> dict:
+    entry = {
+        "run_id": run_id,
+        "metrics": {"mean": 0.1, "std": 0.2, "sharpe": 0.5, "max_drawdown": 0.05},
+        "manifest": {
+            "oof_device": "cpu",
+            "config": {
+                "data": {"feature_set": "small", "feature_subset": None,
+                         "targets": ["target"]},
+                "model": {"backend": "lightgbm", "preset": "fast"},
+                "risk": {"neutralization_proportion": 1.0},
+                "run": {"name": "sample-run"},
+            },
+        },
+        "scorecard": None if not scorecard else {
+            "corr": 0.12, "corr_ci_low": 0.05, "corr_ci_high": 0.19, "corr_n_eras": 30,
+            "corr_sharpe_ac": 0.8, "corr_sharpe_ac_ci_low": 0.6, "corr_sharpe_ac_ci_high": 1.0,
+            "max_drawdown": 0.1, "std_corr": 0.2, "deflated_sharpe": 0.97,
+            "max_feature_exposure": 0.3, "bmc": 0.02, "fnc": 0.05, "n_eras": 30,
+            "cagr_1y": 1.5, "gain_to_pain_ratio": 2.0, "kelly_fraction": 0.4,
+            "mmc_down": 0.01, "mmc_down_reason": None,
+        },
+    }
+    return entry
+
+
+def _write_registry(tmp_path: Path, entries: list[dict]) -> None:
+    for entry in entries:
+        run_dir = tmp_path / entry["run_id"]
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "run.json").write_text(json.dumps(entry), encoding="utf-8")
+
+
+def test_load_unified_leaderboard_registry_only(tmp_path: Path) -> None:
+    _write_registry(tmp_path, [_registry_entry("a" * 64), _registry_entry("b" * 64, scorecard=False)])
+    frame = dash.load_unified_leaderboard(tmp_path, benchmark_path=False)
+    assert frame.height == 2
+    rows = {r["model_id"]: r for r in frame.to_dicts()}
+    assert rows["a" * 64]["source"] == "trained"
+    assert rows["a" * 64]["corr"] == 0.12
+    assert rows["b" * 64]["source"] == "trained_legacy"
+    assert rows["b" * 64]["corr"] == 0.1  # legacy falls back to metrics.mean
+    assert rows["a" * 64]["cagr_1y"] == 1.5  # stored capital block carried through
+
+
+def test_load_unified_leaderboard_zero_scorecard_value_not_legacy(tmp_path: Path) -> None:
+    entry = _registry_entry("c" * 64)
+    entry["scorecard"]["corr"] = 0.0  # legitimate 0.0 must NOT fall through
+    _write_registry(tmp_path, [entry])
+    frame = dash.load_unified_leaderboard(tmp_path, benchmark_path=False)
+    assert frame.row(0, named=True)["corr"] == 0.0
+    assert frame.row(0, named=True)["source"] == "trained"
+
+
+def test_load_unified_leaderboard_corrupt_run_json_skipped(tmp_path: Path) -> None:
+    _write_registry(tmp_path, [_registry_entry("d" * 64)])
+    bad_dir = tmp_path / ("e" * 64)
+    bad_dir.mkdir(parents=True, exist_ok=True)
+    (bad_dir / "run.json").write_text("{not json", encoding="utf-8")
+    frame = dash.load_unified_leaderboard(tmp_path, benchmark_path=False)
+    assert frame.height == 1
+
+
+def test_load_unified_leaderboard_merges_benchmarks(tmp_path: Path) -> None:
+    _write_registry(tmp_path, [_registry_entry("f" * 64)])
+    bench = _write_benchmark_csv(
+        tmp_path,
+        "model_id,corr,corr_sharpe_ac,std_corr,max_drawdown,strategy_group,tier\n"
+        "bench_a,0.05,0.5,0.3,0.2,linear,1\n",
+    )
+    frame = dash.load_unified_leaderboard(tmp_path, benchmark_path=bench)
+    assert frame.height == 2
+    assert set(frame.get_column("source").to_list()) == {"trained", "benchmark"}
+
+
+def test_load_unified_leaderboard_empty_registry_returns_schema_frame(tmp_path: Path) -> None:
+    frame = dash.load_unified_leaderboard(tmp_path, benchmark_path=False)
     assert frame.height == 0
     assert frame.schema == dash.UNIFIED_SCHEMA

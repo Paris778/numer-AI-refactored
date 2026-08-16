@@ -7,6 +7,7 @@ function here is covered by tests/test_dashboard.py.
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -16,7 +17,12 @@ from nmr.config import REPO_ROOT
 
 logger = logging.getLogger("nmr.dashboard")
 
-__all__ = ["UNIFIED_SCHEMA", "load_benchmark_frame", "resolve_benchmark_path"]
+__all__ = [
+    "UNIFIED_SCHEMA",
+    "load_benchmark_frame",
+    "load_unified_leaderboard",
+    "resolve_benchmark_path",
+]
 
 REPORTS_DIR = REPO_ROOT / "artifacts" / "reports"
 LEGACY_BENCHMARK_PATH = REPO_ROOT / "artifacts" / "benchmark_scores.csv"
@@ -152,4 +158,102 @@ def load_benchmark_frame(benchmark_path: Path) -> pl.DataFrame:
                 "run_dir": str(path),
             }
         )
+    return pl.DataFrame(rows, schema=UNIFIED_SCHEMA, strict=False)
+
+
+def load_unified_leaderboard(
+    registry_dir: Path,
+    benchmark_path: Path | None | bool = None,
+    reports_dir: Path | None = None,
+) -> pl.DataFrame:
+    """Load registry runs and (optionally) benchmark rows into one frame.
+
+    Explicit-None discipline: a scorecard value of 0.0 is real and must not
+    fall through to the legacy train-OOF ``metrics``. Corrupt ``run.json``
+    files are skipped. ``benchmark_path=False`` disables benchmark loading
+    (registry-only); otherwise a missing path falls through the resolution
+    chain.
+    """
+    rows: list[dict] = []
+    registry = Path(registry_dir)
+    for run_file in sorted(registry.glob("*/run.json")):
+        try:
+            payload = json.loads(run_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        metrics = payload.get("metrics") or {}
+        manifest = payload.get("manifest") or {}
+        cfg = manifest.get("config") or {}
+        data_cfg = cfg.get("data") or {}
+        model_cfg = cfg.get("model") or {}
+        run_cfg = cfg.get("run") or {}
+        risk_cfg = cfg.get("risk") or {}
+
+        scorecard = payload.get("scorecard") or {}
+        sc_corr = scorecard.get("corr")
+        sc_sharpe = scorecard.get("corr_sharpe_ac")
+        sc_std = scorecard.get("std_corr")
+        sc_dd = scorecard.get("max_drawdown")
+        rows.append(
+            {
+                "model_id": payload.get("run_id") or run_file.parent.name,
+                "source": "trained" if scorecard else "trained_legacy",
+                "run_name": run_cfg.get("name", "unknown"),
+                "backend": model_cfg.get("backend", "unknown"),
+                "preset": model_cfg.get("preset", "unknown"),
+                "feature_set": data_cfg.get("feature_set", "unknown"),
+                "feature_subset": data_cfg.get("feature_subset"),
+                "n_targets": len(data_cfg.get("targets", [])),
+                "targets": ", ".join(data_cfg.get("targets", [])),
+                "neutralization_proportion": risk_cfg.get("neutralization_proportion"),
+                "oof_device": manifest.get("oof_device"),
+                "corr": float(sc_corr if sc_corr is not None else metrics.get("mean", 0.0)),
+                "corr_ci_low": scorecard.get("corr_ci_low"),
+                "corr_ci_high": scorecard.get("corr_ci_high"),
+                "corr_n_eras": scorecard.get("corr_n_eras"),
+                "corr_sharpe_ac": float(
+                    sc_sharpe if sc_sharpe is not None else metrics.get("sharpe", 0.0)
+                ),
+                "corr_sharpe_ac_ci_low": scorecard.get("corr_sharpe_ac_ci_low"),
+                "corr_sharpe_ac_ci_high": scorecard.get("corr_sharpe_ac_ci_high"),
+                "corr_sharpe_ac_n_eras": scorecard.get("corr_sharpe_ac_n_eras"),
+                "std_corr": float(sc_std if sc_std is not None else metrics.get("std", 0.0)),
+                "max_drawdown": float(
+                    sc_dd if sc_dd is not None else metrics.get("max_drawdown", 0.0)
+                ),
+                "deflated_sharpe": scorecard.get("deflated_sharpe"),
+                "fnc": scorecard.get("fnc"),
+                "mmc": scorecard.get("mmc"),
+                "mmc_sharpe_ac": scorecard.get("mmc_sharpe_ac"),
+                "bmc": scorecard.get("bmc"),
+                "cwmm": scorecard.get("cwmm"),
+                "mean_payout": scorecard.get("mean_payout"),
+                "cagr_1y": scorecard.get("cagr_1y"),
+                "gain_to_pain_ratio": scorecard.get("gain_to_pain_ratio"),
+                "kelly_fraction": scorecard.get("kelly_fraction"),
+                "mmc_down": scorecard.get("mmc_down"),
+                "mmc_down_reason": scorecard.get("mmc_down_reason"),
+                "turnover_mean": scorecard.get("turnover_mean"),
+                "n_eras": scorecard.get("n_eras"),
+                "rank_scalar": scorecard.get("rank_scalar"),
+                "cvar5": scorecard.get("cvar5"),
+                "burn_rate": scorecard.get("burn_rate"),
+                "max_feature_exposure": scorecard.get("max_feature_exposure"),
+                "has_bmc": scorecard.get("bmc") is not None,
+                "has_horizon": scorecard.get("horizon_model_sharpe_20") is not None,
+                "has_perturb": scorecard.get("perturb_ceiling_stability") is not None,
+                "has_regime": scorecard.get("regime_count") is not None,
+                "tier": None,
+                "run_dir": str(run_file.parent),
+            }
+        )
+
+    resolved = resolve_benchmark_path(benchmark_path, reports_dir=reports_dir)
+    if resolved is not None:
+        rows.extend(load_benchmark_frame(resolved).to_dicts())
+
+    if not rows:
+        return pl.DataFrame(schema=UNIFIED_SCHEMA)
     return pl.DataFrame(rows, schema=UNIFIED_SCHEMA, strict=False)
