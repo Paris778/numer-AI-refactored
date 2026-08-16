@@ -1765,11 +1765,13 @@ def test_html_escapes_user_strings_and_single_plotly_engine(tmp_path: Path) -> N
         registry_dir=tmp_path,
         technical_entries=[],
     )
-    assert "<script>alert(1)</script>" not in html_text
-    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html_text
-    assert html_text.count("window.Plotly") == 1       # engine injected exactly once
-    assert "cdn.plot.ly" not in html_text
-    assert html_text.count("Plotly.newPlot") == 3      # three figures, no engine per figure
+    assert '"><img src=x' not in html_text            # hostile run_name escaped, never raw
+    assert "&lt;img src=x onerror=alert(2)&gt;" in html_text
+    # engine embed marker (the bundle itself contains many "window.Plotly"
+    # literals, so count the template's own marker, not bundle internals)
+    assert html_text.count("<!-- plotly-engine-embed -->") == 1
+    assert "<script src" not in html_text            # zero external script tags (offline)
+    assert html_text.count("Plotly.newPlot(") == 3   # three figures, no engine per figure
     assert 'class="num gate-fail"' in html_text   # failing gate cell tinted
     assert "badge research" in html_text          # status badge pill rendered
 ```
@@ -1784,9 +1786,11 @@ def test_generate_dashboard_end_to_end_synthetic(tmp_path: Path) -> None:
     assert out.exists()
     text = out.read_text(encoding="utf-8")
     assert "sample-run" in text
-    assert "RESEARCH" in text
-    assert "window.Plotly" in text
-    assert out.stat().st_size < 4.5 * 1024 * 1024
+    # the synthetic fixture genuinely clears the real tier-4 gate (corr 0.12,
+    # sharpe 0.8, fnc 0.05, dsr 0.97, gtp 2.0, cagr 1.5) -> CAPITAL READY badge
+    assert "CAPITAL READY" in text
+    assert "<!-- plotly-engine-embed -->" in text
+    # size is unbounded by ruling (full plotly engine inline, ~4.9 MB)
 ```
 
 (Implementer note: `generate_dashboard()` uses the repo defaults for data/gate paths; with a synthetic tmp registry and real repo data present, capital recompute may run — both paths are valid, the assertions hold either way.)
@@ -2068,6 +2072,7 @@ def _build_html(leaderboard: pl.DataFrame, champion: str | None, kpis: dict,
   pre {{ white-space: pre-wrap; font-size: 0.75rem; }}
   h1, h2 {{ color: #e6edf3; }}
 </style>
+<!-- plotly-engine-embed -->
 <script>{engine_js}</script>
 </head>
 <body>
@@ -2261,9 +2266,9 @@ import polars as pl
 from nmr.dashboard import load_unified_leaderboard, reconcile_capital_metrics, DEFAULT_DATA_DIR
 p = Path('artifacts/dashboard.html')
 text = p.read_text(encoding='utf-8')
-assert p.stat().st_size < 4.5 * 1024 * 1024, 'size budget exceeded'
-assert 'cdn.plot.ly' not in text, 'CDN reference found'
-assert text.count('window.Plotly') == 1, 'plotly engine must be embedded exactly once'
+# size unbounded by ruling (full plotly engine inline, ~4.9 MB)
+assert "<script src" not in text, 'external script tag found (must be offline)'
+assert text.count('<!-- plotly-engine-embed -->') == 1, 'plotly engine must be embedded exactly once'
 frame = load_unified_leaderboard(Path('artifacts/registry'), benchmark_path=False)
 out = reconcile_capital_metrics(frame, Path('artifacts/registry'), DEFAULT_DATA_DIR)
 missing = [r['model_id'][:8] for r in out.to_dicts() if r['cagr_1y'] is None or r['gain_to_pain_ratio'] is None or r['kelly_fraction'] is None]

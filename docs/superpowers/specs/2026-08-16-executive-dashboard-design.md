@@ -12,7 +12,7 @@ Give the portfolio owner / Director of Investing a single, double-clickable HTML
 3. What is our worst-case drawdown and downside risk?
 4. Is the performance real or just luck?
 
-Output: `artifacts/dashboard.html` — self-contained (single embedded Plotly engine, < 4.5 MB), offline, no CDN references, deterministic given identical artifacts.
+Output: `artifacts/dashboard.html` — self-contained (single embedded Plotly engine; file size unbounded — director ruling 2026-08-16: the full engine is embedded inline, ~4.9 MB), offline, no CDN script tags, deterministic given identical artifacts.
 
 ## 2. Approved Decisions Log
 
@@ -194,7 +194,7 @@ KPI semantics: Fleet Best Return = highest recomputed `cagr_1y` across research-
   - Degradation: missing `validation_preds.parquet` → `None` capital cells, no exception.
   - Sentinel: stored block trusted only when all three scalar cells present; stored `mmc_down=None` with reason preserved.
 - **Real-data acceptance** (skip-marked like existing real-data tests): recomputed per-era CORR mean ≈ stored scorecard `corr`; recomputed tier-4 `cagr_1y` == benchmark CSV cell; all 29 runs yield complete capital columns.
-- **Pre-sign-off gates (mandatory, AGENTS.md §7):** `ruff check .` + `pytest -q` (full suite) + `generate_dashboard.py` run producing `artifacts/dashboard.html`; inspect the HTML: size < 4.5 MB, exactly one inline Plotly engine (no CDN `<script>` tags), and all 29 current runs display non-null `cagr_1y`, `gain_to_pain_ratio`, `kelly_fraction`.
+- **Pre-sign-off gates (mandatory, AGENTS.md §7):** `ruff check .` + `pytest -q` (full suite) + `generate_dashboard.py` run producing `artifacts/dashboard.html`; inspect the HTML: exactly one inline Plotly engine (no `<script src>` tags — no CDN dependencies), and all 29 current runs display non-null `cagr_1y`, `gain_to_pain_ratio`, `kelly_fraction`.
 
 ## 8. Scope Exclusions & Risks
 
