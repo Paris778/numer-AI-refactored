@@ -1771,7 +1771,9 @@ def test_html_escapes_user_strings_and_single_plotly_engine(tmp_path: Path) -> N
     # literals, so count the template's own marker, not bundle internals)
     assert html_text.count("<!-- plotly-engine-embed -->") == 1
     assert "<script src" not in html_text            # zero external script tags (offline)
-    assert html_text.count("Plotly.newPlot(") == 3   # three figures, no engine per figure
+    # three figure render calls, counted after the engine's closing </script>
+    # so the plotly.js bundle's own example string is excluded
+    assert html_text.split("</script>", 1)[1].count("Plotly.newPlot(") == 3
     assert 'class="num gate-fail"' in html_text   # failing gate cell tinted
     assert "badge research" in html_text          # status badge pill rendered
 ```
