@@ -243,3 +243,91 @@ def test_gate_status_turnover_violation_when_present(tmp_path: Path) -> None:
     out = frame.row(0, named=True)
     assert out["gate_turnover_mean"] is False  # 0.9 > 0.35
     assert out["status"] == "RESEARCH"
+
+
+def _synthetic_data_dir(tmp_path: Path) -> Path:
+    """era/id/target + meta parquets over 3 eras with a perfectly
+    correlated predictor so recomputed values are exactly known."""
+    data = tmp_path / "data"
+    data.mkdir()
+    rows = []
+    for era in ("0001", "0002", "0003"):
+        for i in range(10):
+            t = float(i)
+            rows.append({"era": era, "id": f"{era}_{i:03d}", "target": t})
+    targets = pl.DataFrame(rows)
+    meta = targets.select(
+        ["era", "id", pl.col("target").alias("numerai_meta_model")]
+    )
+    targets.write_parquet(data / "validation.parquet")
+    meta.write_parquet(data / "meta_model.parquet")
+    return data
+
+
+def _write_preds(run_dir: Path, scale: float) -> None:
+    preds = [
+        {"era": era, "id": f"{era}_{i:03d}", "prediction": scale * float(i)}
+        for era in ("0001", "0002", "0003")
+        for i in range(10)
+    ]
+    pl.DataFrame(preds).write_parquet(run_dir / "validation_preds.parquet")
+
+
+def test_reconcile_capital_metrics_recomputes_missing_block(tmp_path: Path) -> None:
+    _write_registry(tmp_path, [_registry_entry("a" * 64, scorecard=True)])
+    entry = json.loads((tmp_path / ("a" * 64) / "run.json").read_text(encoding="utf-8"))
+    del entry["scorecard"]["cagr_1y"]
+    del entry["scorecard"]["gain_to_pain_ratio"]
+    del entry["scorecard"]["kelly_fraction"]
+    del entry["scorecard"]["mmc_down"]
+    (tmp_path / ("a" * 64) / "run.json").write_text(json.dumps(entry), encoding="utf-8")
+    _write_preds(tmp_path / ("a" * 64), scale=1.0)
+    data = _synthetic_data_dir(tmp_path)
+
+    frame = dash.load_unified_leaderboard(tmp_path, benchmark_path=False)
+    out = dash.reconcile_capital_metrics(frame, tmp_path, data)
+    row = out.row(0, named=True)
+    assert row["cagr_1y"] is not None
+    assert row["gain_to_pain_ratio"] is not None
+    assert row["kelly_fraction"] is not None
+    # perfect corr with target and meta -> payout == 0.05 clipped every era
+    assert row["cagr_1y"] == pytest.approx((1.05 ** 52) - 1.0, abs=1e-6)
+    assert row["gain_to_pain_ratio"] == float("inf")  # no losing eras
+
+
+def test_reconcile_capital_metrics_stored_block_wins(tmp_path: Path) -> None:
+    _write_registry(tmp_path, [_registry_entry("b" * 64)])
+    _write_preds(tmp_path / ("b" * 64), scale=0.0)  # junk preds must be ignored
+    data = _synthetic_data_dir(tmp_path)
+    frame = dash.load_unified_leaderboard(tmp_path, benchmark_path=False)
+    out = dash.reconcile_capital_metrics(frame, tmp_path, data)
+    row = out.row(0, named=True)
+    assert row["cagr_1y"] == 1.5       # stored value untouched
+    assert row["gain_to_pain_ratio"] == 2.0
+    assert row["kelly_fraction"] == 0.4
+    assert row["mmc_down"] == 0.01
+
+
+def test_reconcile_capital_metrics_missing_preds_degrades(tmp_path: Path) -> None:
+    entry = _registry_entry("c" * 64)
+    del entry["scorecard"]["cagr_1y"]
+    del entry["scorecard"]["gain_to_pain_ratio"]
+    del entry["scorecard"]["kelly_fraction"]
+    _write_registry(tmp_path, [entry])
+    data = _synthetic_data_dir(tmp_path)  # no validation_preds.parquet written
+    frame = dash.load_unified_leaderboard(tmp_path, benchmark_path=False)
+    out = dash.reconcile_capital_metrics(frame, tmp_path, data)
+    row = out.row(0, named=True)
+    assert row["cagr_1y"] is None
+    assert row["kelly_fraction"] is None
+
+
+def test_reconcile_capital_metrics_missing_data_assets_noop(tmp_path: Path) -> None:
+    entry = _registry_entry("d" * 64)
+    del entry["scorecard"]["cagr_1y"]
+    del entry["scorecard"]["gain_to_pain_ratio"]
+    del entry["scorecard"]["kelly_fraction"]
+    _write_registry(tmp_path, [entry])
+    frame = dash.load_unified_leaderboard(tmp_path, benchmark_path=False)
+    out = dash.reconcile_capital_metrics(frame, tmp_path, tmp_path / "no-data")
+    assert out.row(0, named=True)["cagr_1y"] is None

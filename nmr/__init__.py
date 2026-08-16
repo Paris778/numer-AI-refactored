@@ -83,6 +83,7 @@ from .dashboard import (
     evaluate_gate_status,
     load_benchmark_frame,
     load_unified_leaderboard,
+    reconcile_capital_metrics,
     resolve_benchmark_path,
 )
 from .data import IngestionAgent
@@ -317,6 +318,7 @@ __all__ = [
     "fleet_summary",
     "paired_era_comparison",
     "promotion_verdict",
+    "reconcile_capital_metrics",
     "OverlappingSimulationResult",
     "PayoutSeries",
     "PayoutResult",

@@ -11,9 +11,18 @@ import json
 import logging
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 
 from nmr.config import REPO_ROOT
+from nmr.evaluation import EvaluationEngine, downside_era_indices
+from nmr.payout import (
+    annual_compounded_return,
+    gain_to_pain_ratio,
+    kelly_fraction,
+    payout_series,
+)
+from nmr.scorecard import MMC_DOWN_MIN_ERAS
 
 logger = logging.getLogger("nmr.dashboard")
 
@@ -22,6 +31,7 @@ __all__ = [
     "evaluate_gate_status",
     "load_benchmark_frame",
     "load_unified_leaderboard",
+    "reconcile_capital_metrics",
     "resolve_benchmark_path",
 ]
 
@@ -350,3 +360,118 @@ def evaluate_gate_status(
     if not rows:
         return pl.DataFrame(schema=_STATUS_SCHEMA)
     return pl.DataFrame(rows, schema=_STATUS_SCHEMA, strict=False)
+
+
+_CAPITAL_SCALAR_CELLS = ("cagr_1y", "gain_to_pain_ratio", "kelly_fraction")
+
+
+def _has_stored_capital_block(row: dict) -> bool:
+    return all(row.get(c) is not None for c in _CAPITAL_SCALAR_CELLS)
+
+
+def _load_shared_lookups(
+    data_dir: Path,
+) -> tuple[pl.DataFrame, pl.DataFrame, list[str]] | None:
+    """Load the 86-era meta-overlap targets + meta lookups once.
+
+    Returns ``(targets_86, meta, meta_eras)`` or None when either data asset
+    is missing.
+    """
+    data = Path(data_dir)
+    targets_path = data / "validation.parquet"
+    meta_path = data / "meta_model.parquet"
+    if not (targets_path.exists() and meta_path.exists()):
+        return None
+    targets = pl.read_parquet(targets_path, columns=["era", "id", "target"])
+    meta = pl.read_parquet(
+        meta_path, columns=["era", "id", "numerai_meta_model"]
+    )
+    meta_eras = sorted(meta.get_column("era").unique().to_list(), key=int)
+    targets_86 = targets.filter(pl.col("era").is_in(meta_eras))
+    return targets_86, meta, meta_eras
+
+
+def _per_era_metrics(
+    preds_path: Path,
+    targets_86: pl.DataFrame,
+    meta: pl.DataFrame,
+) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
+    """Per-era CORR, MMC, and meta-CORR for one stored predictions file.
+
+    Joins on [era, id] against the shared lookups — the meta inner join
+    restricts to the standard 86-era overlap window.
+    """
+    preds = pl.read_parquet(preds_path, columns=["era", "id", "prediction"])
+    joined = (
+        preds.join(targets_86, on=["era", "id"], how="inner")
+        .join(meta, on=["era", "id"], how="inner")
+    )
+    engine = EvaluationEngine()
+    corr = engine.per_era_corr(joined, pred_col="prediction", target_col="target")
+    mmc = engine.per_era_mmc(
+        joined, pred_col="prediction",
+        meta_col="numerai_meta_model", target_col="target",
+    )
+    meta_corr = engine.per_era_corr(
+        joined, pred_col="numerai_meta_model", target_col="target"
+    )
+    return corr, mmc, meta_corr
+
+
+def reconcile_capital_metrics(
+    leaderboard: pl.DataFrame,
+    registry_dir: Path,
+    data_dir: Path,
+) -> pl.DataFrame:
+    """Fill missing capital cells by recomputing from stored parquets.
+
+    Stored-first: rows whose scorecard carries all three scalar capital cells
+    are trusted verbatim (including a stored ``mmc_down=None`` with reason).
+    Everything else for trained/trained_legacy rows is recomputed via the
+    oracle-parity evaluation/payout paths. Registry files are never written.
+    """
+    rows = leaderboard.to_dicts()
+    needs_recompute = [
+        row for row in rows
+        if row["source"] in ("trained", "trained_legacy")
+        and not _has_stored_capital_block(row)
+    ]
+    if not needs_recompute:
+        return leaderboard
+
+    lookups = _load_shared_lookups(data_dir)
+    if lookups is None:
+        logger.warning(
+            "nmr.dashboard: v5.3 targets/meta_model missing at %s; "
+            "capital cells left None", data_dir,
+        )
+        return leaderboard
+    targets_86, meta, _ = lookups
+
+    for row in rows:
+        if not (
+            row["source"] in ("trained", "trained_legacy")
+            and not _has_stored_capital_block(row)
+        ):
+            continue
+        preds_path = Path(row["run_dir"]) / "validation_preds.parquet"
+        if not preds_path.exists():
+            logger.warning(
+                "nmr.dashboard: %s has no validation_preds.parquet; "
+                "capital cells left None", row["model_id"],
+            )
+            continue
+        corr, mmc, meta_corr = _per_era_metrics(preds_path, targets_86, meta)
+        series = payout_series(corr, mmc)
+        row["cagr_1y"] = annual_compounded_return(series.clipped)
+        row["gain_to_pain_ratio"] = gain_to_pain_ratio(series.clipped)
+        row["kelly_fraction"] = kelly_fraction(series.raw)
+        downside = downside_era_indices(meta_corr)
+        if len(downside) >= MMC_DOWN_MIN_ERAS:
+            row["mmc_down"] = float(np.mean([mmc[e] for e in downside]))
+            row["mmc_down_reason"] = None
+        else:
+            row["mmc_down"] = None
+            row["mmc_down_reason"] = "insufficient_downside_eras"
+
+    return pl.DataFrame(rows, schema=UNIFIED_SCHEMA, strict=False)

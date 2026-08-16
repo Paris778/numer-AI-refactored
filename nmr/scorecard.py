@@ -45,6 +45,7 @@ from nmr.robustness import (
 logger = logging.getLogger("nmr.scorecard")
 
 _MMC_DOWN_MIN_ERAS = 5
+MMC_DOWN_MIN_ERAS = _MMC_DOWN_MIN_ERAS  # public alias for cross-module use
 
 __all__ = ["MetricCell", "MetricScorecard", "evaluate_model"]
 
