@@ -216,7 +216,7 @@ def _build_html(leaderboard: pl.DataFrame, champion: str | None, kpis: dict,
     """Assemble the full HTML document (single plotly engine in <head>)."""
     engine_js = get_plotlyjs()
     figure_html = {
-        name: pio.to_html(fig, include_plotlyjs=False, full_html=False)
+        name: pio.to_html(fig, include_plotlyjs=False, full_html=False, div_id=name)
         for name, fig in figures.items()
     }
     rows_html = "".join(_row_html(row) for row in _table_rows(leaderboard, champion))

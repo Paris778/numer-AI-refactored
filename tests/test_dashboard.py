@@ -598,3 +598,21 @@ def test_generate_dashboard_end_to_end_synthetic(tmp_path: Path) -> None:
     assert "CAPITAL READY" in text
     assert "<!-- plotly-engine-embed -->" in text
     # size is unbounded by ruling (full plotly engine inline, ~4.9 MB)
+
+
+def test_build_html_deterministic_across_calls(tmp_path: Path) -> None:
+    rows = pl.DataFrame(
+        [{"model_id": "a" * 64, "source": "trained", "run_name": "sample-run",
+          "corr_sharpe_ac": 0.8, "corr_sharpe_ac_ci_low": 0.6,
+          "corr_sharpe_ac_ci_high": 1.0, "cagr_1y": 1.5,
+          "gain_to_pain_ratio": 2.0, "kelly_fraction": 0.4, "mmc_down": 0.01,
+          "deflated_sharpe": 0.97, "max_drawdown": 0.1, "fnc": 0.05,
+          "corr": 0.12, "status": "RESEARCH", "tier": None}]
+    )
+    kwargs = dict(
+        leaderboard=rows, champion=None, kpis=_kpis_for_test(),
+        figures=_charts_for_test(), registry_dir=tmp_path, technical_entries=[],
+    )
+    first = generate_dashboard._build_html(**kwargs)
+    second = generate_dashboard._build_html(**kwargs)
+    assert first == second  # byte-identical, no random div ids
