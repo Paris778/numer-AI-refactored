@@ -3,10 +3,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 import pytest
 
 import nmr.dashboard as dash
+import nmr.evaluation as nmr_evaluation
+import nmr.payout as payout
 from nmr.config import REPO_ROOT
 
 
@@ -373,3 +376,73 @@ def test_extract_payout_timeseries_missing_run_skipped(tmp_path: Path) -> None:
         tmp_path, data, run_ids=["a" * 64, "9" * 64], include_tier4_ref=False
     )
     assert set(payload["series"]) == {"a" * 64}
+
+
+_REAL_VALIDATION = Path("data/v5.3/validation.parquet")
+_REAL_META = Path("data/v5.3/meta_model.parquet")
+_REAL_BENCH = Path("data/v5.3/validation_benchmark_models.parquet")
+_REAL_REGISTRY = Path("artifacts/registry")
+_SMOKE_CSV = Path("artifacts/reports/benchmark_hierarchy_scorecard_smoke.csv")
+_HAS_REAL = (
+    _REAL_VALIDATION.exists()
+    and _REAL_META.exists()
+    and _REAL_BENCH.exists()
+    and _REAL_REGISTRY.exists()
+    and any(_REAL_REGISTRY.glob("*/run.json"))
+)
+
+
+@pytest.mark.skipif(not _HAS_REAL, reason="real registry/v5.3 data absent; skipped in CI")
+def test_real_recompute_matches_stored_corr() -> None:
+    frame = dash.load_unified_leaderboard(_REAL_REGISTRY, benchmark_path=False)
+    row = frame.sort("corr_sharpe_ac", descending=True, nulls_last=True).row(0, named=True)
+    lookups = dash._load_shared_lookups(Path("data/v5.3"))
+    assert lookups is not None
+    targets_86, meta, _ = lookups
+    preds_path = Path(row["run_dir"]) / "validation_preds.parquet"
+    corr, _, _ = dash._per_era_metrics(preds_path, targets_86, meta)
+    assert len(corr) == row["corr_n_eras"]
+    assert float(np.mean(list(corr.values()))) == pytest.approx(row["corr"], abs=1e-4)
+
+
+@pytest.mark.skipif(not (_HAS_REAL and _SMOKE_CSV.exists()),
+                    reason="real v5.3 data + smoke benchmark CSV absent; skipped in CI")
+def test_real_tier4_cagr_matches_smoke_csv() -> None:
+    lookups = dash._load_shared_lookups(Path("data/v5.3"))
+    assert lookups is not None
+    targets_86, meta, _ = lookups
+    bench = pl.read_parquet(
+        _REAL_BENCH, columns=["era", "id", "v53_lgbm_ender60"]
+    )
+    axis = sorted(
+        meta.get_column("era").unique().to_list(), key=int
+    )
+    joined = (
+        bench.filter(pl.col("era").is_in(axis))
+        .join(targets_86, on=["era", "id"], how="inner")
+        .join(meta, on=["era", "id"], how="inner")
+    )
+    engine = nmr_evaluation.EvaluationEngine()  # import nmr.evaluation as nmr_evaluation at top
+    corr = engine.per_era_corr(joined, pred_col="v53_lgbm_ender60", target_col="target")
+    mmc = engine.per_era_mmc(
+        joined, pred_col="v53_lgbm_ender60",
+        meta_col="numerai_meta_model", target_col="target",
+    )
+    pay = payout.payout_series(corr, mmc)  # import nmr.payout as payout at top
+    recomputed = payout.annual_compounded_return(pay.clipped)
+    stored = dash.load_benchmark_frame(_SMOKE_CSV).filter(
+        pl.col("model_id") == "v53_lgbm_ender60"
+    ).row(0, named=True)["cagr_1y"]
+    assert float(recomputed) == pytest.approx(float(stored), abs=1e-6)
+
+
+@pytest.mark.skipif(not _HAS_REAL, reason="real registry/v5.3 data absent; skipped in CI")
+def test_real_reconcile_populates_all_capital_columns() -> None:
+    frame = dash.load_unified_leaderboard(_REAL_REGISTRY, benchmark_path=False)
+    out = dash.reconcile_capital_metrics(frame, _REAL_REGISTRY, Path("data/v5.3"))
+    trained = out.filter(pl.col("source").is_in(["trained", "trained_legacy"]))
+    assert trained.height > 0
+    for row in trained.to_dicts():
+        assert row["cagr_1y"] is not None
+        assert row["gain_to_pain_ratio"] is not None
+        assert row["kelly_fraction"] is not None
