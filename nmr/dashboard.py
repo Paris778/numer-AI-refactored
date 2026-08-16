@@ -34,12 +34,12 @@ __all__ = [
     "extract_payout_timeseries",
     "load_benchmark_frame",
     "load_unified_leaderboard",
+    "read_champion_pointer",
     "reconcile_capital_metrics",
     "resolve_benchmark_path",
 ]
 
 REPORTS_DIR = REPO_ROOT / "artifacts" / "reports"
-LEGACY_BENCHMARK_PATH = REPO_ROOT / "artifacts" / "benchmark_scores.csv"
 DEFAULT_REGISTRY_DIR = REPO_ROOT / "artifacts" / "registry"
 DEFAULT_DATA_DIR = REPO_ROOT / "data" / "v5.3"
 DEFAULT_GATE_PATH = REPO_ROOT / "configs" / "benchmarks" / "tier4_gate.yaml"
@@ -75,13 +75,12 @@ UNIFIED_SCHEMA = pl.Schema(
 def resolve_benchmark_path(
     benchmark_path: Path | None | bool = None,
     reports_dir: Path | None = None,
-    legacy_path: Path | None = None,
 ) -> Path | None:
     """Resolve the benchmark scorecard CSV via the fallback chain.
 
     Chain: given path (if it exists) -> full hierarchy CSV -> smoke CSV ->
-    legacy CSV -> None. ``benchmark_path=False`` is an explicit directive to
-    disable benchmark loading entirely (test isolation).
+    None. ``benchmark_path=False`` is an explicit directive to disable
+    benchmark loading entirely (test isolation).
     """
     if benchmark_path is False:
         return None
@@ -90,11 +89,9 @@ def resolve_benchmark_path(
         if given.exists():
             return given
     reports = Path(reports_dir) if reports_dir is not None else REPORTS_DIR
-    legacy = Path(legacy_path) if legacy_path is not None else LEGACY_BENCHMARK_PATH
     for candidate in (
         reports / "benchmark_hierarchy_scorecard.csv",
         reports / "benchmark_hierarchy_scorecard_smoke.csv",
-        legacy,
     ):
         if candidate.exists():
             return candidate
@@ -289,7 +286,7 @@ _STATUS_SCHEMA = pl.Schema(
 )
 
 
-def _read_champion_pointer(champion_path: Path) -> str | None:
+def read_champion_pointer(champion_path: Path) -> str | None:
     """Opaque champion pointer; missing or corrupt file -> None."""
     path = Path(champion_path)
     if not path.exists():
@@ -335,7 +332,7 @@ def evaluate_gate_status(
     if gate is None:
         raise ValueError(f"gate config {gate_config_path} has no gate section")
     reference_column = file_cfg.reference_column
-    champion_id = _read_champion_pointer(champion_path)
+    champion_id = read_champion_pointer(champion_path)
 
     rows: list[dict] = []
     for row in leaderboard.to_dicts():
@@ -423,7 +420,6 @@ def _per_era_metrics(
 
 def reconcile_capital_metrics(
     leaderboard: pl.DataFrame,
-    registry_dir: Path,
     data_dir: Path,
 ) -> pl.DataFrame:
     """Fill missing capital cells by recomputing from stored parquets.

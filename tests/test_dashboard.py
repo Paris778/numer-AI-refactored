@@ -28,14 +28,10 @@ def test_resolve_benchmark_path_chain_falls_back(tmp_path: Path) -> None:
     reports.mkdir()
     smoke = reports / "benchmark_hierarchy_scorecard_smoke.csv"
     smoke.write_text("x", encoding="utf-8")
-    legacy = tmp_path / "benchmark_scores.csv"
-    legacy.write_text("x", encoding="utf-8")
     # given path missing -> chain: full (missing) -> smoke (hit)
-    assert dash.resolve_benchmark_path(reports / "nope.csv", reports_dir=reports, legacy_path=legacy) == smoke
+    assert dash.resolve_benchmark_path(reports / "nope.csv", reports_dir=reports) == smoke
     smoke.unlink()
-    assert dash.resolve_benchmark_path(reports / "nope.csv", reports_dir=reports, legacy_path=legacy) == legacy
-    legacy.unlink()
-    assert dash.resolve_benchmark_path(reports / "nope.csv", reports_dir=reports, legacy_path=legacy) is None
+    assert dash.resolve_benchmark_path(reports / "nope.csv", reports_dir=reports) is None
 
 
 def test_resolve_benchmark_path_false_disables_chain(tmp_path: Path) -> None:
@@ -291,7 +287,7 @@ def test_reconcile_capital_metrics_recomputes_missing_block(tmp_path: Path) -> N
     data = _synthetic_data_dir(tmp_path)
 
     frame = dash.load_unified_leaderboard(tmp_path, benchmark_path=False)
-    out = dash.reconcile_capital_metrics(frame, tmp_path, data)
+    out = dash.reconcile_capital_metrics(frame, data)
     row = out.row(0, named=True)
     assert row["cagr_1y"] is not None
     assert row["gain_to_pain_ratio"] is not None
@@ -306,7 +302,7 @@ def test_reconcile_capital_metrics_stored_block_wins(tmp_path: Path) -> None:
     _write_preds(tmp_path / ("b" * 64), scale=0.0)  # junk preds must be ignored
     data = _synthetic_data_dir(tmp_path)
     frame = dash.load_unified_leaderboard(tmp_path, benchmark_path=False)
-    out = dash.reconcile_capital_metrics(frame, tmp_path, data)
+    out = dash.reconcile_capital_metrics(frame, data)
     row = out.row(0, named=True)
     assert row["cagr_1y"] == 1.5       # stored value untouched
     assert row["gain_to_pain_ratio"] == 2.0
@@ -322,7 +318,7 @@ def test_reconcile_capital_metrics_missing_preds_degrades(tmp_path: Path) -> Non
     _write_registry(tmp_path, [entry])
     data = _synthetic_data_dir(tmp_path)  # no validation_preds.parquet written
     frame = dash.load_unified_leaderboard(tmp_path, benchmark_path=False)
-    out = dash.reconcile_capital_metrics(frame, tmp_path, data)
+    out = dash.reconcile_capital_metrics(frame, data)
     row = out.row(0, named=True)
     assert row["cagr_1y"] is None
     assert row["kelly_fraction"] is None
@@ -335,7 +331,7 @@ def test_reconcile_capital_metrics_missing_data_assets_noop(tmp_path: Path) -> N
     del entry["scorecard"]["kelly_fraction"]
     _write_registry(tmp_path, [entry])
     frame = dash.load_unified_leaderboard(tmp_path, benchmark_path=False)
-    out = dash.reconcile_capital_metrics(frame, tmp_path, tmp_path / "no-data")
+    out = dash.reconcile_capital_metrics(frame, tmp_path / "no-data")
     assert out.row(0, named=True)["cagr_1y"] is None
 
 
@@ -442,7 +438,7 @@ def test_real_tier4_cagr_matches_smoke_csv() -> None:
 @pytest.mark.skipif(not _HAS_REAL, reason="real registry/v5.3 data absent; skipped in CI")
 def test_real_reconcile_populates_all_capital_columns() -> None:
     frame = dash.load_unified_leaderboard(_REAL_REGISTRY, benchmark_path=False)
-    out = dash.reconcile_capital_metrics(frame, _REAL_REGISTRY, Path("data/v5.3"))
+    out = dash.reconcile_capital_metrics(frame, Path("data/v5.3"))
     trained = out.filter(pl.col("source").is_in(["trained", "trained_legacy"]))
     assert trained.height > 0
     for row in trained.to_dicts():
@@ -460,6 +456,7 @@ def test_dashboard_symbols_exported_from_package() -> None:
         "extract_payout_timeseries",
         "load_benchmark_frame",
         "load_unified_leaderboard",
+        "read_champion_pointer",
         "reconcile_capital_metrics",
         "resolve_benchmark_path",
     ):

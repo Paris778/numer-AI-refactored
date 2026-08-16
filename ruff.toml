@@ -7,7 +7,7 @@ target-version = "py312"
 line-length = 120
 
 # Notebooks are JSON control-plane artifacts (not lint targets); artifacts/ is
-# machine-generated scratch (e.g. gpu_bench.py) — both stay out of the lint scope.
+# machine-generated scratch (logs, generated HTML) — both stay out of the lint scope.
 extend-exclude = [
     "*.ipynb",
     "artifacts/",

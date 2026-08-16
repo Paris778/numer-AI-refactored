@@ -84,6 +84,7 @@ from .dashboard import (
     extract_payout_timeseries,
     load_benchmark_frame,
     load_unified_leaderboard,
+    read_champion_pointer,
     reconcile_capital_metrics,
     resolve_benchmark_path,
 )
@@ -320,6 +321,7 @@ __all__ = [
     "fleet_summary",
     "paired_era_comparison",
     "promotion_verdict",
+    "read_champion_pointer",
     "reconcile_capital_metrics",
     "OverlappingSimulationResult",
     "PayoutSeries",

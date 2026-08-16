@@ -23,7 +23,7 @@ Output: `artifacts/dashboard.html` — self-contained (single embedded Plotly en
 | 3 | Gate status semantics | **Absolute hurdles only.** `CHAMPION` = `champion.json` pointer (currently absent → "None Designated"); `CAPITAL READY` = clears all hard tier-4 hurdles from `configs/benchmarks/tier4_gate.yaml`; `RESEARCH` = otherwise (all 29 current runs). Benchmark rows are exempt from these statuses (see #13). |
 | 4 | Missing capital cells (`cagr_1y`, `gain_to_pain_ratio`, `kelly_fraction`, `mmc_down` — absent in all 29 run.json scorecards) | **Recompute at report time with stored-first fallback.** Registry stays immutable; recompute uses `nmr/evaluation.py` per-era metrics + `nmr/payout.py` (oracle-parity code). |
 | 5 | Graph scope | Core owner set: Sharpe leaderboard bar + cumulative wealth curve + drawdown curve + market-dislocation shading. Regime/perturb/horizon surfaces excluded (cells null in 29/29 runs). |
-| 6 | Benchmark reference | Tier-4 per-era curve computed directly from `validation_benchmark_models.parquet` column `v53_lgbm_ender60` (independent of which scorecard CSV exists). Benchmark CSV fallback chain: full → smoke → legacy `benchmark_scores.csv`. |
+| 6 | Benchmark reference | Tier-4 per-era curve computed directly from `validation_benchmark_models.parquet` column `v53_lgbm_ender60` (independent of which scorecard CSV exists). Benchmark CSV fallback chain: full → smoke (the legacy S11 `benchmark_scores.csv` entry was removed in the 2026-08-16 legacy sweep). |
 | 7 | Table grouping | Executive table groups rows: **Active Champion / Proprietary Research Fleet / Benchmark Reference Floor** (tier-0 nulls through tier-4), so hurdles are never confused with proprietary models. |
 | 8 | Determinism | No wall-clock timestamp in the HTML; footer carries data version + registry stats. Stable sort orders (metric desc, run_id tiebreak). |
 | 9 | Gate engine / agent harness from the parent plan | **Out of scope.** Gate assertions already exist (`assert_tier0_null_floor`, `assert_tier4_gate`, `assert_hierarchy_monotone`, `promotion_verdict`); the dashboard projects them read-only, never enforces. |
@@ -49,7 +49,7 @@ Storage (immutable reads only)
       │
       ▼
 nmr/dashboard.py (pure engine — polars/json/numpy + nmr.{evaluation,payout,benchmark,meta,config} only)
-  resolve_benchmark_path()    → benchmark CSV via full → smoke → legacy chain
+  resolve_benchmark_path()    → benchmark CSV via full → smoke chain
   load_unified_leaderboard()  → unified polars frame (registry runs + benchmark tiers)
   reconcile_capital_metrics() → stored-first, recompute-fallback capital cells (single shared scan)
   extract_payout_timeseries() → per-era payout/wealth/drawdown series + meta drawdown mask
@@ -80,9 +80,10 @@ def load_unified_leaderboard(
 
 def reconcile_capital_metrics(
     leaderboard: pl.DataFrame,
-    registry_dir: Path,
     data_dir: Path,
 ) -> pl.DataFrame: ...
+
+def read_champion_pointer(champion_path: Path) -> str | None: ...
 
 def extract_payout_timeseries(
     registry_dir: Path,

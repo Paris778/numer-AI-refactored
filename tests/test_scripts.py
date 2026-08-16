@@ -105,7 +105,7 @@ def test_leaderboard_bar_labels_unique_on_run_name_collision(tmp_path) -> None:
 
 
 def test_benchmarks_and_merge(tmp_path) -> None:
-    bench_path = tmp_path / "benchmark_scores.csv"
+    bench_path = tmp_path / "bench.csv"
     bench_path.write_text(
         "model_id,corr,corr_sharpe_ac,corr_sharpe_ac_ci_low,corr_sharpe_ac_ci_high,std_corr,max_drawdown,strategy_group,horizon_target_name\n"
         "bench_a,0.05,0.5,0.4,0.6,0.3,0.2,linear,cyrusd\n",

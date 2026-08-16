@@ -26,6 +26,7 @@ from nmr.dashboard import (
     evaluate_gate_status,
     extract_payout_timeseries,
     load_unified_leaderboard,
+    read_champion_pointer,
     reconcile_capital_metrics,
 )
 
@@ -72,18 +73,6 @@ def _bar_input(leaderboard: pl.DataFrame, champion: str | None) -> pl.DataFrame:
             for row in top.to_dicts()
         ]
     )
-
-
-def _champion_id(registry_dir: Path) -> str | None:
-    champion_path = registry_dir / "champion.json"
-    if not champion_path.exists():
-        return None
-    try:
-        payload = json.loads(champion_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
-    run_id = payload.get("run_id") if isinstance(payload, dict) else None
-    return run_id if isinstance(run_id, str) else None
 
 
 def _kpi_cards(leaderboard: pl.DataFrame, champion: str | None,
@@ -321,7 +310,7 @@ def generate_dashboard(
     output_path = Path(output_path) if output_path is not None else REPO_ROOT / "artifacts" / "dashboard.html"
 
     leaderboard = load_unified_leaderboard(registry_dir, benchmark_path=benchmark_path)
-    leaderboard = reconcile_capital_metrics(leaderboard, registry_dir, DEFAULT_DATA_DIR)
+    leaderboard = reconcile_capital_metrics(leaderboard, DEFAULT_DATA_DIR)
     statuses = evaluate_gate_status(leaderboard, DEFAULT_GATE_PATH, registry_dir / "champion.json")
     leaderboard = leaderboard.join(statuses, on="model_id", how="left")
 
@@ -329,7 +318,7 @@ def generate_dashboard(
     assert gate_cfg.reference_column is not None
     hurdle_sharpe = float(gate_cfg.gate.corr_sharpe_ac_min)
 
-    champion = _champion_id(registry_dir)
+    champion = read_champion_pointer(registry_dir / "champion.json")
     fleet = leaderboard.filter(pl.col("source").is_in(["trained", "trained_legacy"]))
     top_ids = fleet.sort("corr_sharpe_ac", descending=True, nulls_last=True).head(3)
     timeseries = extract_payout_timeseries(
