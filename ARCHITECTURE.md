@@ -39,7 +39,7 @@ RunRegistry.promote() ─> artifacts/registry/champion.json   (atomic pointer)
 RunRegistry.promote_if_better() ─> champion.json  (guarded: scorecard metric + direction)
      |
      v
-generate_dashboard.py ─> artifacts/dashboard.html  (ranked leaderboard)
+generate_dashboard.py ─> artifacts/dashboard.html  (executive report — offline single-file HTML)
 
 Parallel harness:
 benchmark_runner.py ──> BenchmarkHierarchy (nmr/benchmark.py)
