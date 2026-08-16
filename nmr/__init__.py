@@ -78,7 +78,7 @@ from .config import (
     load_config,
     set_global_seeds,
 )
-from .dashboard import UNIFIED_SCHEMA, resolve_benchmark_path
+from .dashboard import UNIFIED_SCHEMA, load_benchmark_frame, resolve_benchmark_path
 from .data import IngestionAgent
 from .deployment import DeploymentArtifact, load_predict, serialize_predict
 from .ensemble import Ensembler
@@ -237,6 +237,7 @@ __all__ = [
     "hierarchy_frame",
     "load_benchmark_data",
     "load_benchmark_file",
+    "load_benchmark_frame",
     "load_benchmark_suite_config",
     "resolve_benchmark_feature_cols",
     "score_benchmark_column",
