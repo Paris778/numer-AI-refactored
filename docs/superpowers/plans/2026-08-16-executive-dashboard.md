@@ -809,11 +809,11 @@ git commit -m "feat(dashboard): gate status projection from tier4_gate.yaml"
 **Interfaces:**
 - Consumes: `UNIFIED_SCHEMA`; `nmr.evaluation.{EvaluationEngine, downside_era_indices}`; `nmr.payout.{payout_series, annual_compounded_return, gain_to_pain_ratio, kelly_fraction}`; public alias `MMC_DOWN_MIN_ERAS` from `nmr.scorecard` (the alias is added to `nmr/scorecard.py` in this task — see the implementer note in Step 3).
 - Produces: `reconcile_capital_metrics(leaderboard: pl.DataFrame, registry_dir: Path, data_dir: Path) -> pl.DataFrame` — same schema; fills `cagr_1y`, `gain_to_pain_ratio`, `kelly_fraction`, `mmc_down` (+ `mmc_down_reason`) for trained/trained_legacy rows lacking the stored block; leaves cells untouched otherwise; missing data assets or missing `validation_preds.parquet` → cells stay `None` with a warning, no exception.
-- Private helpers also produced here (reused by Task 6): `_has_stored_capital_block(row: dict) -> bool`, `_load_shared_lookups(data_dir: Path) -> tuple[pl.DataFrame, pl.DataFrame, list[str]] | None` (returns `(targets_86, meta, meta_eras)`), `_per_era_metrics(preds_path: Path, targets_86: pl.DataFrame, meta: pl.DataFrame) -> tuple[dict[str, float], dict[str, float], dict[str, float]]` returning `(corr, mmc, meta_corr)`.
+- Private helpers also produced here (reused by Task 6 — `_load_shared_lookups` and `_per_era_metrics`; `_has_stored_capital_block` is Task-5-local): `_has_stored_capital_block(row: dict) -> bool`, `_load_shared_lookups(data_dir: Path) -> tuple[pl.DataFrame, pl.DataFrame, list[str]] | None` (returns `(targets_86, meta, meta_eras)`), `_per_era_metrics(preds_path: Path, targets_86: pl.DataFrame, meta: pl.DataFrame) -> tuple[dict[str, float], dict[str, float], dict[str, float]]` returning `(corr, mmc, meta_corr)`.
 
 - [ ] **Step 1: Write the failing test**
 
-Append to `tests/test_dashboard.py` (add `import numpy as np` at top):
+Append to `tests/test_dashboard.py` (no new imports — the tests use only `json`, `pl`, `pytest`, and `dash` already imported):
 
 ```python
 def _synthetic_data_dir(tmp_path: Path) -> Path:
@@ -1423,7 +1423,7 @@ and after `"load_benchmark_suite_config",`:
     "load_unified_leaderboard",
 ```
 
-and after `"reconcile"`... there is no `reconcile` entry — add `"reconcile_capital_metrics",` alphabetically after `"regime_conditioned_corr",` and `"resolve_benchmark_path",` after `"resolve_bandwidth",`.
+and after `"reconcile"`... there is no `reconcile` entry — add `"reconcile_capital_metrics",` alphabetically after `"promotion_verdict",` (actual correct slot: `reconcile_` < `regime_`), and `"resolve_benchmark_path",` after `"resolve_bandwidth",`.
 
 - [ ] **Step 4: Run tests**
 
