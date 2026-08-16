@@ -7,6 +7,7 @@ import numpy as np
 import polars as pl
 import pytest
 
+import dashboard_charts as charts
 import nmr.dashboard as dash
 import nmr.evaluation as nmr_evaluation
 import nmr.payout as payout
@@ -462,3 +463,75 @@ def test_dashboard_symbols_exported_from_package() -> None:
     ):
         assert getattr(nmr, name) is not None, f"nmr.{name} not exported"
         assert name in nmr.__all__
+
+
+def _bar_input() -> pl.DataFrame:
+    return pl.DataFrame(
+        [
+            {"label": "run-a · aaaaaaaa", "corr_sharpe_ac": 0.8,
+             "corr_sharpe_ac_ci_low": 0.6, "corr_sharpe_ac_ci_high": 1.0,
+             "champion": True},
+            {"label": "bench · bbbbbbbb", "corr_sharpe_ac": 0.5,
+             "corr_sharpe_ac_ci_low": None, "corr_sharpe_ac_ci_high": None,
+             "champion": False},
+        ]
+    )
+
+
+def _ts_payload() -> dict:
+    return {
+        "eras": ["0001", "0002", "0003", "0004"],
+        "meta_downside_mask": [True, True, False, True],
+        "series": {
+            "a": {"label": "run-a", "cumulative_wealth": [1.0, 1.05, 1.10, 1.08],
+                  "drawdown": [0.0, 0.0, 0.0, -0.018]},
+        },
+    }
+
+
+def test_leaderboard_chart_traces_and_hurdle_line() -> None:
+    fig = charts.build_leaderboard_bar_chart(_bar_input(), hurdle_sharpe=0.78)
+    assert len(fig.data) == 2
+    # first trace is the last row (ascending order -> best on top)
+    assert fig.data[0].y[0] == "bench · bbbbbbbb"
+    # hurdle line is a layout shape
+    shapes = [s for s in fig.layout.shapes if s.type == "line"]
+    assert any(abs(s.x0 - 0.78) < 1e-9 for s in shapes)
+
+
+def test_wealth_chart_downside_vrects() -> None:
+    fig = charts.build_cumulative_wealth_chart(_ts_payload())
+    assert len(fig.data) == 1
+    assert fig.data[0].y[-1] == 1.08
+    vrects = [s for s in fig.layout.shapes if s.type == "rect"]
+    assert len(vrects) == 2          # [0001..0002] and [0004..0004]
+    assert vrects[0].x0 == "0001" and vrects[0].x1 == "0002"
+    assert vrects[1].x0 == "0004" and vrects[1].x1 == "0004"
+
+
+def test_drawdown_chart_underwater_fill() -> None:
+    fig = charts.build_drawdown_chart(_ts_payload())
+    assert len(fig.data) == 1
+    assert fig.data[0].fill == "tozeroy"
+    assert fig.data[0].y[-1] == pytest.approx(-0.018)
+
+
+def test_timeseries_charts_empty_payload_render_annotation() -> None:
+    empty = {"eras": [], "meta_downside_mask": [], "series": {}}
+    for builder in (charts.build_cumulative_wealth_chart, charts.build_drawdown_chart):
+        fig = builder(empty)
+        assert len(fig.data) == 0
+        assert fig.layout.annotations
+        assert "unavailable" in fig.layout.annotations[0].text.lower()
+
+
+def test_leaderboard_chart_empty_frame_render_annotation() -> None:
+    fig = charts.build_leaderboard_bar_chart(
+        pl.DataFrame(schema={"label": pl.String, "corr_sharpe_ac": pl.Float64,
+                             "corr_sharpe_ac_ci_low": pl.Float64,
+                             "corr_sharpe_ac_ci_high": pl.Float64,
+                             "champion": pl.Boolean}),
+        hurdle_sharpe=0.78,
+    )
+    assert len(fig.data) == 0
+    assert fig.layout.annotations
