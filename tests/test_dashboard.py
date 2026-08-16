@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import polars as pl
 import pytest
 
 import nmr.dashboard as dash
+from nmr.config import REPO_ROOT
 
 
 def test_resolve_benchmark_path_prefers_given_existing(tmp_path: Path) -> None:
@@ -177,3 +179,67 @@ def test_load_unified_leaderboard_empty_registry_returns_schema_frame(tmp_path: 
     frame = dash.load_unified_leaderboard(tmp_path, benchmark_path=False)
     assert frame.height == 0
     assert frame.schema == dash.UNIFIED_SCHEMA
+
+
+_GATE_YAML = REPO_ROOT / "configs" / "benchmarks" / "tier4_gate.yaml"
+
+
+def _status_frame(tmp_path: Path, rows: list[dict]) -> pl.DataFrame:
+    frame = pl.DataFrame(rows, schema=dash.UNIFIED_SCHEMA, strict=False)
+    return dash.evaluate_gate_status(frame, _GATE_YAML, tmp_path / "champion.json")
+
+
+def test_gate_status_research_and_capital_ready(tmp_path: Path) -> None:
+    base = {
+        "model_id": "r1", "source": "trained", "corr": 0.01,
+        "corr_sharpe_ac": 0.2, "fnc": 0.001, "deflated_sharpe": 0.5,
+        "gain_to_pain_ratio": 1.0, "cagr_1y": 0.1, "turnover_mean": None,
+    }
+    frame = _status_frame(tmp_path, [base])
+    assert frame.row(0, named=True)["status"] == "RESEARCH"
+    assert frame.row(0, named=True)["gate_corr"] is False
+
+    passing = dict(base)
+    passing.update({"model_id": "r2", "corr": 0.03, "corr_sharpe_ac": 0.8,
+                    "fnc": 0.03, "deflated_sharpe": 0.96,
+                    "gain_to_pain_ratio": 1.6, "cagr_1y": 0.01})
+    frame = _status_frame(tmp_path, [passing])
+    assert frame.row(0, named=True)["status"] == "CAPITAL READY"
+    assert frame.row(0, named=True)["gate_corr"] is True
+    assert frame.row(0, named=True)["gate_cagr_1y"] is True  # strict > 0.0
+
+
+def test_gate_status_champion_via_pointer(tmp_path: Path) -> None:
+    (tmp_path / "champion.json").write_text(
+        json.dumps({"run_id": "ch" * 32}), encoding="utf-8"
+    )
+    frame = _status_frame(tmp_path, [{"model_id": "ch" * 32, "source": "trained",
+                                      "corr": 0.0, "corr_sharpe_ac": 0.0,
+                                      "fnc": 0.0, "deflated_sharpe": 0.0,
+                                      "gain_to_pain_ratio": 0.0,
+                                      "cagr_1y": 0.0, "turnover_mean": None}])
+    assert frame.row(0, named=True)["status"] == "CHAMPION"
+
+
+def test_gate_status_benchmark_rows_never_capital_ready(tmp_path: Path) -> None:
+    ref = {"model_id": "v53_lgbm_ender60", "source": "benchmark", "corr": 0.029,
+           "corr_sharpe_ac": 0.78, "fnc": 0.027, "deflated_sharpe": 1.0,
+           "gain_to_pain_ratio": 44.0, "cagr_1y": 4.88, "turnover_mean": None}
+    other = dict(ref, model_id="null_constant_05", corr=0.0, corr_sharpe_ac=0.0)
+    frame = _status_frame(tmp_path, [ref, other])
+    statuses = {r["model_id"]: r["status"] for r in frame.to_dicts()}
+    assert statuses["v53_lgbm_ender60"] == "GATE HURDLE"
+    assert statuses["null_constant_05"] == "BENCHMARK"
+    ref_row = frame.filter(pl.col("model_id") == "v53_lgbm_ender60").row(0, named=True)
+    assert ref_row["gate_corr_sharpe_ac"] is True
+    assert ref_row["gate_turnover_mean"] is None  # turnover absent -> exempt
+
+
+def test_gate_status_turnover_violation_when_present(tmp_path: Path) -> None:
+    row = {"model_id": "r3", "source": "trained", "corr": 0.03,
+           "corr_sharpe_ac": 0.8, "fnc": 0.03, "deflated_sharpe": 0.96,
+           "gain_to_pain_ratio": 1.6, "cagr_1y": 0.01, "turnover_mean": 0.9}
+    frame = _status_frame(tmp_path, [row])
+    out = frame.row(0, named=True)
+    assert out["gate_turnover_mean"] is False  # 0.9 > 0.35
+    assert out["status"] == "RESEARCH"

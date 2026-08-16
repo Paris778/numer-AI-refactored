@@ -19,6 +19,7 @@ logger = logging.getLogger("nmr.dashboard")
 
 __all__ = [
     "UNIFIED_SCHEMA",
+    "evaluate_gate_status",
     "load_benchmark_frame",
     "load_unified_leaderboard",
     "resolve_benchmark_path",
@@ -257,3 +258,95 @@ def load_unified_leaderboard(
     if not rows:
         return pl.DataFrame(schema=UNIFIED_SCHEMA)
     return pl.DataFrame(rows, schema=UNIFIED_SCHEMA, strict=False)
+
+
+_GATE_THRESHOLD_ATTRS = {
+    "corr": "corr_min",
+    "corr_sharpe_ac": "corr_sharpe_ac_min",
+    "fnc": "fnc_min",
+    "deflated_sharpe": "deflated_sharpe_min",
+    "gain_to_pain_ratio": "gain_to_pain_min",
+    "cagr_1y": "cagr_min",
+}
+_GATE_FIELDS = ("corr", "corr_sharpe_ac", "fnc", "deflated_sharpe",
+                "gain_to_pain_ratio", "cagr_1y", "turnover_mean")
+_STATUS_SCHEMA = pl.Schema(
+    {"model_id": pl.String, "status": pl.String,
+     **{f"gate_{f}": pl.Boolean for f in _GATE_FIELDS}}
+)
+
+
+def _read_champion_pointer(champion_path: Path) -> str | None:
+    """Opaque champion pointer; missing or corrupt file -> None."""
+    path = Path(champion_path)
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    run_id = payload.get("run_id") if isinstance(payload, dict) else None
+    return run_id if isinstance(run_id, str) else None
+
+
+def _gate_receipt(field: str, row: dict, gate) -> bool | None:
+    value = row.get(field)
+    if value is None:
+        return None
+    measured = float(value)
+    if field == "turnover_mean":
+        return measured <= float(gate.turnover_max)
+    if field == "cagr_1y":
+        return measured > float(gate.cagr_min)  # strict, mirrors assert_tier4_gate
+    return measured >= float(getattr(gate, _GATE_THRESHOLD_ATTRS[field]))
+
+
+def evaluate_gate_status(
+    leaderboard: pl.DataFrame,
+    gate_config_path: Path,
+    champion_path: Path,
+) -> pl.DataFrame:
+    """Project each row against the tier-4 gate (read-only, never enforces).
+
+    Status ladder: benchmark rows are exempt (``GATE HURDLE`` for the gate
+    file's reference column, ``BENCHMARK`` otherwise); registry rows are
+    ``CHAMPION`` (champion.json pointer), ``CAPITAL READY`` (all hard
+    hurdles), or ``RESEARCH``. Per-field receipts mirror
+    ``assert_tier4_gate``: >= for most fields, strict > for cagr_1y, turnover
+    exempt when None.
+    """
+    from nmr.benchmark import load_benchmark_file
+
+    file_cfg = load_benchmark_file(gate_config_path)
+    gate = file_cfg.gate
+    if gate is None:
+        raise ValueError(f"gate config {gate_config_path} has no gate section")
+    reference_column = file_cfg.reference_column
+    champion_id = _read_champion_pointer(champion_path)
+
+    rows: list[dict] = []
+    for row in leaderboard.to_dicts():
+        model_id = row["model_id"]
+        if row["source"] == "benchmark":
+            status = "GATE HURDLE" if model_id == reference_column else "BENCHMARK"
+        elif champion_id is not None and model_id == champion_id:
+            status = "CHAMPION"
+        elif (
+            all(
+                _gate_receipt(f, row, gate) is True
+                for f in _GATE_FIELDS
+                if f != "turnover_mean"
+            )
+            # turnover is exempt only when None; a measured violation blocks the gate
+            and _gate_receipt("turnover_mean", row, gate) is not False
+        ):
+            status = "CAPITAL READY"
+        else:
+            status = "RESEARCH"
+        rows.append(
+            {"model_id": model_id, "status": status,
+             **{f"gate_{f}": _gate_receipt(f, row, gate) for f in _GATE_FIELDS}}
+        )
+    if not rows:
+        return pl.DataFrame(schema=_STATUS_SCHEMA)
+    return pl.DataFrame(rows, schema=_STATUS_SCHEMA, strict=False)

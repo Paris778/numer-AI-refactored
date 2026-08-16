@@ -78,7 +78,13 @@ from .config import (
     load_config,
     set_global_seeds,
 )
-from .dashboard import UNIFIED_SCHEMA, load_benchmark_frame, load_unified_leaderboard, resolve_benchmark_path
+from .dashboard import (
+    UNIFIED_SCHEMA,
+    evaluate_gate_status,
+    load_benchmark_frame,
+    load_unified_leaderboard,
+    resolve_benchmark_path,
+)
 from .data import IngestionAgent
 from .deployment import DeploymentArtifact, load_predict, serialize_predict
 from .ensemble import Ensembler
@@ -289,6 +295,7 @@ __all__ = [
     "SeriesStats",
     "BootstrapCI",
     "era_series_stats",
+    "evaluate_gate_status",
     "resolve_block_len",
     "resolve_bandwidth",
     "resolve_benchmark_path",
