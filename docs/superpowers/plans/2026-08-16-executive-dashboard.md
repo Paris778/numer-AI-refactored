@@ -235,7 +235,7 @@ git commit -m "feat(dashboard): engine skeleton with unified schema and benchmar
 
 **Interfaces:**
 - Consumes: `UNIFIED_SCHEMA`, `resolve_benchmark_path` (Task 1).
-- Produces: `load_benchmark_frame(benchmark_path: Path) -> pl.DataFrame` — benchmark rows in the unified schema; empty schema frame when the file is missing/unreadable or empty. Missing CSV columns map to `None` (no exceptions); `run_name` = `strategy_group`, falling back to `"tier{int(tier)}"` when `tier` is present, else `"benchmark"`.
+- Produces: `load_benchmark_frame(benchmark_path: Path) -> pl.DataFrame` — benchmark rows in the unified schema; empty schema frame when the file is missing or a parsed-but-empty CSV (zero-byte/corrupt files raise — fail loud). Missing CSV columns map to `None` (no exceptions), except `std_corr`/`max_drawdown` which keep the legacy `0.0` default; `run_name` = `strategy_group`, falling back to `"tier{int(tier)}"` when `tier` is present, else `"benchmark"`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -301,7 +301,8 @@ def load_benchmark_frame(benchmark_path: Path) -> pl.DataFrame:
 
     Mirrors the legacy ``dashboard_app.load_benchmarks`` column semantics but
     carries the full scorecard mapping (fnc, deflated_sharpe, capital cells,
-    CIs). A missing file, or an empty CSV, returns the empty schema frame.
+    CIs). A missing file, or a parsed-but-empty CSV, returns the empty schema
+    frame (zero-byte/corrupt files raise — fail loud).
     """
     path = Path(benchmark_path)
     if not path.exists():
