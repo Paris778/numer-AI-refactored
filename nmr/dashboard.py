@@ -9,13 +9,15 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import polars as pl
 
 from nmr.config import REPO_ROOT
-from nmr.evaluation import EvaluationEngine, downside_era_indices
+from nmr.evaluation import EvaluationEngine, downside_era_indices, sorted_era_labels
 from nmr.payout import (
     annual_compounded_return,
     gain_to_pain_ratio,
@@ -29,6 +31,7 @@ logger = logging.getLogger("nmr.dashboard")
 __all__ = [
     "UNIFIED_SCHEMA",
     "evaluate_gate_status",
+    "extract_payout_timeseries",
     "load_benchmark_frame",
     "load_unified_leaderboard",
     "reconcile_capital_metrics",
@@ -475,3 +478,113 @@ def reconcile_capital_metrics(
             row["mmc_down_reason"] = "insufficient_downside_eras"
 
     return pl.DataFrame(rows, schema=UNIFIED_SCHEMA, strict=False)
+
+
+def _series_label(registry_dir: Path, run_id: str) -> str:
+    run_file = Path(registry_dir) / run_id / "run.json"
+    name = "unknown"
+    if run_file.exists():
+        try:
+            payload = json.loads(run_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            payload = {}
+        if isinstance(payload, dict):
+            manifest = payload.get("manifest") or {}
+            name = (manifest.get("config") or {}).get("run", {}).get("name", "unknown")
+    return f"{name} · {run_id[:8]}"
+
+
+def _series_from_metrics(
+    corr: dict[str, float], mmc: dict[str, float], axis_eras: list[str], label: str
+) -> dict:
+    """Aligned wealth/drawdown arrays over ``axis_eras`` (fail-loud on gaps)."""
+    missing = set(axis_eras) - set(corr) - set(mmc)
+    if set(corr) != set(axis_eras) or set(mmc) != set(axis_eras) or missing:
+        raise ValueError(
+            f"series {label!r} does not cover the full era axis "
+            f"(missing {sorted(missing, key=int)[:5]}...)"
+        )
+    # Order dicts by the axis explicitly: wealth compounding and drawdown
+    # watermarks are sequence-sensitive (defense in depth — payout_series
+    # sorts numerically, but this keeps the invariant local).
+    ordered_corr = {era: float(corr[era]) for era in axis_eras}
+    ordered_mmc = {era: float(mmc[era]) for era in axis_eras}
+    pay = payout_series(ordered_corr, ordered_mmc)
+    wealth = np.cumprod(1.0 + pay.clipped)
+    peak = np.maximum.accumulate(wealth)
+    drawdown = wealth / peak - 1.0
+    return {
+        "label": label,
+        "cumulative_wealth": [float(v) for v in wealth],
+        "drawdown": [float(v) for v in drawdown],
+        "cagr": float(annual_compounded_return(pay.clipped)),
+        "mdd": float(np.min(drawdown)),
+    }
+
+
+def extract_payout_timeseries(
+    registry_dir: Path,
+    data_dir: Path,
+    run_ids: Sequence[str],
+    include_tier4_ref: bool = True,
+    tier4_column: str = "v53_lgbm_ender60",
+) -> dict[str, Any]:
+    """Per-era payout/wealth/drawdown series over the standard 86-era window.
+
+    Numeric era ordering throughout (``sorted_era_labels``); arrays aligned
+    to the shared axis; deterministic key order (sorted run ids).
+    """
+    lookups = _load_shared_lookups(data_dir)
+    if lookups is None:
+        logger.warning(
+            "nmr.dashboard: data assets missing at %s; "
+            "returning empty timeseries", data_dir,
+        )
+        return {"eras": [], "meta_downside_mask": [], "series": {}}
+    targets_86, meta, meta_eras = lookups
+    axis = sorted_era_labels(meta_eras)
+
+    # meta-model downside mask (strict CORR_meta < 0), computed once
+    meta_only = meta.filter(pl.col("era").is_in(axis))
+    meta_joined = meta_only.join(targets_86, on=["era", "id"], how="inner")
+    meta_corr = EvaluationEngine().per_era_corr(
+        meta_joined, pred_col="numerai_meta_model", target_col="target"
+    )
+    mask = [bool(meta_corr[e] < 0.0) for e in axis]
+
+    series: dict[str, dict] = {}
+    for run_id in sorted(set(run_ids)):
+        preds_path = Path(registry_dir) / run_id / "validation_preds.parquet"
+        if not preds_path.exists():
+            logger.warning("nmr.dashboard: skipping missing preds %s", preds_path)
+            continue
+        corr, mmc, _ = _per_era_metrics(preds_path, targets_86, meta)
+        series[run_id] = _series_from_metrics(
+            corr, mmc, axis, _series_label(registry_dir, run_id)
+        )
+
+    if include_tier4_ref:
+        bench_path = Path(data_dir) / "validation_benchmark_models.parquet"
+        if bench_path.exists():
+            bench = pl.read_parquet(
+                bench_path, columns=["era", "id", tier4_column]
+            ).filter(pl.col("era").is_in(axis))
+            ref_joined = (
+                bench.join(targets_86, on=["era", "id"], how="inner")
+                .join(meta, on=["era", "id"], how="inner")
+            )
+            engine = EvaluationEngine()
+            ref_corr = engine.per_era_corr(
+                ref_joined, pred_col=tier4_column, target_col="target"
+            )
+            ref_mmc = engine.per_era_mmc(
+                ref_joined, pred_col=tier4_column,
+                meta_col="numerai_meta_model", target_col="target",
+            )
+            series[tier4_column] = _series_from_metrics(
+                ref_corr, ref_mmc, axis, tier4_column
+            )
+        else:
+            logger.warning("nmr.dashboard: %s missing; tier-4 curve omitted", bench_path)
+
+    return {"eras": axis, "meta_downside_mask": mask, "series": series}

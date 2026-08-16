@@ -331,3 +331,45 @@ def test_reconcile_capital_metrics_missing_data_assets_noop(tmp_path: Path) -> N
     frame = dash.load_unified_leaderboard(tmp_path, benchmark_path=False)
     out = dash.reconcile_capital_metrics(frame, tmp_path, tmp_path / "no-data")
     assert out.row(0, named=True)["cagr_1y"] is None
+
+
+def test_extract_payout_timeseries_shape_and_determinism(tmp_path: Path) -> None:
+    _write_registry(tmp_path, [_registry_entry("a" * 64), _registry_entry("b" * 64)])
+    for run_id, scale in (("a" * 64, 1.0), ("b" * 64, -0.5)):
+        _write_preds(tmp_path / run_id, scale=scale)
+    data = _synthetic_data_dir(tmp_path)
+
+    payload = dash.extract_payout_timeseries(
+        tmp_path, data, run_ids=["b" * 64, "a" * 64], include_tier4_ref=False
+    )
+    assert payload["eras"] == ["0001", "0002", "0003"]  # numeric order
+    assert len(payload["meta_downside_mask"]) == 3
+    assert set(payload["series"]) == {"a" * 64, "b" * 64}
+    for series in payload["series"].values():
+        assert len(series["cumulative_wealth"]) == 3
+        assert len(series["drawdown"]) == 3
+        assert series["mdd"] <= 0.0
+        assert isinstance(series["cagr"], float)
+        assert series["label"]
+
+    # determinism: identical payload hash across repeated runs and insertion orders
+    again = dash.extract_payout_timeseries(
+        tmp_path, data, run_ids=["a" * 64, "b" * 64], include_tier4_ref=False
+    )
+    assert json.dumps(again, sort_keys=True) == json.dumps(payload, sort_keys=True)
+
+    # perfect-correlation series: wealth compounds at +5% per era, drawdown == 0
+    perfect = payload["series"]["a" * 64]
+    assert perfect["cumulative_wealth"][-1] == pytest.approx(1.05**3, abs=1e-9)
+    assert perfect["drawdown"] == pytest.approx([0.0, 0.0, 0.0], abs=1e-12)
+    assert perfect["mdd"] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_extract_payout_timeseries_missing_run_skipped(tmp_path: Path) -> None:
+    _write_registry(tmp_path, [_registry_entry("a" * 64)])
+    _write_preds(tmp_path / ("a" * 64), scale=1.0)
+    data = _synthetic_data_dir(tmp_path)
+    payload = dash.extract_payout_timeseries(
+        tmp_path, data, run_ids=["a" * 64, "9" * 64], include_tier4_ref=False
+    )
+    assert set(payload["series"]) == {"a" * 64}

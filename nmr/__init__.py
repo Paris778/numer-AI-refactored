@@ -81,6 +81,7 @@ from .config import (
 from .dashboard import (
     UNIFIED_SCHEMA,
     evaluate_gate_status,
+    extract_payout_timeseries,
     load_benchmark_frame,
     load_unified_leaderboard,
     reconcile_capital_metrics,
@@ -297,6 +298,7 @@ __all__ = [
     "BootstrapCI",
     "era_series_stats",
     "evaluate_gate_status",
+    "extract_payout_timeseries",
     "resolve_block_len",
     "resolve_bandwidth",
     "resolve_benchmark_path",
