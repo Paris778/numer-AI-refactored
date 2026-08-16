@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import math
-
 import numpy as np
 import pytest
 
@@ -160,7 +158,9 @@ def test_deflated_sharpe_boundary_raises() -> None:
 
 def test_block_bootstrap_ci_determinism_same_seed() -> None:
     data = np.linspace(-1.0, 1.0, 200)
-    stat_fn = lambda x: float(np.mean(x))
+
+    def stat_fn(x) -> float:
+        return float(np.mean(x))
 
     first = block_bootstrap_ci(data, stat_fn, block_len=5, n_boot=300, seed=123)
     second = block_bootstrap_ci(data, stat_fn, block_len=5, n_boot=300, seed=123)
@@ -202,9 +202,11 @@ def test_block_bootstrap_ci_invalid_cases() -> None:
             n_boot=10,
             seed=1,
         )
-    finite_only_on_original = lambda x: (
-        float(0.0) if np.array_equal(x, np.array([1.0, 2.0, 3.0])) else float("nan")
-    )
+    def finite_only_on_original(x):
+        return (
+            0.0 if np.array_equal(x, np.array([1.0, 2.0, 3.0])) else float("nan")
+        )
+
     with pytest.raises(ValueError, match="insufficient valid"):
         block_bootstrap_ci(
             np.array([1.0, 2.0, 3.0]),
@@ -298,7 +300,9 @@ def test_deflated_sharpe_rejects_invalid_trials_var() -> None:
 
 
 def test_block_bootstrap_ci_rejects_non_finite_point_estimate() -> None:
-    always_nan = lambda x: float("nan")
+    def always_nan(x) -> float:
+        return float("nan")
+
     with pytest.raises(ValueError, match="non-finite point estimate"):
         block_bootstrap_ci(
             np.array([1.0, 2.0, 3.0, 4.0]),

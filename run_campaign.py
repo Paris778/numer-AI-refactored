@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
 from pathlib import Path
 
 from nmr import ExperimentRunner, RunRegistry, load_config

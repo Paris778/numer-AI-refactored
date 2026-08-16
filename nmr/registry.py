@@ -10,8 +10,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-import polars as pl
-
 from nmr._atomicio import atomic_write_text
 from nmr.runner import RunResult
 

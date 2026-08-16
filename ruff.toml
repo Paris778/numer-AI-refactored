@@ -1,0 +1,22 @@
+# Ruff lint configuration — conservative adoption (2026-08-16).
+# Phase 1: safety (E, F), import order (I), pyupgrade modernization (UP).
+# No `ruff format` in this phase; deterministic formatting is deferred to a
+# dedicated Phase-2 reformat commit so lint fixes stay reviewable on their own.
+# pytest remains the sole *functional* gate; ruff is a CI lint gate.
+target-version = "py312"
+line-length = 120
+
+# Notebooks are JSON control-plane artifacts (not lint targets); artifacts/ is
+# machine-generated scratch (e.g. gpu_bench.py) — both stay out of the lint scope.
+extend-exclude = [
+    "*.ipynb",
+    "artifacts/",
+]
+
+[lint]
+select = ["E", "F", "I", "UP"]
+
+# Project-specific suppressions with reasons (mirrors existing `# noqa` style).
+[lint.per-file-ignores]
+# Import-time side-effect smoke and long synthetic-fixture lines.
+"tests/*.py" = ["E501"]

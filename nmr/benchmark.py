@@ -15,15 +15,14 @@ import gc
 import hashlib
 import json
 import logging
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-import yaml
-
 import numpy as np
 import polars as pl
+import yaml
 from sklearn.linear_model import Ridge
 
 from nmr.ensemble import Ensembler

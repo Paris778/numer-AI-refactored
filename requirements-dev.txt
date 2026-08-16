@@ -1,0 +1,5 @@
+# Development tooling (NOT runtime deps — kept out of requirements.txt).
+# Exact-pinned per repo convention. Install via:
+#   ./.venv/Scripts/python -m pip install -r requirements-dev.txt
+#   (never ./.venv/Scripts/pip — that shim targets the legacy ../numer-AI venv)
+ruff==0.16.3

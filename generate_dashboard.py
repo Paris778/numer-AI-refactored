@@ -8,7 +8,6 @@ import webbrowser
 from pathlib import Path
 
 import pandas as pd
-import polars as pl
 
 from nmr.config import REPO_ROOT
 
@@ -280,7 +279,8 @@ def _build_html(
 <body>
   <header>
     <h1>🏆 NumerAI Model Dashboard</h1>
-    <p>Trained runs from {html.escape(str(registry_dir))} plus benchmark models from {html.escape(str(benchmark_path.name))}</p>
+    <p>Trained runs from {html.escape(str(registry_dir))} plus benchmark
+      models from {html.escape(str(benchmark_path.name))}</p>
   </header>
   <main>
     <div class="stats">

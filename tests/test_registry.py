@@ -30,7 +30,9 @@ def _result(run_id: str, sharpe: float) -> RunResult:
 
 
 def _scorecard(sharpe_ac: float, *, max_drawdown: float = 0.1) -> MetricScorecard:
-    cell = lambda v: MetricCell(value=v, ci_low=None, ci_high=None, n_eras=10)
+    def cell(v: float) -> MetricCell:
+        return MetricCell(value=v, ci_low=None, ci_high=None, n_eras=10)
+
     return MetricScorecard(
         model_id="m", n_eras=10, rank_scalar=0.0, deflated_sharpe=0.0,
         mean_payout=cell(0.0), corr=cell(0.0), mmc=cell(0.0), fnc=0.0,

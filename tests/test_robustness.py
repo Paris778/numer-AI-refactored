@@ -98,7 +98,9 @@ def test_adversarial_perturbation_boundaries_and_determinism() -> None:
         }
     )
     blocks = {"b1": ["f1", "f2"], "b2": ["f3"]}
-    predict_fn = lambda x: x[:, 0] + 0.5 * x[:, 1] - 0.2 * x[:, 2]
+
+    def predict_fn(x):
+        return x[:, 0] + 0.5 * x[:, 1] - 0.2 * x[:, 2]
 
     out1 = adversarial_perturbation(
         eval_df,

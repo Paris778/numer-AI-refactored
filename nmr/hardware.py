@@ -249,7 +249,10 @@ def _cpu_usage_pct_windows(sample_seconds: float = 0.2) -> float | None:
                 ctypes.byref(idle), ctypes.byref(kernel), ctypes.byref(user)
             ):
                 raise OSError("GetSystemTimes failed")
-            to_int = lambda ft: (ft.dwHighDateTime << 32) | ft.dwLowDateTime
+
+            def to_int(ft) -> int:
+                return (ft.dwHighDateTime << 32) | ft.dwLowDateTime
+
             # kernel includes idle; report (kernel - idle, user, idle) so the
             # shared parse_cpu_times contract counts each tick once.
             return to_int(kernel) - to_int(idle), to_int(user), to_int(idle)

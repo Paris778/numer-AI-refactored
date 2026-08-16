@@ -9,7 +9,7 @@ import os
 import platform
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
@@ -54,7 +54,7 @@ def serialize_predict(
     )
 
     manifest = {
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
         "feature_names": list(feature_names),
         "sha256": _sha256_bytes(payload_bytes),
         "environment": _environment_fingerprint(),

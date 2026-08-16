@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 import polars as pl
-import pytest
 import scipy.stats
 
 from nmr import _gpu

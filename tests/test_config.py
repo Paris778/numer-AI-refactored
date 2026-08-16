@@ -6,6 +6,7 @@ import random
 
 import numpy as np
 import pytest
+
 from nmr.config import (
     REPO_ROOT,
     DataConfig,
@@ -122,9 +123,9 @@ def test_feature_subset_overrides_feature_set_in_resolution():
 
 
 def test_feature_subset_must_be_non_empty_when_provided():
-    from nmr.config import DataConfig
-
     import pytest as _pytest
+
+    from nmr.config import DataConfig
 
     with _pytest.raises(ValueError, match="feature_subset"):
         DataConfig(feature_subset="")
@@ -137,9 +138,9 @@ def test_catboost_backend_is_valid():
 
 
 def test_invalid_backend_still_raises():
-    from nmr.config import ModelConfig
-
     import pytest as _pytest
+
+    from nmr.config import ModelConfig
 
     with _pytest.raises(ValueError, match="backend"):
         ModelConfig(backend="bogus")

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 
 import benchmark_runner
@@ -74,9 +76,7 @@ def test_run_campaign_imports_as_control_plane() -> None:
     import run_campaign  # noqa: F401  (import-time smoke)
 
 
-import json
-
-import dashboard_app
+import dashboard_app  # noqa: E402  (lazy: streamlit is heavy at module load)
 
 
 def _registry_entry(run_id: str, *, scorecard: bool = True) -> dict:

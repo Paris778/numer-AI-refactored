@@ -13,10 +13,10 @@ from nmr.hardware import (
     discover_hardware,
     gpu_devices,
     hardware_status,
+    parse_cpu_times,
     parse_gpu_devices,
     parse_gpu_status,
     parse_meminfo,
-    parse_cpu_times,
 )
 
 _GPU_QUERY = """0, NVIDIA RTX A1000 Laptop GPU, 4096, 580.97, 8.6

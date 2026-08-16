@@ -204,7 +204,6 @@ def test_validation_stage_produces_scorecard_and_purges_first_eras(tmp_path) -> 
 
 def test_deployed_artifact_matches_validation_stage_predictions(tmp_path) -> None:
     """F-019 fidelity: load_predict reproduces the scored validation pipeline."""
-    import pandas as pd
     from scipy.stats import spearmanr
 
     cfg = _validation_config(tmp_path)

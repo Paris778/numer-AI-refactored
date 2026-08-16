@@ -14,8 +14,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
-import optuna
 import numpy as np
+import optuna
 import polars as pl
 
 from nmr.config import ExperimentConfig

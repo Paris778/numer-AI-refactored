@@ -19,7 +19,7 @@ import tempfile
 import time
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import polars as pl
@@ -687,7 +687,7 @@ def _stage_manifest(ctx: _Ctx, stages_run: list[str]) -> None:
                     for g in hardware.gpus
                 ],
             },
-            "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "generated_at": datetime.now(UTC).isoformat(timespec="seconds"),
         },
         ctx.out / "manifest.json",
     )

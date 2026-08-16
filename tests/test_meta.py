@@ -6,7 +6,7 @@ from pathlib import Path
 import polars as pl
 import pytest
 
-from nmr.evaluation import MIN_OVERLAP_ERAS, NonVacuityError
+from nmr.evaluation import NonVacuityError
 from nmr.meta import fleet_summary, paired_era_comparison, promotion_verdict
 
 
@@ -454,6 +454,7 @@ def _variant_row(label, sharpe, skew, kurt, n_eras, std=0.1, status="recorded"):
 
 def test_attach_campaign_dsr_computes_fleet_deflation() -> None:
     import numpy as np
+
     from nmr.inference import deflated_sharpe
     from nmr.meta import _attach_campaign_dsr
 

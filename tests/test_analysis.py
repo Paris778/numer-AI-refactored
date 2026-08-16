@@ -1,5 +1,7 @@
 """Unit tests for nmr.analysis — synthetic frames, seeded where random."""
 
+# ruff: noqa: E402 — nmr.analysis imports deliberately sit beside the tests that
+# use them (lazy import pattern); keeps the heavy analysis dependency off module load.
 from __future__ import annotations
 
 import numpy as np
@@ -724,7 +726,6 @@ from nmr.analysis import feature_drift_psi
 
 
 def _psi_chunks(values: np.ndarray, n_eras: int = 3) -> list[pl.DataFrame]:
-    rng = np.random.default_rng(0)
     chunks = []
     pos = 0
     for e in range(n_eras):
@@ -1029,6 +1030,8 @@ from nmr.analysis import (
     REGIME_LOW_PCT,
     regime_analysis,
 )
+
+
 def _ic_by_era_series(n_eras: int = 30) -> pl.DataFrame:
     # era mean_ic ramps upward so quartile/decile bands are well-separated
     rows = []

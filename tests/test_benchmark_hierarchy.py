@@ -9,11 +9,9 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
-import pytest
 
 from nmr.benchmark import (
     BenchmarkCellConfig,
-    BenchmarkData,
     BenchmarkHierarchy,
     BenchmarkSuiteSpec,
     Tier4GateConfig,
@@ -165,10 +163,13 @@ def test_hierarchy_cross_process_determinism(tmp_path: Path) -> None:
         "print(scorecards_sha256(h.run().scorecards))"
     )
     env = {**os.environ, "PYTHONPATH": str(Path.cwd())}
-    run = lambda: subprocess.run(
-        [sys.executable, "-c", script], capture_output=True, text=True,
-        env=env, cwd=Path.cwd(), check=True,
-    ).stdout.strip()
+
+    def run() -> str:
+        return subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True,
+            env=env, cwd=Path.cwd(), check=True,
+        ).stdout.strip()
+
     assert run() == run()
 
 

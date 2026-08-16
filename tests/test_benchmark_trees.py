@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 import polars as pl
-import pytest
 
 from nmr.benchmark import generate_tree_predictions
 from nmr.models import construct_tree_model

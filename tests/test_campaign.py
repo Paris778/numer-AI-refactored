@@ -7,14 +7,15 @@ from pathlib import Path
 import polars as pl
 import pytest
 
+import run_campaign
 from nmr.campaign import (
-    CampaignConfig,
-    CampaignLog,
     CampaignRun,
     build_campaign_log,
     campaign_id,
     write_campaign_log,
 )
+from nmr.evaluation import MetricSummary
+from nmr.runner import ExperimentRunner, RunResult
 
 
 def _write_config(tmp_path, name: str, content: str) -> None:
@@ -81,16 +82,6 @@ def test_write_campaign_log_is_idempotent(tmp_path) -> None:
     p1 = write_campaign_log(log, tmp_path / "out")
     p2 = write_campaign_log(log, tmp_path / "out")
     assert p1.read_text(encoding="utf-8") == p2.read_text(encoding="utf-8")
-
-
-import subprocess
-import sys
-
-import pytest
-
-import run_campaign
-from nmr.runner import ExperimentRunner, RunResult
-from nmr.evaluation import MetricSummary
 
 
 def _stub_run(tmp_path, monkeypatch) -> None:

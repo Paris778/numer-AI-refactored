@@ -34,6 +34,9 @@ suite). Upgrading a pin is a deliberate act, never a casual `pip install -U`:
 2. Reinstall: `.\.venv\Scripts\python -m pip install -r requirements.txt`
 3. Re-run the full suite and the pre-sign-off gate.
 
+Dev tooling (ruff) is pinned separately in `requirements-dev.txt` (also exact-pinned);
+it is never added to the runtime `requirements.txt`.
+
 ### Making changes
 
 1. **Write tests first.** Follow the TDD cycle: failing test → smallest fix → verify → refactor.
@@ -49,19 +52,20 @@ suite). Upgrading a pin is a deliberate act, never a casual `pip install -U`:
 - **Real-v5.3 test fixtures: establish era overlap before limiting rows.** See the era-overlap-before-limit rule and the benchmark-parquet gap in [`AGENTS.md`](AGENTS.md#8-critical-operational-hazards).
 - **Run pytest from the repo root.** `pythonpath = .` is relative; running from a subdirectory breaks `import nmr`.
 - **`standard` / `deep` presets train for hours.** Use the `fast` preset, small feature set, or truncated era windows in tests; never let a test depend on a long training run.
-- **There is no ruff/mypy config.** pytest is the only automated gate — do not invent lint commands in docs or CI, and do not add tooling as a side effect of another task.
+- **Ruff lint gate (adopted 2026-08-16).** `ruff check .` (config `ruff.toml`) is part of CI and the pre-sign-off gate. Install: `./.venv/Scripts/python -m pip install -r requirements-dev.txt` (never `Scripts/pip`). Fix findings, or add a scoped `# noqa: <code>` with a reason — never suppress a whole rule or edit `ruff.toml` casually.
 
 ---
 
 ## Testing & Verification
 
-Run the full suite after every change (from the repo root):
+Run the full gate after every change (from the repo root):
 
 ```powershell
-.\.venv\Scripts\python -m pytest -q
+.\.venv\Scripts\python -m ruff check .   # lint gate (E/F/I/UP @120, ruff.toml)
+.\.venv\Scripts\python -m pytest -q      # functional gate
 ```
 
-CI (`.github/workflows/ci.yml`) runs `pytest -q` on Python 3.12 for every push/PR; real-data tests self-skip without `data/v5.3/`.
+CI (`.github/workflows/ci.yml`) runs `ruff check .` + `pytest -q` on Python 3.12 for every push/PR; real-data tests self-skip without `data/v5.3/`.
 
 Useful targeted runs while iterating:
 
@@ -76,6 +80,7 @@ Useful targeted runs while iterating:
 Before delivering completed work:
 
 ```powershell
+.\.venv\Scripts\python -m ruff check .                   # lint gate, zero findings
 .\.venv\Scripts\python -m pytest -q                      # full suite, zero failures
 .\.venv\Scripts\python benchmark_runner.py --fast-mode   # real-data smoke run (writes artifacts/reports/benchmark_hierarchy_scorecard_smoke.csv + benchmark_gate_report_smoke.csv)
 ```

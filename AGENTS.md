@@ -30,7 +30,7 @@ These four files obey a strict **Single Source of Truth (SSOT) hierarchy**. One 
 
 ## 1. Agent Identity & Mission
 
-You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (717 tests). No lint/type-check tooling is configured — pytest is the sole automated gate, enforced by CI (`.github/workflows/ci.yml`).
+You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (717 tests, sole functional gate) + `ruff check` (lint gate, `ruff.toml` E/F/I/UP @120, pinned in `requirements-dev.txt`). Both enforced by CI (`.github/workflows/ci.yml`).
 
 Your mission:
 
@@ -190,7 +190,7 @@ Never invent a `numerai_tools` / `numerapi` signature — open the installed sou
 
 Three gates, in order of rigor — **exact commands live only in [`CONTRIBUTING.md`](CONTRIBUTING.md#testing--verification)**:
 
-1. **Fast gate** — full `pytest -q` after every meaningful change.
+1. **Fast gate** — `ruff check .` + full `pytest -q` after every meaningful change.
 2. **Targeted subsets** while iterating — oracle parity (`tests/test_parity.py` + `tests/test_risk_parity.py`) and determinism hashes (`tests/test_benchmark_hierarchy.py`).
 3. **Pre-sign-off gate** (mandatory before delivering work) — full 717-test suite plus the real-data benchmark smoke (`benchmark_runner.py --fast-mode` → `artifacts/reports/benchmark_hierarchy_scorecard_smoke.csv` + `benchmark_gate_report_smoke.csv`).
 
@@ -244,8 +244,8 @@ All routine research, screening, HPO, and model iteration uses `medium` (780), `
 ### CatBoost-backed deploy artifacts
 Local `load_predict` fidelity is tested, but CatBoost availability in Numerai's hosted predict runtime is **UNVERIFIED** — validate a catboost deploy against the hosted runtime before staking on it.
 
-### No lint/type-check tooling exists
-There is no `pyproject.toml`, ruff, or mypy configuration. Do not claim lint/type gates ran; do not add such tooling as a side effect of another task.
+### Ruff lint gate (adopted 2026-08-16)
+`ruff check .` (config `ruff.toml`: E/F/I/UP, line-length 120) is the CI lint gate; ruff is pinned in `requirements-dev.txt` and installed via `./.venv/Scripts/python -m pip` (never the `Scripts/pip` shim). pytest remains the sole *functional* gate. `ruff format` is NOT adopted — deferred to a dedicated Phase-2 reformat commit.
 
 ### `../numer-AI/` is read-only legacy
 The V1 repo is mined for logic only. Never import from it, never modify it, never add it to any path.

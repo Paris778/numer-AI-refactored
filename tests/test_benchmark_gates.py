@@ -19,7 +19,6 @@ from nmr.benchmark import (
 )
 from nmr.scorecard import MetricScorecard, evaluate_model
 
-
 GATE = Tier4GateConfig(
     corr_min=0.0286,
     corr_sharpe_ac_min=1.50,

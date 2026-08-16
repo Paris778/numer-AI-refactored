@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 
@@ -11,7 +10,7 @@ import polars as pl
 import pytest
 from numerai_tools.scoring import correlation_contribution
 
-from nmr.evaluation import EvaluationEngine, downside_era_indices
+from nmr.evaluation import EvaluationEngine
 from nmr.inference import block_bootstrap_ci, era_series_stats, resolve_block_len
 from nmr.payout import (
     annual_compounded_return,

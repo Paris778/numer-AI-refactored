@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
 
 import lightgbm as lgb
-import logging
 import numpy as np
 import polars as pl
 import pytest
 import xgboost as xgb
 
 from nmr.config import ModelConfig, SplitConfig
-from nmr.models import CVResult, ModelOrchestrator
+from nmr.models import CVResult, ModelOrchestrator, resolve_model_params
 from nmr.splitter import PurgedEraSplitter
 
 
@@ -421,9 +421,6 @@ def test_fit_model_records_resolved_device() -> None:
     assert orchestrator.resolved_device == "cpu"
 
 
-from nmr.models import ModelOrchestrator, resolve_model_params
-
-
 def test_resolve_model_params_merges_preset_and_overrides():
     resolved = resolve_model_params("fast", {"n_estimators": 2500})
     assert resolved["n_estimators"] == 2500          # override wins
@@ -709,7 +706,6 @@ def test_full_history_subprocess_fit_matches_in_process(tmp_path) -> None:
 
     import json
     import multiprocessing as mp
-    from pathlib import Path
 
     # the worker re-reads the train split from its own data dir
     data_root = tmp_path / "data" / "vtest"
@@ -783,7 +779,6 @@ def test_full_history_spawn_path_with_data_config(tmp_path) -> None:
     ModelConfig, which has no .data, and lgbm_v1 died with AttributeError
     after 4h of CV)."""
     import json
-    from pathlib import Path
 
     from nmr.config import DataConfig
 

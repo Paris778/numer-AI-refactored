@@ -7,11 +7,11 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import pytest
+from numerai_tools.scoring import correlation_contribution
 
 from nmr.config import DataConfig
 from nmr.data import IngestionAgent
 from nmr.evaluation import EvaluationEngine
-from numerai_tools.scoring import correlation_contribution
 
 CORR_ATOL = 1e-6
 MMC_ATOL = 1e-6

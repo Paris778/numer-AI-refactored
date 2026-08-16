@@ -7,16 +7,11 @@ from pathlib import Path
 import pytest
 
 from nmr.benchmark import (
-    BenchmarkCellConfig,
-    BenchmarkFileConfig,
-    BenchmarkSuiteSpec,
-    Tier4GateConfig,
     VALID_BENCHMARK_TIERS,
     load_benchmark_file,
     load_benchmark_suite_config,
 )
 from nmr.config import REPO_ROOT
-
 
 BENCHMARK_CONFIG_DIR = REPO_ROOT / "configs" / "benchmarks"
 

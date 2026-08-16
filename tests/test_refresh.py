@@ -7,8 +7,14 @@ import pytest
 from nmr.config import REPO_ROOT, load_config
 from nmr.refresh import (
     CURRENT_DATA_VERSION,
+    EXPANDING_FILES,
+    LIVE_FRESH_FILES,
+    STATIC_FILES,
     _parse_version,
+    build_era_manifest,
+    classify_refresh_plan,
     detect_newer_version,
+    needs_live_refresh,
 )
 
 
@@ -60,16 +66,6 @@ def test_drift_guard_current_version_matches_canonical_config() -> None:
         pytest.skip("configs/first_model.yaml absent in this checkout")
     cfg = load_config(cfg_path)
     assert CURRENT_DATA_VERSION == cfg.data.version
-
-
-from nmr.refresh import (
-    EXPANDING_FILES,
-    LIVE_FRESH_FILES,
-    STATIC_FILES,
-    build_era_manifest,
-    classify_refresh_plan,
-    needs_live_refresh,
-)
 
 
 def test_needs_live_refresh_truth_table() -> None:

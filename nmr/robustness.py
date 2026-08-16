@@ -8,8 +8,9 @@ adjusted Sharpe are delegated to `nmr.inference`.
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Literal
+from typing import Literal
 
 import numpy as np
 import polars as pl

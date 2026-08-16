@@ -18,6 +18,7 @@ disableModelInvocation: false
 | # | Gate | How | Fails if |
 |---|---|---|---|
 | 1 | Full suite green | `.\.venv\Scripts\python -m pytest -q` (repo root) | Any failure, error, or unexplained skip |
+| 1b | Ruff lint gate | `.\.venv\Scripts\python -m ruff check .` (repo root) | Any finding (E/F/I/UP) |
 | 2 | Benchmark smoke | `benchmark_runner.py --fast-mode` (writes `artifacts/reports/benchmark_hierarchy_scorecard_smoke.csv` + `benchmark_gate_report_smoke.csv`) for any data/evaluation/scorecard change | Error exit or empty outputs |
 | 3 | Canonical-hash purity | Any new scorecard/instrumentation field triaged into canonical-vs-excluded (`canonical_scorecards_bytes`) | Timing/path fields inside canonical bytes → `tests/test_benchmark_hierarchy.py` / `tests/test_scorecard.py` flake |
 | 4 | Parity | Metric changes update `tests/test_parity.py` + `tests/test_risk_parity.py` | Custom metric diverges from `numerai_tools.scoring` |

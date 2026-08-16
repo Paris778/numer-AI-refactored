@@ -8,15 +8,7 @@ import optuna
 import polars as pl
 import pytest
 
-from nmr.config import (
-    DataConfig,
-    EvalConfig,
-    ExperimentConfig,
-    ModelConfig,
-    RunConfig,
-    SplitConfig,
-)
-from nmr.opt import _SpaceParam, _parse_space
+from nmr.opt import _parse_space
 
 
 def test_parse_space_accepts_all_kinds() -> None:
@@ -284,8 +276,8 @@ def test_bayesian_sweep_disables_baseline_anchor(tmp_path, monkeypatch) -> None:
     # enqueued — trial 0 must be TPE-suggested, not the anchor. Guards the
     # `if enqueue_base_config:` wiring (a regression here would silently make
     # every sweep trial 0 the baseline again).
-    from nmr.opt import bayesian_sweep
     from nmr.models import resolve_model_params
+    from nmr.opt import bayesian_sweep
 
     cfg = _sweep_config(tmp_path)
     # Baseline num_leaves (fast preset = 31) lies outside this space, so any

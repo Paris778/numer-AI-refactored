@@ -20,6 +20,7 @@ from collections.abc import Sequence
 from datetime import date
 from pathlib import Path
 
+import numerapi
 import polars as pl
 
 from nmr._atomicio import atomic_write_text
@@ -31,8 +32,6 @@ from nmr.refresh import (
     detect_newer_version,
     needs_live_refresh,
 )
-
-import numerapi
 
 _VERSION_ALERT = (
     "[WARNING] New Numerai data version detected: {newer} is available. "

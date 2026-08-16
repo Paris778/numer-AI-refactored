@@ -18,8 +18,8 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 
-from nmr.config import REPO_ROOT
 from nmr._transforms import neutralize_array
+from nmr.config import REPO_ROOT
 
 logger = logging.getLogger("nmr.risk")
 

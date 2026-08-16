@@ -121,7 +121,7 @@ def test_held_out_partition_enforces_purge_gap(tmp_path) -> None:
 
 
 def test_neutralization_frontier_matches_endpoints(tmp_path) -> None:
-    cfg = _write_data(tmp_path)
+    _write_data(tmp_path)
     df = _train_frame()
     proportions = [0.0, 1.0]
     frontier = neutralization_frontier(

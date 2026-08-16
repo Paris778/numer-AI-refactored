@@ -22,7 +22,6 @@ from typing import Any
 import catboost
 import lightgbm as lgb
 import numpy as np
-import pandas as pd
 import polars as pl
 import xgboost as xgb
 

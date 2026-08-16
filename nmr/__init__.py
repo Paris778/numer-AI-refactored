@@ -14,8 +14,8 @@ from .analysis import (
     describe_splits,
     era_structure,
     feature_correlation_structure,
-    feature_drift_psi,
     feature_drift_profile,
+    feature_drift_psi,
     feature_ic_by_era,
     feature_ic_by_split,
     feature_ic_screen,
@@ -29,6 +29,7 @@ from .analysis import (
     within_set_redundancy,
 )
 from .benchmark import (
+    VALID_BENCHMARK_TIERS,
     BenchmarkCellConfig,
     BenchmarkData,
     BenchmarkFileConfig,
@@ -36,7 +37,6 @@ from .benchmark import (
     BenchmarkHierarchyResult,
     BenchmarkSuiteSpec,
     Tier4GateConfig,
-    VALID_BENCHMARK_TIERS,
     assert_hierarchy_monotone,
     assert_tier0_null_floor,
     assert_tier4_gate,
@@ -151,7 +151,6 @@ from .payout import (
     sortino,
     time_to_recovery,
 )
-from .registry import RunRegistry
 from .refresh import (
     CURRENT_DATA_VERSION,
     EXPANDING_FILES,
@@ -162,6 +161,7 @@ from .refresh import (
     detect_newer_version,
     needs_live_refresh,
 )
+from .registry import RunRegistry
 from .research import (
     HyperparameterSweep,
     NeutralizationFrontier,
