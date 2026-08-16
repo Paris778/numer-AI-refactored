@@ -6,13 +6,14 @@ formulas, no transforms, no registry writes. The only computation in the app
 (``fleet_summary``) lives in ``nmr/meta.py`` and is consumed by the render
 layer below.
 
-Mirrors the column semantics of ``generate_dashboard._load_registry_runs`` /
-``_load_benchmarks`` (which returned pandas DataFrames) but returns Polars
-DataFrames and adds scorecard-CI / robustness columns.
+Data loading delegates to the shared engine ``nmr.dashboard``
+(``load_unified_leaderboard`` / ``load_benchmark_frame``); this module
+projects the engine's unified frame down to ``_LEADERBOARD_SCHEMA`` for the
+Streamlit views and adds the render layer.
 
 Critical semantic: explicit ``None`` checks — a legitimate scorecard value of
-``0.0`` must NOT fall through to the legacy ``metrics`` fallback. See the same
-trap documented in ``generate_dashboard.py`` lines 43-50.
+``0.0`` must NOT fall through to the legacy ``metrics`` fallback. That
+None-discipline lives in ``nmr.dashboard.load_unified_leaderboard``.
 
 Render layer: all ``st.*`` calls live inside ``main()`` or the five view
 functions, so importing this module is side-effect free (streamlit/plotly
@@ -31,6 +32,7 @@ import polars as pl
 import streamlit as st
 
 from nmr.config import REPO_ROOT
+from nmr.dashboard import load_benchmark_frame, load_unified_leaderboard
 from nmr.meta import fleet_summary
 
 _LEADERBOARD_SCHEMA = pl.Schema(
@@ -89,126 +91,25 @@ _EMPTY_CAMPAIGNS = pl.DataFrame(schema=_CAMPAIGN_SCHEMA)
 
 
 def load_registry_frame(registry_dir: Path) -> pl.DataFrame:
-    """Load all registry runs into a leaderboard frame.
+    """Load all registry runs into a leaderboard frame (engine delegation).
 
-    Runs with a scorecard block are ``source="trained"`` and read their
-    metrics from the scorecard cells (including CI bounds and robustness
-    cells). Runs without a scorecard are ``source="trained_legacy"`` and fall
-    back to the train-OOF ``metrics`` for corr / sharpe / drawdown — mirroring
-    ``generate_dashboard._load_registry_runs``. Explicit ``None`` checks mean a
-    legitimate scorecard ``0.0`` never falls through to the legacy metric.
+    Projects the engine's unified frame down to ``_LEADERBOARD_SCHEMA`` for
+    the Streamlit views; parsing and None-discipline live in
+    ``nmr.dashboard.load_unified_leaderboard``.
     """
-    rows: list[dict] = []
-    for run_file in sorted(registry_dir.glob("*/run.json")):
-        try:
-            payload = json.loads(run_file.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue  # corrupt run.json degrades gracefully (same as _load_registry_entries)
-        metrics = payload.get("metrics") or {}
-        manifest = payload.get("manifest") or {}
-        cfg = manifest.get("config") or {}
-        data_cfg = cfg.get("data") or {}
-        model_cfg = cfg.get("model") or {}
-        run_cfg = cfg.get("run") or {}
-        risk_cfg = cfg.get("risk") or {}
-
-        # Explicit None checks: a legitimate scorecard 0.0 must NOT fall
-        # through to the legacy OOF metric (same trap as generate_dashboard).
-        scorecard = payload.get("scorecard") or {}
-        sc_corr = scorecard.get("corr")
-        sc_sharpe = scorecard.get("corr_sharpe_ac")
-        sc_std = scorecard.get("std_corr")
-        sc_dd = scorecard.get("max_drawdown")
-
-        flags = {
-            flag: scorecard.get(cell) is not None
-            for flag, cell in _ROBUSTNESS_CELLS.items()
-        }
-        rows.append(
-            {
-                "model_id": payload.get("run_id") or run_file.parent.name,
-                "source": "trained" if scorecard else "trained_legacy",
-                "run_name": run_cfg.get("name", "unknown"),
-                "backend": model_cfg.get("backend", "unknown"),
-                "preset": model_cfg.get("preset", "unknown"),
-                "feature_set": data_cfg.get("feature_set", "unknown"),
-                "feature_subset": data_cfg.get("feature_subset"),
-                "n_targets": len(data_cfg.get("targets", [])),
-                "targets": ", ".join(data_cfg.get("targets", [])),
-                "neutralization_proportion": risk_cfg.get("neutralization_proportion"),
-                "oof_device": manifest.get("oof_device"),
-                "corr": float(sc_corr if sc_corr is not None else metrics.get("mean", 0.0)),
-                "corr_ci_low": scorecard.get("corr_ci_low"),
-                "corr_ci_high": scorecard.get("corr_ci_high"),
-                "corr_sharpe_ac": float(
-                    sc_sharpe if sc_sharpe is not None else metrics.get("sharpe", 0.0)
-                ),
-                "corr_sharpe_ac_ci_low": scorecard.get("corr_sharpe_ac_ci_low"),
-                "corr_sharpe_ac_ci_high": scorecard.get("corr_sharpe_ac_ci_high"),
-                "max_drawdown": float(
-                    sc_dd if sc_dd is not None else metrics.get("max_drawdown", 0.0)
-                ),
-                "std_corr": float(sc_std if sc_std is not None else metrics.get("std", 0.0)),
-                "deflated_sharpe": scorecard.get("deflated_sharpe"),
-                "max_feature_exposure": scorecard.get("max_feature_exposure"),
-                **flags,
-                "run_dir": str(run_file.parent),
-            }
-        )
-    if not rows:
+    frame = load_unified_leaderboard(registry_dir, benchmark_path=False)
+    trained = frame.filter(pl.col("source").is_in(["trained", "trained_legacy"]))
+    if trained.height == 0:
         return _EMPTY_LEADERBOARD
-    return pl.DataFrame(rows, schema=_LEADERBOARD_SCHEMA, strict=False)
+    return trained.select(_LEADERBOARD_SCHEMA.names())
 
 
 def load_benchmarks(path: Path) -> pl.DataFrame:
-    """Normalize the benchmark CSV to the leaderboard schema.
-
-    Mirrors ``generate_dashboard._load_benchmarks`` column semantics:
-    ``strategy_group`` -> ``run_name``, ``horizon_target_name`` -> ``targets``,
-    ``corr`` / ``corr_sharpe_ac`` / ``std_corr`` / ``max_drawdown`` keep their
-    names, ``corr_sharpe_ac_ci_low`` / ``corr_sharpe_ac_ci_high`` are carried
-    through when present (None when absent), everything else is
-    ``source="benchmark"``. A missing file yields an empty frame.
-    """
-    if not path.exists():
+    """Normalize the benchmark CSV to the leaderboard schema (engine delegation)."""
+    frame = load_benchmark_frame(path)
+    if frame.height == 0:
         return _EMPTY_LEADERBOARD
-
-    df = pl.read_csv(path)
-    if df.height == 0:
-        return _EMPTY_LEADERBOARD
-
-    rows = [
-        {
-            "model_id": row["model_id"],
-            "source": "benchmark",
-            "run_name": row.get("strategy_group", "benchmark"),
-            "backend": "benchmark",
-            "preset": "benchmark",
-            "feature_set": "all",
-            "feature_subset": None,
-            "n_targets": 1,
-            "targets": row.get("horizon_target_name", "cyrusd"),
-            "neutralization_proportion": None,
-            "oof_device": None,
-            "corr": row.get("corr"),
-            "corr_ci_low": None,
-            "corr_ci_high": None,
-            "corr_sharpe_ac": row.get("corr_sharpe_ac"),
-            "corr_sharpe_ac_ci_low": row.get("corr_sharpe_ac_ci_low"),
-            "corr_sharpe_ac_ci_high": row.get("corr_sharpe_ac_ci_high"),
-            "max_drawdown": row.get("max_drawdown", 0.0),
-            "std_corr": row.get("std_corr", 0.0),
-            "deflated_sharpe": None,
-            "max_feature_exposure": None,
-            "has_bmc": False,
-            "has_horizon": False,
-            "has_perturb": False,
-            "has_regime": False,
-            "run_dir": str(path),
-        }
-        for row in df.to_dicts()
-    ]
-    return pl.DataFrame(rows, schema=_LEADERBOARD_SCHEMA, strict=False)
+    return frame.select(_LEADERBOARD_SCHEMA.names())
 
 
 def merge_leaderboard(registry: pl.DataFrame, benchmarks: pl.DataFrame) -> pl.DataFrame:
