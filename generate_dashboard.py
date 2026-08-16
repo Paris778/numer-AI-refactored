@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import html
 import json
+import logging
 import webbrowser
 from pathlib import Path
 
@@ -28,9 +29,7 @@ from nmr.dashboard import (
     reconcile_capital_metrics,
 )
 
-_EXEC_COLUMNS = ("cagr_1y", "corr_sharpe_ac", "corr_sharpe_ac_ci_low",
-                 "corr_sharpe_ac_ci_high", "max_drawdown", "gain_to_pain_ratio",
-                 "mmc_down", "deflated_sharpe")
+logger = logging.getLogger(__name__)
 
 
 def _fmt(value, *, pct: bool = False) -> str:
@@ -66,6 +65,9 @@ def _bar_input(leaderboard: pl.DataFrame, champion: str | None) -> pl.DataFrame:
                 "corr_sharpe_ac_ci_low": row["corr_sharpe_ac_ci_low"],
                 "corr_sharpe_ac_ci_high": row["corr_sharpe_ac_ci_high"],
                 "champion": row["model_id"] == champion,
+                "cagr_1y": row.get("cagr_1y"),
+                "max_drawdown": row.get("max_drawdown"),
+                "deflated_sharpe": row.get("deflated_sharpe"),
             }
             for row in top.to_dicts()
         ]
@@ -93,11 +95,20 @@ def _kpi_cards(leaderboard: pl.DataFrame, champion: str | None,
         row["cagr_1y"] for row in fleet.to_dicts()
         if row["cagr_1y"] is not None
     ]
+    champion_row = None
+    if champion is not None:
+        champ_frame = leaderboard.filter(pl.col("model_id") == champion)
+        if champ_frame.height:
+            champion_row = champ_frame.row(0, named=True)
+        else:
+            logger.warning(
+                "generate_dashboard: champion %s not found in leaderboard; "
+                "treating as none designated", champion,
+            )
     return {
-        "champion_label": "None Designated" if champion is None
-                          else _bar_label(leaderboard.filter(
-                              pl.col("model_id") == champion).row(0, named=True)),
-        "champion_detail": "(Unallocated)" if champion is None else "Active",
+        "champion_label": "None Designated" if champion_row is None
+                          else _bar_label(champion_row),
+        "champion_detail": "(Unallocated)" if champion_row is None else "Active",
         "top_contender_label": _bar_label(top_row) if top_row else "—",
         "top_contender_sharpe": top_row["corr_sharpe_ac"] if top_row else None,
         "hurdle_sharpe": hurdle_sharpe,
@@ -315,6 +326,7 @@ def generate_dashboard(
     leaderboard = leaderboard.join(statuses, on="model_id", how="left")
 
     gate_cfg = load_benchmark_file(DEFAULT_GATE_PATH)
+    assert gate_cfg.reference_column is not None
     hurdle_sharpe = float(gate_cfg.gate.corr_sharpe_ac_min)
 
     champion = _champion_id(registry_dir)
@@ -324,6 +336,7 @@ def generate_dashboard(
         registry_dir, DEFAULT_DATA_DIR,
         run_ids=top_ids.get_column("model_id").to_list(),
         include_tier4_ref=True,
+        tier4_column=str(gate_cfg.reference_column),
     )
     figures = {
         "leaderboard": charts.build_leaderboard_bar_chart(

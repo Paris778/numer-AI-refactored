@@ -8,6 +8,7 @@ math, no file I/O, no registry access.
 
 from __future__ import annotations
 
+import html
 from typing import Any
 
 import plotly.graph_objects as go
@@ -38,6 +39,26 @@ def build_leaderboard_bar_chart(
                 "array": [row["corr_sharpe_ac_ci_high"] - value],
                 "arrayminus": [value - row["corr_sharpe_ac_ci_low"]],
             }
+        escaped_label = html.escape(row["label"])
+        cagr = row.get("cagr_1y")
+        mdd = row.get("max_drawdown")
+        dsr = row.get("deflated_sharpe")
+        has_hover_fields = (
+            "cagr_1y" in row and "max_drawdown" in row and "deflated_sharpe" in row
+        )
+        if has_hover_fields:
+            customdata = [[cagr, mdd, dsr]]
+            hovertemplate = (
+                f"<b>{escaped_label}</b><br>Sharpe (AC): %{{x:.3f}}<br>"
+                f"Ann. Return: %{{customdata[0]:.2%}}<br>"
+                f"Max DD: %{{customdata[1]:.2%}}<br>"
+                f"DSR: %{{customdata[2]:.3f}}<extra></extra>"
+            )
+        else:
+            customdata = None
+            hovertemplate = (
+                f"{escaped_label}<br>Sharpe (AC): %{{x:.3f}}<extra></extra>"
+            )
         fig.add_trace(
             go.Bar(
                 name=row["label"],
@@ -46,9 +67,8 @@ def build_leaderboard_bar_chart(
                 orientation="h",
                 error_x=error_x,
                 marker_pattern_shape="/" if row["champion"] else "",
-                hovertemplate=(
-                    f"{row['label']}<br>Sharpe (AC): %{{x:.3f}}<extra></extra>"
-                ),
+                customdata=customdata,
+                hovertemplate=hovertemplate,
             )
         )
     fig.add_vline(
@@ -98,7 +118,7 @@ def build_cumulative_wealth_chart(payload: dict[str, Any]) -> go.Figure:
                 x=eras,
                 y=series["cumulative_wealth"],
                 mode="lines",
-                hovertemplate="%{y:.4f}<extra>" + series["label"] + "</extra>",
+                hovertemplate="%{y:.4f}<extra>" + html.escape(series["label"]) + "</extra>",
             )
         )
     for x0, x1 in _downside_spans(eras, payload["meta_downside_mask"]):
@@ -135,7 +155,7 @@ def build_drawdown_chart(payload: dict[str, Any]) -> go.Figure:
                 mode="lines",
                 fill="tozeroy",
                 fillcolor=_DOWNSIDE_FILL,
-                hovertemplate="%{y:.2%}<extra>" + series["label"] + "</extra>",
+                hovertemplate="%{y:.2%}<extra>" + html.escape(series["label"]) + "</extra>",
             )
         )
     fig.update_layout(

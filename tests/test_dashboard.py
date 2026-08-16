@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -471,7 +472,8 @@ def _bar_input() -> pl.DataFrame:
         [
             {"label": "run-a · aaaaaaaa", "corr_sharpe_ac": 0.8,
              "corr_sharpe_ac_ci_low": 0.6, "corr_sharpe_ac_ci_high": 1.0,
-             "champion": True},
+             "champion": True, "cagr_1y": 1.5, "max_drawdown": 0.2,
+             "deflated_sharpe": 0.97},
             {"label": "bench · bbbbbbbb", "corr_sharpe_ac": 0.5,
              "corr_sharpe_ac_ci_low": None, "corr_sharpe_ac_ci_high": None,
              "champion": False},
@@ -500,6 +502,14 @@ def test_leaderboard_chart_traces_and_hurdle_line() -> None:
     assert any(abs(s.x0 - 0.78) < 1e-9 for s in shapes)
 
 
+def test_leaderboard_chart_hover_fields() -> None:
+    fig = charts.build_leaderboard_bar_chart(_bar_input(), hurdle_sharpe=0.78)
+    # ascending sort: bench row (no hover values) first, run-a row second
+    rich = fig.data[1]
+    assert "Ann. Return" in rich.hovertemplate
+    assert list(rich.customdata) == [[1.5, 0.2, 0.97]]
+
+
 def test_wealth_chart_downside_vrects() -> None:
     fig = charts.build_cumulative_wealth_chart(_ts_payload())
     assert len(fig.data) == 1
@@ -508,6 +518,14 @@ def test_wealth_chart_downside_vrects() -> None:
     assert len(vrects) == 2          # [0001..0002] and [0004..0004]
     assert vrects[0].x0 == "0001" and vrects[0].x1 == "0002"
     assert vrects[1].x0 == "0004" and vrects[1].x1 == "0004"
+
+
+def test_chart_hovertemplate_escapes_labels() -> None:
+    payload = _ts_payload()
+    payload["series"]["a"]["label"] = "run-<img src=x>"
+    fig = charts.build_cumulative_wealth_chart(payload)
+    assert "&lt;img" in fig.data[0].hovertemplate
+    assert "<img src=x>" not in fig.data[0].hovertemplate
 
 
 def test_drawdown_chart_underwater_fill() -> None:
@@ -582,6 +600,21 @@ def test_html_escapes_user_strings_and_single_plotly_engine(tmp_path: Path) -> N
     assert html_text.split("</script>", 1)[1].count("Plotly.newPlot(") == 3
     assert 'class="num gate-fail"' in html_text   # failing gate cell tinted
     assert "badge research" in html_text          # status badge pill rendered
+
+
+def test_kpi_cards_stale_champion_pointer_degrades(caplog: pytest.LogCaptureFixture) -> None:
+    frame = pl.DataFrame(
+        [{"model_id": "a" * 64, "source": "trained", "run_name": "sample-run",
+          "corr_sharpe_ac": 0.8, "cagr_1y": 1.5, "max_drawdown": 0.1,
+          "status": "RESEARCH", "n_eras": 30}]
+    )
+    with caplog.at_level(logging.WARNING, logger="generate_dashboard"):
+        kpis = generate_dashboard._kpi_cards(
+            frame, champion="9" * 64, hurdle_sharpe=0.78
+        )
+    assert kpis["champion_label"] == "None Designated"
+    assert kpis["champion_detail"] == "(Unallocated)"
+    assert "champion" in caplog.text and "not found in leaderboard" in caplog.text
 
 
 def test_generate_dashboard_end_to_end_synthetic(tmp_path: Path) -> None:
