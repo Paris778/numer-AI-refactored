@@ -252,8 +252,8 @@ Local `load_predict` fidelity is tested, but CatBoost availability in Numerai's 
 ### `../numer-AI/` is read-only legacy
 The V1 repo is mined for logic only. Never import from it, never modify it, never add it to any path.
 
-### Stale `manifest.scoring_eras` in pre-rebuild registry rows (2026-08-14)
-Runs recorded before the registry rebuild carry `scoring_eras` from the old validation window while their `validation_preds.parquet` covers the refreshed window (detail: `ARCHITECTURE.md` §N). Never use `scoring_eras` as "what this run was scored on" — trust the scorecard `*_n_eras` cells and the stored parquet. Registry files stay immutable: document, never backfill.
+### Stale era-range manifest fields in pre-rebuild registry rows (2026-08-14)
+ALL 29 current registry rows predate the rebuild: their `manifest.scoring_eras` (`0461..0574`) and `manifest.weight_learning_eras` (`0119..0460`) are the old window while their `validation_preds.parquet` covers the refreshed one — zero overlap between manifest lists and parquet eras is the tell (detail: `ARCHITECTURE.md` §N). Never use those fields as "what this run was scored on" — trust the scorecard `*_n_eras` cells and the stored parquet. Registry files stay immutable: document, never backfill.
 
 ### Dashboard window drifts on data refresh
 The executive report's standardized comparison window = meta overlap (eras `1133..1218` today; v5.3 meta exists only from 1133 onward). Refresh shifts it — regenerate `artifacts/dashboard.html` after every `refresh_data.py` run, or the report compares rows on a stale basis (`ARCHITECTURE.md` §W).
