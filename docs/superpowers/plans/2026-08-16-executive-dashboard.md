@@ -21,6 +21,7 @@
 - Recompute inputs: `kelly_fraction` receives the **raw** payout series; `annual_compounded_return` / `gain_to_pain_ratio` receive the **clipped** series.
 - Stored-first sentinel: a run's capital block is trusted iff `cagr_1y`, `gain_to_pain_ratio`, and `kelly_fraction` are **all** non-null in its run.json scorecard.
 - Commit steps below require the user's explicit go-ahead (repo rule). If the user has not authorized commits, skip the commit step and continue to the next task.
+- `tests/test_package_api.py` enforces that every public name in an `nmr` module's `__all__` is re-exported from `nmr/__init__.py` on every commit: each task that adds names to `nmr/dashboard.py.__all__` must update `nmr/__init__.py` (import block + `__all__`, alphabetical) in the same commit. `tests/test_docs_hygiene.py` enforces that the "N tests" claims in `AGENTS.md`, `README.md`, and `CONTRIBUTING.md` match `pytest --collect-only`; bump all three in the same commit that changes the test count.
 
 ---
 

@@ -1,6 +1,3 @@
-# ruff: noqa: F822
-# __all__ documents the module's final public surface; the remaining names are
-# implemented in later dashboard tasks (Task 2+ of the executive-dashboard plan).
 """Pure analytical engine for the executive performance dashboard.
 
 Registry scans, benchmark reconciliation, gate projection, capital-cell
@@ -19,15 +16,7 @@ from nmr.config import REPO_ROOT
 
 logger = logging.getLogger("nmr.dashboard")
 
-__all__ = [
-    "UNIFIED_SCHEMA",
-    "evaluate_gate_status",
-    "extract_payout_timeseries",
-    "load_benchmark_frame",
-    "load_unified_leaderboard",
-    "reconcile_capital_metrics",
-    "resolve_benchmark_path",
-]
+__all__ = ["UNIFIED_SCHEMA", "resolve_benchmark_path"]
 
 REPORTS_DIR = REPO_ROOT / "artifacts" / "reports"
 LEGACY_BENCHMARK_PATH = REPO_ROOT / "artifacts" / "benchmark_scores.csv"

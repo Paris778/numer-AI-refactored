@@ -78,6 +78,7 @@ from .config import (
     load_config,
     set_global_seeds,
 )
+from .dashboard import UNIFIED_SCHEMA, resolve_benchmark_path
 from .data import IngestionAgent
 from .deployment import DeploymentArtifact, load_predict, serialize_predict
 from .ensemble import Ensembler
@@ -257,6 +258,7 @@ __all__ = [
     "CVResult",
     "coerce_float32_features",
     "CURRENT_DATA_VERSION",
+    "UNIFIED_SCHEMA",
     "EXPANDING_FILES",
     "ModelOrchestrator",
     "MetricSummary",
@@ -287,6 +289,7 @@ __all__ = [
     "era_series_stats",
     "resolve_block_len",
     "resolve_bandwidth",
+    "resolve_benchmark_path",
     "block_bootstrap_ci",
     "block_bootstrap_pvalue",
     "benjamini_hochberg",
