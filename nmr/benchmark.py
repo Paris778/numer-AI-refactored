@@ -1148,6 +1148,12 @@ class BenchmarkHierarchy:
         """Score every cell, the tier-4 reference, and all hard gates."""
         scorecards: dict[str, MetricScorecard] = {}
         tier_of: dict[str, int] = {}
+        # The validation targets block is identical for every cell - read it
+        # once and share it across all cells (and the tier-4 reference) so a
+        # 13-cell hierarchy does not re-stream the targets parquet per cell.
+        val_targets = pl.read_parquet(
+            self._data.validation_path, columns=self._target_cols
+        )
 
         for cell in self._spec.cells:
             logger.info(
@@ -1160,10 +1166,7 @@ class BenchmarkHierarchy:
                 meta_model=self._data.meta_model,
                 benchmarks=self._data.benchmarks,
                 features=val_features,
-                targets=pl.read_parquet(
-                    self._data.validation_path,
-                    columns=self._target_cols,
-                ),
+                targets=val_targets,
                 n_trials=1,
                 seed=cell.seed,
                 horizon=self._horizon,
@@ -1204,10 +1207,7 @@ class BenchmarkHierarchy:
                 meta_model=self._data.meta_model,
                 benchmarks=self._data.benchmarks,
                 features=ref_features,
-                targets=pl.read_parquet(
-                    self._data.validation_path,
-                    columns=self._target_cols,
-                ),
+                targets=val_targets,
                 n_trials=1,
                 seed=self._seed,
                 horizon=self._horizon,

@@ -59,7 +59,7 @@ Targets are forward-looking and overlapping. Random row-level CV is forbidden. A
 Configs validate at load time (`load_config` rejects unknown keys/sections and invalid enum values). Degenerate inputs raise (`ValueError`, `NonVacuityError`) rather than silently returning defaults. Catch specific exception types only. Unknown/missing values propagate as `None` or raise — never silently coerce to `0`.
 
 ### 6. No Magic Values
-Closed sets live in module-level tuples (`VALID_MODEL_BACKENDS`, `NULL_BASELINES`, `_CANONICAL_PRESETS`, `MIN_OVERLAP_ERAS`). Numeric thresholds and formula constants are named module-level constants with evidence in `docs/`. Never inline a threshold in logic.
+Closed sets live in module-level tuples (`VALID_MODEL_BACKENDS`, `NULL_KINDS`, `_CANONICAL_PRESETS`, `MIN_OVERLAP_ERAS`). Numeric thresholds and formula constants are named module-level constants with evidence in `docs/`. Never inline a threshold in logic.
 
 ### 7. Test-Driven Development & Continuous Verification
 Write or update tests before implementing. Cover success, failure, edge cases, degenerate eras (zero variance, <2 rows, non-finite values), and cross-process determinism where relevant. Run the suite after every meaningful change (see [Verification Gates](#7-verification-gates)). Never claim tests passed without executing them.
