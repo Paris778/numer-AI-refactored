@@ -8,6 +8,7 @@ import polars as pl
 import pytest
 
 import dashboard_charts as charts
+import generate_dashboard
 import nmr.dashboard as dash
 import nmr.evaluation as nmr_evaluation
 import nmr.payout as payout
@@ -535,3 +536,65 @@ def test_leaderboard_chart_empty_frame_render_annotation() -> None:
     )
     assert len(fig.data) == 0
     assert fig.layout.annotations
+
+
+def _charts_for_test() -> dict:
+    bar = charts.build_leaderboard_bar_chart(_bar_input(), hurdle_sharpe=0.78)
+    return {"leaderboard": bar, "wealth": charts.build_cumulative_wealth_chart(_ts_payload()),
+            "drawdown": charts.build_drawdown_chart(_ts_payload())}
+
+
+def _kpis_for_test() -> dict:
+    return {
+        "champion_label": "None Designated", "champion_detail": "(Unallocated)",
+        "top_contender_label": "sample-run · aaaaaaaa",
+        "top_contender_sharpe": 0.8, "hurdle_sharpe": 0.78,
+        "gap": 0.02, "fleet_best_cagr": 1.5, "worst_drawdown": -0.05,
+        "capital_ready_count": 0, "fleet_count": 1, "data_version": "v5.3",
+        "n_eras": 86,
+    }
+
+
+def test_html_escapes_user_strings_and_single_plotly_engine(tmp_path: Path) -> None:
+    rows = pl.DataFrame(
+        [{"model_id": "<script>alert(1)</script>", "source": "trained",
+          "run_name": '"><img src=x onerror=alert(2)>', "corr_sharpe_ac": 0.8,
+          "corr_sharpe_ac_ci_low": 0.6, "corr_sharpe_ac_ci_high": 1.0,
+          "cagr_1y": 1.5, "gain_to_pain_ratio": 2.0, "kelly_fraction": 0.4,
+          "mmc_down": 0.01, "deflated_sharpe": 0.97, "max_drawdown": 0.1,
+          "fnc": 0.05, "corr": 0.12, "status": "RESEARCH", "tier": None,
+          "gate_corr_sharpe_ac": False, "gate_cagr_1y": None}]
+    )
+    html_text = generate_dashboard._build_html(
+        leaderboard=rows, champion=None, kpis=_kpis_for_test(),
+        figures=_charts_for_test(),
+        registry_dir=tmp_path,
+        technical_entries=[],
+    )
+    assert '"><img src=x' not in html_text            # hostile run_name escaped, never raw
+    assert "&lt;img src=x onerror=alert(2)&gt;" in html_text
+    # engine embed marker (the bundle itself contains many "window.Plotly"
+    # literals, so count the template's own marker, not bundle internals)
+    assert html_text.count("<!-- plotly-engine-embed -->") == 1
+    assert "<script src" not in html_text            # zero external script tags (offline)
+    # three figure render calls, counted AFTER the engine block so the
+    # plotly.js bundle's own "Plotly.newPlot(...)" example string is excluded
+    assert html_text.split("</script>", 1)[1].count("Plotly.newPlot(") == 3
+    assert 'class="num gate-fail"' in html_text   # failing gate cell tinted
+    assert "badge research" in html_text          # status badge pill rendered
+
+
+def test_generate_dashboard_end_to_end_synthetic(tmp_path: Path) -> None:
+    _write_registry(tmp_path, [_registry_entry("a" * 64)])
+    out = generate_dashboard.generate_dashboard(
+        registry_dir=tmp_path, benchmark_path=False,
+        output_path=tmp_path / "dashboard.html", open_browser=False,
+    )
+    assert out.exists()
+    text = out.read_text(encoding="utf-8")
+    assert "sample-run" in text
+    # the synthetic fixture genuinely clears the real tier-4 gate (corr 0.12,
+    # sharpe 0.8, fnc 0.05, dsr 0.97, gtp 2.0, cagr 1.5) -> CAPITAL READY badge
+    assert "CAPITAL READY" in text
+    assert "<!-- plotly-engine-embed -->" in text
+    # size is unbounded by ruling (full plotly engine inline, ~4.9 MB)

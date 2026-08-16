@@ -1,4 +1,8 @@
-"""Generate an HTML leaderboard dashboard from trained runs and benchmarks."""
+"""Compile the executive HTML performance report from the shared engine.
+
+Thin control plane only: data comes from ``nmr.dashboard``, figures from
+``dashboard_charts``, HTML from the template below. No metric math here.
+"""
 
 from __future__ import annotations
 
@@ -7,373 +11,337 @@ import json
 import webbrowser
 from pathlib import Path
 
-import pandas as pd
+import plotly.io as pio
+import polars as pl
+from plotly.offline import get_plotlyjs
 
+import dashboard_charts as charts
+from nmr.benchmark import load_benchmark_file
 from nmr.config import REPO_ROOT
+from nmr.dashboard import (
+    DEFAULT_DATA_DIR,
+    DEFAULT_GATE_PATH,
+    DEFAULT_REGISTRY_DIR,
+    evaluate_gate_status,
+    extract_payout_timeseries,
+    load_unified_leaderboard,
+    reconcile_capital_metrics,
+)
+
+_EXEC_COLUMNS = ("cagr_1y", "corr_sharpe_ac", "corr_sharpe_ac_ci_low",
+                 "corr_sharpe_ac_ci_high", "max_drawdown", "gain_to_pain_ratio",
+                 "mmc_down", "deflated_sharpe")
 
 
-def _load_registry_runs(registry_dir: Path) -> pd.DataFrame:
-    """Load all runs from the registry into a tidy DataFrame."""
-    rows: list[dict] = []
-    for run_file in sorted(registry_dir.glob("*/run.json")):
-        payload = json.loads(run_file.read_text(encoding="utf-8"))
-        metrics = payload.get("metrics", {})
-        manifest = payload.get("manifest", {})
-        cfg = manifest.get("config", {})
-        data_cfg = cfg.get("data", {})
-        model_cfg = cfg.get("model", {})
-        run_cfg = cfg.get("run", {})
+def _fmt(value, *, pct: bool = False) -> str:
+    if value is None:
+        return "—"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    if number != number:  # NaN
+        return "—"
+    if number == float("inf"):
+        return "∞"
+    if pct:
+        return f"{number:.2%}"
+    return f"{number:.4f}"
 
-        scorecard = payload.get("scorecard") or {}
-        sc_mean = scorecard.get("corr")
-        sc_std = scorecard.get("std_corr")
-        sc_sharpe = scorecard.get("corr_sharpe_ac")
-        sc_dd = scorecard.get("max_drawdown")
-        rows.append(
+
+def _bar_label(row: dict) -> str:
+    model_id = row["model_id"] or "?"
+    if row["source"] == "benchmark":
+        return f"{row['run_name']} · {model_id}"
+    return f"{row['run_name']} · {model_id[:8]}"
+
+
+def _bar_input(leaderboard: pl.DataFrame, champion: str | None) -> pl.DataFrame:
+    top = leaderboard.sort("corr_sharpe_ac", descending=True, nulls_last=True).head(10)
+    return pl.DataFrame(
+        [
             {
-                "model_id": payload.get("run_id", run_file.parent.name),
-                "source": "trained" if scorecard else "trained_legacy",
-                "run_name": run_cfg.get("name", "unknown"),
-                "feature_set": data_cfg.get("feature_set", "unknown"),
-                "backend": model_cfg.get("backend", "unknown"),
-                "preset": model_cfg.get("preset", "unknown"),
-                "n_targets": len(data_cfg.get("targets", [])),
-                "targets": ", ".join(data_cfg.get("targets", [])),
-                # Explicit None checks: a legitimate scorecard value of 0.0 must
-                # NOT fall through to the legacy OOF metric.
-                "mean": float(sc_mean if sc_mean is not None else metrics.get("mean", 0.0)),
-                "std": float(sc_std if sc_std is not None else metrics.get("std", 0.0)),
-                "sharpe": float(sc_sharpe if sc_sharpe is not None else metrics.get("sharpe", 0.0)),
-                "max_drawdown": float(
-                    sc_dd if sc_dd is not None else metrics.get("max_drawdown", 0.0)
-                ),
-                "artifact_path": payload.get("artifact_path"),
-                "run_dir": str(run_file.parent),
+                "label": _bar_label(row),
+                "corr_sharpe_ac": row["corr_sharpe_ac"],
+                "corr_sharpe_ac_ci_low": row["corr_sharpe_ac_ci_low"],
+                "corr_sharpe_ac_ci_high": row["corr_sharpe_ac_ci_high"],
+                "champion": row["model_id"] == champion,
+            }
+            for row in top.to_dicts()
+        ]
+    )
+
+
+def _champion_id(registry_dir: Path) -> str | None:
+    champion_path = registry_dir / "champion.json"
+    if not champion_path.exists():
+        return None
+    try:
+        payload = json.loads(champion_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    run_id = payload.get("run_id") if isinstance(payload, dict) else None
+    return run_id if isinstance(run_id, str) else None
+
+
+def _kpi_cards(leaderboard: pl.DataFrame, champion: str | None,
+               hurdle_sharpe: float) -> dict:
+    fleet = leaderboard.filter(pl.col("source").is_in(["trained", "trained_legacy"]))
+    top = fleet.sort("corr_sharpe_ac", descending=True, nulls_last=True).head(1)
+    top_row = top.row(0, named=True) if top.height else None
+    cagr_values = [
+        row["cagr_1y"] for row in fleet.to_dicts()
+        if row["cagr_1y"] is not None
+    ]
+    return {
+        "champion_label": "None Designated" if champion is None
+                          else _bar_label(leaderboard.filter(
+                              pl.col("model_id") == champion).row(0, named=True)),
+        "champion_detail": "(Unallocated)" if champion is None else "Active",
+        "top_contender_label": _bar_label(top_row) if top_row else "—",
+        "top_contender_sharpe": top_row["corr_sharpe_ac"] if top_row else None,
+        "hurdle_sharpe": hurdle_sharpe,
+        "gap": (top_row["corr_sharpe_ac"] - hurdle_sharpe)
+               if top_row and top_row["corr_sharpe_ac"] is not None else None,
+        "fleet_best_cagr": max(cagr_values) if cagr_values else None,
+        "worst_drawdown": min(
+            [row["max_drawdown"] for row in fleet.to_dicts()
+             if row["max_drawdown"] is not None],
+            default=None,
+        ),
+        "capital_ready_count": fleet.join(
+            leaderboard.select(["model_id", "status"]), on="model_id", how="left"
+        ).filter(pl.col("status") == "CAPITAL READY").height,
+        "fleet_count": fleet.height,
+        "data_version": "v5.3",
+        "n_eras": leaderboard.get_column("n_eras").drop_nulls().max()
+                  if leaderboard.height else None,
+    }
+
+
+def _table_rows(leaderboard: pl.DataFrame, champion: str | None) -> list[dict]:
+    rows = leaderboard.to_dicts()
+    champion_rows = [r for r in rows if champion is not None and r["model_id"] == champion]
+    fleet_rows = sorted(
+        [r for r in rows
+         if r["source"] in ("trained", "trained_legacy") and r["model_id"] != champion],
+        key=lambda r: (-(r["corr_sharpe_ac"] if r["corr_sharpe_ac"] is not None
+                        else float("-inf")), r["model_id"]),
+    )
+    bench_rows = sorted(
+        [r for r in rows if r["source"] == "benchmark"],
+        key=lambda r: ((r["tier"] if r["tier"] is not None else 99), r["model_id"]),
+    )
+    return champion_rows + fleet_rows + bench_rows
+
+
+_STATUS_BADGE = {
+    "CHAMPION": "champion",
+    "CAPITAL READY": "ready",
+    "RESEARCH": "research",
+    "GATE HURDLE": "hurdle",
+    "BENCHMARK": "benchmark",
+}
+
+
+def _status_badge(status: str) -> str:
+    cls = _STATUS_BADGE.get(status, "research")
+    return f'<span class="badge {cls}">{html.escape(status)}</span>'
+
+
+def _td_gate(value_str: str, gate_pass: bool | None) -> str:
+    if gate_pass is False:
+        return f'<td class="num gate-fail">{value_str}</td>'
+    return f'<td class="num">{value_str}</td>'
+
+
+def _row_html(row: dict) -> str:
+    status = _status_badge(row.get("status", "RESEARCH"))
+    sharpe = _fmt(row.get("corr_sharpe_ac"))
+    ci = "—"
+    if row.get("corr_sharpe_ac_ci_low") is not None and row.get("corr_sharpe_ac_ci_high") is not None:
+        ci = f"[{_fmt(row['corr_sharpe_ac_ci_low'])}–{_fmt(row['corr_sharpe_ac_ci_high'])}]"
+    return (
+        "<tr>"
+        f"<td>{status}</td>"
+        f"<td>{html.escape(_bar_label(row))}</td>"
+        f"{_td_gate(_fmt(row.get('cagr_1y'), pct=True), row.get('gate_cagr_1y'))}"
+        f"{_td_gate(sharpe, row.get('gate_corr_sharpe_ac'))}"
+        f"<td class=\"num\">{ci}</td>"
+        f"<td class=\"num\">{_fmt(row.get('max_drawdown'), pct=True)}</td>"
+        f"{_td_gate(_fmt(row.get('gain_to_pain_ratio')), row.get('gate_gain_to_pain_ratio'))}"
+        f"<td class=\"num\">{_fmt(row.get('mmc_down'))}</td>"
+        f"{_td_gate(_fmt(row.get('deflated_sharpe')), row.get('gate_deflated_sharpe'))}"
+        "</tr>"
+    )
+
+
+def _technical_entries(registry_dir: Path) -> list[dict]:
+    entries = []
+    for run_file in sorted(registry_dir.glob("*/run.json")):
+        try:
+            payload = json.loads(run_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        manifest = payload.get("manifest") or {}
+        cfg = manifest.get("config") or {}
+        run_cfg = cfg.get("run") or {}
+        entries.append(
+            {
+                "label": f"{run_cfg.get('name', 'unknown')} · "
+                         f"{str(payload.get('run_id') or run_file.parent.name)[:8]}",
+                "summary": {
+                    "backend": (cfg.get("model") or {}).get("backend"),
+                    "preset": (cfg.get("model") or {}).get("preset"),
+                    "feature_set": (cfg.get("data") or {}).get("feature_set"),
+                    "feature_subset": (cfg.get("data") or {}).get("feature_subset"),
+                    "neutralization_proportion": (cfg.get("risk") or {}).get(
+                        "neutralization_proportion"
+                    ),
+                    "seed": run_cfg.get("seed"),
+                    "device": manifest.get("oof_device"),
+                    "targets": (cfg.get("data") or {}).get("targets"),
+                },
+                "json_text": json.dumps(payload, indent=2, sort_keys=True),
             }
         )
-    return pd.DataFrame(rows)
+    return entries
 
 
-def _load_benchmarks(path: Path) -> pd.DataFrame:
-    """Load the benchmark scorecard CSV and normalize columns to the dashboard schema."""
-    if not path.exists():
-        return pd.DataFrame()
-
-    df = pd.read_csv(path)
-    rename = {
-        "model_id": "model_id",
-        "corr": "mean",
-        "corr_sharpe_ac": "sharpe",
+def _build_html(leaderboard: pl.DataFrame, champion: str | None, kpis: dict,
+                figures: dict, registry_dir: Path,
+                technical_entries: list[dict]) -> str:
+    """Assemble the full HTML document (single plotly engine in <head>)."""
+    engine_js = get_plotlyjs()
+    figure_html = {
+        name: pio.to_html(fig, include_plotlyjs=False, full_html=False)
+        for name, fig in figures.items()
     }
-    df = df.rename(columns=rename)
-    df["source"] = "benchmark"
-    df["run_name"] = df.get("strategy_group", "benchmark")
-    df["feature_set"] = "all"
-    df["backend"] = "benchmark"
-    df["preset"] = "benchmark"
-    df["n_targets"] = 1
-    df["targets"] = df.get("horizon_target_name", "cyrusd")
-    df["std"] = df.get("std_corr", 0.0)
-    df["max_drawdown"] = df.get("max_drawdown", 0.0)
-    df["artifact_path"] = None
-    df["run_dir"] = str(path)
-
-    keep = [
-        "model_id",
-        "source",
-        "run_name",
-        "feature_set",
-        "backend",
-        "preset",
-        "n_targets",
-        "targets",
-        "mean",
-        "std",
-        "sharpe",
-        "max_drawdown",
-        "artifact_path",
-        "run_dir",
-    ]
-    return df[[col for col in keep if col in df.columns]].copy()
-
-
-def _rank_models(df: pd.DataFrame) -> pd.DataFrame:
-    """Sort by Sharpe and add a rank column."""
-    df = df.copy()
-    df = df.sort_values("sharpe", ascending=False).reset_index(drop=True)
-    df.insert(0, "rank", df.index + 1)
-    return df
-
-
-def _format_value(value: float | None, fmt: str = ".5f") -> str:
-    if value is None or (isinstance(value, float) and pd.isna(value)):
-        return "—"
-    return f"{value:{fmt}}"
-
-
-def _build_html(
-    df: pd.DataFrame,
-    benchmark_path: Path,
-    registry_dir: Path,
-    legacy: pd.DataFrame,
-) -> str:
-    """Render the leaderboard as a self-contained HTML page."""
-    rows_html = ""
-    for _, row in df.iterrows():
-        badge_class = (
-            "trained" if row["source"].startswith("trained") else "benchmark"
+    rows_html = "".join(_row_html(row) for row in _table_rows(leaderboard, champion))
+    accordion = ""
+    for entry in technical_entries:
+        accordion += (
+            "<details><summary>"
+            f"{html.escape(entry['label'])} — technical &amp; audit</summary>"
+            f"<pre>{html.escape(entry['json_text'])}</pre></details>"
         )
-        rows_html += f"""
-        <tr>
-          <td class="rank">{int(row['rank'])}</td>
-          <td class="model-id" title="{html.escape(str(row['model_id']))}">{html.escape(str(row['model_id']))[:16]}</td>
-          <td><span class="badge {badge_class}">{html.escape(str(row['source']))}</span></td>
-          <td>{html.escape(str(row['run_name']))}</td>
-          <td>{html.escape(str(row['feature_set']))}</td>
-          <td>{html.escape(str(row['backend']))}</td>
-          <td>{html.escape(str(row['preset']))}</td>
-          <td>{int(row['n_targets'])}</td>
-          <td class="num">{_format_value(row['mean'])}</td>
-          <td class="num">{_format_value(row['std'])}</td>
-          <td class="num sharpe">{_format_value(row['sharpe'])}</td>
-          <td class="num">{_format_value(row['max_drawdown'])}</td>
-        </tr>
-        """
-
-    legacy_rows_html = ""
-    for _, row in legacy.iterrows():
-        badge_class = (
-            "trained" if row["source"].startswith("trained") else "benchmark"
-        )
-        legacy_rows_html += f"""
-        <tr>
-          <td class="model-id" title="{html.escape(str(row['model_id']))}">{html.escape(str(row['model_id']))[:16]}</td>
-          <td><span class="badge {badge_class}">{html.escape(str(row['source']))}</span></td>
-          <td>{html.escape(str(row['run_name']))}</td>
-          <td>{html.escape(str(row['feature_set']))}</td>
-          <td>{html.escape(str(row['backend']))}</td>
-          <td>{html.escape(str(row['preset']))}</td>
-          <td>{int(row['n_targets'])}</td>
-          <td class="num">{_format_value(row['mean'])}</td>
-          <td class="num">{_format_value(row['std'])}</td>
-          <td class="num sharpe">{_format_value(row['sharpe'])}</td>
-          <td class="num">{_format_value(row['max_drawdown'])}</td>
-        </tr>
-        """
-
-    legacy_section = ""
-    if len(legacy) > 0:
-        legacy_section = f"""
-    <h2 class="section-title">Legacy runs — train-OOF metrics (no validation scorecard)</h2>
-    <table>
-      <thead>
-        <tr>
-          <th>Model ID</th>
-          <th>Source</th>
-          <th>Name</th>
-          <th>Features</th>
-          <th>Backend</th>
-          <th>Preset</th>
-          <th>Targets</th>
-          <th class="num">Mean CORR</th>
-          <th class="num">Std</th>
-          <th class="num">Sharpe</th>
-          <th class="num">Max DD</th>
-        </tr>
-      </thead>
-      <tbody>
-        {legacy_rows_html}
-      </tbody>
-    </table>
-"""
-
-    return f"""<!DOCTYPE html>
+    return (
+        f"""<!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>NumerAI Model Dashboard</title>
-  <style>
-    :root {{
-      --bg: #0d1117;
-      --surface: #161b22;
-      --border: #30363d;
-      --text: #c9d1d9;
-      --muted: #8b949e;
-      --accent: #58a6ff;
-      --trained: #238636;
-      --benchmark: #8957e5;
-      --danger: #f85149;
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{
-      margin: 0;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      line-height: 1.5;
-    }}
-    header {{
-      padding: 2rem 1.5rem 1rem;
-      border-bottom: 1px solid var(--border);
-    }}
-    header h1 {{ margin: 0 0 0.5rem; font-size: 1.75rem; }}
-    header p {{ margin: 0; color: var(--muted); }}
-    main {{ padding: 1.5rem; }}
-    .stats {{
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-      gap: 1rem;
-      margin-bottom: 1.5rem;
-    }}
-    .stat-card {{
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 1rem;
-    }}
-    .stat-card .label {{ font-size: 0.8rem; color: var(--muted); text-transform: uppercase; }}
-    .stat-card .value {{ font-size: 1.5rem; font-weight: 600; margin-top: 0.25rem; }}
-    .section-title {{ margin: 2rem 0 0.75rem; font-size: 1.1rem; color: var(--muted); }}
-    table {{
-      width: 100%;
-      border-collapse: collapse;
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      overflow: hidden;
-    }}
-    th, td {{ padding: 0.75rem 1rem; text-align: left; border-bottom: 1px solid var(--border); }}
-    th {{
-      background: #21262d;
-      color: var(--muted);
-      font-weight: 600;
-      font-size: 0.8rem;
-      text-transform: uppercase;
-      position: sticky;
-      top: 0;
-    }}
-    tr:hover {{ background: rgba(88, 166, 255, 0.08); }}
-    .rank {{ font-weight: 700; color: var(--accent); }}
-    .num {{ font-variant-numeric: tabular-nums; text-align: right; }}
-    .sharpe {{ color: #3fb950; font-weight: 600; }}
-    .model-id {{ font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }}
-    .badge {{
-      display: inline-block;
-      padding: 0.15rem 0.5rem;
-      border-radius: 999px;
-      font-size: 0.75rem;
-      font-weight: 600;
-      text-transform: uppercase;
-    }}
-    .badge.trained {{ background: rgba(35, 134, 54, 0.2); color: #3fb950; }}
-    .badge.benchmark {{ background: rgba(137, 87, 229, 0.2); color: #a371f7; }}
-    footer {{
-      padding: 1.5rem;
-      color: var(--muted);
-      font-size: 0.85rem;
-      border-top: 1px solid var(--border);
-    }}
-  </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NumerAI Executive Performance Report</title>
+<style>
+  body {{ background: #0d1117; color: #c9d1d9; font-family: -apple-system, 'Segoe UI', sans-serif;"""
+        f""" margin: 0; padding: 1.5rem; }}
+  .kpis {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));"""
+        f""" gap: 1rem; margin: 1rem 0 2rem; }}
+  .kpi {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1rem; }}
+  .kpi .label {{ font-size: 0.8rem; color: #8b949e; text-transform: uppercase; }}
+  .kpi .value {{ font-size: 1.4rem; font-weight: 600; }}
+  table {{ width: 100%; border-collapse: collapse; background: #161b22; border: 1px solid #30363d; }}
+  th, td {{ padding: 0.6rem 0.8rem; border-bottom: 1px solid #30363d; text-align: left; }}
+  th {{ background: #21262d; font-size: 0.8rem; text-transform: uppercase; }}
+  .num {{ font-variant-numeric: tabular-nums; text-align: right; }}
+  .gate-fail {{ color: #f85149; font-weight: 500; }}
+  .badge {{ display: inline-block; padding: 0.15rem 0.5rem; border-radius: 999px;"""
+        f""" font-size: 0.75rem; font-weight: 600; text-transform: uppercase; }}
+  .badge.champion {{ background: rgba(137, 87, 229, 0.2); color: #a371f7; border: 1px solid #8957e5; }}
+  .badge.ready {{ background: rgba(46, 160, 67, 0.2); color: #3fb950; border: 1px solid #2ea043; }}
+  .badge.research {{ background: rgba(110, 118, 129, 0.2); color: #8b949e; border: 1px solid #30363d; }}
+  .badge.hurdle {{ background: rgba(248, 81, 73, 0.2); color: #f85149; border: 1px solid #da3633; }}
+  .badge.benchmark {{ background: rgba(137, 87, 229, 0.12); color: #a371f7; border: 1px solid #30363d; }}
+  details {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px;"""
+        f""" padding: 0.5rem 1rem; margin: 0.5rem 0; }}
+  summary {{ cursor: pointer; }}
+  pre {{ white-space: pre-wrap; font-size: 0.75rem; }}
+  h1, h2 {{ color: #e6edf3; }}
+</style>
+<!-- plotly-engine-embed -->
+<script>{engine_js}</script>
 </head>
 <body>
-  <header>
-    <h1>🏆 NumerAI Model Dashboard</h1>
-    <p>Trained runs from {html.escape(str(registry_dir))} plus benchmark
-      models from {html.escape(str(benchmark_path.name))}</p>
-  </header>
-  <main>
-    <div class="stats">
-      <div class="stat-card">
-        <div class="label">Total Models</div>
-        <div class="value">{len(df)}</div>
-      </div>
-      <div class="stat-card">
-        <div class="label">Trained</div>
-        <div class="value">{len(df[df['source'] == 'trained'])}</div>
-      </div>
-      <div class="stat-card">
-        <div class="label">Benchmarks</div>
-        <div class="value">{len(df[df['source'] == 'benchmark'])}</div>
-      </div>
-      <div class="stat-card">
-        <div class="label">Best Sharpe</div>
-        <div class="value">{_format_value(df['sharpe'].max())}</div>
-      </div>
-    </div>
-    <table>
-      <thead>
-        <tr>
-          <th>Rank</th>
-          <th>Model ID</th>
-          <th>Source</th>
-          <th>Name</th>
-          <th>Features</th>
-          <th>Backend</th>
-          <th>Preset</th>
-          <th>Targets</th>
-          <th class="num">Mean CORR</th>
-          <th class="num">Std</th>
-          <th class="num">Sharpe</th>
-          <th class="num">Max DD</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows_html}
-      </tbody>
-    </table>
-    {legacy_section}
-  </main>
-  <footer>
-    Generated from repository root: {html.escape(str(REPO_ROOT))}<br>
-    Registry: {html.escape(str(registry_dir))} | Benchmarks: {html.escape(str(benchmark_path))}
-  </footer>
+<h1>🏆 NumerAI Executive Performance Report</h1>
+<p>Evaluation window: {kpis['n_eras']} overlap eras · data version {kpis['data_version']}</p>
+<div class="kpis">
+  <div class="kpi"><div class="label">Active Champion</div><div class="value">{html.escape(kpis['champion_label'])}"""
+        f"""</div><div>{html.escape(kpis['champion_detail'])}</div></div>
+  <div class="kpi"><div class="label">Top Research Contender</div>"""
+        f"""<div class="value">{html.escape(kpis['top_contender_label'])}</div><div>Sharpe"""
+        f""" {_fmt(kpis['top_contender_sharpe'])} vs hurdle {_fmt(kpis['hurdle_sharpe'])}</div></div>
+  <div class="kpi"><div class="label">Fleet Best Return (CAGR)</div>"""
+        f"""<div class="value">{_fmt(kpis['fleet_best_cagr'], pct=True)}</div></div>
+  <div class="kpi"><div class="label">Worst Fleet Drawdown</div>"""
+        f"""<div class="value">{_fmt(kpis['worst_drawdown'], pct=True)}</div></div>
+  <div class="kpi"><div class="label">Capital Readiness</div>"""
+        f"""<div class="value">{kpis['capital_ready_count']} / {kpis['fleet_count']}</div></div>
+</div>
+<h2>1. Cumulative Wealth &amp; Downside Protection</h2>
+{figure_html['wealth']}
+<h2>2. Risk-Adjusted Return Leaderboard</h2>
+{figure_html['leaderboard']}
+<h2>3. Executive Allocation &amp; Risk Decision Table</h2>
+<table>
+<thead><tr><th>Status</th><th>Model</th><th>Ann. Return</th><th>Sharpe (AC)</th><th>Sharpe CI</th><th>Max DD</th>"""
+        f"""<th>Gain-to-Pain</th><th>Downside</th><th>Confidence (DSR)</th></tr></thead>
+<tbody>{rows_html}</tbody>
+</table>
+<h2>4. Underwater Drawdown</h2>
+{figure_html['drawdown']}
+<h2>Technical &amp; Audit Metadata</h2>
+{accordion}
 </body>
 </html>"""
-
-
-def _resolve_benchmark_path(path: Path) -> Path:
-    """Prefer the 5-tier hierarchy scorecard; fall back to the legacy S11 CSV.
-
-    Old runs predating the hierarchy emitted ``artifacts/benchmark_scores.csv``;
-    the dashboard still loads them when the hierarchy scorecard is absent.
-    """
-    if path.exists():
-        return path
-    legacy = REPO_ROOT / "artifacts" / "benchmark_scores.csv"
-    return legacy if legacy.exists() else path
+    )
 
 
 def generate_dashboard(
     *,
     registry_dir: Path | None = None,
-    benchmark_path: Path | None = None,
+    benchmark_path: Path | None | bool = None,
     output_path: Path | None = None,
     open_browser: bool = True,
 ) -> Path:
-    """Build the HTML dashboard and write it to disk."""
-    registry_dir = registry_dir or REPO_ROOT / "artifacts" / "registry"
-    benchmark_path = benchmark_path or (
-        REPO_ROOT / "artifacts" / "reports" / "benchmark_hierarchy_scorecard.csv"
+    """Build the executive HTML report and write it to disk."""
+    registry_dir = Path(registry_dir) if registry_dir is not None else DEFAULT_REGISTRY_DIR
+    output_path = Path(output_path) if output_path is not None else REPO_ROOT / "artifacts" / "dashboard.html"
+
+    leaderboard = load_unified_leaderboard(registry_dir, benchmark_path=benchmark_path)
+    leaderboard = reconcile_capital_metrics(leaderboard, registry_dir, DEFAULT_DATA_DIR)
+    statuses = evaluate_gate_status(leaderboard, DEFAULT_GATE_PATH, registry_dir / "champion.json")
+    leaderboard = leaderboard.join(statuses, on="model_id", how="left")
+
+    gate_cfg = load_benchmark_file(DEFAULT_GATE_PATH)
+    hurdle_sharpe = float(gate_cfg.gate.corr_sharpe_ac_min)
+
+    champion = _champion_id(registry_dir)
+    fleet = leaderboard.filter(pl.col("source").is_in(["trained", "trained_legacy"]))
+    top_ids = fleet.sort("corr_sharpe_ac", descending=True, nulls_last=True).head(3)
+    timeseries = extract_payout_timeseries(
+        registry_dir, DEFAULT_DATA_DIR,
+        run_ids=top_ids.get_column("model_id").to_list(),
+        include_tier4_ref=True,
     )
-    benchmark_path = _resolve_benchmark_path(benchmark_path)
-    output_path = output_path or REPO_ROOT / "artifacts" / "dashboard.html"
-
-    trained = _load_registry_runs(registry_dir)
-    benchmarks = _load_benchmarks(benchmark_path)
-    combined = pd.concat([trained, benchmarks], ignore_index=True)
-    comparable = combined[combined["source"] != "trained_legacy"].copy()
-    legacy = combined[combined["source"] == "trained_legacy"].copy()
-    ranked = _rank_models(comparable) if not comparable.empty else comparable
-
+    figures = {
+        "leaderboard": charts.build_leaderboard_bar_chart(
+            _bar_input(leaderboard, champion), hurdle_sharpe=hurdle_sharpe
+        ),
+        "wealth": charts.build_cumulative_wealth_chart(timeseries),
+        "drawdown": charts.build_drawdown_chart(timeseries),
+    }
+    html_text = _build_html(
+        leaderboard=leaderboard, champion=champion,
+        kpis=_kpi_cards(leaderboard, champion, hurdle_sharpe),
+        figures=figures, registry_dir=registry_dir,
+        technical_entries=_technical_entries(registry_dir),
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(
-        _build_html(ranked, benchmark_path, registry_dir, legacy), encoding="utf-8"
-    )
-
+    output_path.write_text(html_text, encoding="utf-8")
     if open_browser:
         webbrowser.open(output_path.as_uri())
-
     return output_path
 
 

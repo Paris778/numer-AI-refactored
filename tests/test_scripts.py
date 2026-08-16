@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 
-import pandas as pd
-
 import benchmark_runner
 import generate_dashboard
 import train_first_model  # noqa: F401  (import-time smoke)
@@ -17,59 +15,9 @@ def test_benchmark_runner_import_surface() -> None:
     assert callable(benchmark_runner._parse_args)
 
 
-def test_dashboard_escapes_html_interpolation() -> None:
-    df = pd.DataFrame(
-        [
-            {
-                "model_id": "<script>alert(1)</script>",
-                "source": "trained",
-                "run_name": '"><img src=x onerror=alert(2)>',
-                "feature_set": "small",
-                "backend": "lightgbm",
-                "preset": "fast",
-                "n_targets": 1,
-                "targets": "target",
-                "mean": 0.1,
-                "std": 0.2,
-                "sharpe": 0.5,
-                "max_drawdown": 0.05,
-                "rank": 1,
-            }
-        ]
-    )
-    html = generate_dashboard._build_html(
-        df,
-        benchmark_path=__import__("pathlib").Path("benchmark_scores.csv"),
-        registry_dir=__import__("pathlib").Path("registry"),
-        legacy=pd.DataFrame(),
-    )
-    assert "<script>alert(1)</script>" not in html
-    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
-
-
-def test_dashboard_ranks_trained_and_benchmark_on_same_sharpe() -> None:
-    trained = pd.DataFrame(
-        [
-            {
-                "model_id": "trained_a", "source": "trained", "run_name": "t",
-                "feature_set": "small", "backend": "lgbm", "preset": "fast",
-                "n_targets": 1, "targets": "target", "mean": 0.1, "std": 0.1,
-                "sharpe": 1.5, "max_drawdown": 0.1,
-            }
-        ]
-    )
-    benchmark = pd.DataFrame(
-        [
-            {
-                "model_id": "bench_a", "source": "benchmark", "run_name": "b",
-                "feature_set": "all", "backend": "benchmark", "preset": "benchmark",
-                "n_targets": 1, "targets": "target", "mean": 0.05, "std": 0.1,
-                "sharpe": 0.5, "max_drawdown": 0.2,
-            }
-        ]
-    )
-    ranked = generate_dashboard._rank_models(pd.concat([trained, benchmark], ignore_index=True))
-    assert ranked.iloc[0]["model_id"] == "trained_a"
+def test_generate_dashboard_import_surface() -> None:
+    assert callable(generate_dashboard.generate_dashboard)
+    assert callable(generate_dashboard.main)
 
 
 def test_run_campaign_imports_as_control_plane() -> None:
