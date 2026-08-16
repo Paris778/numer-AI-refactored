@@ -827,8 +827,8 @@ def _synthetic_data_dir(tmp_path: Path) -> Path:
             t = float(i)
             rows.append({"era": era, "id": f"{era}_{i:03d}", "target": t})
     targets = pl.DataFrame(rows)
-    meta = targets.select(["era", "id"]).with_columns(
-        pl.col("target").alias("numerai_meta_model")
+    meta = targets.select(
+        [pl.col("era"), pl.col("id"), pl.col("target").alias("numerai_meta_model")]
     )
     targets.write_parquet(data / "validation.parquet")
     meta.write_parquet(data / "meta_model.parquet")
@@ -862,7 +862,8 @@ def test_reconcile_capital_metrics_recomputes_missing_block(tmp_path: Path) -> N
     assert row["gain_to_pain_ratio"] is not None
     assert row["kelly_fraction"] is not None
     # perfect corr with target and meta -> payout == 0.05 clipped every era
-    assert row["cagr_1y"] == pytest.approx((1.05 ** (52 / 3)) - 1.0, abs=1e-6)
+    # repo formula: prod(1+r)^(52/n) - 1 => (1.05^3)^(52/3) - 1 = 1.05^52 - 1
+    assert row["cagr_1y"] == pytest.approx((1.05 ** 52) - 1.0, rel=1e-6)
     assert row["gain_to_pain_ratio"] == float("inf")  # no losing eras
 
 
