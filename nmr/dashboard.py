@@ -18,6 +18,7 @@ import numpy as np
 import polars as pl
 
 from nmr.config import REPO_ROOT
+from nmr.ensemble import Ensembler
 from nmr.evaluation import EvaluationEngine, downside_era_indices, sorted_era_labels
 from nmr.payout import (
     annual_compounded_return,
@@ -33,6 +34,7 @@ __all__ = [
     "UNIFIED_SCHEMA",
     "evaluate_gate_status",
     "extract_multimetric_timeseries",
+    "extract_pairwise_similarity_matrix",
     "load_benchmark_frame",
     "load_unified_leaderboard",
     "read_champion_pointer",
@@ -812,3 +814,102 @@ def extract_multimetric_timeseries(
         "metrics": metrics,
         "drawdowns": drawdowns,
     }
+
+
+def extract_pairwise_similarity_matrix(
+    registry_dir: Path,
+    data_dir: Path,
+    run_ids: Sequence[str],
+    include_tier4_ref: bool = True,
+    tier4_column: str = "v53_lgbm_ender60",
+) -> tuple[list[str], list[str], list[list[float]], dict[str, Any]]:
+    """Pairwise rank-gaussian pooled-Pearson similarity over the meta window.
+
+    Single multi-way inner join across all candidates (decision #12), global
+    intersection (not pairwise-complete); the tier-4 candidate is read from
+    the benchmark parquet, never a registry dir (decision #20); degenerate
+    columns guarded (decision #15); matrix clamped to [-1, 1] (decision #22).
+    Returns (labels, run_ids, matrix, stress_stats) with stress_stats =
+    {"mean_delta": mean off-diagonal (rho_stress - rho_normal) | None,
+     "n_pairs": int} (decision #26).
+    """
+    lookups = _load_v2_lookups(data_dir, tier4_column)
+    if lookups is None:
+        logger.warning(
+            "nmr.dashboard: data assets missing at %s; empty similarity", data_dir
+        )
+        return [], [], [], {"mean_delta": None, "n_pairs": 0}
+
+    axis = lookups.meta_eras
+    frames: list[pl.DataFrame] = []
+    ids_used: list[str] = []
+    labels: list[str] = []
+    for model_id in sorted(set(run_ids)):
+        if model_id == tier4_column:
+            continue
+        preds_path = Path(registry_dir) / model_id / "validation_preds.parquet"
+        if not preds_path.exists():
+            logger.warning("nmr.dashboard: skipping missing preds %s", preds_path)
+            continue
+        frames.append(
+            pl.read_parquet(preds_path, columns=["era", "id", "prediction"]).rename(
+                {"prediction": model_id}
+            )
+        )
+        ids_used.append(model_id)
+        labels.append(_series_label(registry_dir, model_id))
+    if include_tier4_ref and lookups.benchmarks.height > 0:
+        frames.append(lookups.benchmarks)
+        ids_used.append(tier4_column)
+        labels.append(tier4_column)
+    if not frames:
+        return [], [], [], {"mean_delta": None, "n_pairs": 0}
+
+    aligned = frames[0]
+    for frame in frames[1:]:
+        aligned = aligned.join(frame, on=["era", "id"], how="inner")
+    gauss = Ensembler.rank_normalize(aligned, pred_cols=ids_used, era_col="era")
+
+    columns: list[np.ndarray] = []
+    for model_id in ids_used:
+        # polars 1.41 Series.to_numpy has no dtype kwarg; cast numpy-side
+        arr = gauss.get_column(model_id).to_numpy().astype(np.float64, copy=False)
+        arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+        if np.std(arr) <= 0.0:
+            arr = np.zeros_like(arr)
+        columns.append(arr)
+    stacked = np.vstack(columns)
+    # decision #15/#22: zero-variance columns contribute zeros; a lone
+    # degenerate candidate (0-d/scalar corrcoef) keeps a valid 1x1 identity
+    matrix = np.atleast_2d(np.clip(np.corrcoef(stacked), -1.0, 1.0))
+    matrix = np.nan_to_num(matrix, nan=0.0)
+    np.fill_diagonal(matrix, 1.0)
+
+    meta_corr = EvaluationEngine().per_era_corr(
+        lookups.meta.join(lookups.targets, on=["era", "id"], how="inner"),
+        pred_col="numerai_meta_model", target_col="target",
+    )
+    stress_eras = {era for era in axis if meta_corr.get(era, 0.0) < 0.0}
+    era_arr = gauss.get_column("era").to_list()
+    stress_idx = np.asarray([era in stress_eras for era in era_arr])
+
+    def _mean_offdiag(mat: np.ndarray) -> float | None:
+        mat = np.atleast_2d(mat)
+        if mat.shape[0] < 2:
+            return None
+        upper = [mat[i, j] for i in range(mat.shape[0]) for j in range(i + 1, mat.shape[0])]
+        return float(np.mean(upper)) if upper else None
+
+    mean_delta = None
+    if stress_idx.sum() >= 5:
+        rho_stress = _mean_offdiag(
+            np.clip(np.corrcoef(stacked[:, stress_idx]), -1.0, 1.0)
+        )
+        rho_normal = _mean_offdiag(
+            np.clip(np.corrcoef(stacked[:, ~stress_idx]), -1.0, 1.0)
+        )
+        if rho_stress is not None and rho_normal is not None:
+            mean_delta = rho_stress - rho_normal
+
+    n_pairs = len(ids_used) * (len(ids_used) - 1) // 2
+    return labels, ids_used, matrix.tolist(), {"mean_delta": mean_delta, "n_pairs": n_pairs}

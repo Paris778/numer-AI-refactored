@@ -511,6 +511,7 @@ def test_dashboard_symbols_exported_from_package() -> None:
         "UNIFIED_SCHEMA",
         "evaluate_gate_status",
         "extract_multimetric_timeseries",
+        "extract_pairwise_similarity_matrix",
         "load_benchmark_frame",
         "load_unified_leaderboard",
         "read_champion_pointer",
@@ -741,3 +742,54 @@ def test_load_v2_lookups_deduped_target_columns(tmp_path: Path) -> None:
 
 def test_load_v2_lookups_missing_assets_returns_none(tmp_path: Path) -> None:
     assert dash._load_v2_lookups(tmp_path / "no-data", tier4_column="v53_lgbm_ender60") is None
+
+
+def test_similarity_matrix_identity_symmetry_and_clamp(tmp_path: Path) -> None:
+    _write_registry(tmp_path, [_registry_entry("a" * 64), _registry_entry("b" * 64)])
+    _write_preds(tmp_path / ("a" * 64), scale=1.0)
+    _write_preds(tmp_path / ("b" * 64), scale=2.0)  # scale-shifted copy of a
+    data = _synthetic_v2_data_dir(tmp_path)
+    labels, ids, matrix, stress = dash.extract_pairwise_similarity_matrix(
+        tmp_path, data, run_ids=["b" * 64, "a" * 64], include_tier4_ref=False
+    )
+    assert ids == ["a" * 64, "b" * 64]          # sorted deterministically
+    assert matrix[0][0] == 1.0 and matrix[1][1] == 1.0
+    assert matrix[0][1] == pytest.approx(1.0, abs=1e-9)   # rank-gaussian: scale-invariant
+    assert matrix[0][1] == pytest.approx(matrix[1][0], abs=1e-12)  # symmetric
+    assert all(-1.0 <= v <= 1.0 for row in matrix for v in row)    # clamped
+    assert set(stress) == {"mean_delta", "n_pairs"}
+
+
+def test_similarity_matrix_includes_tier4_from_benchmark_parquet(tmp_path: Path) -> None:
+    _write_registry(tmp_path, [_registry_entry("c" * 64)])
+    _write_preds(tmp_path / ("c" * 64), scale=1.0)
+    data = _synthetic_v2_data_dir(tmp_path)
+    labels, ids, matrix, _ = dash.extract_pairwise_similarity_matrix(
+        tmp_path, data, run_ids=["c" * 64], include_tier4_ref=True
+    )
+    # no registry dir exists for the benchmark model — it comes from the parquet
+    assert ids == ["c" * 64, "v53_lgbm_ender60"]
+    assert matrix[1][1] == 1.0
+
+
+def test_similarity_matrix_degenerate_constant_predictions(tmp_path: Path) -> None:
+    _write_registry(tmp_path, [_registry_entry("d" * 64)])
+    rows = [
+        {"era": era, "id": f"{era}_{i:03d}", "prediction": 1.0}
+        for era in ("0001", "0002", "0003")
+        for i in range(10)
+    ]
+    pl.DataFrame(rows).write_parquet(tmp_path / ("d" * 64) / "validation_preds.parquet")
+    data = _synthetic_v2_data_dir(tmp_path)
+    labels, ids, matrix, _ = dash.extract_pairwise_similarity_matrix(
+        tmp_path, data, run_ids=["d" * 64], include_tier4_ref=False
+    )
+    assert matrix[0][0] == 1.0
+    assert not any(v != v for row in matrix for v in row)  # no NaN
+
+
+def test_similarity_matrix_missing_data_assets(tmp_path: Path) -> None:
+    out = dash.extract_pairwise_similarity_matrix(
+        tmp_path, tmp_path / "no-data", run_ids=["a" * 64], include_tier4_ref=False
+    )
+    assert out == ([], [], [], {"mean_delta": None, "n_pairs": 0})
