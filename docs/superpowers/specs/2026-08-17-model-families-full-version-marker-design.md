@@ -177,6 +177,10 @@ Signature gains `models_dir: Path | None = None` (default → `DEFAULT_MODELS_DI
     in-sample and must never be shown as comparable OOF numbers (honest "—" rendering via
     existing `_fmt(None)`).
   - `family`/`training_scope` set; `has_full_version = false`.
+- **Status assignment**: `evaluate_gate_status` gains an explicit early branch —
+  `source == "full"` rows are stamped `status = "FULL"` with all `gate_*` receipts `None`.
+  This is mandatory: without it, all-null metric cells fall through the gate ladder and
+  full rows would be mislabeled `RESEARCH`. Status stays owned by the gate function.
 - **Benchmark rows**: `family`/`training_scope` null, `has_full_version` false.
 - Missing `models_dir` → empty scan → all flags false, zero full rows. **No behavioral
   change for existing callers/tests.**
@@ -207,7 +211,8 @@ Signature gains `models_dir: Path | None = None` (default → `DEFAULT_MODELS_DI
 - `load_registry_frame()` broadens the trained-only filter to
   `pl.col("source").is_in(["trained", "trained_legacy", "full"])` (approval item 2) so the
   existing Source multiselect surfaces `full` and full rows render.
-- `has_full_version` rendered as a visible ✓/— column (or column-config checkmark).
+- `has_full_version` rendered via `st.column_config.CheckboxColumn(label="Full", help=...)` —
+  a checkbox column is the unambiguous boolean presentation; no extra text column.
 - No other view-contract changes.
 
 ### 6.3 Charts
@@ -259,6 +264,8 @@ No `CONTRIBUTING.md` change (no new commands). No config-schema change (D4).
   - Benchmark rows (when `benchmark_path` provided) untouched by the family logic.
   - `benchmark_path=False` isolation intact; missing `models_dir` → zero full rows, all
     flags false.
+- `evaluate_gate_status` with a full row present → that row's status is `"FULL"`, receipts
+  all `None`, and no full row is ever mislabeled `RESEARCH`.
 - Existing determinism tests (`tests/test_benchmark_hierarchy.py`, `tests/test_scorecard.py`)
   are the guard that no canonical-hash payload changed — run unchanged.
 
