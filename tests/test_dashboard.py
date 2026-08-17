@@ -793,3 +793,32 @@ def test_similarity_matrix_missing_data_assets(tmp_path: Path) -> None:
         tmp_path, tmp_path / "no-data", run_ids=["a" * 64], include_tier4_ref=False
     )
     assert out == ([], [], [], {"mean_delta": None, "n_pairs": 0})
+
+
+def test_multimetric_chart_html_embeds_payload_and_controls() -> None:
+    payload = {
+        "eras": ["0001", "0002"],
+        "meta_downside_mask": [True, False],
+        "metrics": {"payout": {"a": {"standard": [0.01, 0.02],
+                                      "cumulative": [1.01, 1.0302], "label": "run · aaaaaaaa"}},
+                    "corr20": {}, "mmc20": {}, "corr60": {}, "mmc60": {}, "bmc": {}, "cwmm": {}},
+        "drawdowns": {"a": [0.0, 0.0]},
+    }
+    block = charts.multimetric_chart_html(payload)
+    assert 'id="multimetric-chart"' in block
+    embedded = json.loads(block.split("var payload = ")[1].split(";")[0])
+    assert embedded == payload  # exact sorted-key serialization round-trips
+    assert block.count("<option") == 7
+    assert "Cumulative View" in block and "Standard View" in block
+    assert "METRIC_CONFIG" in block
+    assert "Cumulative Wealth (1.0 Stake)" in block and "Per-Era Net Return" in block
+    assert "updatemenus" not in block
+    assert "<script src" not in block
+
+
+def test_multimetric_chart_html_empty_payload_annotation() -> None:
+    block = charts.multimetric_chart_html(
+        {"eras": [], "meta_downside_mask": [], "metrics": {}, "drawdowns": {}}
+    )
+    assert "Timeseries data unavailable without local v5.3 assets" in block
+    assert "Plotly" not in block  # no chart is even mounted
