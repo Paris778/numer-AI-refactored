@@ -103,7 +103,13 @@ def _downside_spans(eras: list[str], mask: list[bool]) -> list[tuple[str, str]]:
 
 
 def build_cumulative_wealth_chart(payload: dict[str, Any]) -> go.Figure:
-    """Cumulative wealth curves with shaded meta-model drawdown eras."""
+    """Cumulative wealth curves with shaded meta-model drawdown eras.
+
+    TRANSITIONAL v1 shim: ``generate_dashboard.generate_dashboard`` still
+    renders the v1 wealth figure until plan Task 6 rewires it to the v2
+    layout (dropping the ``wealth`` figure key). Delete this function and
+    ``_downside_spans`` there; no other callers remain.
+    """
     eras = payload["eras"]
     fig = go.Figure()
     if not payload.get("eras"):
@@ -138,26 +144,29 @@ def build_cumulative_wealth_chart(payload: dict[str, Any]) -> go.Figure:
 
 
 def build_drawdown_chart(payload: dict[str, Any]) -> go.Figure:
-    """Underwater drawdown curves, filled red to zero."""
-    eras = payload["eras"]
+    """Underwater payout drawdown curves (v2 payload: drawdowns + eras)."""
     fig = go.Figure()
-    if not payload.get("eras"):
+    eras = payload.get("eras") or []
+    if not eras:
         fig.add_annotation(
             text="Timeseries data unavailable without local v5.3 assets",
             showarrow=False,
         )
         fig.update_layout(template="plotly_dark")
         return fig
-    for series in payload["series"].values():
+    drawdowns = payload.get("drawdowns") or {}
+    payout_metric = (payload.get("metrics") or {}).get("payout", {})
+    for model_id in sorted(drawdowns):
+        label = payout_metric.get(model_id, {}).get("label", model_id)
         fig.add_trace(
             go.Scatter(
-                name=series["label"],
+                name=label,
                 x=eras,
-                y=series["drawdown"],
+                y=drawdowns[model_id],
                 mode="lines",
                 fill="tozeroy",
                 fillcolor=_DOWNSIDE_FILL,
-                hovertemplate="%{y:.2%}<extra>" + html.escape(series["label"]) + "</extra>",
+                hovertemplate="%{y:.2%}<extra>" + html.escape(label) + "</extra>",
             )
         )
     fig.update_layout(
@@ -165,8 +174,37 @@ def build_drawdown_chart(payload: dict[str, Any]) -> go.Figure:
         xaxis_title="Era",
         yaxis_title="Drawdown",
         yaxis_tickformat=".0%",
-        legend=dict(orientation="h"),
     )
+    return fig
+
+
+def build_similarity_matrix_chart(
+    labels: list[str], matrix: list[list[float]]
+) -> go.Figure:
+    """Pairwise similarity heatmap with the top-ranked row/col highlighted."""
+    fig = go.Figure()
+    if not matrix:
+        fig.add_annotation(
+            text="Similarity matrix unavailable without local v5.3 assets",
+            showarrow=False,
+        )
+        fig.update_layout(template="plotly_dark")
+        return fig
+    text = [
+        [
+            f"<b>{v:.3f}</b>" if (i == 0 or j == 0) else f"{v:.3f}"
+            for j, v in enumerate(row)
+        ]
+        for i, row in enumerate(matrix)
+    ]
+    fig.add_trace(
+        go.Heatmap(
+            z=matrix, x=labels, y=labels, colorscale="RdBu_r", zmid=0.5,
+            text=text, texttemplate="%{text}",
+            hovertemplate="%{x} vs %{y}: %{z:.3f}<extra></extra>",
+        )
+    )
+    fig.update_layout(template="plotly_dark", margin=dict(l=20, r=20, t=40, b=20))
     return fig
 
 

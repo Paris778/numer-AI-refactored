@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import pytest
+from plotly.colors import diverging
 
 import dashboard_charts as charts
 import generate_dashboard
@@ -540,10 +541,8 @@ def _ts_payload() -> dict:
     return {
         "eras": ["0001", "0002", "0003", "0004"],
         "meta_downside_mask": [True, True, False, True],
-        "series": {
-            "a": {"label": "run-a", "cumulative_wealth": [1.0, 1.05, 1.10, 1.08],
-                  "drawdown": [0.0, 0.0, 0.0, -0.018]},
-        },
+        "drawdowns": {"a": [0.0, 0.0, 0.0, -0.018]},
+        "metrics": {"payout": {"a": {"label": "run-a"}}},
     }
 
 
@@ -565,20 +564,10 @@ def test_leaderboard_chart_hover_fields() -> None:
     assert list(rich.customdata) == [[1.5, 0.2, 0.97]]
 
 
-def test_wealth_chart_downside_vrects() -> None:
-    fig = charts.build_cumulative_wealth_chart(_ts_payload())
-    assert len(fig.data) == 1
-    assert fig.data[0].y[-1] == 1.08
-    vrects = [s for s in fig.layout.shapes if s.type == "rect"]
-    assert len(vrects) == 2          # [0001..0002] and [0004..0004]
-    assert vrects[0].x0 == "0001" and vrects[0].x1 == "0002"
-    assert vrects[1].x0 == "0004" and vrects[1].x1 == "0004"
-
-
 def test_chart_hovertemplate_escapes_labels() -> None:
     payload = _ts_payload()
-    payload["series"]["a"]["label"] = "run-<img src=x>"
-    fig = charts.build_cumulative_wealth_chart(payload)
+    payload["metrics"]["payout"]["a"]["label"] = "run-<img src=x>"
+    fig = charts.build_drawdown_chart(payload)
     assert "&lt;img" in fig.data[0].hovertemplate
     assert "<img src=x>" not in fig.data[0].hovertemplate
 
@@ -591,12 +580,11 @@ def test_drawdown_chart_underwater_fill() -> None:
 
 
 def test_timeseries_charts_empty_payload_render_annotation() -> None:
-    empty = {"eras": [], "meta_downside_mask": [], "series": {}}
-    for builder in (charts.build_cumulative_wealth_chart, charts.build_drawdown_chart):
-        fig = builder(empty)
-        assert len(fig.data) == 0
-        assert fig.layout.annotations
-        assert "unavailable" in fig.layout.annotations[0].text.lower()
+    empty = {"eras": [], "meta_downside_mask": [], "drawdowns": {}, "metrics": {}}
+    fig = charts.build_drawdown_chart(empty)
+    assert len(fig.data) == 0
+    assert fig.layout.annotations
+    assert "unavailable" in fig.layout.annotations[0].text.lower()
 
 
 def test_leaderboard_chart_empty_frame_render_annotation() -> None:
@@ -613,7 +601,7 @@ def test_leaderboard_chart_empty_frame_render_annotation() -> None:
 
 def _charts_for_test() -> dict:
     bar = charts.build_leaderboard_bar_chart(_bar_input(), hurdle_sharpe=0.78)
-    return {"leaderboard": bar, "wealth": charts.build_cumulative_wealth_chart(_ts_payload()),
+    return {"leaderboard": bar, "wealth": charts.build_drawdown_chart(_ts_payload()),
             "drawdown": charts.build_drawdown_chart(_ts_payload())}
 
 
@@ -822,3 +810,38 @@ def test_multimetric_chart_html_empty_payload_annotation() -> None:
     )
     assert "Timeseries data unavailable without local v5.3 assets" in block
     assert "Plotly" not in block  # no chart is even mounted
+
+
+def test_similarity_chart_heatmap_and_highlight() -> None:
+    fig = charts.build_similarity_matrix_chart(
+        ["top", "second"], [[1.0, 0.7], [0.7, 1.0]]
+    )
+    assert len(fig.data) == 1
+    trace = fig.data[0]
+    assert list(trace.z[0]) == [1.0, 0.7]
+    assert "<b>" in trace.text[0][0]      # row/col 0 highlight (decision #25)
+    assert "<b>" in trace.text[1][0]
+    # brief asserts "RdBu_r" in str(trace.colorscale); plotly 6.x expands named
+    # colorscales server-side (the name is never stored), so assert the exact
+    # expansion of RdBu_r plus the diverging midpoint instead
+    assert trace.zmid == 0.5
+    assert [color for _, color in trace.colorscale] == diverging.RdBu_r
+
+
+def test_similarity_chart_empty_matrix_annotation() -> None:
+    fig = charts.build_similarity_matrix_chart([], [])
+    assert len(fig.data) == 0
+    assert "Similarity matrix unavailable without local v5.3 assets" in fig.layout.annotations[0].text
+
+
+def test_drawdown_chart_v2_payload() -> None:
+    payload = {
+        "eras": ["0001", "0002"],
+        "meta_downside_mask": [False, False],
+        "drawdowns": {"a": [0.0, -0.01]},
+        "metrics": {"payout": {"a": {"label": "run-a"}}},
+    }
+    fig = charts.build_drawdown_chart(payload)
+    assert len(fig.data) == 1
+    assert fig.data[0].y[-1] == pytest.approx(-0.01)
+    assert fig.data[0].fill == "tozeroy"
