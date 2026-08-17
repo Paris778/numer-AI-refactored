@@ -79,6 +79,7 @@ from .config import (
     set_global_seeds,
 )
 from .dashboard import (
+    EVALUABLE_ROWS,
     UNIFIED_SCHEMA,
     evaluate_gate_status,
     extract_multimetric_timeseries,
@@ -285,6 +286,7 @@ __all__ = [
     "EXPANDING_FILES",
     "ModelOrchestrator",
     "MetricSummary",
+    "EVALUABLE_ROWS",
     "EvaluationEngine",
     "MIN_OVERLAP_ERAS",
     "NonVacuityError",

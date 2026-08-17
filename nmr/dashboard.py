@@ -20,6 +20,7 @@ import polars as pl
 from nmr.config import REPO_ROOT
 from nmr.ensemble import Ensembler
 from nmr.evaluation import EvaluationEngine, downside_era_indices, sorted_era_labels
+from nmr.families import DEFAULT_MODELS_DIR, scan_full_versions
 from nmr.payout import (
     annual_compounded_return,
     gain_to_pain_ratio,
@@ -31,6 +32,7 @@ from nmr.scorecard import MMC_DOWN_MIN_ERAS
 logger = logging.getLogger("nmr.dashboard")
 
 __all__ = [
+    "EVALUABLE_ROWS",
     "UNIFIED_SCHEMA",
     "evaluate_gate_status",
     "extract_multimetric_timeseries",
@@ -52,6 +54,7 @@ DEFAULT_GATE_PATH = REPO_ROOT / "configs" / "benchmarks" / "tier4_gate.yaml"
 UNIFIED_SCHEMA = pl.Schema(
     {
         "model_id": pl.String, "source": pl.String, "run_name": pl.String,
+        "family": pl.String, "training_scope": pl.String, "has_full_version": pl.Boolean,
         "backend": pl.String, "preset": pl.String, "feature_set": pl.String,
         "feature_subset": pl.String, "n_targets": pl.Int64, "targets": pl.String,
         "neutralization_proportion": pl.Float64, "oof_device": pl.String,
@@ -73,6 +76,12 @@ UNIFIED_SCHEMA = pl.Schema(
         "tier": pl.Int64, "run_dir": pl.String,
     }
 )
+
+# Single predicate for every chart / candidate-selection path: rows that carry
+# validation metrics. Source-based (never null) so benchmark rows (null
+# training_scope) stay visible in charts; full rows (in-sample metrics) are
+# excluded everywhere.
+EVALUABLE_ROWS: pl.Expr = pl.col("source") != "full"
 
 
 def resolve_benchmark_path(
@@ -179,6 +188,7 @@ def load_unified_leaderboard(
     registry_dir: Path,
     benchmark_path: Path | None | bool = None,
     reports_dir: Path | None = None,
+    models_dir: Path | None = None,
 ) -> pl.DataFrame:
     """Load registry runs and (optionally) benchmark rows into one frame.
 
@@ -189,6 +199,10 @@ def load_unified_leaderboard(
     chain.
     """
     rows: list[dict] = []
+    full_versions = scan_full_versions(
+        Path(models_dir) if models_dir is not None else DEFAULT_MODELS_DIR
+    )
+    promoted_families = set(full_versions)
     registry = Path(registry_dir)
     for run_file in sorted(registry.glob("*/run.json")):
         try:
@@ -215,6 +229,9 @@ def load_unified_leaderboard(
                 "model_id": payload.get("run_id") or run_file.parent.name,
                 "source": "trained" if scorecard else "trained_legacy",
                 "run_name": run_cfg.get("name", "unknown"),
+                "family": run_cfg.get("name", "unknown"),
+                "training_scope": "research",
+                "has_full_version": run_cfg.get("name", "unknown") in promoted_families,
                 "backend": model_cfg.get("backend", "unknown"),
                 "preset": model_cfg.get("preset", "unknown"),
                 "feature_set": data_cfg.get("feature_set", "unknown"),
@@ -263,6 +280,37 @@ def load_unified_leaderboard(
                 "run_dir": str(run_file.parent),
             }
         )
+
+    for family in sorted(full_versions):
+        version = full_versions[family]
+        if not (Path(registry_dir) / version.promoted_from_run_id).is_dir():
+            logger.warning(
+                "nmr.dashboard: full version %s lineage dangling "
+                "(promoted_from_run_id %s not in registry)",
+                family, version.promoted_from_run_id,
+            )
+        full_row = dict.fromkeys(UNIFIED_SCHEMA.names())  # all metric cells null
+        cfg_data = (version.config.get("data") or {}) if version.config else {}
+        cfg_model = (version.config.get("model") or {}) if version.config else {}
+        targets = cfg_data.get("targets") or []
+        full_row.update(
+            {
+                "model_id": f"{family}::full",
+                "source": "full",
+                "run_name": family,
+                "family": family,
+                "training_scope": "full",
+                "has_full_version": False,
+                "backend": cfg_model.get("backend"),
+                "preset": cfg_model.get("preset"),
+                "feature_set": cfg_data.get("feature_set"),
+                "feature_subset": cfg_data.get("feature_subset"),
+                "n_targets": len(targets) if targets else None,
+                "targets": ", ".join(targets) if targets else None,
+                "run_dir": str(version.manifest_path.parent),
+            }
+        )
+        rows.append(full_row)
 
     resolved = resolve_benchmark_path(benchmark_path, reports_dir=reports_dir)
     if resolved is not None:
@@ -321,7 +369,8 @@ def evaluate_gate_status(
 ) -> pl.DataFrame:
     """Project each row against the tier-4 gate (read-only, never enforces).
 
-    Status ladder: benchmark rows are exempt (``GATE HURDLE`` for the gate
+    Status ladder: full rows are stamped ``FULL`` (in-sample metrics, never
+    gated); benchmark rows are exempt (``GATE HURDLE`` for the gate
     file's reference column, ``BENCHMARK`` otherwise); registry rows are
     ``CHAMPION`` (champion.json pointer), ``CAPITAL READY`` (all hard
     hurdles), or ``RESEARCH``. Per-field receipts mirror
@@ -340,7 +389,9 @@ def evaluate_gate_status(
     rows: list[dict] = []
     for row in leaderboard.to_dicts():
         model_id = row["model_id"]
-        if row["source"] == "benchmark":
+        if row["source"] == "full":
+            status = "FULL"
+        elif row["source"] == "benchmark":
             status = "GATE HURDLE" if model_id == reference_column else "BENCHMARK"
         elif champion_id is not None and model_id == champion_id:
             status = "CHAMPION"

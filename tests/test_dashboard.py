@@ -1003,3 +1003,129 @@ def test_build_html_v2_sections_and_four_render_calls(tmp_path: Path) -> None:
     assert html_text.count("<!-- plotly-engine-embed -->") == 1
     assert html_text.split("</script>", 1)[1].count("Plotly.newPlot(") == 4
     assert "<script src" not in html_text
+
+
+def test_unified_schema_has_family_columns() -> None:
+    for col in ("family", "training_scope", "has_full_version"):
+        assert col in dash.UNIFIED_SCHEMA.names()
+
+
+def _write_models_dir(tmp_path: Path, families: dict[str, dict]) -> Path:
+    """families: {family: manifest-dict}; a predict.pkl artifact is auto-created."""
+    models = tmp_path / "models"
+    for family, manifest in families.items():
+        full = models / family / "full"
+        full.mkdir(parents=True)
+        (full / "predict.pkl").write_text("weights", encoding="utf-8")
+        (full / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return models
+
+
+def _full_manifest_dict(family: str, run_id: str) -> dict:
+    return {
+        "family": family,
+        "training_scope": "full",
+        "promoted_from_run_id": run_id,
+        "promoted_at": "2026-08-17T12:00:00Z",
+        "artifact_path": "predict.pkl",
+        "config": {
+            "run": {"name": family},
+            "data": {"feature_set": "all", "feature_subset": "medium", "targets": ["target"]},
+            "model": {"backend": "xgboost", "preset": "fast"},
+        },
+    }
+
+
+def test_load_unified_leaderboard_family_columns_and_full_rows(tmp_path: Path) -> None:
+    entry = _registry_entry("a" * 64)
+    entry["manifest"]["config"]["run"]["name"] = "brb1-xgb-v6"
+    _write_registry(tmp_path, [entry])
+    models = _write_models_dir(
+        tmp_path, {"brb1-xgb-v6": _full_manifest_dict("brb1-xgb-v6", "a" * 64)}
+    )
+    frame = dash.load_unified_leaderboard(
+        tmp_path, benchmark_path=False, models_dir=models
+    )
+    rows = {r["model_id"]: r for r in frame.to_dicts()}
+    trained = rows["a" * 64]
+    assert trained["family"] == "brb1-xgb-v6"
+    assert trained["training_scope"] == "research"
+    assert trained["has_full_version"] is True
+    full = rows["brb1-xgb-v6::full"]
+    assert full["source"] == "full"
+    assert full["run_name"] == "brb1-xgb-v6"
+    assert full["training_scope"] == "full"
+    assert full["has_full_version"] is False
+    assert full["corr"] is None
+    assert full["corr_sharpe_ac"] is None
+    assert full["backend"] == "xgboost"
+    assert full["feature_subset"] == "medium"
+    assert full["run_dir"] == str(models / "brb1-xgb-v6" / "full")
+
+
+def test_load_unified_leaderboard_scan_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_registry(tmp_path, [_registry_entry("a" * 64), _registry_entry("b" * 64)])
+    calls = {"n": 0}
+    real_scan = dash.scan_full_versions
+
+    def counting_scan(models_dir: Path) -> dict:
+        calls["n"] += 1
+        return real_scan(models_dir)
+
+    monkeypatch.setattr(dash, "scan_full_versions", counting_scan)
+    dash.load_unified_leaderboard(
+        tmp_path, benchmark_path=False, models_dir=tmp_path / "models"
+    )
+    assert calls["n"] == 1
+
+
+def test_load_unified_leaderboard_missing_models_dir(tmp_path: Path) -> None:
+    _write_registry(tmp_path, [_registry_entry("a" * 64)])
+    frame = dash.load_unified_leaderboard(
+        tmp_path, benchmark_path=False, models_dir=tmp_path / "nope"
+    )
+    assert frame.height == 1
+    assert frame.row(0, named=True)["has_full_version"] is False
+
+
+def test_load_unified_leaderboard_dangling_lineage_warns(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    _write_registry(tmp_path, [_registry_entry("a" * 64)])
+    models = _write_models_dir(
+        tmp_path,
+        {"orphan-family": _full_manifest_dict("orphan-family", "f" * 64)},
+    )
+    with caplog.at_level(logging.WARNING, logger="nmr.dashboard"):
+        frame = dash.load_unified_leaderboard(
+            tmp_path, benchmark_path=False, models_dir=models
+        )
+    assert "orphan-family" in caplog.text  # dangling lineage warned
+    rows = {r["model_id"]: r for r in frame.to_dicts()}
+    assert "orphan-family::full" in rows  # still rendered
+
+
+def test_gate_status_full_rows_stamped_full(tmp_path: Path) -> None:
+    frame = pl.DataFrame(
+        [{"model_id": "brb1-xgb-v6::full", "source": "full", "corr": None,
+          "corr_sharpe_ac": None, "fnc": None, "deflated_sharpe": None,
+          "gain_to_pain_ratio": None, "cagr_1y": None, "turnover_mean": None}],
+        schema=dash.UNIFIED_SCHEMA,
+        strict=False,
+    )
+    out = dash.evaluate_gate_status(frame, _GATE_YAML, tmp_path / "champion.json").row(0, named=True)
+    assert out["status"] == "FULL"
+    assert out["gate_corr"] is None
+    assert out["gate_turnover_mean"] is None
+
+
+def test_evaluable_rows_predicate() -> None:
+    frame = pl.DataFrame(
+        [{"model_id": "a", "source": "trained"},
+         {"model_id": "b", "source": "benchmark"},
+         {"model_id": "c::full", "source": "full"}],
+        schema=dash.UNIFIED_SCHEMA,
+        strict=False,
+    )
+    keep = frame.filter(dash.EVALUABLE_ROWS).get_column("model_id").to_list()
+    assert keep == ["a", "b"]
