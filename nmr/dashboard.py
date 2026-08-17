@@ -728,7 +728,8 @@ def extract_multimetric_timeseries(
             meta_col="numerai_meta_model", target_col="target",
         )
         pay = payout_series(corr_t, mmc_t)
-        standard = [float(v) for v in pay.clipped]
+        clipped_by_era = dict(zip(pay.eras, pay.clipped))
+        standard = [float(clipped_by_era.get(era, 0.0)) for era in axis]
         metrics["payout"][model_id] = {
             "standard": standard,
             "cumulative": _cumulative_from_standard(standard, payout=True),
@@ -778,9 +779,8 @@ def extract_multimetric_timeseries(
             }
         else:
             joined_b = joined.join(lookups.benchmarks, on=["era", "id"], how="inner")
-            # min_overlap_eras=1: the non-vacuity guard's default (20) targets
-            # evaluation contexts; here the axis is the meta window and missing
-            # eras are zero-filled by the alignment below.
+            # reporting path relaxes the evaluation vacuity gate (real meta
+            # window satisfies 20 anyway); alignment below zero-fills missing eras
             per_bmc = engine.per_era_bmc(
                 joined_b, pred_col="prediction",
                 benchmark_col=tier4_column, target_col="target",
@@ -793,6 +793,8 @@ def extract_multimetric_timeseries(
                 "label": label,
             }
 
+        # reporting path relaxes the evaluation vacuity gate (real meta window
+        # satisfies 20 anyway); alignment below zero-fills missing eras
         per_cwmm = engine.per_era_cwmm(
             joined, pred_col="prediction", meta_col="numerai_meta_model",
             min_overlap_eras=1,

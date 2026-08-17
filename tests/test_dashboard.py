@@ -414,6 +414,26 @@ def test_multimetric_determinism_and_missing_run_skip(tmp_path: Path) -> None:
     assert set(a["metrics"]["payout"]) == {"c" * 64}
 
 
+def test_multimetric_payout_aligned_when_model_misses_an_era(tmp_path: Path) -> None:
+    _write_registry(tmp_path, [_registry_entry("e" * 64)])
+    rows = [
+        {"era": era, "id": f"{era}_{i:03d}", "prediction": float(i)}
+        for era in ("0001", "0003")  # era 0002 deliberately missing
+        for i in range(10)
+    ]
+    pl.DataFrame(rows).write_parquet(tmp_path / ("e" * 64) / "validation_preds.parquet")
+    data = _synthetic_v2_data_dir(tmp_path)
+    payload = dash.extract_multimetric_timeseries(
+        tmp_path, data, run_ids=["e" * 64], include_tier4_ref=False
+    )
+    payout = payload["metrics"]["payout"]["e" * 64]
+    assert len(payout["standard"]) == 3          # aligned 1:1 with the axis
+    assert payout["standard"][1] == 0.0          # missing era zero-filled
+    assert len(payload["drawdowns"]["e" * 64]) == 3
+    for name in ("corr20", "mmc20", "corr60", "mmc60", "bmc", "cwmm"):
+        assert len(payload["metrics"][name]["e" * 64]["standard"]) == 3
+
+
 _REAL_VALIDATION = Path("data/v5.3/validation.parquet")
 _REAL_META = Path("data/v5.3/meta_model.parquet")
 _REAL_BENCH = Path("data/v5.3/validation_benchmark_models.parquet")
