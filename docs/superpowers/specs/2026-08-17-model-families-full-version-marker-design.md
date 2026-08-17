@@ -43,6 +43,10 @@ read/discovery side only; the writer is a future workstream that imports the sam
 | D5 | Module placement | **New read-only `nmr/families.py`** — dedicated tested boundary; future promotion writer imports the same contract |
 | D6 | Table grouping | Active Champion → Promoted Full Versions → Research Fleet → Benchmark Floor |
 | D7 | Marker semantics | **Manifest existence**, not bare dir existence — a `full/` dir without a valid manifest is ignored (half-written promotion) |
+| D8 | Family charset | **Lowercase-only** `^[a-z0-9_-]+$` — prevents case-collision overwrites on case-insensitive filesystems (Windows NTFS / macOS APFS); matches the existing `run.name` convention |
+| D9 | Chart evaluability | **Single module-level predicate** (`EVALUABLE_ROWS = source != "full"`) owns chart inclusion — no ad-hoc per-chart filters |
+| D10 | Promotion completeness | Valid manifest additionally requires a **non-empty relative `artifact_path` whose file exists** — no ghost/hollow promotions |
+| D11 | Champion vs full | Champion pointer always names a registry `run_id`; a full row (`<family>::full`) can never be champion — the two table partitions are additive, not exclusive |
 
 ---
 
@@ -83,9 +87,18 @@ precedent in `load_unified_leaderboard`):
 
 1. `manifest.json` exists under `artifacts/models/<family>/full/`.
 2. JSON parses as an object.
-3. `family` equals the directory name exactly.
+3. `family` equals the directory name exactly (dir names are lowercase, §4.3).
 4. `training_scope == "full"`.
 5. `promoted_from_run_id` is a non-empty string.
+6. `artifact_path` is a non-empty **relative** path — no leading `/`, no drive
+   letter, no `..` — resolved against the repo root, **and the referenced file
+   exists on disk**. A manifest written before model serialization completes
+   ("hollow" promotion) is treated as not promoted and warned, exactly like a
+   corrupt `run.json`.
+
+**Lineage warning (not invalidation):** if `promoted_from_run_id` has no directory under
+`artifacts/registry/` (source run pruned), the consumer logs a warning but still renders
+the full row — the deployed model exists; provenance is informational.
 
 ### 3.3 Determinism & integrity notes
 
@@ -94,6 +107,9 @@ precedent in `load_unified_leaderboard`):
   canonical hash. Canonical-hash invariants are untouched.
 - `artifacts/models/` is **machine-generated, not source of truth**. The read side is
   strictly read-only; the registry stays immutable.
+- **Writer contract (future):** the promotion writer must serialize the model artifact
+  BEFORE writing `manifest.json` (temp file + fsync + `os.replace`, matching the repo's
+  atomic-write discipline), so a valid manifest always implies an existing artifact.
 
 ---
 
@@ -140,17 +156,20 @@ def family_has_full_version(models_dir: Path, family: str) -> bool
 
 ### 4.3 Path-traversal / naming guard (approval item 1)
 
-Family names are validated against a strict charset before ANY path construction:
-`^[A-Za-z0-9_-]+$`. Enforcement points:
+Family names are validated against a strict **lowercase** charset before ANY path
+construction: `^[a-z0-9_-]+$`. Lowercase-only prevents case-collision overwrites on
+case-insensitive filesystems (Windows NTFS, macOS APFS) where `Model_A` and `model_a`
+would silently collide and clobber each other; it also matches the existing `run.name`
+convention (all 29 registry runs are lowercase). Enforcement points:
 
 - `full_manifest_path()` and `load_full_version()` **raise** `ValueError` on an invalid
   family name (fail-fast — callers must not feed unvalidated names).
 - `scan_full_versions()` **skips** directory entries that do not match the regex
-  (defensive — the filesystem may contain arbitrary entries).
+  (defensive — the filesystem may contain arbitrary entries, including mixed-case dirs).
 - `manifest.family` must equal the (validated) directory name (§3.2 rule 3).
 
-This prevents path traversal (`..`, `/`, `\`), special filesystem characters, and
-whitespace from reaching filesystem calls.
+This prevents path traversal (`..`, `/`, `\`), special filesystem characters, whitespace,
+and mixed-case collisions from reaching filesystem calls.
 
 ---
 
@@ -168,15 +187,22 @@ whitespace from reaching filesystem calls.
 
 Signature gains `models_dir: Path | None = None` (default → `DEFAULT_MODELS_DIR`).
 
+- **Scan once (review item 1):** `full_versions = scan_full_versions(models_dir)` runs a
+  single top-of-function pass; `promoted_families = set(full_versions)` is built from it.
+  Every trained row resolves `has_full_version` via **O(1) set membership** — never a
+  per-row filesystem check. N runs across M families ⇒ 1 disk scan, not N.
 - **Trained rows**: `family = run.name`, `training_scope = "research"`,
-  `has_full_version = family_has_full_version(models_dir, run.name)`.
-- **Full rows**: one appended per valid `FullVersion` from `scan_full_versions()`:
+  `has_full_version = run.name in promoted_families`.
+- **Full rows**: one appended per valid `FullVersion` from the single scan:
   - `model_id = f"{family}::full"`, `source = "full"`, `run_name = family`,
     `run_dir = str(manifest_path.parent)`.
   - **All metric cells null** — validation metrics for a train+validation model are
     in-sample and must never be shown as comparable OOF numbers (honest "—" rendering via
     existing `_fmt(None)`).
   - `family`/`training_scope` set; `has_full_version = false`.
+  - **Lineage warning (review item 2b):** if `(registry_dir / promoted_from_run_id)` does
+    not exist, log a warning — provenance is dangling after registry pruning. The row
+    still renders; the warning is informational.
 - **Status assignment**: `evaluate_gate_status` gains an explicit early branch —
   `source == "full"` rows are stamped `status = "FULL"` with all `gate_*` receipts `None`.
   This is mandatory: without it, all-null metric cells fall through the gate ladder and
@@ -186,6 +212,17 @@ Signature gains `models_dir: Path | None = None` (default → `DEFAULT_MODELS_DI
   change for existing callers/tests.**
 
 `_LEADERBOARD_SCHEMA` (`dashboard_app.py`) mirrors the three new columns.
+
+### 5.3 Chart-inclusion predicate (review item 4)
+
+```python
+EVALUABLE_ROWS: pl.Expr = pl.col("source") != "full"
+```
+
+Module-level in `nmr/dashboard.py` — the **single** predicate every chart and candidate
+selection path uses. Source-based, not `training_scope`-based, on purpose: benchmark rows
+have null `training_scope` and must remain visible in the Sharpe leaderboard, while
+`source` is never null. Full rows carry no validation metrics and are excluded everywhere.
 
 ---
 
@@ -200,10 +237,15 @@ Signature gains `models_dir: Path | None = None` (default → `DEFAULT_MODELS_DI
   the Active Champion group and the Research Fleet** (approval item 3 — D6). Status badge
   `FULL` (new `_STATUS_BADGE["FULL"] = "full"` entry). Metric cells render "—" via
   `_fmt(None)`; gate cells pass through `_td_gate(..., None)` without red tinting.
+- **Champion vs full coexistence (review item 5b — D11)**: the champion pointer always
+  names a registry `run_id` (`champion.json` → `{"run_id": ...}`), and a full row's
+  `model_id = "<family>::full"` can never equal it — a full row can never itself be
+  champion. If the champion *family* has a full version, the champion research row stays in
+  the Active Champion group (carrying the FULL chip) while its full row renders in the
+  Promoted group. The two partitions are additive, not exclusive.
 - **`_table_rows`**: group order = champion rows + full rows + fleet rows + benchmark rows.
-- **`_bar_input`** (Sharpe leaderboard chart): exclude `source == "full"` rows explicitly
-  (they carry null Sharpe; the sort already puts nulls last, but the exclusion makes the
-  intent explicit and future-proof).
+- **`_bar_input`** (Sharpe leaderboard chart): filter `EVALUABLE_ROWS` (§5.3) before
+  ranking — full rows never reach the chart.
 
 ### 6.2 Streamlit app (`dashboard_app.py`)
 
@@ -211,18 +253,20 @@ Signature gains `models_dir: Path | None = None` (default → `DEFAULT_MODELS_DI
 - `load_registry_frame()` broadens the trained-only filter to
   `pl.col("source").is_in(["trained", "trained_legacy", "full"])` (approval item 2) so the
   existing Source multiselect surfaces `full` and full rows render.
+- **Deterministic default sort (review item 5a)**: `load_registry_frame()` pins full rows
+  first (`source == "full"` ascending-key first), then `corr_sharpe_ac` descending with
+  nulls last — no client-side Arrow/AgGrid null-placement ambiguity on column sorts.
 - `has_full_version` rendered via `st.column_config.CheckboxColumn(label="Full", help=...)` —
   a checkbox column is the unambiguous boolean presentation; no extra text column.
 - No other view-contract changes.
 
 ### 6.3 Charts
 
-- Sharpe leaderboard (`_bar_input`): `source == "full"` excluded (§6.1).
-- Similarity matrix (`extract_pairwise_similarity_matrix`): candidate selection excludes
-  `source == "full"` (full rows have no registry `validation_preds.parquet`; explicit
-  exclusion prevents missing-run warnings).
-- Multimetric timeseries / drawdown: full rows are not selectable candidates (same
-  exclusion at candidate selection).
+All chart and candidate-selection paths use the single `EVALUABLE_ROWS` predicate (§5.3) —
+Sharpe leaderboard (`_bar_input`), similarity-matrix candidate selection, and
+multimetric/drawdown candidates. No ad-hoc `source != "full"` checks scattered across call
+sites. (Full rows also have no registry `validation_preds.parquet`, so the predicate
+prevents missing-run warnings in the similarity matrix.)
 
 ---
 
@@ -247,9 +291,15 @@ No `CONTRIBUTING.md` change (no new commands). No config-schema change (D4).
 - **Path-guard**: `full_manifest_path`/`load_full_version` raise `ValueError` for invalid
   family names (`../evil`, `a/b`, `a b`, `a:b`, `""`); `scan_full_versions` skips
   non-matching directory entries.
+- **Lowercase guard (review item 3)**: mixed-case family names (`ModelA`) are rejected by
+  the regex — `load_full_version("ModelA")` raises, `scan_full_versions` skips a mixed-case
+  dir, and a manifest whose `family` is mixed-case inside a lowercase dir is invalid.
 - `load_full_version` happy path; missing manifest → `None`; corrupt JSON → `None`;
   `family != dir name` → `None`; `training_scope != "full"` → `None`; missing
   `promoted_from_run_id` → `None`.
+- **Artifact-existence (review item 2a)**: empty / absolute / `..`-containing `artifact_path`
+  → `None`; a non-empty relative `artifact_path` whose file does not exist → `None`
+  (hollow promotion rejected); existing file → valid.
 - `scan_full_versions` across multiple families (valid + invalid interleaved) → only valid
   ones, keyed by family.
 - `family_has_full_version` true/false.
@@ -264,8 +314,14 @@ No `CONTRIBUTING.md` change (no new commands). No config-schema change (D4).
   - Benchmark rows (when `benchmark_path` provided) untouched by the family logic.
   - `benchmark_path=False` isolation intact; missing `models_dir` → zero full rows, all
     flags false.
+- **Scan-once (review item 1)**: monkeypatch `scan_full_versions` with a call counter —
+  N trained runs resolve `has_full_version` with exactly one scan invocation.
+- **Lineage (review item 2b)**: a full manifest whose `promoted_from_run_id` has no
+  registry dir still renders, with a warning logged (`caplog`).
 - `evaluate_gate_status` with a full row present → that row's status is `"FULL"`, receipts
   all `None`, and no full row is ever mislabeled `RESEARCH`.
+- **`EVALUABLE_ROWS` (review item 4)**: excludes full rows, keeps trained and benchmark
+  rows.
 - Existing determinism tests (`tests/test_benchmark_hierarchy.py`, `tests/test_scorecard.py`)
   are the guard that no canonical-hash payload changed — run unchanged.
 
