@@ -800,11 +800,14 @@ def extract_pairwise_similarity_matrix(
 
     mean_delta = None
     if stress_idx.sum() >= 5:
+        # degenerate columns inside the stress/normal subsets produce NaN
+        # correlations — neutralize them (0) before the off-diagonal mean so
+        # mean_delta is always finite (0-d scalar corrcoef kept 2-d too)
         rho_stress = _mean_offdiag(
-            np.clip(np.corrcoef(stacked[:, stress_idx]), -1.0, 1.0)
+            np.clip(np.nan_to_num(np.atleast_2d(np.corrcoef(stacked[:, stress_idx])), nan=0.0), -1.0, 1.0)
         )
         rho_normal = _mean_offdiag(
-            np.clip(np.corrcoef(stacked[:, ~stress_idx]), -1.0, 1.0)
+            np.clip(np.nan_to_num(np.atleast_2d(np.corrcoef(stacked[:, ~stress_idx])), nan=0.0), -1.0, 1.0)
         )
         if rho_stress is not None and rho_normal is not None:
             mean_delta = rho_stress - rho_normal

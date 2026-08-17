@@ -93,8 +93,10 @@ def extract_pairwise_similarity_matrix(
     run_ids: Sequence[str],
     include_tier4_ref: bool = True,
     tier4_column: str = "v53_lgbm_ender60",
-) -> tuple[list[str], list[str], list[list[float]]]: ...
+) -> tuple[list[str], list[str], list[list[float]], dict[str, Any]]: ...
 ```
+
+(plan-level refinement: the stress-regime delta rides along as a fourth element — `{"mean_delta": float | None, "n_pairs": int}` — rather than a separate function.)
 
 ### `_resolve_horizon_targets`
 
@@ -151,7 +153,7 @@ def build_drawdown_chart(payload: dict[str, Any]) -> go.Figure: ...
 def build_leaderboard_bar_chart(df: pl.DataFrame, *, hurdle_sharpe: float) -> go.Figure: ...  # unchanged
 ```
 
-- **`multimetric_chart_html`** returns the full `<div id="multimetric-chart">` + `<script>` block: the payload embedded as `const MM_PAYLOAD = {...}` (`json.dumps(..., sort_keys=True)`), a fixed vanilla-JS controller scoped to the rendered root (decision #24) with state variables `currentMetric`/`currentView`, an HTML `<select>` (7 options) and two view `<button>`s, and `applyState()` rebuilding traces via `Plotly.react` **including the `METRIC_CONFIG` y-axis title/tickformat per metric × view** (decision #21 — exact titles per review round 2). Stress-era `vrect` spans are fixed layout shapes from `meta_downside_mask`. Hovertemplate labels via a small JS escape helper. Empty payload → the "Timeseries data unavailable without local v5.3 assets" annotation.
+- **`multimetric_chart_html`** returns the full `<div id="multimetric-chart">` + `<script>` block: the payload embedded as `var payload = {...}` (`json.dumps(..., sort_keys=True)`), a fixed vanilla-JS controller scoped to the rendered root (decision #24) with state variables `currentMetric`/`currentView`, an HTML `<select>` (7 options) and two view `<button>`s, and `applyState()` rebuilding traces via `Plotly.react(root, traces, layout)` **including the `METRIC_CONFIG` y-axis title/tickformat per metric × view** (decision #21 — exact titles per review round 2). Stress-era `vrect` spans are fixed layout shapes from `meta_downside_mask`. Hovertemplate labels via a small JS escape helper. Empty payload → the "Timeseries data unavailable without local v5.3 assets" annotation.
 - **Similarity chart**: static `go.Heatmap(z=matrix, x=labels, y=labels)`, `colorscale="RdBu_r"`, `zmid=0.5`, per-cell value annotations, labels escaped, **visual highlight on row/column 0** (top-ranked model, decision #25); empty matrix → annotation (no traces).
 - **Drawdown chart**: traces from `payload["drawdowns"]` over `payload["eras"]`, `fill="tozeroy"` red fill; empty payload → the same unavailable annotation as v1.
 

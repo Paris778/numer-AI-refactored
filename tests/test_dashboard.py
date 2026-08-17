@@ -505,6 +505,47 @@ def test_real_reconcile_populates_all_capital_columns() -> None:
         assert row["kelly_fraction"] is not None
 
 
+@pytest.mark.skipif(not _HAS_REAL, reason="real registry/v5.3 data absent; skipped in CI")
+def test_real_multimetric_payload_and_payout_parity() -> None:
+    frame = dash.load_unified_leaderboard(_REAL_REGISTRY, benchmark_path=False)
+    top = frame.sort("corr_sharpe_ac", descending=True, nulls_last=True).row(0, named=True)
+    payload = dash.extract_multimetric_timeseries(
+        _REAL_REGISTRY, Path("data/v5.3"), run_ids=[top["model_id"]],
+        include_tier4_ref=False,
+    )
+    assert len(payload["eras"]) == 86
+    for name in ("payout", "corr20", "mmc20", "corr60", "mmc60", "bmc", "cwmm"):
+        series = payload["metrics"][name][top["model_id"]]
+        assert len(series["standard"]) == 86
+        assert len(series["cumulative"]) == 86
+    # chart payout compounding == table cagr_1y (same "target" anchor)
+    reconciled = dash.reconcile_capital_metrics(frame, Path("data/v5.3"))
+    row = reconciled.filter(pl.col("model_id") == top["model_id"]).row(0, named=True)
+    from nmr.payout import annual_compounded_return
+    assert annual_compounded_return(
+        payload["metrics"]["payout"][top["model_id"]]["standard"]
+    ) == pytest.approx(row["cagr_1y"], rel=1e-6)
+
+
+@pytest.mark.skipif(not _HAS_REAL, reason="real registry/v5.3 data absent; skipped in CI")
+def test_real_similarity_matrix_top5_with_tier4() -> None:
+    frame = dash.load_unified_leaderboard(_REAL_REGISTRY, benchmark_path=False)
+    top5 = (
+        frame.sort("corr_sharpe_ac", descending=True, nulls_last=True)
+        .head(5).get_column("model_id").to_list()
+    )
+    _labels, ids, matrix, stress = dash.extract_pairwise_similarity_matrix(
+        _REAL_REGISTRY, Path("data/v5.3"), run_ids=top5,
+        include_tier4_ref=True,
+    )
+    assert len(ids) == 6 and "v53_lgbm_ender60" in ids
+    for i in range(len(ids)):
+        assert matrix[i][i] == pytest.approx(1.0, abs=1e-12)
+        for j in range(len(ids)):
+            assert -1.0 <= matrix[i][j] <= 1.0
+    assert set(stress) == {"mean_delta", "n_pairs"}
+
+
 def test_dashboard_symbols_exported_from_package() -> None:
     import nmr
 
@@ -806,6 +847,32 @@ def test_similarity_matrix_degenerate_constant_predictions(tmp_path: Path) -> No
     )
     assert matrix[0][0] == 1.0
     assert not any(v != v for row in matrix for v in row)  # no NaN
+
+
+def test_similarity_stress_delta_finite_under_degenerate_stress(tmp_path: Path) -> None:
+    # meta flipped negative in era 0001 -> a stress era exists; a constant-
+    # prediction model makes the stress-subset column degenerate.
+    data = _synthetic_data_dir(tmp_path)
+    meta_path = data / "meta_model.parquet"
+    rows = []
+    for era in ("0001", "0002", "0003"):
+        for i in range(10):
+            sign = -1.0 if era == "0001" else 1.0
+            rows.append({"era": era, "id": f"{era}_{i:03d}",
+                         "numerai_meta_model": sign * float(i)})
+    pl.DataFrame(rows).write_parquet(meta_path)
+    pl.DataFrame(
+        [{"era": era, "id": f"{era}_{i:03d}", "v53_lgbm_ender60": float(i)}
+         for era in ("0001", "0002", "0003") for i in range(10)]
+    ).write_parquet(data / "validation_benchmark_models.parquet")
+    _write_registry(tmp_path, [_registry_entry("f" * 64)])
+    _write_preds(tmp_path / ("f" * 64), scale=0.0)
+    _labels, ids, matrix, stress = dash.extract_pairwise_similarity_matrix(
+        tmp_path, data, run_ids=["f" * 64], include_tier4_ref=True
+    )
+    # mean_delta may be None (insufficient stress rows) but never NaN
+    assert stress["mean_delta"] is None or stress["mean_delta"] == stress["mean_delta"]
+    assert all(-1.0 <= v <= 1.0 for row in matrix for v in row)
 
 
 def test_similarity_matrix_missing_data_assets(tmp_path: Path) -> None:

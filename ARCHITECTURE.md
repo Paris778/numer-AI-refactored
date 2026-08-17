@@ -389,9 +389,7 @@ Long-running paths print console progress that never enters artifacts: `analyze_
 
 ### W. Executive Dashboard Engine — `nmr/dashboard.py` + `dashboard_charts.py`
 
-`nmr/dashboard.py` — executive report engine: unified leaderboard schema (superset of the Streamlit leaderboard schema), tier-4 gate projection from `configs/benchmarks/tier4_gate.yaml`, stored-first capital recompute over the 86-era meta-overlap window, payout timeseries with downside mask; plotly/streamlit-free.
-
-`dashboard_charts.py` (top-level control plane) — plotly figure builders for the executive report (presentation only).
+`nmr/dashboard.py` — executive report engine — unified leaderboard, tier-4 gate projection, stored-first capital recompute over the 86-era meta-overlap window, 7-metric multimetric timeseries (payout anchored to `target`; BMC self-guard; zeroed missing horizons), pairwise rank-gaussian similarity matrix with stress-regime delta; plotly/streamlit-free. `dashboard_charts.py` adds the JS-controller multimetric chart (no `updatemenus`) and the similarity heatmap.
 
 **Standardized window & regeneration rule:** all dashboard rows (trained runs and benchmark tiers) are compared on the **meta-overlap window** = `validation.parquet ∩ meta_model.parquet` — currently eras `1133..1218` (86 eras); it is meta coverage, not an arbitrary choice. `meta_model.parquet` (v5.3) only exists from era 1133 onward, and the window moves forward as the local data snapshot is refreshed (`refresh_data.py` + `nmr/refresh.py`; the live file expands weekly). **After every data refresh, regenerate the report** (`./.venv/Scripts/python generate_dashboard.py`) — a stale `artifacts/dashboard.html` would compare rows on a window that no longer matches the refreshed data. The capital-cell recompute derives its era axis from the same meta overlap at generation time.
 
