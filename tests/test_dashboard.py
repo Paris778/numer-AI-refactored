@@ -14,6 +14,7 @@ import nmr.dashboard as dash
 import nmr.evaluation as nmr_evaluation
 import nmr.payout as payout
 from nmr.config import REPO_ROOT
+from nmr.payout import annual_compounded_return
 
 
 def test_resolve_benchmark_path_prefers_given_existing(tmp_path: Path) -> None:
@@ -335,46 +336,82 @@ def test_reconcile_capital_metrics_missing_data_assets_noop(tmp_path: Path) -> N
     assert out.row(0, named=True)["cagr_1y"] is None
 
 
-def test_extract_payout_timeseries_shape_and_determinism(tmp_path: Path) -> None:
-    _write_registry(tmp_path, [_registry_entry("a" * 64), _registry_entry("b" * 64)])
-    for run_id, scale in (("a" * 64, 1.0), ("b" * 64, -0.5)):
-        _write_preds(tmp_path / run_id, scale=scale)
-    data = _synthetic_data_dir(tmp_path)
-
-    payload = dash.extract_payout_timeseries(
-        tmp_path, data, run_ids=["b" * 64, "a" * 64], include_tier4_ref=False
-    )
-    assert payload["eras"] == ["0001", "0002", "0003"]  # numeric order
-    assert len(payload["meta_downside_mask"]) == 3
-    assert set(payload["series"]) == {"a" * 64, "b" * 64}
-    for series in payload["series"].values():
-        assert len(series["cumulative_wealth"]) == 3
-        assert len(series["drawdown"]) == 3
-        assert series["mdd"] <= 0.0
-        assert isinstance(series["cagr"], float)
-        assert series["label"]
-
-    # determinism: identical payload hash across repeated runs and insertion orders
-    again = dash.extract_payout_timeseries(
-        tmp_path, data, run_ids=["a" * 64, "b" * 64], include_tier4_ref=False
-    )
-    assert json.dumps(again, sort_keys=True) == json.dumps(payload, sort_keys=True)
-
-    # perfect-correlation series: wealth compounds at +5% per era, drawdown == 0
-    perfect = payload["series"]["a" * 64]
-    assert perfect["cumulative_wealth"][-1] == pytest.approx(1.05**3, abs=1e-9)
-    assert perfect["drawdown"] == pytest.approx([0.0, 0.0, 0.0], abs=1e-12)
-    assert perfect["mdd"] == pytest.approx(0.0, abs=1e-12)
-
-
-def test_extract_payout_timeseries_missing_run_skipped(tmp_path: Path) -> None:
+def test_multimetric_payload_shape_and_semantics(tmp_path: Path) -> None:
     _write_registry(tmp_path, [_registry_entry("a" * 64)])
     _write_preds(tmp_path / ("a" * 64), scale=1.0)
-    data = _synthetic_data_dir(tmp_path)
-    payload = dash.extract_payout_timeseries(
-        tmp_path, data, run_ids=["a" * 64, "9" * 64], include_tier4_ref=False
+    data = _synthetic_v2_data_dir(tmp_path)
+
+    payload = dash.extract_multimetric_timeseries(
+        tmp_path, data, run_ids=["a" * 64], include_tier4_ref=True
     )
-    assert set(payload["series"]) == {"a" * 64}
+    assert payload["eras"] == ["0001", "0002", "0003"]
+    assert len(payload["meta_downside_mask"]) == 3
+    assert set(payload["metrics"]) == {
+        "payout", "corr20", "mmc20", "corr60", "mmc60", "bmc", "cwmm"
+    }
+    assert set(payload["drawdowns"]) >= {"a" * 64, "v53_lgbm_ender60"}
+    for name in payload["metrics"]:
+        for model_id in ("a" * 64, "v53_lgbm_ender60"):
+            series = payload["metrics"][name][model_id]
+            assert len(series["standard"]) == 3
+            assert len(series["cumulative"]) == 3
+            assert series["label"]
+    # payout: perfect corr with target and meta -> r_t = 0.05 clipped every era
+    payout = payload["metrics"]["payout"]["a" * 64]
+    assert payout["standard"] == pytest.approx([0.05, 0.05, 0.05], abs=1e-9)
+    assert payout["cumulative"] == pytest.approx([1.05, 1.05**2, 1.05**3], abs=1e-9)
+    # correlation-family cumulative = cumsum (aligned 1:1, no origin point)
+    cwmm = payload["metrics"]["cwmm"]["a" * 64]
+    assert cwmm["cumulative"][-1] == pytest.approx(sum(cwmm["standard"]), abs=1e-9)
+    # BMC short-circuit: the reference measured against itself is all zeros
+    bmc_ref = payload["metrics"]["bmc"]["v53_lgbm_ender60"]
+    assert bmc_ref["standard"] == pytest.approx([0.0, 0.0, 0.0], abs=1e-12)
+    # drawdown aligned with payout wealth
+    wealth = payout["cumulative"]
+    peak = max(wealth[:1])
+    assert payload["drawdowns"]["a" * 64][0] == pytest.approx(wealth[0] / peak - 1.0, abs=1e-12)
+
+
+def test_multimetric_payout_parity_with_reconcile(tmp_path: Path) -> None:
+    entry = _registry_entry("b" * 64)
+    del entry["scorecard"]["cagr_1y"]
+    del entry["scorecard"]["gain_to_pain_ratio"]
+    del entry["scorecard"]["kelly_fraction"]
+    _write_registry(tmp_path, [entry])
+    _write_preds(tmp_path / ("b" * 64), scale=1.0)
+    data = _synthetic_v2_data_dir(tmp_path)
+    payload = dash.extract_multimetric_timeseries(
+        tmp_path, data, run_ids=["b" * 64], include_tier4_ref=False
+    )
+    frame = dash.load_unified_leaderboard(tmp_path, benchmark_path=False)
+    reconciled = dash.reconcile_capital_metrics(frame, data)
+    row = reconciled.row(0, named=True)
+    # chart payout compounded must equal the table's cagr_1y compounding
+    # (both anchored to main_target="target" — decision #19)
+    standard = payload["metrics"]["payout"]["b" * 64]["standard"]
+    assert annual_compounded_return(standard) == pytest.approx(row["cagr_1y"], abs=1e-6)
+    assert row["cagr_1y"] is not None
+
+
+def test_multimetric_missing_data_assets_empty_payload(tmp_path: Path) -> None:
+    payload = dash.extract_multimetric_timeseries(
+        tmp_path, tmp_path / "no-data", run_ids=["a" * 64], include_tier4_ref=False
+    )
+    assert payload == {"eras": [], "meta_downside_mask": [], "metrics": {}, "drawdowns": {}}
+
+
+def test_multimetric_determinism_and_missing_run_skip(tmp_path: Path) -> None:
+    _write_registry(tmp_path, [_registry_entry("c" * 64)])
+    _write_preds(tmp_path / ("c" * 64), scale=-0.5)
+    data = _synthetic_v2_data_dir(tmp_path)
+    a = dash.extract_multimetric_timeseries(
+        tmp_path, data, run_ids=["c" * 64, "9" * 64], include_tier4_ref=False
+    )
+    b = dash.extract_multimetric_timeseries(
+        tmp_path, data, run_ids=["9" * 64, "c" * 64], include_tier4_ref=False
+    )
+    assert json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
+    assert set(a["metrics"]["payout"]) == {"c" * 64}
 
 
 _REAL_VALIDATION = Path("data/v5.3/validation.parquet")
@@ -453,7 +490,7 @@ def test_dashboard_symbols_exported_from_package() -> None:
     for name in (
         "UNIFIED_SCHEMA",
         "evaluate_gate_status",
-        "extract_payout_timeseries",
+        "extract_multimetric_timeseries",
         "load_benchmark_frame",
         "load_unified_leaderboard",
         "read_champion_pointer",

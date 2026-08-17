@@ -32,7 +32,7 @@ logger = logging.getLogger("nmr.dashboard")
 __all__ = [
     "UNIFIED_SCHEMA",
     "evaluate_gate_status",
-    "extract_payout_timeseries",
+    "extract_multimetric_timeseries",
     "load_benchmark_frame",
     "load_unified_leaderboard",
     "read_champion_pointer",
@@ -592,6 +592,12 @@ def extract_payout_timeseries(
 
     Numeric era ordering throughout (``sorted_era_labels``); arrays aligned
     to the shared axis; deterministic key order (sorted run ids).
+
+    TRANSITIONAL (dashboard-v2 plan): superseded by
+    ``extract_multimetric_timeseries`` and removed from the public exports.
+    Kept only because ``generate_dashboard.py`` (its sole remaining
+    consumer) is migrated in plan Task 6 — delete this function and
+    ``_series_from_metrics`` when that migration lands.
     """
     lookups = _load_shared_lookups(data_dir)
     if lookups is None:
@@ -647,3 +653,160 @@ def extract_payout_timeseries(
             logger.warning("nmr.dashboard: %s missing; tier-4 curve omitted", bench_path)
 
     return {"eras": axis, "meta_downside_mask": mask, "series": series}
+
+
+_METRIC_NAMES = ("payout", "corr20", "mmc20", "corr60", "mmc60", "bmc", "cwmm")
+
+
+def _cumulative_from_standard(standard: list[float], *, payout: bool) -> list[float]:
+    values = np.asarray(standard, dtype=float)
+    if payout:
+        return [float(v) for v in np.cumprod(1.0 + values)]
+    return [float(v) for v in np.cumsum(values)]
+
+
+def extract_multimetric_timeseries(
+    registry_dir: Path,
+    data_dir: Path,
+    run_ids: Sequence[str],
+    include_tier4_ref: bool = True,
+    tier4_column: str = "v53_lgbm_ender60",
+) -> dict[str, Any]:
+    """7-metric per-era trajectories over the standardized meta window.
+
+    Payout is anchored to main_target="target" (decision #19); correlation
+    metrics use cumsum, payout uses cumprod (decision #9); the tier-4 BMC is
+    short-circuited to zeros (decision #11); missing horizon targets zero
+    their slice with a warning (decision #23). Never raises on missing
+    assets — returns the empty payload.
+    """
+    lookups = _load_v2_lookups(data_dir, tier4_column)
+    if lookups is None:
+        logger.warning(
+            "nmr.dashboard: data assets missing at %s; empty timeseries", data_dir
+        )
+        return {"eras": [], "meta_downside_mask": [], "metrics": {}, "drawdowns": {}}
+
+    axis = lookups.meta_eras
+    engine = EvaluationEngine()
+    meta_joined = lookups.meta.join(lookups.targets, on=["era", "id"], how="inner")
+    meta_corr = engine.per_era_corr(
+        meta_joined, pred_col="numerai_meta_model", target_col="target"
+    )
+    mask = [bool(meta_corr[era] < 0.0) for era in axis]
+
+    metrics: dict[str, dict] = {name: {} for name in _METRIC_NAMES}
+    drawdowns: dict[str, list[float]] = {}
+
+    ids = [mid for mid in sorted(set(run_ids)) if mid != tier4_column]
+    if include_tier4_ref and lookups.benchmarks.height > 0:
+        ids.append(tier4_column)
+
+    for model_id in ids:
+        if model_id == tier4_column:
+            preds = lookups.benchmarks.select(
+                ["era", "id", pl.col(tier4_column).alias("prediction")]
+            )
+            label = tier4_column
+        else:
+            preds_path = Path(registry_dir) / model_id / "validation_preds.parquet"
+            if not preds_path.exists():
+                logger.warning(
+                    "nmr.dashboard: skipping missing preds %s", preds_path
+                )
+                continue
+            preds = pl.read_parquet(preds_path, columns=["era", "id", "prediction"])
+            label = _series_label(registry_dir, model_id)
+
+        joined = (
+            preds.join(lookups.targets, on=["era", "id"], how="inner")
+            .join(lookups.meta, on=["era", "id"], how="inner")
+        )
+        corr_t = engine.per_era_corr(joined, pred_col="prediction", target_col="target")
+        mmc_t = engine.per_era_mmc(
+            joined, pred_col="prediction",
+            meta_col="numerai_meta_model", target_col="target",
+        )
+        pay = payout_series(corr_t, mmc_t)
+        standard = [float(v) for v in pay.clipped]
+        metrics["payout"][model_id] = {
+            "standard": standard,
+            "cumulative": _cumulative_from_standard(standard, payout=True),
+            "label": label,
+        }
+        wealth = np.asarray(metrics["payout"][model_id]["cumulative"], dtype=float)
+        peak = np.maximum.accumulate(wealth)
+        drawdowns[model_id] = [float(v) for v in wealth / peak - 1.0]
+
+        horizon_metrics = (
+            ("corr20", lookups.target_20_col, "corr"),
+            ("corr60", lookups.target_60_col, "corr"),
+            ("mmc20", lookups.target_20_col, "mmc"),
+            ("mmc60", lookups.target_60_col, "mmc"),
+        )
+        for name, target_col, kind in horizon_metrics:
+            if target_col not in joined.columns:
+                logger.warning(
+                    "nmr.dashboard: horizon target %s missing; %s zeroed",
+                    target_col, name,
+                )
+                zeros = [0.0 for _ in axis]
+                metrics[name][model_id] = {
+                    "standard": zeros, "cumulative": zeros, "label": label,
+                }
+                continue
+            if kind == "corr":
+                per = engine.per_era_corr(
+                    joined, pred_col="prediction", target_col=target_col
+                )
+            else:
+                per = engine.per_era_mmc(
+                    joined, pred_col="prediction",
+                    meta_col="numerai_meta_model", target_col=target_col,
+                )
+            aligned = [float(per.get(era, 0.0)) for era in axis]
+            metrics[name][model_id] = {
+                "standard": aligned,
+                "cumulative": _cumulative_from_standard(aligned, payout=False),
+                "label": label,
+            }
+
+        if model_id == tier4_column:
+            zeros = [0.0 for _ in axis]
+            metrics["bmc"][model_id] = {
+                "standard": zeros, "cumulative": zeros, "label": label,
+            }
+        else:
+            joined_b = joined.join(lookups.benchmarks, on=["era", "id"], how="inner")
+            # min_overlap_eras=1: the non-vacuity guard's default (20) targets
+            # evaluation contexts; here the axis is the meta window and missing
+            # eras are zero-filled by the alignment below.
+            per_bmc = engine.per_era_bmc(
+                joined_b, pred_col="prediction",
+                benchmark_col=tier4_column, target_col="target",
+                min_overlap_eras=1,
+            )
+            aligned = [float(per_bmc.get(era, 0.0)) for era in axis]
+            metrics["bmc"][model_id] = {
+                "standard": aligned,
+                "cumulative": _cumulative_from_standard(aligned, payout=False),
+                "label": label,
+            }
+
+        per_cwmm = engine.per_era_cwmm(
+            joined, pred_col="prediction", meta_col="numerai_meta_model",
+            min_overlap_eras=1,
+        )
+        aligned = [float(per_cwmm.get(era, 0.0)) for era in axis]
+        metrics["cwmm"][model_id] = {
+            "standard": aligned,
+            "cumulative": _cumulative_from_standard(aligned, payout=False),
+            "label": label,
+        }
+
+    return {
+        "eras": axis,
+        "meta_downside_mask": mask,
+        "metrics": metrics,
+        "drawdowns": drawdowns,
+    }
