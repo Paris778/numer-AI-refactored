@@ -70,7 +70,7 @@ artifacts/
   "training_scope": "full",
   "promoted_from_run_id": "2610a99d833779ea78d14aa0b78d16a0a1d17706fc3aa6b9536ca7e9093445a5",
   "promoted_at": "2026-08-17T12:00:00Z",
-  "artifact_path": "artifacts/models/brb1-xgb-v6/full/predict.pkl",
+  "artifact_path": "predict.pkl",   # relative to the full/ dir — sits beside the manifest
   "config": {
     "run": { "name": "brb1-xgb-v6", "seed": 20260810, "artifacts_dir": "artifacts" },
     "data": { "version": "v5.3", "feature_set": "all", "feature_subset": "medium" },
@@ -91,10 +91,11 @@ precedent in `load_unified_leaderboard`):
 4. `training_scope == "full"`.
 5. `promoted_from_run_id` is a non-empty string.
 6. `artifact_path` is a non-empty **relative** path — no leading `/`, no drive
-   letter, no `..` — resolved against the repo root, **and the referenced file
-   exists on disk**. A manifest written before model serialization completes
-   ("hollow" promotion) is treated as not promoted and warned, exactly like a
-   corrupt `run.json`.
+   letter, no `..` — **resolved against the manifest's own `full/` directory**
+   (the artifact sits beside the manifest, so the two form a movable unit),
+   **and the referenced file exists on disk**. A manifest written before model
+   serialization completes ("hollow" promotion) is treated as not promoted and
+   warned, exactly like a corrupt `run.json`.
 
 **Lineage warning (not invalidation):** if `promoted_from_run_id` has no directory under
 `artifacts/registry/` (source run pruned), the consumer logs a warning but still renders
