@@ -261,6 +261,8 @@ artifacts/registry/
     ├── oof.parquet
     └── validation_preds.parquet  # [era, id, prediction] on validation eras,
                                   # only when evaluation.validation_scorecard
+
+artifacts/models/<family>/full/manifest.json  # promoted full-version marker (family == run.name; read-only via nmr/families.py)
 ```
 
 All JSON writes: temp file in parent dir → fsync → `os.replace()`; the OOF parquet likewise writes temp + `os.replace` (no fsync). `record(result)` writes OOF then run.json; when `result.scorecard` is present, run.json carries a `scorecard` block of flat scalar keys per `MetricScorecard.to_frame()` (values filtered to drop `timing_*`/`quality_metric*` keys). **Registry quirk (do not trust the era-range manifest fields on pre-rebuild rows):** every registry row recorded before the 2026-08-14 rebuild (all 29 rows as of 2026-08-16) carries training-time era lists in its manifest — `scoring_eras` = `0461..0574`, `weight_learning_eras` = `0119..0460` — while its `validation_preds.parquet` was regenerated on the refreshed window (18 rows: `0583..1231`; 11 rows: `1000..1231`). **Zero overlap between the manifest lists and the parquet eras is the tell.** The stored scorecard (86-era meta overlap, `*_n_eras` cells) and the parquet agree — only the manifest provenance is stale. Never use `scoring_eras`/`weight_learning_eras` to infer "what this run was scored on"; use the scorecard cells and the parquet itself. The rebuild's own log is `artifacts/campaigns/rebuild_v53_step2.log`. Registry files stay immutable: document, never backfill. `best(metric="sharpe")` validates the metric against `MetricSummary` fields (`mean`, `std`, `sharpe`, `max_drawdown`; unknown ⇒ `ValueError`) and returns the max with a run_id tiebreak (deterministic); `list()` sorts by (mtime, run_id) — stable. `promote(run_id)` regex-validates `[0-9a-f]{64}` (path-traversal guard), validates existence, then atomically rewrites champion.json. `promote_if_better(run_id, metric="corr_sharpe_ac") -> tuple[Path, bool]` promotes only when the candidate's scorecard metric strictly beats the champion's, honoring direction (`_SCORECARD_METRIC_DIRECTION`: `max_drawdown`/`std_corr` are lower-is-better); a scorecard-bearing candidate may displace a scorecard-less (legacy) champion; legacy candidates (no scorecard) and unknown metrics raise `ValueError`; a missing/corrupted champion pointer is treated as no champion.
@@ -395,6 +397,42 @@ Long-running paths print console progress that never enters artifacts: `analyze_
 
 ---
 
+## Model Families & Full Versions (nmr/families.py)
+
+A model **family** is the set of registry runs sharing `manifest.config.run.name`
+(e.g. `brb1-xgb-v6`; duplicate reruns belong to one family). Promotion to a
+**full version** (trained on train+validation, deployed) is marked by a valid
+manifest at `artifacts/models/<family>/full/manifest.json` — manifest
+presence + validity IS the marker. `nmr/families.py` is the read-only
+discovery layer (no writes; the promotion writer is a future workstream).
+
+Manifest schema (`manifest.json`):
+
+| Field | Requirement |
+|---|---|
+| `family` | equals the directory name (lowercase `^[a-z0-9_-]+$`) |
+| `training_scope` | `"full"` |
+| `promoted_from_run_id` | non-empty registry run id (dangling lineage warns, never invalidates) |
+| `promoted_at` | display metadata only — never in a canonical hash |
+| `artifact_path` | non-empty relative path — no leading `/`, no drive letter, no `..`; resolved against the manifest's own `full/` dir; file must exist (hollow promotions rejected) |
+| `config` | snapshot of the promoted research config |
+
+Public API: `full_manifest_path`, `load_full_version`, `scan_full_versions`,
+`family_has_full_version`, `FullVersion`, constants `FAMILY_DIR_NAME` /
+`FULL_DIR_NAME` / `FULL_MANIFEST_NAME` / `DEFAULT_MODELS_DIR`.
+
+Leaderboard integration (`nmr/dashboard.py`): `UNIFIED_SCHEMA` carries
+`family`, `training_scope` (`"research"` / `"full"`), `has_full_version`.
+`load_unified_leaderboard` scans `artifacts/models/` ONCE, stamps trained rows
+via set membership, and appends one `source="full"` row per valid manifest
+(`model_id = "<family>::full"`, all metric cells null — in-sample metrics are
+never shown as comparable OOF numbers). `evaluate_gate_status` stamps full
+rows `FULL` (all gate receipts null). `EVALUABLE_ROWS = pl.col("source") != "full"`
+is the single chart-inclusion predicate (source-based so benchmark rows with
+null `training_scope` remain visible).
+
+---
+
 ## 3. Module Dependency Graph
 
 ```
@@ -402,6 +440,7 @@ config.py        (leaf — no nmr imports)
 _transforms.py   (leaf)
 features.py      (leaf — stdlib/NumPy/Polars only)
 refresh.py       (leaf — stdlib only; pure refresh policy, no I/O/numerapi)
+families.py      (leaf — read-only family/full-version discovery, consumed by dashboard.py; future promotion writer is its sole writer)
 
 data.py      ──> config (DataConfig)
 splitter.py  ──> config (SplitConfig)

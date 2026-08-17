@@ -55,6 +55,7 @@ A **lean, deterministic research framework** for the [Numerai Classic tournament
 ├── tests/                     # unit / parity / determinism / real-data tests
 ├── data/                      # local Numerai v5.3 assets (parquets git-ignored)
 ├── artifacts/                 # runs, registry, caches, campaigns, benchmark CSVs (generated)
+│   └── models/                # promoted full-version markers (<family>/full/manifest.json)
 ├── docs/                      # curated Numerai knowledge base — start at docs/DOCS_README.md
 ├── notebooks/                 # researcher control plane (thin, zero business logic)
 ├── .kimi-code/skills/          # project Kimi skills — research protocols for agents (map: ARCHITECTURE.md §T)

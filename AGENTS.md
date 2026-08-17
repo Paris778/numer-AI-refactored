@@ -141,6 +141,7 @@ When modifying or generating code, enforce these seven invariants:
 | Change perturbation/horizon/regime diagnostics | `nmr/robustness.py` |
 | Change the benchmark hierarchy (cells, gates, thresholds) | `nmr/benchmark.py` + `configs/benchmarks/` + `benchmark_runner.py` |
 | Change the executive dashboard data engine (leaderboard, gate projection, capital recompute, payout timeseries) | `nmr/dashboard.py` + `dashboard_charts.py` + `generate_dashboard.py` (spec: `docs/superpowers/specs/2026-08-16-executive-dashboard-design.md`) |
+| Change model-family / full-version discovery | `nmr/families.py` — read-only scan of `artifacts/models/<family>/full/manifest.json` (spec: `ARCHITECTURE.md` Model Families section) |
 | Change campaign orchestration | `nmr/campaign.py` + `run_campaign.py` (spec: `ARCHITECTURE.md` §R) |
 | Inspect runs / campaigns interactively | `dashboard_app.py` — `streamlit run` (read-only) |
 | Analyze the dataset / run one analysis stage | `analyze_dataset.py` — modular stages, `--only`/`--skip` (deps auto-included), progress markers (stage registry: `ARCHITECTURE.md` §O) |
