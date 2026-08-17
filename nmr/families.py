@@ -69,13 +69,32 @@ def full_manifest_path(models_dir: Path, family: str) -> Path:
     return Path(models_dir) / family / FULL_DIR_NAME / FULL_MANIFEST_NAME
 
 
+_DRIVE_LETTER_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def _is_portable_relative(candidate: Path) -> bool:
+    """True when ``candidate`` is relative on every platform.
+
+    ``is_absolute()`` alone is platform-specific: ``C:\\...`` is not absolute
+    on POSIX and ``/abs/...`` is not absolute on Windows, so root/drive and
+    drive-letter forms are rejected explicitly.
+    """
+    return (
+        not candidate.is_absolute()
+        and not candidate.root
+        and not candidate.drive
+        and not _DRIVE_LETTER_RE.match(str(candidate))
+        and ".." not in candidate.parts
+    )
+
+
 def _validate_artifact(manifest_dir: Path, artifact_path: object) -> str | None:
     """Artifact must be a non-empty relative path (no /, drive, or ..) whose
     file exists beside the manifest. None on any violation."""
     if not isinstance(artifact_path, str) or not artifact_path.strip():
         return None
     candidate = Path(artifact_path)
-    if candidate.is_absolute() or ".." in candidate.parts:
+    if not _is_portable_relative(candidate):
         return None
     if not (manifest_dir / candidate).is_file():
         return None

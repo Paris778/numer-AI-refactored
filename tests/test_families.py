@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -27,9 +28,17 @@ def _write_full_manifest(
     # fixtures and must not touch the real filesystem).
     if artifact_path is not None and artifact_path:
         candidate = Path(artifact_path)
-        # Windows quirk: Path('/abs/predict.pkl').is_absolute() is False for
-        # drive-less rooted paths; `root` catches those too.
-        if not candidate.is_absolute() and not candidate.root and ".." not in candidate.parts:
+        # Portable relative-path guard: is_absolute() alone is platform-
+        # specific (C:\... is not absolute on POSIX; /abs/... is not absolute
+        # on Windows). Reject root/drive + drive-letter forms on both
+        # platforms so fixtures never write outside the tmp models dir.
+        if (
+            not candidate.is_absolute()
+            and not candidate.root
+            and not candidate.drive
+            and not re.match(r"^[A-Za-z]:[\\/]", str(candidate))
+            and ".." not in candidate.parts
+        ):
             (full_dir / candidate).write_text("weights", encoding="utf-8")
     manifest = body
     if manifest is None:
@@ -102,7 +111,7 @@ def test_load_full_version_missing_run_id_returns_none(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "bad_artifact",
-    ["", "../predict.pkl", "C:\\abs\\predict.pkl", "/abs/predict.pkl"],
+    ["", "../predict.pkl", "C:\\abs\\predict.pkl", "C:/abs/predict.pkl", "/abs/predict.pkl"],
 )
 def test_load_full_version_rejects_invalid_artifact_path(
     tmp_path: Path, bad_artifact: str
