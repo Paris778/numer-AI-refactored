@@ -546,6 +546,19 @@ def _ts_payload() -> dict:
     }
 
 
+def _multimetric_payload() -> dict:
+    return {
+        "eras": ["0001", "0002"],
+        "meta_downside_mask": [False, False],
+        "metrics": {"payout": {"a": {"standard": [0.01, 0.02],
+                                      "cumulative": [1.01, 1.0302],
+                                      "label": "run · aaaaaaaa"}},
+                    "corr20": {}, "mmc20": {}, "corr60": {}, "mmc60": {},
+                    "bmc": {}, "cwmm": {}},
+        "drawdowns": {"a": [0.0, -0.01]},
+    }
+
+
 def test_leaderboard_chart_traces_and_hurdle_line() -> None:
     fig = charts.build_leaderboard_bar_chart(_bar_input(), hurdle_sharpe=0.78)
     assert len(fig.data) == 2
@@ -601,7 +614,10 @@ def test_leaderboard_chart_empty_frame_render_annotation() -> None:
 
 def _charts_for_test() -> dict:
     bar = charts.build_leaderboard_bar_chart(_bar_input(), hurdle_sharpe=0.78)
-    return {"leaderboard": bar, "wealth": charts.build_drawdown_chart(_ts_payload()),
+    similarity = charts.build_similarity_matrix_chart(
+        ["run-a · aaaaaaaa"], [[1.0]]
+    )
+    return {"leaderboard": bar, "similarity": similarity,
             "drawdown": charts.build_drawdown_chart(_ts_payload())}
 
 
@@ -629,6 +645,9 @@ def test_html_escapes_user_strings_and_single_plotly_engine(tmp_path: Path) -> N
     html_text = generate_dashboard._build_html(
         leaderboard=rows, champion=None, kpis=_kpis_for_test(),
         figures=_charts_for_test(),
+        multimetric_block=charts.multimetric_chart_html(_multimetric_payload()),
+        badge_html="<p>BADGE MODERATE OVERLAP</p>",
+        ensemble_card_html="<p>ENSEMBLE CARD —</p>",
         registry_dir=tmp_path,
         technical_entries=[],
     )
@@ -638,9 +657,10 @@ def test_html_escapes_user_strings_and_single_plotly_engine(tmp_path: Path) -> N
     # literals, so count the template's own marker, not bundle internals)
     assert html_text.count("<!-- plotly-engine-embed -->") == 1
     assert "<script src" not in html_text            # zero external script tags (offline)
-    # three figure render calls, counted AFTER the engine block so the
-    # plotly.js bundle's own "Plotly.newPlot(...)" example string is excluded
-    assert html_text.split("</script>", 1)[1].count("Plotly.newPlot(") == 3
+    # four figure render calls (3 pio figures + the multimetric JS controller),
+    # counted AFTER the engine block so the plotly.js bundle's own
+    # "Plotly.newPlot(...)" example string is excluded
+    assert html_text.split("</script>", 1)[1].count("Plotly.newPlot(") == 4
     assert 'class="num gate-fail"' in html_text   # failing gate cell tinted
     assert "badge research" in html_text          # status badge pill rendered
 
@@ -673,6 +693,14 @@ def test_generate_dashboard_end_to_end_synthetic(tmp_path: Path) -> None:
     # sharpe 0.8, fnc 0.05, dsr 0.97, gtp 2.0, cagr 1.5) -> CAPITAL READY badge
     assert "CAPITAL READY" in text
     assert "<!-- plotly-engine-embed -->" in text
+    # v2 layout sections always present, even with degraded data payloads
+    for section in ("ALPHA GENERATION", "SIGNAL DIVERSIFICATION", "CAPITAL DRAWDOWN"):
+        assert section in text
+    # four Plotly mounts (3 figures + the multimetric JS controller); without
+    # local v5.3 assets (CI) the controller degrades to an annotation and only
+    # the three pio figures mount
+    expected_renders = 4 if Path("data/v5.3/validation.parquet").exists() else 3
+    assert text.split("</script>", 1)[1].count("Plotly.newPlot(") == expected_renders
     # size is unbounded by ruling (full plotly engine inline, ~4.9 MB)
 
 
@@ -687,7 +715,11 @@ def test_build_html_deterministic_across_calls(tmp_path: Path) -> None:
     )
     kwargs = dict(
         leaderboard=rows, champion=None, kpis=_kpis_for_test(),
-        figures=_charts_for_test(), registry_dir=tmp_path, technical_entries=[],
+        figures=_charts_for_test(),
+        multimetric_block=charts.multimetric_chart_html(_multimetric_payload()),
+        badge_html="<p>BADGE MODERATE OVERLAP</p>",
+        ensemble_card_html="<p>ENSEMBLE CARD —</p>",
+        registry_dir=tmp_path, technical_entries=[],
     )
     first = generate_dashboard._build_html(**kwargs)
     second = generate_dashboard._build_html(**kwargs)
@@ -845,3 +877,62 @@ def test_drawdown_chart_v2_payload() -> None:
     assert len(fig.data) == 1
     assert fig.data[0].y[-1] == pytest.approx(-0.01)
     assert fig.data[0].fill == "tozeroy"
+
+
+def test_diversification_stats_thresholds() -> None:
+    low = generate_dashboard._diversification_stats(
+        [[1.0, 0.4, 0.3], [0.4, 1.0, 0.5], [0.3, 0.5, 1.0]]
+    )
+    assert low["mean_overlap"] == pytest.approx(0.4, abs=1e-9)
+    assert low["max_overlap"] == pytest.approx(0.5, abs=1e-9)
+    assert low["badge"] == "EXCELLENT DIVERSIFICATION"
+    high = generate_dashboard._diversification_stats([[1.0, 0.9], [0.9, 1.0]])
+    assert high["badge"] == "HIGH REDUNDANCY"
+    mid = generate_dashboard._diversification_stats([[1.0, 0.7], [0.7, 1.0]])
+    assert mid["badge"] == "MODERATE OVERLAP"
+
+
+def test_ensemble_sharpe_card_guard() -> None:
+    assert generate_dashboard._ensemble_sharpe({}) is None           # < 2 series
+    assert generate_dashboard._ensemble_sharpe({"a": {"standard": [0.01, 0.02]}}) is None
+    value = generate_dashboard._ensemble_sharpe({
+        "a": {"standard": [0.01, 0.02, 0.03]},
+        "b": {"standard": [0.02, 0.01, 0.02]},
+    })
+    assert isinstance(value, float) and value == value  # finite
+
+
+def test_build_html_v2_sections_and_four_render_calls(tmp_path: Path) -> None:
+    payload = {
+        "eras": ["0001", "0002"],
+        "meta_downside_mask": [False, False],
+        "metrics": {"payout": {"a": {"standard": [0.01, 0.02], "cumulative": [1.01, 1.0302], "label": "run · aaaaaaaa"}},
+                    "corr20": {}, "mmc20": {}, "corr60": {}, "mmc60": {}, "bmc": {}, "cwmm": {}},
+        "drawdowns": {"a": [0.0, -0.01]},
+    }
+    rows = pl.DataFrame(
+        [{"model_id": "a", "source": "trained", "run_name": "run",
+          "corr_sharpe_ac": 0.8, "corr_sharpe_ac_ci_low": 0.6, "corr_sharpe_ac_ci_high": 1.0,
+          "cagr_1y": 1.5, "gain_to_pain_ratio": 2.0, "kelly_fraction": 0.4,
+          "mmc_down": 0.01, "deflated_sharpe": 0.97, "max_drawdown": 0.1,
+          "fnc": 0.05, "corr": 0.12, "status": "RESEARCH", "tier": None}]
+    )
+    figures = {
+        "leaderboard": charts.build_leaderboard_bar_chart(_bar_input(), hurdle_sharpe=0.78),
+        "similarity": charts.build_similarity_matrix_chart(["a", "b"], [[1.0, 0.5], [0.5, 1.0]]),
+        "drawdown": charts.build_drawdown_chart(payload),
+    }
+    multimetric_block = charts.multimetric_chart_html(payload)
+    html_text = generate_dashboard._build_html(
+        leaderboard=rows, champion=None, kpis=_kpis_for_test(),
+        figures=figures, multimetric_block=multimetric_block,
+        badge_html="<p>BADGE Mean 0.50 Max 0.50 MODERATE OVERLAP</p>",
+        ensemble_card_html="<p>ENSEMBLE CARD 1.234</p>",
+        registry_dir=tmp_path, technical_entries=[],
+    )
+    for section in ("ALPHA GENERATION", "SIGNAL DIVERSIFICATION",
+                    "CAPITAL DRAWDOWN", "BADGE", "ENSEMBLE CARD"):
+        assert section in html_text
+    assert html_text.count("<!-- plotly-engine-embed -->") == 1
+    assert html_text.split("</script>", 1)[1].count("Plotly.newPlot(") == 4
+    assert "<script src" not in html_text

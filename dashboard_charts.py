@@ -88,61 +88,6 @@ def build_leaderboard_bar_chart(
     return fig
 
 
-def _downside_spans(eras: list[str], mask: list[bool]) -> list[tuple[str, str]]:
-    spans: list[tuple[str, str]] = []
-    start: int | None = None
-    for index, flag in enumerate(mask):
-        if flag and start is None:
-            start = index
-        if not flag and start is not None:
-            spans.append((eras[start], eras[index - 1]))
-            start = None
-    if start is not None:
-        spans.append((eras[start], eras[-1]))
-    return spans
-
-
-def build_cumulative_wealth_chart(payload: dict[str, Any]) -> go.Figure:
-    """Cumulative wealth curves with shaded meta-model drawdown eras.
-
-    TRANSITIONAL v1 shim: ``generate_dashboard.generate_dashboard`` still
-    renders the v1 wealth figure until plan Task 6 rewires it to the v2
-    layout (dropping the ``wealth`` figure key). Delete this function and
-    ``_downside_spans`` there; no other callers remain.
-    """
-    eras = payload["eras"]
-    fig = go.Figure()
-    if not payload.get("eras"):
-        fig.add_annotation(
-            text="Timeseries data unavailable without local v5.3 assets",
-            showarrow=False,
-        )
-        fig.update_layout(template="plotly_dark")
-        return fig
-    for series in payload["series"].values():
-        fig.add_trace(
-            go.Scatter(
-                name=series["label"],
-                x=eras,
-                y=series["cumulative_wealth"],
-                mode="lines",
-                hovertemplate="%{y:.4f}<extra>" + html.escape(series["label"]) + "</extra>",
-            )
-        )
-    for x0, x1 in _downside_spans(eras, payload["meta_downside_mask"]):
-        fig.add_vrect(
-            x0=x0, x1=x1, fillcolor=_DOWNSIDE_FILL,
-            line_width=0, layer="below",
-        )
-    fig.update_layout(
-        template="plotly_dark",
-        xaxis_title="Era",
-        yaxis_title="Cumulative wealth (1.0 stake)",
-        legend=dict(orientation="h"),
-    )
-    return fig
-
-
 def build_drawdown_chart(payload: dict[str, Any]) -> go.Figure:
     """Underwater payout drawdown curves (v2 payload: drawdowns + eras)."""
     fig = go.Figure()

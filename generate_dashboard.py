@@ -12,6 +12,7 @@ import logging
 import webbrowser
 from pathlib import Path
 
+import numpy as np
 import plotly.io as pio
 import polars as pl
 from plotly.offline import get_plotlyjs
@@ -24,7 +25,8 @@ from nmr.dashboard import (
     DEFAULT_GATE_PATH,
     DEFAULT_REGISTRY_DIR,
     evaluate_gate_status,
-    extract_payout_timeseries,
+    extract_multimetric_timeseries,
+    extract_pairwise_similarity_matrix,
     load_unified_leaderboard,
     read_champion_pointer,
     reconcile_capital_metrics,
@@ -210,9 +212,76 @@ def _technical_entries(registry_dir: Path) -> list[dict]:
     return entries
 
 
-def _build_html(leaderboard: pl.DataFrame, champion: str | None, kpis: dict,
-                figures: dict, registry_dir: Path,
-                technical_entries: list[dict]) -> str:
+def _diversification_stats(matrix: list[list[float]]) -> dict:
+    """Max/mean off-diagonal overlap + badge tier (decision #16)."""
+    n = len(matrix)
+    off = [matrix[i][j] for i in range(n) for j in range(i + 1, n)]
+    mean = float(np.mean(off)) if off else None
+    maximum = float(max(off)) if off else None
+    if mean is None:
+        badge = "—"
+    elif mean < 0.65:
+        badge = "EXCELLENT DIVERSIFICATION"
+    elif mean <= 0.85:
+        badge = "MODERATE OVERLAP"
+    else:
+        badge = "HIGH REDUNDANCY"
+    return {"mean_overlap": mean, "max_overlap": maximum, "badge": badge}
+
+
+def _ensemble_sharpe(payout_metric: dict) -> float | None:
+    """Equal-weighted blended Sharpe from per-era payout series (decision #17).
+
+    SR_blended = mean(mu) / sqrt(w^T Sigma w), w uniform; None when fewer
+    than 2 usable series or zero variance.
+    """
+    series = [
+        np.asarray(v["standard"], dtype=float)
+        for v in payout_metric.values()
+        if v.get("standard")
+    ]
+    if len(series) < 2:
+        return None
+    stacked = np.vstack(series)
+    mu = np.mean(stacked, axis=1)
+    weights = np.full(len(mu), 1.0 / len(mu))
+    variance = float(weights @ np.cov(stacked) @ weights)
+    if variance <= 0.0 or not np.isfinite(variance):
+        return None
+    return float(np.mean(mu) / np.sqrt(variance))
+
+
+def _badge_html(stats: dict, stress: dict) -> str:
+    delta = stress.get("mean_delta")
+    delta_text = "—" if delta is None else f"{delta:+.3f}"
+    mean_text = "—" if stats["mean_overlap"] is None else f"{stats['mean_overlap']:.3f}"
+    max_text = "—" if stats["max_overlap"] is None else f"{stats['max_overlap']:.3f}"
+    return (
+        f'<p class="badge-line"><b>{html.escape(stats["badge"])}</b> · '
+        f"Mean Overlap {mean_text} · Max Overlap {max_text} · "
+        f"Stress-Regime Δρ {delta_text}</p>"
+    )
+
+
+def _ensemble_card_html(value: float | None) -> str:
+    text = "—" if value is None else f"{value:.3f}"
+    return (
+        '<div class="kpi"><div class="label">Equal-Weight Ensemble Sharpe '
+        f"(top-3, heuristic)</div><div class=\"value\">{text}</div></div>"
+    )
+
+
+def _build_html(
+    leaderboard: pl.DataFrame,
+    champion: str | None,
+    kpis: dict,
+    figures: dict,
+    multimetric_block: str,
+    badge_html: str,
+    ensemble_card_html: str,
+    registry_dir: Path,
+    technical_entries: list[dict],
+) -> str:
     """Assemble the full HTML document (single plotly engine in <head>)."""
     engine_js = get_plotlyjs()
     figure_html = {
@@ -279,17 +348,21 @@ def _build_html(leaderboard: pl.DataFrame, champion: str | None, kpis: dict,
   <div class="kpi"><div class="label">Capital Readiness</div>"""
         f"""<div class="value">{kpis['capital_ready_count']} / {kpis['fleet_count']}</div></div>
 </div>
-<h2>1. Cumulative Wealth &amp; Downside Protection</h2>
-{figure_html['wealth']}
-<h2>2. Risk-Adjusted Return Leaderboard</h2>
+<h2>1. ALPHA GENERATION &amp; MULTI-METRIC PERFORMANCE TRAJECTORY</h2>
+{multimetric_block}
+<h2>2. RISK-ADJUSTED RETURN LEADERBOARD</h2>
 {figure_html['leaderboard']}
-<h2>3. Executive Allocation &amp; Risk Decision Table</h2>
+<h2>3. SIGNAL DIVERSIFICATION &amp; PAIRWISE SIMILARITY MATRIX</h2>
+{badge_html}
+{figure_html['similarity']}
+{ensemble_card_html}
+<h2>4. EXECUTIVE ALLOCATION &amp; RISK DECISION TABLE</h2>
 <table>
 <thead><tr><th>Status</th><th>Model</th><th>Ann. Return</th><th>Sharpe (AC)</th><th>Sharpe CI</th><th>Max DD</th>"""
         f"""<th>Gain-to-Pain</th><th>Downside</th><th>Confidence (DSR)</th></tr></thead>
 <tbody>{rows_html}</tbody>
 </table>
-<h2>4. Underwater Drawdown</h2>
+<h2>5. CAPITAL DRAWDOWN (UNDERWATER TRAJECTORY)</h2>
 {figure_html['drawdown']}
 <h2>Technical &amp; Audit Metadata</h2>
 {accordion}
@@ -316,28 +389,48 @@ def generate_dashboard(
 
     gate_cfg = load_benchmark_file(DEFAULT_GATE_PATH)
     assert gate_cfg.reference_column is not None
+    tier4_column = str(gate_cfg.reference_column)
     hurdle_sharpe = float(gate_cfg.gate.corr_sharpe_ac_min)
 
     champion = read_champion_pointer(registry_dir / "champion.json")
     fleet = leaderboard.filter(pl.col("source").is_in(["trained", "trained_legacy"]))
-    top_ids = fleet.sort("corr_sharpe_ac", descending=True, nulls_last=True).head(3)
-    timeseries = extract_payout_timeseries(
-        registry_dir, DEFAULT_DATA_DIR,
-        run_ids=top_ids.get_column("model_id").to_list(),
-        include_tier4_ref=True,
-        tier4_column=str(gate_cfg.reference_column),
+    top3 = fleet.sort("corr_sharpe_ac", descending=True, nulls_last=True).head(3)
+    top3_ids = top3.get_column("model_id").to_list()
+
+    payload = extract_multimetric_timeseries(
+        registry_dir, DEFAULT_DATA_DIR, run_ids=top3_ids,
+        include_tier4_ref=True, tier4_column=tier4_column,
     )
+    top5_ids = fleet.sort("corr_sharpe_ac", descending=True, nulls_last=True).head(5) \
+        .get_column("model_id").to_list()
+    labels, _sim_ids, matrix, stress = extract_pairwise_similarity_matrix(
+        registry_dir, DEFAULT_DATA_DIR, run_ids=top5_ids,
+        include_tier4_ref=True, tier4_column=tier4_column,
+    )
+    stats = _diversification_stats(matrix)
+    payout_metric = (payload.get("metrics") or {}).get("payout") or {}
+    top3_payout = {
+        mid: payout_metric[mid]
+        for mid in top3_ids
+        if mid in payout_metric
+    }
+    ensemble_value = _ensemble_sharpe(top3_payout)
+
     figures = {
         "leaderboard": charts.build_leaderboard_bar_chart(
             _bar_input(leaderboard, champion), hurdle_sharpe=hurdle_sharpe
         ),
-        "wealth": charts.build_cumulative_wealth_chart(timeseries),
-        "drawdown": charts.build_drawdown_chart(timeseries),
+        "similarity": charts.build_similarity_matrix_chart(labels, matrix),
+        "drawdown": charts.build_drawdown_chart(payload),
     }
     html_text = _build_html(
         leaderboard=leaderboard, champion=champion,
         kpis=_kpi_cards(leaderboard, champion, hurdle_sharpe),
-        figures=figures, registry_dir=registry_dir,
+        figures=figures,
+        multimetric_block=charts.multimetric_chart_html(payload),
+        badge_html=_badge_html(stats, stress),
+        ensemble_card_html=_ensemble_card_html(ensemble_value),
+        registry_dir=registry_dir,
         technical_entries=_technical_entries(registry_dir),
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
