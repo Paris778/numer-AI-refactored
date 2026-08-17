@@ -1175,3 +1175,52 @@ def test_generate_dashboard_bar_input_excludes_full_rows() -> None:
     out = generate_dashboard._bar_input(frame, champion=None)
     assert out.height == 1
     assert out.get_column("label").to_list() == ["r1 · " + "a" * 8]
+
+def test_dashboard_app_load_registry_frame_includes_full_sources(tmp_path: Path) -> None:
+    import dashboard_app as app
+
+    entry = _registry_entry("a" * 64)
+    entry["manifest"]["config"]["run"]["name"] = "brb1-xgb-v6"
+    _write_registry(tmp_path, [entry])
+    models = _write_models_dir(
+        tmp_path, {"brb1-xgb-v6": _full_manifest_dict("brb1-xgb-v6", "a" * 64)}
+    )
+    frame = app.load_registry_frame(tmp_path, models_dir=models)
+    sources = frame.get_column("source").to_list()
+    assert "full" in sources
+    assert "trained" in sources
+    full_row = frame.filter(pl.col("model_id") == "brb1-xgb-v6::full").row(0, named=True)
+    assert full_row["backend"] == "xgboost"  # filled from manifest snapshot
+    assert full_row["has_full_version"] is False
+
+
+def test_dashboard_app_shaped_leaderboard_pins_full_rows_first() -> None:
+    import dashboard_app as app
+
+    rows = [
+        {"model_id": "a" * 64, "source": "trained", "run_name": "r1",
+         "corr_sharpe_ac": 0.5, "corr_sharpe_ac_ci_low": None, "corr_sharpe_ac_ci_high": None},
+        {"model_id": "brb1-xgb-v6::full", "source": "full", "run_name": "brb1-xgb-v6",
+         "corr_sharpe_ac": None, "corr_sharpe_ac_ci_low": None, "corr_sharpe_ac_ci_high": None},
+    ]
+    frame = pl.DataFrame(rows, schema=dash.UNIFIED_SCHEMA, strict=False)
+    pdf = app._shaped_leaderboard_pdf(frame, champion=None)
+    assert list(pdf["model_id"]) == ["brb1-xgb-v6::full", "a" * 64]
+    assert "_is_full" not in pdf.columns
+
+
+def test_dashboard_app_robustness_matrix_excludes_full_rows() -> None:
+    import dashboard_app as app
+
+    rows = [
+        {"model_id": "a" * 64, "source": "trained", "run_name": "r1", "corr_sharpe_ac": 0.5,
+         "has_bmc": True, "has_horizon": False, "has_perturb": True, "has_regime": False,
+         "max_feature_exposure": 0.3, "std_corr": 0.2, "max_drawdown": 0.1},
+        {"model_id": "brb1-xgb-v6::full", "source": "full", "run_name": "brb1-xgb-v6",
+         "corr_sharpe_ac": None, "has_bmc": None, "has_horizon": None, "has_perturb": None,
+         "has_regime": None, "max_feature_exposure": None, "std_corr": None,
+         "max_drawdown": None},
+    ]
+    frame = pl.DataFrame(rows, schema=dash.UNIFIED_SCHEMA, strict=False)
+    matrix = app.robustness_matrix(frame)
+    assert matrix.get_column("model_id").to_list() == ["a" * 64]
