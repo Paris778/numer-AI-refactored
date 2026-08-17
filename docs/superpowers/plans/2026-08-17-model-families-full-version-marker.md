@@ -21,6 +21,7 @@
 - **Windows venv:** always `./.venv/Scripts/python -m ...` — never the `Scripts/pip` shim.
 - **Git:** commit per task. Do NOT `git push`. The LF→CRLF warning on commit is benign; ignore it.
 - **Verification gate per task:** after the targeted tests pass and the count is bumped, run the FULL suite (`./.venv/Scripts/python -m pytest -q`) before committing — never claim green without executing it.
+- **Every commit green (review item):** each task's commit must pass the full suite (ruff + pytest). No red intermediate commits — the `nmr/__init__.py` re-exports for `nmr.families` are therefore added in Task 1 itself, not deferred to Task 2.
 
 ## File Structure
 
@@ -44,6 +45,7 @@
 **Files:**
 - Create: `nmr/families.py`
 - Test: `tests/test_families.py`
+- Modify: `nmr/__init__.py` (families re-exports — review item: keeps `test_package_api.py` green on this commit)
 - Modify: `AGENTS.md` (test-count claim only)
 
 **Interfaces:**
@@ -367,6 +369,28 @@ def family_has_full_version(models_dir: Path, family: str) -> bool:
     return load_full_version(models_dir, family) is not None
 ```
 
+- [ ] **Step 3b: Re-export `nmr.families` from `nmr/__init__.py`**
+
+`tests/test_package_api.py` auto-discovers `nmr/families.py` and fails unless every name in its `__all__` is importable from the `nmr` package. Add the re-export NOW so this commit stays green.
+
+(a) In `nmr/__init__.py`, insert the import block between the `.evaluation` and `.features` import blocks:
+
+```python
+from .families import (
+    DEFAULT_MODELS_DIR,
+    FAMILY_DIR_NAME,
+    FULL_DIR_NAME,
+    FULL_MANIFEST_NAME,
+    FullVersion,
+    family_has_full_version,
+    full_manifest_path,
+    load_full_version,
+    scan_full_versions,
+)
+```
+
+(b) Add the same names to `__all__` (insert alphabetically; exact position does not matter functionally, keep tidy): `"DEFAULT_MODELS_DIR"`, `"FAMILY_DIR_NAME"`, `"FULL_DIR_NAME"`, `"FULL_MANIFEST_NAME"`, `"FullVersion"`, `"family_has_full_version"`, `"full_manifest_path"`, `"load_full_version"`, `"scan_full_versions"`.
+
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `./.venv/Scripts/python -m pytest -q tests/test_families.py`
@@ -386,12 +410,12 @@ Edit `AGENTS.md` line 33: replace the current count (`772 tests`) with the repor
 - [ ] **Step 7: Run the full suite**
 
 Run: `./.venv/Scripts/python -m pytest -q`
-Expected: PASS, including `tests/test_docs_hygiene.py::test_docs_test_count_matches_suite` (count now matches) and `tests/test_package_api.py::test_nmr_package_reexports_all_module_public_symbols` — note: this test will FAIL on this task because `nmr/families.py` now exists but is not yet re-exported. If it fails for exactly that reason, **this is expected mid-plan**; proceed to Task 2 which adds the re-export in the same commit as the module's consumers. (If you prefer a fully green suite per task, add the `nmr/__init__.py` families re-export now, exactly as specified in Task 2 Step 2, and re-run.)
+Expected: PASS, including `tests/test_docs_hygiene.py::test_docs_test_count_matches_suite` (count now matches) and `tests/test_package_api.py::test_nmr_package_reexports_all_module_public_symbols` (families re-exported in Step 3b).
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add nmr/families.py tests/test_families.py AGENTS.md
+git add nmr/families.py nmr/__init__.py tests/test_families.py AGENTS.md
 git commit -m "feat(families): read-only full-version manifest discovery layer"
 ```
 
@@ -401,7 +425,7 @@ git commit -m "feat(families): read-only full-version manifest discovery layer"
 
 **Files:**
 - Modify: `nmr/dashboard.py` (UNIFIED_SCHEMA ~line 52; header imports ~line 20; `__all__` ~line 33; `load_unified_leaderboard` ~line 178; `evaluate_gate_status` ~line 341)
-- Modify: `nmr/__init__.py` (imports ~line 81 and ~line 92 area; `__all__`)
+- Modify: `nmr/__init__.py` (EVALUABLE_ROWS re-export only — families symbols already exported in Task 1)
 - Test: `tests/test_dashboard.py` (append tests; reuse `_registry_entry`/`_write_registry` helpers already in the file)
 - Modify: `AGENTS.md` (test-count claim)
 
@@ -646,27 +670,13 @@ Immediately AFTER the `for run_file in ...` loop and BEFORE `resolved = resolve_
 
 (The `gate_*` receipts for full rows are all `None` automatically — every metric cell is null.)
 
-- [ ] **Step 4: Update `nmr/__init__.py` re-exports**
+- [ ] **Step 4: Update `nmr/__init__.py` — `EVALUABLE_ROWS` re-export**
 
-(a) Add the families import block between the `.evaluation` and `.features` import blocks:
+(The `nmr.families` symbols were already re-exported in Task 1 Step 3b.)
 
-```python
-from .families import (
-    DEFAULT_MODELS_DIR,
-    FAMILY_DIR_NAME,
-    FULL_DIR_NAME,
-    FULL_MANIFEST_NAME,
-    FullVersion,
-    family_has_full_version,
-    full_manifest_path,
-    load_full_version,
-    scan_full_versions,
-)
-```
+(a) Add `EVALUABLE_ROWS,` to the `from .dashboard import (...)` block (before `UNIFIED_SCHEMA,`).
 
-(b) Add `EVALUABLE_ROWS,` to the `from .dashboard import (...)` block (before `UNIFIED_SCHEMA,`).
-
-(c) Add to `__all__` (insert alphabetically; exact position does not matter functionally, keep tidy): `"DEFAULT_MODELS_DIR"`, `"EVALUABLE_ROWS"`, `"FAMILY_DIR_NAME"`, `"FULL_DIR_NAME"`, `"FULL_MANIFEST_NAME"`, `"FullVersion"`, `"family_has_full_version"`, `"full_manifest_path"`, `"load_full_version"`, `"scan_full_versions"`.
+(b) Add `"EVALUABLE_ROWS"` to `__all__` (insert alphabetically near the other `E`-prefixed entries; exact position does not matter functionally, keep tidy).
 
 - [ ] **Step 5: Run the targeted tests**
 
@@ -790,7 +800,7 @@ def _table_rows(leaderboard: pl.DataFrame, champion: str | None) -> list[dict]:
     champion_rows = [r for r in rows if champion is not None and r["model_id"] == champion]
     full_rows = sorted(
         [r for r in rows if r["source"] == "full"],
-        key=lambda r: (r["run_name"] or "", r["model_id"]),
+        key=lambda r: (str(r["run_name"] or ""), str(r["model_id"])),
     )
     fleet_rows = sorted(
         [r for r in rows
@@ -925,6 +935,23 @@ def test_dashboard_app_shaped_leaderboard_pins_full_rows_first() -> None:
     pdf = app._shaped_leaderboard_pdf(frame, champion=None)
     assert list(pdf["model_id"]) == ["brb1-xgb-v6::full", "a" * 64]
     assert "_is_full" not in pdf.columns
+
+
+def test_dashboard_app_robustness_matrix_excludes_full_rows() -> None:
+    import dashboard_app as app
+
+    rows = [
+        {"model_id": "a" * 64, "source": "trained", "run_name": "r1", "corr_sharpe_ac": 0.5,
+         "has_bmc": True, "has_horizon": False, "has_perturb": True, "has_regime": False,
+         "max_feature_exposure": 0.3, "std_corr": 0.2, "max_drawdown": 0.1},
+        {"model_id": "brb1-xgb-v6::full", "source": "full", "run_name": "brb1-xgb-v6",
+         "corr_sharpe_ac": None, "has_bmc": None, "has_horizon": None, "has_perturb": None,
+         "has_regime": None, "max_feature_exposure": None, "std_corr": None,
+         "max_drawdown": None},
+    ]
+    frame = pl.DataFrame(rows, schema=dash.UNIFIED_SCHEMA, strict=False)
+    matrix = app.robustness_matrix(frame)
+    assert matrix.get_column("model_id").to_list() == ["a" * 64]
 ```
 
 - [ ] **Step 2: Run the failing tests**
@@ -1030,6 +1057,95 @@ def render_leaderboard(leaderboard: pl.DataFrame, champion: str | None) -> None:
             ),
         },
     )
+```
+
+(f) `robustness_matrix` — exclude full rows (their robustness cells are all null; without this they leak NaN rows into the heatmap):
+
+```python
+def robustness_matrix(registry: pl.DataFrame) -> pl.DataFrame:
+    """Project the robustness cells of evaluable rows (numeric casts for heatmap)."""
+    columns = [
+        "model_id",
+        "has_bmc",
+        "has_horizon",
+        "has_perturb",
+        "has_regime",
+        "max_feature_exposure",
+        "std_corr",
+        "max_drawdown",
+    ]
+    casts = {
+        "has_bmc": pl.Boolean,
+        "has_horizon": pl.Boolean,
+        "has_perturb": pl.Boolean,
+        "has_regime": pl.Boolean,
+        "max_feature_exposure": pl.Float64,
+        "std_corr": pl.Float64,
+        "max_drawdown": pl.Float64,
+    }
+    evaluable = (
+        registry.filter(EVALUABLE_ROWS) if "source" in registry.columns else registry
+    )
+    frame = evaluable.select(columns)
+    return frame.cast(casts)
+```
+
+(g) `render_robustness_matrix` — guard on the filtered matrix, not the raw input (an all-full registry would otherwise crash `px.imshow` on an empty frame):
+
+```python
+def render_robustness_matrix(registry: pl.DataFrame) -> None:
+    """Plotly heatmap over ``robustness_matrix`` (booleans shown as 0/1)."""
+    matrix = robustness_matrix(registry)
+    if matrix.height == 0:
+        st.info("No evaluable runs in the registry.")
+        return
+    numeric = matrix.with_columns(pl.col(flag).cast(pl.Int8) for flag in _ROBUSTNESS_CELLS)
+    pdf = numeric.to_pandas().set_index("model_id").astype(float)
+    fig = px.imshow(
+        pdf,
+        x=pdf.columns,
+        y=pdf.index,
+        color_continuous_scale="RdBu_r",
+        aspect="auto",
+        title="Robustness matrix",
+    )
+    st.plotly_chart(fig)
+    st.caption(
+        "Boolean cells (has_*) shown as 0/1; numeric cells "
+        "(max_feature_exposure, std_corr, max_drawdown) shown raw."
+    )
+    st.dataframe(matrix)
+```
+
+(h) `render_run_detail` — full-version rows read `manifest.json` (their `run_dir` has no `run.json`). Add a pure helper next to `_read_run_payload` (around line 211; `json` is already imported):
+
+```python
+def _read_full_manifest(run_dir: Path) -> dict | None:
+    """Read and parse a full-version manifest.json (None on missing/corrupt)."""
+    path = Path(run_dir) / "manifest.json"
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    return payload if isinstance(payload, dict) else None
+```
+
+In `render_run_detail`, insert a full-row branch at the top of the row loop, immediately inside `with st.expander(label):` (before `payload = _read_run_payload(...)`):
+
+```python
+        with st.expander(label):
+            if row["source"] == "full":
+                manifest = _read_full_manifest(Path(row["run_dir"]))
+                if manifest is None:
+                    st.caption("Full-version row / missing manifest.json — leaderboard row only.")
+                    st.dataframe(pl.DataFrame([row], strict=False))
+                    continue
+                st.subheader("Promoted Full Version Manifest")
+                st.json(manifest)
+                continue
+            payload = _read_run_payload(Path(row["run_dir"]))
 ```
 
 - [ ] **Step 4: Run the targeted tests**
@@ -1146,7 +1262,7 @@ Expected: PASS.
 
 Run: `./.venv/Scripts/python -m ruff check .`
 Run: `./.venv/Scripts/python -m pytest -q`
-Expected: both PASS. Report the final collected count (expect 772 + 41 = 813).
+Expected: both PASS. Report the final collected count (expect 772 + 42 = 814).
 
 - [ ] **Step 6: Real-data smoke**
 
