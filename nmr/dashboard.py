@@ -131,6 +131,9 @@ def load_benchmark_frame(benchmark_path: Path) -> pl.DataFrame:
             {
                 "model_id": row.get("model_id"),
                 "source": "benchmark",
+                "family": None,
+                "training_scope": None,
+                "has_full_version": False,
                 "run_name": row.get("strategy_group")
                 or (
                     f"tier{int(tier_value)}"

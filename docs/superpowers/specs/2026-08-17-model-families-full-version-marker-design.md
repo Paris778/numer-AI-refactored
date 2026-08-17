@@ -263,11 +263,11 @@ have null `training_scope` and must remain visible in the Sharpe leaderboard, wh
 
 ### 6.3 Charts
 
-All chart and candidate-selection paths use the single `EVALUABLE_ROWS` predicate (§5.3) —
-Sharpe leaderboard (`_bar_input`), similarity-matrix candidate selection, and
-multimetric/drawdown candidates. No ad-hoc `source != "full"` checks scattered across call
-sites. (Full rows also have no registry `validation_preds.parquet`, so the predicate
-prevents missing-run warnings in the similarity matrix.)
+The Sharpe leaderboard chart input (`_bar_input`) and the Streamlit robustness matrix use the
+single `EVALUABLE_ROWS` predicate (§5.3). Candidate selection for the multimetric timeseries,
+similarity matrix, and drawdown keeps the pre-existing trained-only fleet filter
+(`source in ("trained", "trained_legacy")`) — it excludes full rows by construction and does
+not newly admit benchmark rows into candidates.
 
 ---
 

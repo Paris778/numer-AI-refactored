@@ -177,6 +177,10 @@ def test_load_unified_leaderboard_merges_benchmarks(tmp_path: Path) -> None:
     frame = dash.load_unified_leaderboard(tmp_path, benchmark_path=bench)
     assert frame.height == 2
     assert set(frame.get_column("source").to_list()) == {"trained", "benchmark"}
+    bench_row = frame.filter(pl.col("source") == "benchmark").row(0, named=True)
+    assert bench_row["family"] is None
+    assert bench_row["training_scope"] is None
+    assert bench_row["has_full_version"] is False
 
 
 def test_load_unified_leaderboard_empty_registry_returns_schema_frame(tmp_path: Path) -> None:
