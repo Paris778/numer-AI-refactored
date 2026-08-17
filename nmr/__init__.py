@@ -102,6 +102,17 @@ from .evaluation import (
     per_era_turnover,
     sorted_era_labels,
 )
+from .families import (
+    DEFAULT_MODELS_DIR,
+    FAMILY_DIR_NAME,
+    FULL_DIR_NAME,
+    FULL_MANIFEST_NAME,
+    FullVersion,
+    family_has_full_version,
+    full_manifest_path,
+    load_full_version,
+    scan_full_versions,
+)
 from .features import (
     feature_stability_screen,
     resolve_feature_sets,
@@ -281,6 +292,15 @@ __all__ = [
     "downside_era_indices",
     "per_era_turnover",
     "sorted_era_labels",
+    "DEFAULT_MODELS_DIR",
+    "FAMILY_DIR_NAME",
+    "FULL_DIR_NAME",
+    "FULL_MANIFEST_NAME",
+    "FullVersion",
+    "family_has_full_version",
+    "full_manifest_path",
+    "load_full_version",
+    "scan_full_versions",
     "feature_stability_screen",
     "resolve_feature_sets",
     "resolve_small_feature_set",
