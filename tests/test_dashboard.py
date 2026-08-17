@@ -1129,3 +1129,49 @@ def test_evaluable_rows_predicate() -> None:
     )
     keep = frame.filter(dash.EVALUABLE_ROWS).get_column("model_id").to_list()
     assert keep == ["a", "b"]
+
+
+def _lb_row(model_id: str, source: str, run_name: str, sharpe: float | None = None,
+            has_full: bool = False) -> dict:
+    return {"model_id": model_id, "source": source, "run_name": run_name,
+            "corr_sharpe_ac": sharpe, "has_full_version": has_full}
+
+
+def test_generate_dashboard_table_rows_grouping() -> None:
+    rows = [
+        _lb_row("ch" * 32, "trained", "champ-run", 0.9),
+        _lb_row("a" * 64, "trained", "brb1-xgb-v6", 0.5, has_full=True),
+        _lb_row("brb1-xgb-v6::full", "full", "brb1-xgb-v6"),
+        _lb_row("bench_a", "benchmark", "ref", 0.78),
+    ]
+    frame = pl.DataFrame(rows, schema=dash.UNIFIED_SCHEMA, strict=False)
+    ordered = generate_dashboard._table_rows(frame, champion="ch" * 32)
+    kinds = [
+        "header" if r.get("_group_header") else r["source"]
+        for r in ordered
+    ]
+    assert kinds == ["trained", "header", "full", "trained", "benchmark"]
+
+
+def test_generate_dashboard_row_html_full_chip() -> None:
+    row = {
+        **_lb_row("a" * 64, "trained", "brb1-xgb-v6", 0.5, has_full=True),
+        "status": "RESEARCH",
+        "cagr_1y": None, "corr_sharpe_ac_ci_low": None, "corr_sharpe_ac_ci_high": None,
+        "max_drawdown": None, "gain_to_pain_ratio": None, "mmc_down": None,
+        "deflated_sharpe": None, "gate_cagr_1y": None, "gate_corr_sharpe_ac": None,
+        "gate_gain_to_pain_ratio": None, "gate_deflated_sharpe": None,
+    }
+    html_out = generate_dashboard._row_html(row)
+    assert 'class="badge full">FULL</span>' in html_out
+
+
+def test_generate_dashboard_bar_input_excludes_full_rows() -> None:
+    rows = [
+        _lb_row("a" * 64, "trained", "r1", 0.5),
+        _lb_row("brb1-xgb-v6::full", "full", "brb1-xgb-v6"),
+    ]
+    frame = pl.DataFrame(rows, schema=dash.UNIFIED_SCHEMA, strict=False)
+    out = generate_dashboard._bar_input(frame, champion=None)
+    assert out.height == 1
+    assert out.get_column("label").to_list() == ["r1 · " + "a" * 8]

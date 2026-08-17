@@ -24,6 +24,7 @@ from nmr.dashboard import (
     DEFAULT_DATA_DIR,
     DEFAULT_GATE_PATH,
     DEFAULT_REGISTRY_DIR,
+    EVALUABLE_ROWS,
     evaluate_gate_status,
     extract_multimetric_timeseries,
     extract_pairwise_similarity_matrix,
@@ -59,7 +60,8 @@ def _bar_label(row: dict) -> str:
 
 
 def _bar_input(leaderboard: pl.DataFrame, champion: str | None) -> pl.DataFrame:
-    top = leaderboard.sort("corr_sharpe_ac", descending=True, nulls_last=True).head(10)
+    evaluable = leaderboard.filter(EVALUABLE_ROWS)
+    top = evaluable.sort("corr_sharpe_ac", descending=True, nulls_last=True).head(10)
     return pl.DataFrame(
         [
             {
@@ -124,6 +126,10 @@ def _kpi_cards(leaderboard: pl.DataFrame, champion: str | None,
 def _table_rows(leaderboard: pl.DataFrame, champion: str | None) -> list[dict]:
     rows = leaderboard.to_dicts()
     champion_rows = [r for r in rows if champion is not None and r["model_id"] == champion]
+    full_rows = sorted(
+        [r for r in rows if r["source"] == "full"],
+        key=lambda r: (str(r["run_name"] or ""), str(r["model_id"])),
+    )
     fleet_rows = sorted(
         [r for r in rows
          if r["source"] in ("trained", "trained_legacy") and r["model_id"] != champion],
@@ -134,6 +140,8 @@ def _table_rows(leaderboard: pl.DataFrame, champion: str | None) -> list[dict]:
         [r for r in rows if r["source"] == "benchmark"],
         key=lambda r: ((r["tier"] if r["tier"] is not None else 99), r["model_id"]),
     )
+    if full_rows:
+        return champion_rows + [{"_group_header": "Promoted Full Versions"}] + full_rows + fleet_rows + bench_rows
     return champion_rows + fleet_rows + bench_rows
 
 
@@ -143,6 +151,7 @@ _STATUS_BADGE = {
     "RESEARCH": "research",
     "GATE HURDLE": "hurdle",
     "BENCHMARK": "benchmark",
+    "FULL": "full",
 }
 
 
@@ -158,15 +167,23 @@ def _td_gate(value_str: str, gate_pass: bool | None) -> str:
 
 
 def _row_html(row: dict) -> str:
+    if row.get("_group_header"):
+        return (
+            '<tr class="group-header"><td colspan="9">'
+            f"{html.escape(row['_group_header'])}</td></tr>"
+        )
     status = _status_badge(row.get("status", "RESEARCH"))
     sharpe = _fmt(row.get("corr_sharpe_ac"))
     ci = "—"
     if row.get("corr_sharpe_ac_ci_low") is not None and row.get("corr_sharpe_ac_ci_high") is not None:
         ci = f"[{_fmt(row['corr_sharpe_ac_ci_low'])}–{_fmt(row['corr_sharpe_ac_ci_high'])}]"
+    model_label = html.escape(_bar_label(row))
+    if row.get("has_full_version"):
+        model_label += ' <span class="badge full">FULL</span>'
     return (
         "<tr>"
         f"<td>{status}</td>"
-        f"<td>{html.escape(_bar_label(row))}</td>"
+        f"<td>{model_label}</td>"
         f"{_td_gate(_fmt(row.get('cagr_1y'), pct=True), row.get('gate_cagr_1y'))}"
         f"{_td_gate(sharpe, row.get('gate_corr_sharpe_ac'))}"
         f"<td class=\"num\">{ci}</td>"
@@ -323,6 +340,9 @@ def _build_html(
   .badge.research {{ background: rgba(110, 118, 129, 0.2); color: #8b949e; border: 1px solid #30363d; }}
   .badge.hurdle {{ background: rgba(248, 81, 73, 0.2); color: #f85149; border: 1px solid #da3633; }}
   .badge.benchmark {{ background: rgba(137, 87, 229, 0.12); color: #a371f7; border: 1px solid #30363d; }}
+  .badge.full {{ background: rgba(210, 153, 34, 0.18); color: #d29922; border: 1px solid #9e6a03; }}
+  .group-header td {{ background: #21262d; color: #e6edf3; font-weight: 600; text-transform: uppercase;
+      font-size: 0.75rem; letter-spacing: 0.05em; }}
   details {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px;"""
         f""" padding: 0.5rem 1rem; margin: 0.5rem 0; }}
   summary {{ cursor: pointer; }}
