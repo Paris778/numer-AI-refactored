@@ -777,7 +777,7 @@ def test_generate_dashboard_table_rows_grouping() -> None:
 
 def test_generate_dashboard_row_html_full_chip() -> None:
     row = {
-        **_lb_row("a" * 64, "trained", "brb1-xgb-v6", 0.5),
+        **_lb_row("a" * 64, "trained", "brb1-xgb-v6", 0.5, has_full=True),
         "status": "RESEARCH",
         "cagr_1y": None, "corr_sharpe_ac_ci_low": None, "corr_sharpe_ac_ci_high": None,
         "max_drawdown": None, "gain_to_pain_ratio": None, "mmc_down": None,
@@ -883,7 +883,8 @@ def _row_html(row: dict) -> str:
 
 ```
   .badge.full {{ background: rgba(210, 153, 34, 0.18); color: #d29922; border: 1px solid #9e6a03; }}
-  .group-header td {{ background: #21262d; color: #e6edf3; font-weight: 600; text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.05em; }}
+  .group-header td {{ background: #21262d; color: #e6edf3; font-weight: 600;
+                     text-transform: uppercase; font-size: 0.75rem; letter-spacing: 0.05em; }}
 ```
 
 - [ ] **Step 4: Run the targeted tests**
