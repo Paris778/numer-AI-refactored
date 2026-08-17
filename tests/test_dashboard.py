@@ -646,3 +646,41 @@ def test_build_html_deterministic_across_calls(tmp_path: Path) -> None:
     first = generate_dashboard._build_html(**kwargs)
     second = generate_dashboard._build_html(**kwargs)
     assert first == second  # byte-identical, no random div ids
+
+
+def _synthetic_v2_data_dir(tmp_path: Path, *, with_benchmark: bool = True) -> Path:
+    data = _synthetic_data_dir(tmp_path)  # era/id/target + meta over 0001..0003
+    rows = []
+    for era in ("0001", "0002", "0003"):
+        for i in range(10):
+            rows.append({"era": era, "id": f"{era}_{i:03d}",
+                         "v53_lgbm_ender60": 0.5 * float(i)})
+    pl.DataFrame(rows).write_parquet(data / "validation_benchmark_models.parquet")
+    return data
+
+
+def test_resolve_horizon_targets_fallback_chain() -> None:
+    assert dash._resolve_horizon_targets(["era", "target_ender_20", "target_ender_60"]) == \
+        ("target_ender_20", "target_ender_60")
+    assert dash._resolve_horizon_targets(["target_cyrusd_20", "target_cyrusd_60"]) == \
+        ("target_cyrusd_20", "target_cyrusd_60")
+    # both horizons collapse to the generic target when nothing else exists
+    assert dash._resolve_horizon_targets(["target"]) == ("target", "target")
+
+
+def test_load_v2_lookups_deduped_target_columns(tmp_path: Path) -> None:
+    data = _synthetic_v2_data_dir(tmp_path)
+    lookups = dash._load_v2_lookups(data, tier4_column="v53_lgbm_ender60")
+    assert lookups is not None
+    assert lookups.meta_eras == ["0001", "0002", "0003"]
+    # both horizons resolve to "target" in the synthetic fixture — the read
+    # must still succeed (deduped column list, decision #18)
+    assert lookups.target_20_col == "target"
+    assert lookups.target_60_col == "target"
+    assert lookups.targets.columns == ["era", "id", "target"]
+    assert lookups.benchmarks.columns == ["era", "id", "v53_lgbm_ender60"]
+    assert lookups.benchmarks.height == 30
+
+
+def test_load_v2_lookups_missing_assets_returns_none(tmp_path: Path) -> None:
+    assert dash._load_v2_lookups(tmp_path / "no-data", tier4_column="v53_lgbm_ender60") is None

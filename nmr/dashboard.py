@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -416,6 +417,68 @@ def _per_era_metrics(
         joined, pred_col="numerai_meta_model", target_col="target"
     )
     return corr, mmc, meta_corr
+
+
+@dataclass(frozen=True)
+class _V2Lookups:
+    targets: pl.DataFrame
+    target_20_col: str
+    target_60_col: str
+    meta: pl.DataFrame
+    meta_eras: list[str]
+    benchmarks: pl.DataFrame
+
+
+def _resolve_horizon_targets(schema_cols: Sequence[str]) -> tuple[str, str]:
+    """Resolve the 20D/60D target columns with fallback chains (decision #10)."""
+    target_20 = next(
+        (c for c in ("target_ender_20", "target_cyrusd_20", "target_20", "target")
+         if c in schema_cols),
+        "target",
+    )
+    target_60 = next(
+        (c for c in ("target_ender_60", "target_cyrusd_60", "target_60", "target")
+         if c in schema_cols),
+        target_20,
+    )
+    return target_20, target_60
+
+
+def _load_v2_lookups(data_dir: Path, tier4_column: str) -> _V2Lookups | None:
+    """Single-pass v2 lookups: deduped targets, meta, benchmarks on meta eras.
+
+    Returns None when validation.parquet or meta_model.parquet is missing;
+    benchmarks are optional (empty frame when the file is absent).
+    """
+    data = Path(data_dir)
+    targets_path = data / "validation.parquet"
+    meta_path = data / "meta_model.parquet"
+    bench_path = data / "validation_benchmark_models.parquet"
+    if not (targets_path.exists() and meta_path.exists()):
+        return None
+    schema_cols = pl.read_parquet_schema(targets_path).names()
+    target_20, target_60 = _resolve_horizon_targets(schema_cols)
+    # decision #18: deduped — both horizons may resolve to "target"
+    target_cols = list(dict.fromkeys(["era", "id", "target", target_20, target_60]))
+    targets = pl.read_parquet(targets_path, columns=target_cols)
+    meta = pl.read_parquet(meta_path, columns=["era", "id", "numerai_meta_model"])
+    meta_eras = sorted_era_labels(meta.get_column("era").unique().to_list())
+    targets_86 = targets.filter(pl.col("era").is_in(meta_eras))
+    benchmarks = pl.DataFrame(
+        schema={"era": pl.String, "id": pl.String, tier4_column: pl.Float64}
+    )
+    if bench_path.exists():
+        benchmarks = pl.read_parquet(
+            bench_path, columns=["era", "id", tier4_column]
+        ).filter(pl.col("era").is_in(meta_eras))
+    return _V2Lookups(
+        targets=targets_86,
+        target_20_col=target_20,
+        target_60_col=target_60,
+        meta=meta,
+        meta_eras=meta_eras,
+        benchmarks=benchmarks,
+    )
 
 
 def reconcile_capital_metrics(
