@@ -62,6 +62,7 @@ Create `tests/test_families.py` with exactly:
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -86,7 +87,17 @@ def _write_full_manifest(
     # fixtures and must not touch the real filesystem).
     if artifact_path is not None and artifact_path:
         candidate = Path(artifact_path)
-        if not candidate.is_absolute() and ".." not in candidate.parts:
+        # Portable relative-path guard: is_absolute() alone is platform-
+        # specific (C:\... is not absolute on POSIX; /abs/... is not absolute
+        # on Windows). Reject root/drive + drive-letter forms on both
+        # platforms so fixtures never write outside the tmp models dir.
+        if (
+            not candidate.is_absolute()
+            and not candidate.root
+            and not candidate.drive
+            and not re.match(r"^[A-Za-z]:[\\/]", str(candidate))
+            and ".." not in candidate.parts
+        ):
             (full_dir / candidate).write_text("weights", encoding="utf-8")
     manifest = body
     if manifest is None:
@@ -159,7 +170,7 @@ def test_load_full_version_missing_run_id_returns_none(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "bad_artifact",
-    ["", "../predict.pkl", "C:\\abs\\predict.pkl", "/abs/predict.pkl"],
+    ["", "../predict.pkl", "C:\\abs\\predict.pkl", "C:/abs/predict.pkl", "/abs/predict.pkl"],
 )
 def test_load_full_version_rejects_invalid_artifact_path(
     tmp_path: Path, bad_artifact: str
@@ -289,13 +300,32 @@ def full_manifest_path(models_dir: Path, family: str) -> Path:
     return Path(models_dir) / family / FULL_DIR_NAME / FULL_MANIFEST_NAME
 
 
+_DRIVE_LETTER_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def _is_portable_relative(candidate: Path) -> bool:
+    """True when ``candidate`` is relative on every platform.
+
+    ``is_absolute()`` alone is platform-specific: ``C:\\...`` is not absolute
+    on POSIX and ``/abs/...`` is not absolute on Windows, so root/drive and
+    drive-letter forms are rejected explicitly.
+    """
+    return (
+        not candidate.is_absolute()
+        and not candidate.root
+        and not candidate.drive
+        and not _DRIVE_LETTER_RE.match(str(candidate))
+        and ".." not in candidate.parts
+    )
+
+
 def _validate_artifact(manifest_dir: Path, artifact_path: object) -> str | None:
     """Artifact must be a non-empty relative path (no /, drive, or ..) whose
     file exists beside the manifest. None on any violation."""
     if not isinstance(artifact_path, str) or not artifact_path.strip():
         return None
     candidate = Path(artifact_path)
-    if candidate.is_absolute() or ".." in candidate.parts:
+    if not _is_portable_relative(candidate):
         return None
     if not (manifest_dir / candidate).is_file():
         return None
@@ -394,7 +424,7 @@ from .families import (
 - [ ] **Step 4: Run the test to verify it passes**
 
 Run: `./.venv/Scripts/python -m pytest -q tests/test_families.py`
-Expected: PASS (29 collected).
+Expected: PASS (30 collected).
 
 - [ ] **Step 5: Lint the new files**
 
@@ -404,7 +434,7 @@ Expected: no violations.
 - [ ] **Step 6: Bump the AGENTS.md test-count claim**
 
 Run: `./.venv/Scripts/python -m pytest --collect-only -q 2>&1 | tail -2`
-Read the final line — it reports `N tests collected` (expect 772 + 29 = 801).
+Read the final line — it reports `N tests collected` (expect 772 + 30 = 802).
 Edit `AGENTS.md` line 33: replace the current count (`772 tests`) with the reported `N tests` (keep the surrounding sentence intact).
 
 - [ ] **Step 7: Run the full suite**
@@ -1262,7 +1292,7 @@ Expected: PASS.
 
 Run: `./.venv/Scripts/python -m ruff check .`
 Run: `./.venv/Scripts/python -m pytest -q`
-Expected: both PASS. Report the final collected count (expect 772 + 42 = 814).
+Expected: both PASS. Report the final collected count (expect 772 + 43 = 815).
 
 - [ ] **Step 6: Real-data smoke**
 
