@@ -25,6 +25,15 @@ __all__ = [
 ]
 
 _ZERO_SPAN_EPS = 1e-12
+_PAYLOAD_ROUND = 6
+
+
+def _round6(value: Any) -> Any:
+    """Round payload floats to 6 decimals (display precision is 4) — keeps the
+    data node honest while fitting the < 100 KB artifact gate (amendment)."""
+    if isinstance(value, (int, float, np.floating)):
+        return round(float(value), _PAYLOAD_ROUND)
+    return value
 
 
 def global_y_range(*series: Sequence[float]) -> tuple[float, float]:
@@ -138,18 +147,19 @@ def build_dashboard_payload(
     shaped_metrics: dict[str, Any] = {}
     for metric, models in metrics.items():
         shaped_metrics[metric] = {
-            model_id: {"standard": list(series["standard"]), "label": series["label"]}
+            model_id: {"standard": [_round6(v) for v in series["standard"]],
+                       "label": series["label"]}
             for model_id, series in models.items()
         }
     rows = [
         {
             "label": row["label"],
-            "sharpe": row["corr_sharpe_ac"],
-            "ci_low": row["corr_sharpe_ac_ci_low"],
-            "ci_high": row["corr_sharpe_ac_ci_high"],
-            "cagr_1y": row.get("cagr_1y"),
-            "max_drawdown": row.get("max_drawdown"),
-            "deflated_sharpe": row.get("deflated_sharpe"),
+            "sharpe": _round6(row["corr_sharpe_ac"]),
+            "ci_low": _round6(row["corr_sharpe_ac_ci_low"]),
+            "ci_high": _round6(row["corr_sharpe_ac_ci_high"]),
+            "cagr_1y": _round6(row.get("cagr_1y")),
+            "max_drawdown": _round6(row.get("max_drawdown")),
+            "deflated_sharpe": _round6(row.get("deflated_sharpe")),
             "champion": row["champion"],
         }
         for row in leaderboard_bars.to_dicts()

@@ -341,3 +341,15 @@ def test_generate_dashboard_empty_registry_compiles(tmp_path: Path) -> None:
     text = out.read_text(encoding="utf-8")
     assert "ALPHA GENERATION" in text
     assert 'id="dashboard-data"' in text
+
+
+def test_technical_entries_summary_only(tmp_path: Path) -> None:
+    # < 100 KB gate: the audit accordion must carry config summaries, not
+    # full run.json dumps (~25 KB per run; 29 runs = ~715 KB measured)
+    _write_registry(tmp_path, [_registry_entry("c" * 64)])
+    entries = report._technical_entries(tmp_path)
+    assert len(entries) == 1
+    assert "backend" in entries[0]["json_text"]
+    assert '"scorecard"' not in entries[0]["json_text"]
+    assert '"metrics"' not in entries[0]["json_text"]
+    assert len(entries[0]["json_text"]) < 2048

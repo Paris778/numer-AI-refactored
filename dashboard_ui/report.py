@@ -235,6 +235,12 @@ def _row_html(row: dict) -> str:
 
 
 def _technical_entries(registry_dir: Path) -> list[dict]:
+    """Per-run config summaries for the audit accordion (bounded size).
+
+    Full ``run.json`` dumps (~25 KB per run) blow the < 100 KB artifact gate
+    (measured: 29 runs = ~715 KB), so the accordion carries the curated config
+    summary only; the immutable full payload lives in the registry.
+    """
     entries = []
     for run_file in sorted(registry_dir.glob("*/run.json")):
         try:
@@ -246,23 +252,24 @@ def _technical_entries(registry_dir: Path) -> list[dict]:
         manifest = payload.get("manifest") or {}
         cfg = manifest.get("config") or {}
         run_cfg = cfg.get("run") or {}
+        summary = {
+            "backend": (cfg.get("model") or {}).get("backend"),
+            "preset": (cfg.get("model") or {}).get("preset"),
+            "feature_set": (cfg.get("data") or {}).get("feature_set"),
+            "feature_subset": (cfg.get("data") or {}).get("feature_subset"),
+            "neutralization_proportion": (cfg.get("risk") or {}).get(
+                "neutralization_proportion"
+            ),
+            "seed": run_cfg.get("seed"),
+            "device": manifest.get("oof_device"),
+            "targets": (cfg.get("data") or {}).get("targets"),
+        }
         entries.append(
             {
                 "label": f"{run_cfg.get('name', 'unknown')} · "
                          f"{str(payload.get('run_id') or run_file.parent.name)[:8]}",
-                "summary": {
-                    "backend": (cfg.get("model") or {}).get("backend"),
-                    "preset": (cfg.get("model") or {}).get("preset"),
-                    "feature_set": (cfg.get("data") or {}).get("feature_set"),
-                    "feature_subset": (cfg.get("data") or {}).get("feature_subset"),
-                    "neutralization_proportion": (cfg.get("risk") or {}).get(
-                        "neutralization_proportion"
-                    ),
-                    "seed": run_cfg.get("seed"),
-                    "device": manifest.get("oof_device"),
-                    "targets": (cfg.get("data") or {}).get("targets"),
-                },
-                "json_text": json.dumps(payload, indent=2, sort_keys=True),
+                "summary": summary,
+                "json_text": json.dumps(summary, indent=2, sort_keys=True),
             }
         )
     return entries
@@ -387,7 +394,9 @@ def _build_html(
     data-node substitution runs LAST so payload text can never be re-processed
     by a later placeholder replacement.
     """
-    payload_json = json.dumps(payload, sort_keys=True, allow_nan=False).replace("</", "<\\/")
+    payload_json = json.dumps(
+        payload, sort_keys=True, allow_nan=False, separators=(",", ":")
+    ).replace("</", "<\\/")
     ts_html = _TS_CHART_HTML if payload.get("eras") else _EMPTY_TS_HTML
     replacements = [
         ("{{ INLINE_STYLE }}", _STYLE_CSS),
