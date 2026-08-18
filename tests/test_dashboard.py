@@ -439,6 +439,36 @@ def test_multimetric_payout_aligned_when_model_misses_an_era(tmp_path: Path) -> 
         assert len(payload["metrics"][name]["e" * 64]["standard"]) == 3
 
 
+def test_multimetric_timeseries_benchmarks_absent_degrades(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    _write_registry(tmp_path, [_registry_entry("a" * 64)])
+    _write_preds(tmp_path / ("a" * 64), scale=1.0)
+    data = _synthetic_v2_data_dir(tmp_path, with_benchmark=False)
+    with caplog.at_level(logging.WARNING, logger="nmr.dashboard"):
+        payload = dash.extract_multimetric_timeseries(
+            tmp_path, data, run_ids=["a" * 64], include_tier4_ref=True
+        )
+    # no benchmark parquet -> tier-4 reference dropped; every model slice still
+    # renders, with BMC zero-filled (degrade, never raise — decision #23)
+    assert set(payload["metrics"]) == {
+        "payout", "corr20", "mmc20", "corr60", "mmc60", "bmc", "cwmm"
+    }
+    assert set(payload["metrics"]["payout"]) == {"a" * 64}
+    for name in ("payout", "corr20", "mmc20", "corr60", "mmc60", "bmc", "cwmm"):
+        series = payload["metrics"][name]["a" * 64]
+        assert len(series["standard"]) == 3
+        assert len(series["cumulative"]) == 3
+    assert payload["metrics"]["bmc"]["a" * 64]["standard"] == pytest.approx(
+        [0.0, 0.0, 0.0], abs=1e-12
+    )
+    assert payload["metrics"]["bmc"]["a" * 64]["cumulative"] == pytest.approx(
+        [0.0, 0.0, 0.0], abs=1e-12
+    )
+    assert "a" * 64 in payload["drawdowns"]
+    assert "bmc zeroed" in caplog.text
+
+
 _REAL_VALIDATION = Path("data/v5.3/validation.parquet")
 _REAL_META = Path("data/v5.3/meta_model.parquet")
 _REAL_BENCH = Path("data/v5.3/validation_benchmark_models.parquet")
@@ -773,12 +803,13 @@ def test_build_html_deterministic_across_calls(tmp_path: Path) -> None:
 
 def _synthetic_v2_data_dir(tmp_path: Path, *, with_benchmark: bool = True) -> Path:
     data = _synthetic_data_dir(tmp_path)  # era/id/target + meta over 0001..0003
-    rows = []
-    for era in ("0001", "0002", "0003"):
-        for i in range(10):
-            rows.append({"era": era, "id": f"{era}_{i:03d}",
-                         "v53_lgbm_ender60": 0.5 * float(i)})
-    pl.DataFrame(rows).write_parquet(data / "validation_benchmark_models.parquet")
+    if with_benchmark:
+        rows = []
+        for era in ("0001", "0002", "0003"):
+            for i in range(10):
+                rows.append({"era": era, "id": f"{era}_{i:03d}",
+                             "v53_lgbm_ender60": 0.5 * float(i)})
+        pl.DataFrame(rows).write_parquet(data / "validation_benchmark_models.parquet")
     return data
 
 
@@ -903,6 +934,9 @@ def test_multimetric_chart_html_embeds_payload_and_controls() -> None:
     assert "Cumulative View" in block and "Standard View" in block
     assert "METRIC_CONFIG" in block
     assert "Cumulative Wealth (1.0 Stake)" in block and "Per-Era Net Return" in block
+    # hover values carry a per-metric format matching the axis tickformat (M3)
+    assert "hoverformat" in block
+    assert 'hovertemplate: "%{y:"' in block
     assert "updatemenus" not in block
     assert "<script src" not in block
 
@@ -948,6 +982,7 @@ def test_drawdown_chart_v2_payload() -> None:
     assert len(fig.data) == 1
     assert fig.data[0].y[-1] == pytest.approx(-0.01)
     assert fig.data[0].fill == "tozeroy"
+    assert fig.layout.legend.orientation == "h"   # horizontal legend restored
 
 
 def test_diversification_stats_thresholds() -> None:
@@ -964,11 +999,17 @@ def test_diversification_stats_thresholds() -> None:
 
 
 def test_ensemble_sharpe_card_guard() -> None:
-    assert generate_dashboard._ensemble_sharpe({}) is None           # < 2 series
+    assert generate_dashboard._ensemble_sharpe({}) is None           # no series
     assert generate_dashboard._ensemble_sharpe({"a": {"standard": [0.01, 0.02]}}) is None
+    # decision #27: N_fleet < 3 renders "—", even with 2 usable series
+    assert generate_dashboard._ensemble_sharpe({
+        "a": {"standard": [0.01, 0.02, 0.03]},
+        "b": {"standard": [0.02, 0.01, 0.02]},
+    }) is None
     value = generate_dashboard._ensemble_sharpe({
         "a": {"standard": [0.01, 0.02, 0.03]},
         "b": {"standard": [0.02, 0.01, 0.02]},
+        "c": {"standard": [0.01, 0.01, 0.02]},
     })
     assert isinstance(value, float) and value == value  # finite
 

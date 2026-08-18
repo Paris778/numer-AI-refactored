@@ -250,14 +250,14 @@ def _ensemble_sharpe(payout_metric: dict) -> float | None:
     """Equal-weighted blended Sharpe from per-era payout series (decision #17).
 
     SR_blended = mean(mu) / sqrt(w^T Sigma w), w uniform; None when fewer
-    than 2 usable series or zero variance.
+    than 3 usable series (decision #27) or zero variance.
     """
     series = [
         np.asarray(v["standard"], dtype=float)
         for v in payout_metric.values()
         if v.get("standard")
     ]
-    if len(series) < 2:
+    if len(series) < 3:
         return None
     stacked = np.vstack(series)
     mu = np.mean(stacked, axis=1)

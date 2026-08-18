@@ -119,6 +119,7 @@ def build_drawdown_chart(payload: dict[str, Any]) -> go.Figure:
         xaxis_title="Era",
         yaxis_title="Drawdown",
         yaxis_tickformat=".0%",
+        legend=dict(orientation="h"),
     )
     return fig
 
@@ -174,21 +175,21 @@ def multimetric_chart_html(payload: dict[str, Any]) -> str:
   var payload = {payload_json};
   var METRIC_CONFIG = {{
     payout: {{
-      standard: {{title: "Per-Era Net Return", tickformat: ".2%"}},
-      cumulative: {{title: "Cumulative Wealth (1.0 Stake)", tickformat: ".3f"}}
+      standard: {{title: "Per-Era Net Return", tickformat: ".2%", hoverformat: ".2%"}},
+      cumulative: {{title: "Cumulative Wealth (1.0 Stake)", tickformat: ".3f", hoverformat: ".3f"}}
     }},
-    corr20: {{standard: {{title: "Per-Era CORR (20D)", tickformat: ".4f"}},
-              cumulative: {{title: "Cumulative CORR (20D)", tickformat: ".4f"}}}},
-    mmc20:  {{standard: {{title: "Per-Era MMC (20D)", tickformat: ".4f"}},
-              cumulative: {{title: "Cumulative MMC (20D)", tickformat: ".4f"}}}},
-    corr60: {{standard: {{title: "Per-Era CORR (60D)", tickformat: ".4f"}},
-              cumulative: {{title: "Cumulative CORR (60D)", tickformat: ".4f"}}}},
-    mmc60:  {{standard: {{title: "Per-Era MMC (60D)", tickformat: ".4f"}},
-              cumulative: {{title: "Cumulative MMC (60D)", tickformat: ".4f"}}}},
-    bmc:    {{standard: {{title: "Per-Era BMC", tickformat: ".4f"}},
-              cumulative: {{title: "Cumulative BMC", tickformat: ".4f"}}}},
-    cwmm:   {{standard: {{title: "Per-Era CWMM", tickformat: ".4f"}},
-              cumulative: {{title: "Cumulative CWMM", tickformat: ".4f"}}}}
+    corr20: {{standard: {{title: "Per-Era CORR (20D)", tickformat: ".4f", hoverformat: ".4f"}},
+              cumulative: {{title: "Cumulative CORR (20D)", tickformat: ".4f", hoverformat: ".4f"}}}},
+    mmc20:  {{standard: {{title: "Per-Era MMC (20D)", tickformat: ".4f", hoverformat: ".4f"}},
+              cumulative: {{title: "Cumulative MMC (20D)", tickformat: ".4f", hoverformat: ".4f"}}}},
+    corr60: {{standard: {{title: "Per-Era CORR (60D)", tickformat: ".4f", hoverformat: ".4f"}},
+              cumulative: {{title: "Cumulative CORR (60D)", tickformat: ".4f", hoverformat: ".4f"}}}},
+    mmc60:  {{standard: {{title: "Per-Era MMC (60D)", tickformat: ".4f", hoverformat: ".4f"}},
+              cumulative: {{title: "Cumulative MMC (60D)", tickformat: ".4f", hoverformat: ".4f"}}}},
+    bmc:    {{standard: {{title: "Per-Era BMC", tickformat: ".4f", hoverformat: ".4f"}},
+              cumulative: {{title: "Cumulative BMC", tickformat: ".4f", hoverformat: ".4f"}}}},
+    cwmm:   {{standard: {{title: "Per-Era CWMM", tickformat: ".4f", hoverformat: ".4f"}},
+              cumulative: {{title: "Cumulative CWMM", tickformat: ".4f", hoverformat: ".4f"}}}}
   }};
   var currentMetric = "payout";
   var currentView = "standard";
@@ -227,7 +228,7 @@ def multimetric_chart_html(payload: dict[str, Any]) -> str:
         y: series[currentView],
         mode: "lines",
         name: series.label,
-        hovertemplate: "%{{y}}" + "<extra>" + esc(series.label) + "</extra>"
+        hovertemplate: "%{{y:" + cfg.hoverformat + "}}" + "<extra>" + esc(series.label) + "</extra>"
       }});
     }}
     var cfg = METRIC_CONFIG[currentMetric][currentView];

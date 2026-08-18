@@ -524,9 +524,17 @@ def _load_v2_lookups(data_dir: Path, tier4_column: str) -> _V2Lookups | None:
         schema={"era": pl.String, "id": pl.String, tier4_column: pl.Float64}
     )
     if bench_path.exists():
-        benchmarks = pl.read_parquet(
-            bench_path, columns=["era", "id", tier4_column]
-        ).filter(pl.col("era").is_in(meta_eras))
+        try:
+            benchmarks = pl.read_parquet(
+                bench_path, columns=["era", "id", tier4_column]
+            ).filter(pl.col("era").is_in(meta_eras))
+        except pl.exceptions.ColumnNotFoundError:
+            # schema drift: the parquet exists but lacks the tier-4 column —
+            # degrade to the empty benchmark frame instead of raising
+            logger.warning(
+                "nmr.dashboard: benchmark parquet %s lacks tier-4 column %s; "
+                "benchmarks empty", bench_path, tier4_column,
+            )
     return _V2Lookups(
         targets=targets_86,
         target_20_col=target_20,
@@ -630,9 +638,10 @@ def extract_multimetric_timeseries(
 
     Payout is anchored to main_target="target" (decision #19); correlation
     metrics use cumsum, payout uses cumprod (decision #9); the tier-4 BMC is
-    short-circuited to zeros (decision #11); missing horizon targets zero
-    their slice with a warning (decision #23). Never raises on missing
-    assets — returns the empty payload.
+    short-circuited to zeros (decision #11); an absent benchmark frame or a
+    model sharing no era with the meta window zero-fills its bmc/cwmm slices
+    and skips its payout slice with warnings (decision #23). Never raises on
+    missing assets — returns the empty payload.
     """
     lookups = _load_v2_lookups(data_dir, tier4_column)
     if lookups is None:
@@ -681,17 +690,26 @@ def extract_multimetric_timeseries(
             joined, pred_col="prediction",
             meta_col="numerai_meta_model", target_col="target",
         )
-        pay = payout_series(corr_t, mmc_t)
-        clipped_by_era = dict(zip(pay.eras, pay.clipped))
-        standard = [float(clipped_by_era.get(era, 0.0)) for era in axis]
-        metrics["payout"][model_id] = {
-            "standard": standard,
-            "cumulative": _cumulative_from_standard(standard, payout=True),
-            "label": label,
-        }
-        wealth = np.asarray(metrics["payout"][model_id]["cumulative"], dtype=float)
-        peak = np.maximum.accumulate(wealth)
-        drawdowns[model_id] = [float(v) for v in wealth / peak - 1.0]
+        # decision #23: a stale run whose preds share no era with the meta
+        # window must not abort the report — skip its payout slice (drawdowns
+        # derive from payout wealth) while the other metric slices still render
+        if set(corr_t) & set(mmc_t):
+            pay = payout_series(corr_t, mmc_t)
+            clipped_by_era = dict(zip(pay.eras, pay.clipped))
+            standard = [float(clipped_by_era.get(era, 0.0)) for era in axis]
+            metrics["payout"][model_id] = {
+                "standard": standard,
+                "cumulative": _cumulative_from_standard(standard, payout=True),
+                "label": label,
+            }
+            wealth = np.asarray(metrics["payout"][model_id]["cumulative"], dtype=float)
+            peak = np.maximum.accumulate(wealth)
+            drawdowns[model_id] = [float(v) for v in wealth / peak - 1.0]
+        else:
+            logger.warning(
+                "nmr.dashboard: %s shares no eras with the meta window; "
+                "payout slice skipped", model_id,
+            )
 
         horizon_metrics = (
             ("corr20", lookups.target_20_col, "corr"),
@@ -700,16 +718,7 @@ def extract_multimetric_timeseries(
             ("mmc60", lookups.target_60_col, "mmc"),
         )
         for name, target_col, kind in horizon_metrics:
-            if target_col not in joined.columns:
-                logger.warning(
-                    "nmr.dashboard: horizon target %s missing; %s zeroed",
-                    target_col, name,
-                )
-                zeros = [0.0 for _ in axis]
-                metrics[name][model_id] = {
-                    "standard": zeros, "cumulative": zeros, "label": label,
-                }
-                continue
+            # resolved target columns are guaranteed present in joined by construction
             if kind == "corr":
                 per = engine.per_era_corr(
                     joined, pred_col="prediction", target_col=target_col
@@ -731,7 +740,7 @@ def extract_multimetric_timeseries(
             metrics["bmc"][model_id] = {
                 "standard": zeros, "cumulative": zeros, "label": label,
             }
-        else:
+        elif lookups.benchmarks.height > 0 and joined.height > 0:
             joined_b = joined.join(lookups.benchmarks, on=["era", "id"], how="inner")
             # reporting path relaxes the evaluation vacuity gate (real meta
             # window satisfies 20 anyway); alignment below zero-fills missing eras
@@ -746,19 +755,43 @@ def extract_multimetric_timeseries(
                 "cumulative": _cumulative_from_standard(aligned, payout=False),
                 "label": label,
             }
+        else:
+            # decision #23: an absent benchmark frame (or a model with no era
+            # overlap with it) zero-fills the BMC slice instead of raising
+            if lookups.benchmarks.height == 0:
+                logger.warning(
+                    "nmr.dashboard: benchmark models absent at %s; bmc zeroed",
+                    data_dir,
+                )
+            else:
+                logger.warning(
+                    "nmr.dashboard: %s shares no eras with the benchmark "
+                    "window; bmc zeroed", model_id,
+                )
+            zeros = [0.0 for _ in axis]
+            metrics["bmc"][model_id] = {
+                "standard": zeros, "cumulative": zeros, "label": label,
+            }
 
-        # reporting path relaxes the evaluation vacuity gate (real meta window
-        # satisfies 20 anyway); alignment below zero-fills missing eras
-        per_cwmm = engine.per_era_cwmm(
-            joined, pred_col="prediction", meta_col="numerai_meta_model",
-            min_overlap_eras=1,
-        )
-        aligned = [float(per_cwmm.get(era, 0.0)) for era in axis]
-        metrics["cwmm"][model_id] = {
-            "standard": aligned,
-            "cumulative": _cumulative_from_standard(aligned, payout=False),
-            "label": label,
-        }
+        if joined.height > 0:
+            # reporting path relaxes the evaluation vacuity gate (real meta window
+            # satisfies 20 anyway); alignment below zero-fills missing eras
+            per_cwmm = engine.per_era_cwmm(
+                joined, pred_col="prediction", meta_col="numerai_meta_model",
+                min_overlap_eras=1,
+            )
+            aligned = [float(per_cwmm.get(era, 0.0)) for era in axis]
+            metrics["cwmm"][model_id] = {
+                "standard": aligned,
+                "cumulative": _cumulative_from_standard(aligned, payout=False),
+                "label": label,
+            }
+        else:
+            # zero-overlap model: cwmm renders zero-filled (decision #23)
+            zeros = [0.0 for _ in axis]
+            metrics["cwmm"][model_id] = {
+                "standard": zeros, "cumulative": zeros, "label": label,
+            }
 
     return {
         "eras": axis,
