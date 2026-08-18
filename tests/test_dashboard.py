@@ -9,11 +9,11 @@ import polars as pl
 import pytest
 from plotly.colors import diverging
 
-import generate_dashboard
 import nmr.dashboard as dash
 import nmr.evaluation as nmr_evaluation
 import nmr.payout as payout
 from dashboard_ui import charts
+from dashboard_ui import report as generate_dashboard
 from nmr.config import REPO_ROOT
 from nmr.payout import annual_compounded_return
 
@@ -1288,3 +1288,23 @@ def test_multimetric_chart_embeds_data_node_and_app_js_once() -> None:
     assert block.count("var METRIC_CONFIG = {") == 1  # app.js inlined exactly once
     # a marker from the controller body is present (dataNode read)
     assert 'getElementById("dashboard-multimetric-data")' in block
+
+
+def test_report_inlines_style_css_once(tmp_path: Path) -> None:
+    _write_registry(tmp_path, [_registry_entry("a" * 64)])
+    out = generate_dashboard.generate_dashboard(
+        registry_dir=tmp_path, benchmark_path=False,
+        output_path=tmp_path / "dashboard.html", open_browser=False,
+    )
+    text = out.read_text(encoding="utf-8")
+    assert text.count(".badge.full {") == 1        # style.css inlined once — CSS rule, not the HTML class attr
+    assert text.count(".group-header td {") == 1
+    # single plotly engine embed — the bundle itself contains many
+    # "window.Plotly*" literals, so count the template's own marker
+    assert text.count("<!-- plotly-engine-embed -->") == 1
+    # the app.js data node mounts only with local v5.3 assets; without
+    # them (CI) the multimetric controller degrades to an annotation
+    if Path("data/v5.3/validation.parquet").exists():
+        assert text.count('id="dashboard-multimetric-data"') == 1  # data node present exactly once
+    else:
+        assert 'id="dashboard-multimetric-data"' not in text

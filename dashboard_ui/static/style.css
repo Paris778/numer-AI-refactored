@@ -1,0 +1,23 @@
+  body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, 'Segoe UI', sans-serif; margin: 0; padding: 1.5rem; }
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin: 1rem 0 2rem; }
+  .kpi { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1rem; }
+  .kpi .label { font-size: 0.8rem; color: #8b949e; text-transform: uppercase; }
+  .kpi .value { font-size: 1.4rem; font-weight: 600; }
+  table { width: 100%; border-collapse: collapse; background: #161b22; border: 1px solid #30363d; }
+  th, td { padding: 0.6rem 0.8rem; border-bottom: 1px solid #30363d; text-align: left; }
+  th { background: #21262d; font-size: 0.8rem; text-transform: uppercase; }
+  .num { font-variant-numeric: tabular-nums; text-align: right; }
+  .gate-fail { color: #f85149; font-weight: 500; }
+  .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 999px; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; }
+  .badge.champion { background: rgba(137, 87, 229, 0.2); color: #a371f7; border: 1px solid #8957e5; }
+  .badge.ready { background: rgba(46, 160, 67, 0.2); color: #3fb950; border: 1px solid #2ea043; }
+  .badge.research { background: rgba(110, 118, 129, 0.2); color: #8b949e; border: 1px solid #30363d; }
+  .badge.hurdle { background: rgba(248, 81, 73, 0.2); color: #f85149; border: 1px solid #da3633; }
+  .badge.benchmark { background: rgba(137, 87, 229, 0.12); color: #a371f7; border: 1px solid #30363d; }
+  .badge.full { background: rgba(210, 153, 34, 0.18); color: #d29922; border: 1px solid #9e6a03; }
+  .group-header td { background: #21262d; color: #e6edf3; font-weight: 600; text-transform: uppercase;
+      font-size: 0.75rem; letter-spacing: 0.05em; }
+  details { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.5rem 0; }
+  summary { cursor: pointer; }
+  pre { white-space: pre-wrap; font-size: 0.75rem; }
+  h1, h2 { color: #e6edf3; }

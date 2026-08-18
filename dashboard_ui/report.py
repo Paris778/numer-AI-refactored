@@ -1,0 +1,454 @@
+"""Compile the executive HTML performance report from the shared engine.
+
+Thin control plane only: data comes from ``nmr.dashboard``, figures from
+``dashboard_ui.charts``, CSS from ``dashboard_ui.static``. No metric math here.
+"""
+
+from __future__ import annotations
+
+import html
+import json
+import logging
+import webbrowser
+from pathlib import Path
+
+import numpy as np
+import plotly.io as pio
+import polars as pl
+from plotly.offline import get_plotlyjs
+
+from dashboard_ui import charts
+from nmr.benchmark import load_benchmark_file
+from nmr.config import REPO_ROOT
+from nmr.dashboard import (
+    DEFAULT_DATA_DIR,
+    DEFAULT_GATE_PATH,
+    DEFAULT_REGISTRY_DIR,
+    EVALUABLE_ROWS,
+    evaluate_gate_status,
+    extract_multimetric_timeseries,
+    extract_pairwise_similarity_matrix,
+    load_unified_leaderboard,
+    read_champion_pointer,
+    reconcile_capital_metrics,
+)
+
+logger = logging.getLogger(__name__)
+
+_STATIC_DIR = Path(__file__).parent / "static"
+
+
+def _read_asset(name: str) -> str:
+    """Read a static asset once (cached at import). Content is static."""
+    return (_STATIC_DIR / name).read_text(encoding="utf-8")
+
+
+_STYLE_CSS = _read_asset("style.css")
+
+
+def _fmt(value, *, pct: bool = False) -> str:
+    if value is None:
+        return "—"
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    if number != number:  # NaN
+        return "—"
+    if number == float("inf"):
+        return "∞"
+    if pct:
+        return f"{number:.2%}"
+    return f"{number:.4f}"
+
+
+def _bar_label(row: dict) -> str:
+    model_id = row["model_id"] or "?"
+    if row["source"] == "benchmark":
+        return f"{row['run_name']} · {model_id}"
+    return f"{row['run_name']} · {model_id[:8]}"
+
+
+def _bar_input(leaderboard: pl.DataFrame, champion: str | None) -> pl.DataFrame:
+    evaluable = leaderboard.filter(EVALUABLE_ROWS)
+    top = evaluable.sort("corr_sharpe_ac", descending=True, nulls_last=True).head(10)
+    return pl.DataFrame(
+        [
+            {
+                "label": _bar_label(row),
+                "corr_sharpe_ac": row["corr_sharpe_ac"],
+                "corr_sharpe_ac_ci_low": row["corr_sharpe_ac_ci_low"],
+                "corr_sharpe_ac_ci_high": row["corr_sharpe_ac_ci_high"],
+                "champion": row["model_id"] == champion,
+                "cagr_1y": row.get("cagr_1y"),
+                "max_drawdown": row.get("max_drawdown"),
+                "deflated_sharpe": row.get("deflated_sharpe"),
+            }
+            for row in top.to_dicts()
+        ]
+    )
+
+
+def _kpi_cards(leaderboard: pl.DataFrame, champion: str | None,
+               hurdle_sharpe: float) -> dict:
+    fleet = leaderboard.filter(pl.col("source").is_in(["trained", "trained_legacy"]))
+    top = fleet.sort("corr_sharpe_ac", descending=True, nulls_last=True).head(1)
+    top_row = top.row(0, named=True) if top.height else None
+    cagr_values = [
+        row["cagr_1y"] for row in fleet.to_dicts()
+        if row["cagr_1y"] is not None
+    ]
+    champion_row = None
+    if champion is not None:
+        champ_frame = leaderboard.filter(pl.col("model_id") == champion)
+        if champ_frame.height:
+            champion_row = champ_frame.row(0, named=True)
+        else:
+            logger.warning(
+                "generate_dashboard: champion %s not found in leaderboard; "
+                "treating as none designated", champion,
+            )
+    return {
+        "champion_label": "None Designated" if champion_row is None
+                          else _bar_label(champion_row),
+        "champion_detail": "(Unallocated)" if champion_row is None else "Active",
+        "top_contender_label": _bar_label(top_row) if top_row else "—",
+        "top_contender_sharpe": top_row["corr_sharpe_ac"] if top_row else None,
+        "hurdle_sharpe": hurdle_sharpe,
+        "gap": (top_row["corr_sharpe_ac"] - hurdle_sharpe)
+               if top_row and top_row["corr_sharpe_ac"] is not None else None,
+        "fleet_best_cagr": max(cagr_values) if cagr_values else None,
+        "worst_drawdown": min(
+            [row["max_drawdown"] for row in fleet.to_dicts()
+             if row["max_drawdown"] is not None],
+            default=None,
+        ),
+        "capital_ready_count": fleet.join(
+            leaderboard.select(["model_id", "status"]), on="model_id", how="left"
+        ).filter(pl.col("status") == "CAPITAL READY").height,
+        "fleet_count": fleet.height,
+        "data_version": "v5.3",
+        "n_eras": leaderboard.get_column("n_eras").drop_nulls().max()
+                  if leaderboard.height else None,
+    }
+
+
+def _table_rows(leaderboard: pl.DataFrame, champion: str | None) -> list[dict]:
+    rows = leaderboard.to_dicts()
+    champion_rows = [r for r in rows if champion is not None and r["model_id"] == champion]
+    full_rows = sorted(
+        [r for r in rows if r["source"] == "full"],
+        key=lambda r: (str(r["run_name"] or ""), str(r["model_id"])),
+    )
+    fleet_rows = sorted(
+        [r for r in rows
+         if r["source"] in ("trained", "trained_legacy") and r["model_id"] != champion],
+        key=lambda r: (-(r["corr_sharpe_ac"] if r["corr_sharpe_ac"] is not None
+                        else float("-inf")), r["model_id"]),
+    )
+    bench_rows = sorted(
+        [r for r in rows if r["source"] == "benchmark"],
+        key=lambda r: ((r["tier"] if r["tier"] is not None else 99), r["model_id"]),
+    )
+    if full_rows:
+        return champion_rows + [{"_group_header": "Promoted Full Versions"}] + full_rows + fleet_rows + bench_rows
+    return champion_rows + fleet_rows + bench_rows
+
+
+_STATUS_BADGE = {
+    "CHAMPION": "champion",
+    "CAPITAL READY": "ready",
+    "RESEARCH": "research",
+    "GATE HURDLE": "hurdle",
+    "BENCHMARK": "benchmark",
+    "FULL": "full",
+}
+
+
+def _status_badge(status: str) -> str:
+    cls = _STATUS_BADGE.get(status, "research")
+    return f'<span class="badge {cls}">{html.escape(status)}</span>'
+
+
+def _td_gate(value_str: str, gate_pass: bool | None) -> str:
+    if gate_pass is False:
+        return f'<td class="num gate-fail">{value_str}</td>'
+    return f'<td class="num">{value_str}</td>'
+
+
+def _row_html(row: dict) -> str:
+    if row.get("_group_header"):
+        return (
+            '<tr class="group-header"><td colspan="9">'
+            f"{html.escape(row['_group_header'])}</td></tr>"
+        )
+    status = _status_badge(row.get("status", "RESEARCH"))
+    sharpe = _fmt(row.get("corr_sharpe_ac"))
+    ci = "—"
+    if row.get("corr_sharpe_ac_ci_low") is not None and row.get("corr_sharpe_ac_ci_high") is not None:
+        ci = f"[{_fmt(row['corr_sharpe_ac_ci_low'])}–{_fmt(row['corr_sharpe_ac_ci_high'])}]"
+    model_label = html.escape(_bar_label(row))
+    if row.get("has_full_version"):
+        model_label += ' <span class="badge full">FULL</span>'
+    return (
+        "<tr>"
+        f"<td>{status}</td>"
+        f"<td>{model_label}</td>"
+        f"{_td_gate(_fmt(row.get('cagr_1y'), pct=True), row.get('gate_cagr_1y'))}"
+        f"{_td_gate(sharpe, row.get('gate_corr_sharpe_ac'))}"
+        f"<td class=\"num\">{ci}</td>"
+        f"<td class=\"num\">{_fmt(row.get('max_drawdown'), pct=True)}</td>"
+        f"{_td_gate(_fmt(row.get('gain_to_pain_ratio')), row.get('gate_gain_to_pain_ratio'))}"
+        f"<td class=\"num\">{_fmt(row.get('mmc_down'))}</td>"
+        f"{_td_gate(_fmt(row.get('deflated_sharpe')), row.get('gate_deflated_sharpe'))}"
+        "</tr>"
+    )
+
+
+def _technical_entries(registry_dir: Path) -> list[dict]:
+    entries = []
+    for run_file in sorted(registry_dir.glob("*/run.json")):
+        try:
+            payload = json.loads(run_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        manifest = payload.get("manifest") or {}
+        cfg = manifest.get("config") or {}
+        run_cfg = cfg.get("run") or {}
+        entries.append(
+            {
+                "label": f"{run_cfg.get('name', 'unknown')} · "
+                         f"{str(payload.get('run_id') or run_file.parent.name)[:8]}",
+                "summary": {
+                    "backend": (cfg.get("model") or {}).get("backend"),
+                    "preset": (cfg.get("model") or {}).get("preset"),
+                    "feature_set": (cfg.get("data") or {}).get("feature_set"),
+                    "feature_subset": (cfg.get("data") or {}).get("feature_subset"),
+                    "neutralization_proportion": (cfg.get("risk") or {}).get(
+                        "neutralization_proportion"
+                    ),
+                    "seed": run_cfg.get("seed"),
+                    "device": manifest.get("oof_device"),
+                    "targets": (cfg.get("data") or {}).get("targets"),
+                },
+                "json_text": json.dumps(payload, indent=2, sort_keys=True),
+            }
+        )
+    return entries
+
+
+def _diversification_stats(matrix: list[list[float]]) -> dict:
+    """Max/mean off-diagonal overlap + badge tier (decision #16)."""
+    n = len(matrix)
+    off = [matrix[i][j] for i in range(n) for j in range(i + 1, n)]
+    mean = float(np.mean(off)) if off else None
+    maximum = float(max(off)) if off else None
+    if mean is None:
+        badge = "—"
+    elif mean < 0.65:
+        badge = "EXCELLENT DIVERSIFICATION"
+    elif mean <= 0.85:
+        badge = "MODERATE OVERLAP"
+    else:
+        badge = "HIGH REDUNDANCY"
+    return {"mean_overlap": mean, "max_overlap": maximum, "badge": badge}
+
+
+def _ensemble_sharpe(payout_metric: dict) -> float | None:
+    """Equal-weighted blended Sharpe from per-era payout series (decision #17).
+
+    SR_blended = mean(mu) / sqrt(w^T Sigma w), w uniform; None when fewer
+    than 3 usable series (decision #27) or zero variance.
+    """
+    series = [
+        np.asarray(v["standard"], dtype=float)
+        for v in payout_metric.values()
+        if v.get("standard")
+    ]
+    if len(series) < 3:
+        return None
+    stacked = np.vstack(series)
+    mu = np.mean(stacked, axis=1)
+    weights = np.full(len(mu), 1.0 / len(mu))
+    variance = float(weights @ np.cov(stacked) @ weights)
+    if variance <= 0.0 or not np.isfinite(variance):
+        return None
+    return float(np.mean(mu) / np.sqrt(variance))
+
+
+def _badge_html(stats: dict, stress: dict) -> str:
+    delta = stress.get("mean_delta")
+    delta_text = "—" if delta is None else f"{delta:+.3f}"
+    mean_text = "—" if stats["mean_overlap"] is None else f"{stats['mean_overlap']:.3f}"
+    max_text = "—" if stats["max_overlap"] is None else f"{stats['max_overlap']:.3f}"
+    return (
+        f'<p class="badge-line"><b>{html.escape(stats["badge"])}</b> · '
+        f"Mean Overlap {mean_text} · Max Overlap {max_text} · "
+        f"Stress-Regime Δρ {delta_text}</p>"
+    )
+
+
+def _ensemble_card_html(value: float | None) -> str:
+    text = "—" if value is None else f"{value:.3f}"
+    return (
+        '<div class="kpi"><div class="label">Equal-Weight Ensemble Sharpe '
+        f"(top-3, heuristic)</div><div class=\"value\">{text}</div></div>"
+    )
+
+
+def _build_html(
+    leaderboard: pl.DataFrame,
+    champion: str | None,
+    kpis: dict,
+    figures: dict,
+    multimetric_block: str,
+    badge_html: str,
+    ensemble_card_html: str,
+    registry_dir: Path,
+    technical_entries: list[dict],
+) -> str:
+    """Assemble the full HTML document (single plotly engine in <head>)."""
+    engine_js = get_plotlyjs()
+    figure_html = {
+        name: pio.to_html(fig, include_plotlyjs=False, full_html=False, div_id=name)
+        for name, fig in figures.items()
+    }
+    rows_html = "".join(_row_html(row) for row in _table_rows(leaderboard, champion))
+    accordion = ""
+    for entry in technical_entries:
+        accordion += (
+            "<details><summary>"
+            f"{html.escape(entry['label'])} — technical &amp; audit</summary>"
+            f"<pre>{html.escape(entry['json_text'])}</pre></details>"
+        )
+    return (
+        f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NumerAI Executive Performance Report</title>
+<style>
+{_STYLE_CSS}
+</style>
+<!-- plotly-engine-embed -->
+<script>{engine_js}</script>
+</head>
+<body>
+<h1>🏆 NumerAI Executive Performance Report</h1>
+<p>Evaluation window: {kpis['n_eras']} overlap eras · data version {kpis['data_version']}</p>
+<div class="kpis">
+  <div class="kpi"><div class="label">Active Champion</div><div class="value">{html.escape(kpis['champion_label'])}"""
+        f"""</div><div>{html.escape(kpis['champion_detail'])}</div></div>
+  <div class="kpi"><div class="label">Top Research Contender</div>"""
+        f"""<div class="value">{html.escape(kpis['top_contender_label'])}</div><div>Sharpe"""
+        f""" {_fmt(kpis['top_contender_sharpe'])} vs hurdle {_fmt(kpis['hurdle_sharpe'])}</div></div>
+  <div class="kpi"><div class="label">Fleet Best Return (CAGR)</div>"""
+        f"""<div class="value">{_fmt(kpis['fleet_best_cagr'], pct=True)}</div></div>
+  <div class="kpi"><div class="label">Worst Fleet Drawdown</div>"""
+        f"""<div class="value">{_fmt(kpis['worst_drawdown'], pct=True)}</div></div>
+  <div class="kpi"><div class="label">Capital Readiness</div>"""
+        f"""<div class="value">{kpis['capital_ready_count']} / {kpis['fleet_count']}</div></div>
+</div>
+<h2>1. ALPHA GENERATION &amp; MULTI-METRIC PERFORMANCE TRAJECTORY</h2>
+{multimetric_block}
+<h2>2. RISK-ADJUSTED RETURN LEADERBOARD</h2>
+{figure_html['leaderboard']}
+<h2>3. SIGNAL DIVERSIFICATION &amp; PAIRWISE SIMILARITY MATRIX</h2>
+{badge_html}
+{figure_html['similarity']}
+{ensemble_card_html}
+<h2>4. EXECUTIVE ALLOCATION &amp; RISK DECISION TABLE</h2>
+<table>
+<thead><tr><th>Status</th><th>Model</th><th>Ann. Return</th><th>Sharpe (AC)</th><th>Sharpe CI</th><th>Max DD</th>"""
+        f"""<th>Gain-to-Pain</th><th>Downside</th><th>Confidence (DSR)</th></tr></thead>
+<tbody>{rows_html}</tbody>
+</table>
+<h2>5. CAPITAL DRAWDOWN (UNDERWATER TRAJECTORY)</h2>
+{figure_html['drawdown']}
+<h2>Technical &amp; Audit Metadata</h2>
+{accordion}
+</body>
+</html>"""
+    )
+
+
+def generate_dashboard(
+    *,
+    registry_dir: Path | None = None,
+    benchmark_path: Path | None | bool = None,
+    output_path: Path | None = None,
+    open_browser: bool = True,
+) -> Path:
+    """Build the executive HTML report and write it to disk."""
+    registry_dir = Path(registry_dir) if registry_dir is not None else DEFAULT_REGISTRY_DIR
+    output_path = Path(output_path) if output_path is not None else REPO_ROOT / "artifacts" / "dashboard.html"
+
+    leaderboard = load_unified_leaderboard(registry_dir, benchmark_path=benchmark_path)
+    leaderboard = reconcile_capital_metrics(leaderboard, DEFAULT_DATA_DIR)
+    statuses = evaluate_gate_status(leaderboard, DEFAULT_GATE_PATH, registry_dir / "champion.json")
+    leaderboard = leaderboard.join(statuses, on="model_id", how="left")
+
+    gate_cfg = load_benchmark_file(DEFAULT_GATE_PATH)
+    assert gate_cfg.reference_column is not None
+    tier4_column = str(gate_cfg.reference_column)
+    hurdle_sharpe = float(gate_cfg.gate.corr_sharpe_ac_min)
+
+    champion = read_champion_pointer(registry_dir / "champion.json")
+    fleet = leaderboard.filter(pl.col("source").is_in(["trained", "trained_legacy"]))
+    top3 = fleet.sort("corr_sharpe_ac", descending=True, nulls_last=True).head(3)
+    top3_ids = top3.get_column("model_id").to_list()
+
+    payload = extract_multimetric_timeseries(
+        registry_dir, DEFAULT_DATA_DIR, run_ids=top3_ids,
+        include_tier4_ref=True, tier4_column=tier4_column,
+    )
+    top5_ids = fleet.sort("corr_sharpe_ac", descending=True, nulls_last=True).head(5) \
+        .get_column("model_id").to_list()
+    labels, _sim_ids, matrix, stress = extract_pairwise_similarity_matrix(
+        registry_dir, DEFAULT_DATA_DIR, run_ids=top5_ids,
+        include_tier4_ref=True, tier4_column=tier4_column,
+    )
+    stats = _diversification_stats(matrix)
+    payout_metric = (payload.get("metrics") or {}).get("payout") or {}
+    top3_payout = {
+        mid: payout_metric[mid]
+        for mid in top3_ids
+        if mid in payout_metric
+    }
+    ensemble_value = _ensemble_sharpe(top3_payout)
+
+    figures = {
+        "leaderboard": charts.build_leaderboard_bar_chart(
+            _bar_input(leaderboard, champion), hurdle_sharpe=hurdle_sharpe
+        ),
+        "similarity": charts.build_similarity_matrix_chart(labels, matrix),
+        "drawdown": charts.build_drawdown_chart(payload),
+    }
+    html_text = _build_html(
+        leaderboard=leaderboard, champion=champion,
+        kpis=_kpi_cards(leaderboard, champion, hurdle_sharpe),
+        figures=figures,
+        multimetric_block=charts.multimetric_chart_html(payload),
+        badge_html=_badge_html(stats, stress),
+        ensemble_card_html=_ensemble_card_html(ensemble_value),
+        registry_dir=registry_dir,
+        technical_entries=_technical_entries(registry_dir),
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(html_text, encoding="utf-8")
+    if open_browser:
+        webbrowser.open(output_path.as_uri())
+    return output_path
+
+
+def main() -> int:
+    output = generate_dashboard()
+    print(f"Dashboard written to: {output}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
