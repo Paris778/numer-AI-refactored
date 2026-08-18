@@ -486,11 +486,11 @@ Run:
 ./.venv/Scripts/python -c "
 from pathlib import Path
 text = Path('artifacts/dashboard.html').read_text(encoding='utf-8')
-assert text.count('window.Plotly') == 1
-assert 'cdn.plot.ly' not in text
-assert text.count('dashboard-multimetric-data') == 1
+assert text.count('<!-- plotly-engine-embed -->') == 1   # engine embedded exactly once
+assert '<script src' not in text                          # no external script tags (no CDN)
+assert text.count('id=\"dashboard-multimetric-data\"') == 1   # app.js data node (with local data)
 assert '.badge.full {' in text          # style.css inlined
-assert 'METRIC_CONFIG' in text          # app.js inlined
+assert 'var METRIC_CONFIG = {' in text  # app.js inlined
 print('front-end isolation HTML verified')
 "
 ```
