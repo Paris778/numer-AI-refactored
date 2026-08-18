@@ -432,8 +432,8 @@ def test_app_js_contains_renderer_functions() -> None:
 def test_layout_html_has_compiler_placeholders() -> None:
     from dashboard_ui import report
     layout = (Path(report._STATIC_DIR) / "layout.html").read_text(encoding="utf-8")
-    for ph in ("{{ INLINE_STYLE }}", "{{ N_ERAS }}", "{{ KPI_CARDS }}",
-               "{{ METRIC_CONTROLS }}", "{{ TIMESERIES_SVG }}",
+    for ph in ("{{ INLINE_STYLE }}", "{{ N_ERAS }}", "{{ DATA_VERSION }}",
+               "{{ KPI_CARDS }}", "{{ METRIC_CONTROLS }}", "{{ TIMESERIES_SVG }}",
                "{{ LEADERBOARD_SVG }}", "{{ DIVERSIFICATION_SECTION }}",
                "{{ DECISION_TABLE }}", "{{ DRAWDOWN_SVG }}",
                "{{ AUDIT_ACCORDION }}", "{{ INLINE_DATA_SCRIPT }}"):
@@ -769,11 +769,12 @@ pre { white-space: pre-wrap; font-size: 0.75rem; color: var(--text); }
 
   function gridLines(svg, yMin, yMax, pad, fmtVal) {
     var span = yMax - yMin;
-    var ticks = [yMax, 0.0, yMin];
+    var ticks = (yMin <= 0.0 && yMax >= 0.0)
+      ? [yMax, 0.0, yMin]
+      : [yMax, (yMin + yMax) / 2.0, yMin];
     var innerH = TS.height - pad.top - pad.bottom;
     for (var k = 0; k < ticks.length; k++) {
       var val = ticks[k];
-      if (val < yMin - span * 0.5 || val > yMax + span * 0.5) continue;
       var y = pad.top + (1.0 - (val - yMin) / span) * innerH;
       var line = document.createElementNS("http://www.w3.org/2000/svg", "line");
       line.setAttribute("class", "grid-line");
@@ -834,6 +835,8 @@ pre { white-space: pre-wrap; font-size: 0.75rem; color: var(--text); }
     });
     var innerW = LB.width - LB.pad.left - LB.pad.right;
     var barH = 24, gap = 8;
+    var totalH = Math.max(LB.height, LB.pad.top + LB.pad.bottom + sorted.length * (barH + gap));
+    svg.setAttribute("viewBox", "0 0 " + LB.width + " " + totalH);
     var maxX = Math.max.apply(null, sorted.map(function (r) { return r.sharpe === null ? 0 : r.sharpe; }));
     if (!(maxX > 0)) maxX = 1.0;
     for (var i = 0; i < sorted.length; i++) {
@@ -924,9 +927,10 @@ pre { white-space: pre-wrap; font-size: 0.75rem; color: var(--text); }
       for (var k = 0; k < sim.matrix[i].length; k++) {
         var td = document.createElement("td");
         var v = sim.matrix[i][k];
-        var alpha = 0.05 + 0.85 * Math.abs(v);
-        td.textContent = v.toFixed(3);
-        var color = v < 0 ? "248, 81, 73" : "88, 166, 255";
+        var isNum = v !== null && v !== undefined && isFinite(v);
+        td.textContent = isNum ? v.toFixed(3) : "—";
+        var alpha = isNum ? (0.05 + 0.85 * Math.abs(v)) : 0.0;
+        var color = isNum ? (v < 0 ? "248, 81, 73" : "88, 166, 255") : "110, 118, 129";
         td.style.backgroundColor = "rgba(" + color + ", " + alpha.toFixed(2) + ")";
         if (i === 0 || k === 0) td.setAttribute("class", "highlight");
         tr.appendChild(td);
@@ -984,9 +988,10 @@ pre { white-space: pre-wrap; font-size: 0.75rem; color: var(--text); }
   }
 
   function eraIndexFromX(x) {
+    if (!eras.length) return -1;
     var innerW = TS.width - TS.pad.left - TS.pad.right;
     var t = Math.round((x - TS.pad.left) / (innerW / Math.max(1, eras.length - 1)));
-    return (t >= 0 && t < eras.length) ? t : -1;
+    return Math.min(Math.max(t, 0), eras.length - 1);
   }
 
   function attachTooltip() {
@@ -1159,6 +1164,18 @@ def test_build_html_empty_payload_placeholder_message() -> None:
         "payload": {**_payload_for_test(), "eras": [], "metrics": {}},
     })
     assert "Timeseries data unavailable without local v5.3 assets" in html_text
+
+
+def test_build_html_rejects_non_finite_payload() -> None:
+    # fail loud: NaN/Inf must never serialize into the data node (browser
+    # JSON.parse would throw on them at runtime)
+    kwargs = _build_html_kwargs()
+    payload = dict(kwargs["payload"])
+    payload["metrics"]["payout"]["a" * 64]["standard"] = [0.01, float("nan")]
+    with pytest.raises(ValueError):
+        report._build_html(kpis=kwargs["kpis"], table_html=kwargs["table_html"],
+                           diversification_html=kwargs["diversification_html"],
+                           accordion_html=kwargs["accordion_html"], payload=payload)
 
 
 def test_asset_resolution_independent_of_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2125,10 +2142,10 @@ Streamlit (interactive dashboard — imported only in `dashboard_ui/app.py` and 
 Run:
 
 ```bash
-grep -ri plotly dashboard_ui/ tests/ configs/ requirements.txt *.py
+grep -ri plotly --exclude=test_scripts.py dashboard_ui/ tests/ configs/ requirements.txt *.py
 ```
 
-Expected: **no output**. The only remaining `plotly` strings in the repo are inside the historical specs under `docs/superpowers/specs/2026-08-16-*.md` (allowed — historical records).
+Expected: **no output**. The only intentional `plotly` string in code is the negative-assertion guard inside `tests/test_scripts.py` (excluded above); historical specs under `docs/superpowers/specs/2026-08-16-*.md` are outside the scanned paths (allowed — historical records).
 
 - [ ] **Step 6: Regenerate the artifact and verify the contract**
 
