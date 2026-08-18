@@ -17,7 +17,6 @@ numerai-tools==0.5.3
 optuna==4.9.0
 catboost==1.2.10
 streamlit==1.61.1
-plotly==6.6.0
 ipykernel==7.1.0
 tqdm==4.67.1
 # GPU acceleration (user-granted deps): cupy rankdata for the analysis
