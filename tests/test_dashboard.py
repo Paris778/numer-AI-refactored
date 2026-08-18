@@ -9,11 +9,11 @@ import polars as pl
 import pytest
 from plotly.colors import diverging
 
-import dashboard_charts as charts
 import generate_dashboard
 import nmr.dashboard as dash
 import nmr.evaluation as nmr_evaluation
 import nmr.payout as payout
+from dashboard_ui import charts
 from nmr.config import REPO_ROOT
 from nmr.payout import annual_compounded_return
 
@@ -928,11 +928,14 @@ def test_multimetric_chart_html_embeds_payload_and_controls() -> None:
     }
     block = charts.multimetric_chart_html(payload)
     assert 'id="multimetric-chart"' in block
-    embedded = json.loads(block.split("var payload = ")[1].split(";")[0])
+    data_start = block.index('id="dashboard-multimetric-data"') + len('id="dashboard-multimetric-data">')
+    data_end = block.index("</script>", data_start)
+    embedded = json.loads(block[data_start:data_end])
     assert embedded == payload  # exact sorted-key serialization round-trips
+    assert "var payload = {" not in block  # payload no longer a JS literal
     assert block.count("<option") == 7
     assert "Cumulative View" in block and "Standard View" in block
-    assert "METRIC_CONFIG" in block
+    assert "METRIC_CONFIG" in block  # app.js inlined
     assert "Cumulative Wealth (1.0 Stake)" in block and "Per-Era Net Return" in block
     # hover values carry a per-metric format matching the axis tickformat (M3)
     assert "hoverformat" in block
@@ -1269,3 +1272,19 @@ def test_dashboard_app_robustness_matrix_excludes_full_rows() -> None:
     frame = pl.DataFrame(rows, schema=dash.UNIFIED_SCHEMA, strict=False)
     matrix = app.robustness_matrix(frame)
     assert matrix.get_column("model_id").to_list() == ["a" * 64]
+
+
+def test_multimetric_chart_embeds_data_node_and_app_js_once() -> None:
+    payload = {
+        "eras": ["0001", "0002"],
+        "meta_downside_mask": [False, False],
+        "metrics": {"payout": {"a": {"standard": [0.01, 0.02],
+                                     "cumulative": [1.01, 1.0302], "label": "r"}}},
+        "drawdowns": {"a": [0.0, 0.0]},
+    }
+    block = charts.multimetric_chart_html(payload)
+    assert block.count('id="dashboard-multimetric-data"') == 1
+    assert block.count("<script") == 2  # data node + app.js
+    assert block.count("var METRIC_CONFIG = {") == 1  # app.js inlined exactly once
+    # a marker from the controller body is present (dataNode read)
+    assert 'getElementById("dashboard-multimetric-data")' in block

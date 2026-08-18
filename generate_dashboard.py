@@ -1,7 +1,7 @@
 """Compile the executive HTML performance report from the shared engine.
 
 Thin control plane only: data comes from ``nmr.dashboard``, figures from
-``dashboard_charts``, HTML from the template below. No metric math here.
+``dashboard_ui.charts``, HTML from the template below. No metric math here.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ import plotly.io as pio
 import polars as pl
 from plotly.offline import get_plotlyjs
 
-import dashboard_charts as charts
+from dashboard_ui import charts
 from nmr.benchmark import load_benchmark_file
 from nmr.config import REPO_ROOT
 from nmr.dashboard import (
