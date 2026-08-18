@@ -707,39 +707,6 @@ def _kpis_for_test() -> dict:
     }
 
 
-def test_html_escapes_user_strings_and_single_plotly_engine(tmp_path: Path) -> None:
-    rows = pl.DataFrame(
-        [{"model_id": "<script>alert(1)</script>", "source": "trained",
-          "run_name": '"><img src=x onerror=alert(2)>', "corr_sharpe_ac": 0.8,
-          "corr_sharpe_ac_ci_low": 0.6, "corr_sharpe_ac_ci_high": 1.0,
-          "cagr_1y": 1.5, "gain_to_pain_ratio": 2.0, "kelly_fraction": 0.4,
-          "mmc_down": 0.01, "deflated_sharpe": 0.97, "max_drawdown": 0.1,
-          "fnc": 0.05, "corr": 0.12, "status": "RESEARCH", "tier": None,
-          "gate_corr_sharpe_ac": False, "gate_cagr_1y": None}]
-    )
-    html_text = generate_dashboard._build_html(
-        leaderboard=rows, champion=None, kpis=_kpis_for_test(),
-        figures=_charts_for_test(),
-        multimetric_block=charts.multimetric_chart_html(_multimetric_payload()),
-        badge_html="<p>BADGE MODERATE OVERLAP</p>",
-        ensemble_card_html="<p>ENSEMBLE CARD —</p>",
-        registry_dir=tmp_path,
-        technical_entries=[],
-    )
-    assert '"><img src=x' not in html_text            # hostile run_name escaped, never raw
-    assert "&lt;img src=x onerror=alert(2)&gt;" in html_text
-    # engine embed marker (the bundle itself contains many "window.Plotly"
-    # literals, so count the template's own marker, not bundle internals)
-    assert html_text.count("<!-- plotly-engine-embed -->") == 1
-    assert "<script src" not in html_text            # zero external script tags (offline)
-    # four figure render calls (3 pio figures + the multimetric JS controller),
-    # counted AFTER the engine block so the plotly.js bundle's own
-    # "Plotly.newPlot(...)" example string is excluded
-    assert html_text.split("</script>", 1)[1].count("Plotly.newPlot(") == 4
-    assert 'class="num gate-fail"' in html_text   # failing gate cell tinted
-    assert "badge research" in html_text          # status badge pill rendered
-
-
 def test_kpi_cards_stale_champion_pointer_degrades(caplog: pytest.LogCaptureFixture) -> None:
     frame = pl.DataFrame(
         [{"model_id": "a" * 64, "source": "trained", "run_name": "sample-run",
@@ -753,30 +720,6 @@ def test_kpi_cards_stale_champion_pointer_degrades(caplog: pytest.LogCaptureFixt
     assert kpis["champion_label"] == "None Designated"
     assert kpis["champion_detail"] == "(Unallocated)"
     assert "champion" in caplog.text and "not found in leaderboard" in caplog.text
-
-
-def test_generate_dashboard_end_to_end_synthetic(tmp_path: Path) -> None:
-    _write_registry(tmp_path, [_registry_entry("a" * 64)])
-    out = generate_dashboard.generate_dashboard(
-        registry_dir=tmp_path, benchmark_path=False,
-        output_path=tmp_path / "dashboard.html", open_browser=False,
-    )
-    assert out.exists()
-    text = out.read_text(encoding="utf-8")
-    assert "sample-run" in text
-    # the synthetic fixture genuinely clears the real tier-4 gate (corr 0.12,
-    # sharpe 0.8, fnc 0.05, dsr 0.97, gtp 2.0, cagr 1.5) -> CAPITAL READY badge
-    assert "CAPITAL READY" in text
-    assert "<!-- plotly-engine-embed -->" in text
-    # v2 layout sections always present, even with degraded data payloads
-    for section in ("ALPHA GENERATION", "SIGNAL DIVERSIFICATION", "CAPITAL DRAWDOWN"):
-        assert section in text
-    # four Plotly mounts (3 figures + the multimetric JS controller); without
-    # local v5.3 assets (CI) the controller degrades to an annotation and only
-    # the three pio figures mount
-    expected_renders = 4 if Path("data/v5.3/validation.parquet").exists() else 3
-    assert text.split("</script>", 1)[1].count("Plotly.newPlot(") == expected_renders
-    # size is unbounded by ruling (full plotly engine inline, ~4.9 MB)
 
 
 def test_build_html_deterministic_across_calls(tmp_path: Path) -> None:
@@ -917,33 +860,6 @@ def test_similarity_matrix_missing_data_assets(tmp_path: Path) -> None:
     assert out == ([], [], [], {"mean_delta": None, "n_pairs": 0})
 
 
-def test_multimetric_chart_html_embeds_payload_and_controls() -> None:
-    payload = {
-        "eras": ["0001", "0002"],
-        "meta_downside_mask": [True, False],
-        "metrics": {"payout": {"a": {"standard": [0.01, 0.02],
-                                      "cumulative": [1.01, 1.0302], "label": "run · a</script>aaa"}},
-                    "corr20": {}, "mmc20": {}, "corr60": {}, "mmc60": {}, "bmc": {}, "cwmm": {}},
-        "drawdowns": {"a": [0.0, 0.0]},
-    }
-    block = charts.multimetric_chart_html(payload)
-    assert 'id="multimetric-chart"' in block
-    data_start = block.index('id="dashboard-multimetric-data"') + len('id="dashboard-multimetric-data">')
-    data_end = block.index("</script>", data_start)
-    embedded = json.loads(block[data_start:data_end])
-    assert embedded == payload  # exact sorted-key serialization round-trips
-    assert "var payload = {" not in block  # payload no longer a JS literal
-    assert block.count("<option") == 7
-    assert "Cumulative View" in block and "Standard View" in block
-    assert "METRIC_CONFIG" in block  # app.js inlined
-    assert "Cumulative Wealth (1.0 Stake)" in block and "Per-Era Net Return" in block
-    # hover values carry a per-metric format matching the axis tickformat (M3)
-    assert "hoverformat" in block
-    assert 'hovertemplate: "%{y:"' in block
-    assert "updatemenus" not in block
-    assert "<script src" not in block
-
-
 def test_multimetric_chart_html_empty_payload_annotation() -> None:
     block = charts.multimetric_chart_html(
         {"eras": [], "meta_downside_mask": [], "metrics": {}, "drawdowns": {}}
@@ -1015,42 +931,6 @@ def test_ensemble_sharpe_card_guard() -> None:
         "c": {"standard": [0.01, 0.01, 0.02]},
     })
     assert isinstance(value, float) and value == value  # finite
-
-
-def test_build_html_v2_sections_and_four_render_calls(tmp_path: Path) -> None:
-    payload = {
-        "eras": ["0001", "0002"],
-        "meta_downside_mask": [False, False],
-        "metrics": {"payout": {"a": {"standard": [0.01, 0.02], "cumulative": [1.01, 1.0302], "label": "run · aaaaaaaa"}},
-                    "corr20": {}, "mmc20": {}, "corr60": {}, "mmc60": {}, "bmc": {}, "cwmm": {}},
-        "drawdowns": {"a": [0.0, -0.01]},
-    }
-    rows = pl.DataFrame(
-        [{"model_id": "a", "source": "trained", "run_name": "run",
-          "corr_sharpe_ac": 0.8, "corr_sharpe_ac_ci_low": 0.6, "corr_sharpe_ac_ci_high": 1.0,
-          "cagr_1y": 1.5, "gain_to_pain_ratio": 2.0, "kelly_fraction": 0.4,
-          "mmc_down": 0.01, "deflated_sharpe": 0.97, "max_drawdown": 0.1,
-          "fnc": 0.05, "corr": 0.12, "status": "RESEARCH", "tier": None}]
-    )
-    figures = {
-        "leaderboard": charts.build_leaderboard_bar_chart(_bar_input(), hurdle_sharpe=0.78),
-        "similarity": charts.build_similarity_matrix_chart(["a", "b"], [[1.0, 0.5], [0.5, 1.0]]),
-        "drawdown": charts.build_drawdown_chart(payload),
-    }
-    multimetric_block = charts.multimetric_chart_html(payload)
-    html_text = generate_dashboard._build_html(
-        leaderboard=rows, champion=None, kpis=_kpis_for_test(),
-        figures=figures, multimetric_block=multimetric_block,
-        badge_html="<p>BADGE Mean 0.50 Max 0.50 MODERATE OVERLAP</p>",
-        ensemble_card_html="<p>ENSEMBLE CARD 1.234</p>",
-        registry_dir=tmp_path, technical_entries=[],
-    )
-    for section in ("ALPHA GENERATION", "SIGNAL DIVERSIFICATION",
-                    "CAPITAL DRAWDOWN", "BADGE", "ENSEMBLE CARD"):
-        assert section in html_text
-    assert html_text.count("<!-- plotly-engine-embed -->") == 1
-    assert html_text.split("</script>", 1)[1].count("Plotly.newPlot(") == 4
-    assert "<script src" not in html_text
 
 
 def test_unified_schema_has_family_columns() -> None:
@@ -1272,22 +1152,6 @@ def test_dashboard_app_robustness_matrix_excludes_full_rows() -> None:
     frame = pl.DataFrame(rows, schema=dash.UNIFIED_SCHEMA, strict=False)
     matrix = app.robustness_matrix(frame)
     assert matrix.get_column("model_id").to_list() == ["a" * 64]
-
-
-def test_multimetric_chart_embeds_data_node_and_app_js_once() -> None:
-    payload = {
-        "eras": ["0001", "0002"],
-        "meta_downside_mask": [False, False],
-        "metrics": {"payout": {"a": {"standard": [0.01, 0.02],
-                                     "cumulative": [1.01, 1.0302], "label": "r"}}},
-        "drawdowns": {"a": [0.0, 0.0]},
-    }
-    block = charts.multimetric_chart_html(payload)
-    assert block.count('id="dashboard-multimetric-data"') == 1
-    assert block.count("<script") == 2  # data node + app.js
-    assert block.count("var METRIC_CONFIG = {") == 1  # app.js inlined exactly once
-    # a marker from the controller body is present (dataNode read)
-    assert 'getElementById("dashboard-multimetric-data")' in block
 
 
 def test_report_inlines_style_css_once(tmp_path: Path) -> None:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import polars as pl
 import pytest
 
@@ -110,3 +112,37 @@ def test_build_dashboard_payload_metric_first_standard_only() -> None:
     assert payload["similarity"] == {"labels": ["a"], "matrix": [[1.0]]}
     assert payload["hurdle_sharpe"] == 0.78
     assert payload["ensemble_sharpe"] == 1.2
+
+
+def test_style_css_design_tokens() -> None:
+    from dashboard_ui import report
+    css = (Path(report._STATIC_DIR) / "style.css").read_text(encoding="utf-8")
+    for token in ("--bg: #0d1117", "--surface: #161b22", "--border: #30363d",
+                  "--text: #c9d1d9", "--accent: #58a6ff", "--danger: #f85149",
+                  "--success: #3fb950", "--gold: #d29922"):
+        assert token in css
+    for selector in (".badge.champion", ".badge.ready", ".badge.research",
+                     ".badge.hurdle", ".badge.benchmark", ".badge.full",
+                     ".gate-fail", ".grid-line", ".crosshair", ".tooltip"):
+        assert selector in css
+
+
+def test_app_js_contains_renderer_functions() -> None:
+    from dashboard_ui import report
+    js = (Path(report._STATIC_DIR) / "app.js").read_text(encoding="utf-8")
+    for fn in ("dataToSvgPath", "svgAreaPath", "cumulativeSeries",
+               "drawdownSeries", "globalYRange", "renderTimeseries",
+               "renderLeaderboard", "renderSimilarity", "renderDrawdown"):
+        assert fn in js
+    assert "</script" not in js   # inlined into a <script> node — must never close it
+
+
+def test_layout_html_has_compiler_placeholders() -> None:
+    from dashboard_ui import report
+    layout = (Path(report._STATIC_DIR) / "layout.html").read_text(encoding="utf-8")
+    for ph in ("{{ INLINE_STYLE }}", "{{ N_ERAS }}", "{{ DATA_VERSION }}",
+               "{{ KPI_CARDS }}", "{{ METRIC_CONTROLS }}", "{{ TIMESERIES_SVG }}",
+               "{{ LEADERBOARD_SVG }}", "{{ DIVERSIFICATION_SECTION }}",
+               "{{ DECISION_TABLE }}", "{{ DRAWDOWN_SVG }}",
+               "{{ AUDIT_ACCORDION }}", "{{ INLINE_DATA_SCRIPT }}"):
+        assert ph in layout

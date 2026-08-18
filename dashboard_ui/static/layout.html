@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NumerAI Executive Performance Report</title>
+<style>
+{{ INLINE_STYLE }}
+</style>
+</head>
+<body>
+<div id="dashboard-root">
+<h1>🏆 NumerAI Executive Performance Report</h1>
+<p>Evaluation window: {{ N_ERAS }} overlap eras · data version {{ DATA_VERSION }}</p>
+<div class="kpis">{{ KPI_CARDS }}</div>
+
+<h2>1. ALPHA GENERATION &amp; MULTI-METRIC PERFORMANCE TRAJECTORY</h2>
+{{ METRIC_CONTROLS }}
+{{ TIMESERIES_SVG }}
+
+<h2>2. RISK-ADJUSTED RETURN LEADERBOARD</h2>
+{{ LEADERBOARD_SVG }}
+
+<h2>3. SIGNAL DIVERSIFICATION &amp; PAIRWISE SIMILARITY MATRIX</h2>
+{{ DIVERSIFICATION_SECTION }}
+
+<h2>4. EXECUTIVE ALLOCATION &amp; RISK DECISION TABLE</h2>
+{{ DECISION_TABLE }}
+
+<h2>5. CAPITAL DRAWDOWN (UNDERWATER TRAJECTORY)</h2>
+{{ DRAWDOWN_SVG }}
+
+<h2>Technical &amp; Audit Metadata</h2>
+{{ AUDIT_ACCORDION }}
+</div>
+{{ INLINE_DATA_SCRIPT }}
+</body>
+</html>

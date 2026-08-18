@@ -1,23 +1,113 @@
-  body { background: #0d1117; color: #c9d1d9; font-family: -apple-system, 'Segoe UI', sans-serif; margin: 0; padding: 1.5rem; }
-  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin: 1rem 0 2rem; }
-  .kpi { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 1rem; }
-  .kpi .label { font-size: 0.8rem; color: #8b949e; text-transform: uppercase; }
-  .kpi .value { font-size: 1.4rem; font-weight: 600; }
-  table { width: 100%; border-collapse: collapse; background: #161b22; border: 1px solid #30363d; }
-  th, td { padding: 0.6rem 0.8rem; border-bottom: 1px solid #30363d; text-align: left; }
-  th { background: #21262d; font-size: 0.8rem; text-transform: uppercase; }
-  .num { font-variant-numeric: tabular-nums; text-align: right; }
-  .gate-fail { color: #f85149; font-weight: 500; }
-  .badge { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 999px; font-size: 0.75rem; font-weight: 600; text-transform: uppercase; }
-  .badge.champion { background: rgba(137, 87, 229, 0.2); color: #a371f7; border: 1px solid #8957e5; }
-  .badge.ready { background: rgba(46, 160, 67, 0.2); color: #3fb950; border: 1px solid #2ea043; }
-  .badge.research { background: rgba(110, 118, 129, 0.2); color: #8b949e; border: 1px solid #30363d; }
-  .badge.hurdle { background: rgba(248, 81, 73, 0.2); color: #f85149; border: 1px solid #da3633; }
-  .badge.benchmark { background: rgba(137, 87, 229, 0.12); color: #a371f7; border: 1px solid #30363d; }
-  .badge.full { background: rgba(210, 153, 34, 0.18); color: #d29922; border: 1px solid #9e6a03; }
-  .group-header td { background: #21262d; color: #e6edf3; font-weight: 600; text-transform: uppercase;
-      font-size: 0.75rem; letter-spacing: 0.05em; }
-  details { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 0.5rem 1rem; margin: 0.5rem 0; }
-  summary { cursor: pointer; }
-  pre { white-space: pre-wrap; font-size: 0.75rem; }
-  h1, h2 { color: #e6edf3; }
+:root {
+  --bg: #0d1117;
+  --surface: #161b22;
+  --border: #30363d;
+  --text: #c9d1d9;
+  --muted: #8b949e;
+  --accent: #58a6ff;
+  --danger: #f85149;
+  --success: #3fb950;
+  --gold: #d29922;
+  --heading: #e6edf3;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, "Segoe UI", sans-serif;
+  margin: 0;
+  padding: 1.5rem;
+}
+
+#dashboard-root { max-width: 1100px; margin: 0 auto; }
+
+h1 { color: var(--heading); }
+h2 {
+  color: var(--heading); font-size: 1.1rem; margin-top: 2.5rem;
+  border-bottom: 1px solid var(--border); padding-bottom: 0.4rem;
+}
+
+.kpis {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem; margin: 1rem 0 2rem;
+}
+.kpi { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; }
+.kpi .label { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.kpi .value { font-size: 1.4rem; font-weight: 600; color: var(--heading); }
+
+.chart-box {
+  position: relative; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 0.75rem; margin: 0.75rem 0;
+}
+.chart-box svg { width: 100%; height: auto; display: block; }
+
+.controls { display: flex; gap: 1rem; align-items: center; margin: 1rem 0 0.25rem; flex-wrap: wrap; }
+.controls select, .controls button {
+  background: var(--surface); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 0.4rem 0.8rem; font-size: 0.85rem; cursor: pointer;
+}
+.controls button.active { border-color: var(--accent); color: var(--accent); }
+.axis-label { color: var(--muted); font-size: 0.85rem; }
+
+.series-line { fill: none; stroke-width: 2; }
+.grid-line { stroke: var(--border); stroke-dasharray: 4 4; }
+.axis-text { fill: var(--muted); font-size: 11px; }
+.hurdle-line { stroke: var(--danger); stroke-dasharray: 6 4; }
+.hurdle-text { fill: var(--danger); font-size: 11px; }
+.bar { fill: var(--accent); opacity: 0.85; }
+.bar.champion-bar { fill: var(--gold); }
+.bar-label { fill: var(--text); font-size: 12px; }
+.bar-value { fill: var(--muted); font-size: 11px; }
+.ci-whisker { stroke: var(--heading); stroke-width: 2; }
+.drawdown-area { stroke-width: 1.5; }
+.crosshair { stroke: var(--muted); stroke-dasharray: 3 3; }
+svg .empty-note { fill: var(--muted); font-size: 13px; }
+p.empty-note { color: var(--muted); text-align: center; padding: 2rem 0; }
+
+.tooltip {
+  position: absolute; left: 0; top: 0; z-index: 10;
+  background: rgba(13, 17, 23, 0.95); border: 1px solid var(--border); border-radius: 6px;
+  padding: 0.5rem 0.75rem; font-size: 0.8rem; pointer-events: none; max-width: 260px;
+}
+
+table {
+  width: 100%; border-collapse: collapse; background: var(--surface);
+  border: 1px solid var(--border);
+}
+th, td {
+  padding: 0.6rem 0.8rem; border-bottom: 1px solid var(--border);
+  text-align: left; font-size: 0.85rem;
+}
+th { background: #21262d; font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--heading); }
+.num { font-variant-numeric: tabular-nums; text-align: right; }
+.gate-fail { color: var(--danger); font-weight: 500; }
+
+.badge {
+  display: inline-block; padding: 0.15rem 0.5rem; border-radius: 999px;
+  font-size: 0.72rem; font-weight: 600; text-transform: uppercase; margin-right: 0.25rem;
+}
+.badge.champion { background: rgba(137, 87, 229, 0.2); color: #a371f7; border: 1px solid #8957e5; }
+.badge.ready { background: rgba(46, 160, 67, 0.2); color: var(--success); border: 1px solid #2ea043; }
+.badge.research { background: rgba(110, 118, 129, 0.2); color: var(--muted); border: 1px solid var(--border); }
+.badge.hurdle { background: rgba(248, 81, 73, 0.2); color: var(--danger); border: 1px solid #da3633; }
+.badge.benchmark { background: rgba(137, 87, 229, 0.12); color: #a371f7; border: 1px solid var(--border); }
+.badge.full { background: rgba(210, 153, 34, 0.18); color: var(--gold); border: 1px solid #9e6a03; }
+
+.group-header td {
+  background: #21262d; color: var(--heading); font-weight: 600; text-transform: uppercase;
+  font-size: 0.75rem; letter-spacing: 0.05em;
+}
+
+table.similarity th, table.similarity td { text-align: center; font-size: 0.75rem; }
+table.similarity td.highlight { font-weight: 700; }
+
+.badge-line { font-size: 0.9rem; }
+
+details {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 0.5rem 1rem; margin: 0.5rem 0;
+}
+summary { cursor: pointer; color: var(--heading); }
+pre { white-space: pre-wrap; font-size: 0.75rem; color: var(--text); }
