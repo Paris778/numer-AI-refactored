@@ -922,7 +922,7 @@ def test_multimetric_chart_html_embeds_payload_and_controls() -> None:
         "eras": ["0001", "0002"],
         "meta_downside_mask": [True, False],
         "metrics": {"payout": {"a": {"standard": [0.01, 0.02],
-                                      "cumulative": [1.01, 1.0302], "label": "run · aaaaaaaa"}},
+                                      "cumulative": [1.01, 1.0302], "label": "run · a</script>aaa"}},
                     "corr20": {}, "mmc20": {}, "corr60": {}, "mmc60": {}, "bmc": {}, "cwmm": {}},
         "drawdowns": {"a": [0.0, 0.0]},
     }

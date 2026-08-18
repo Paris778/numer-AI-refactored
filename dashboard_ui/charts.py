@@ -1,4 +1,4 @@
-# dashboard_charts.py
+# dashboard_ui/charts.py
 """Plotly figure builders and the multimetric JS-controller block for the executive dashboard.
 
 Thin presentation layer: consumes clean frames/dicts from ``nmr.dashboard``
@@ -179,10 +179,10 @@ def multimetric_chart_html(payload: dict[str, Any]) -> str:
             '<div id="multimetric-chart" class="chart-box">'
             "<p>Timeseries data unavailable without local v5.3 assets</p></div>"
         )
-    payload_json = json.dumps(payload, sort_keys=True).replace("</", "<\\/")
+    payload_json = json.dumps(payload, sort_keys=True, allow_nan=False).replace("</", "<\\/")
     return (
         '<div id="multimetric-chart" class="chart-box"></div>\n'
         '<script type="application/json" id="dashboard-multimetric-data">'
         f"{payload_json}</script>\n"
-        f"<script>{_APP_JS}</script>"
+        f"<script>\n{_APP_JS}</script>"
     )
