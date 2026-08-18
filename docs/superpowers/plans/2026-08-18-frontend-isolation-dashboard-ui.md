@@ -165,7 +165,7 @@ In `tests/test_dashboard.py`, update `test_multimetric_chart_html_embeds_payload
     data_end = block.index("</script>", data_start)
     embedded = json.loads(block[data_start:data_end])
     assert embedded == payload  # exact sorted-key serialization round-trips
-    assert "var payload = " not in block  # payload no longer a JS literal
+    assert "var payload = {" not in block  # payload no longer a JS object literal
     assert block.count("<option") == 7
     assert "Cumulative View" in block and "Standard View" in block
     assert "METRIC_CONFIG" in block  # app.js inlined
@@ -194,7 +194,7 @@ def test_multimetric_chart_embeds_data_node_and_app_js_once() -> None:
     block = charts.multimetric_chart_html(payload)
     assert block.count('id="dashboard-multimetric-data"') == 1
     assert block.count("<script") == 2  # data node + app.js
-    assert block.count("METRIC_CONFIG") == 1  # app.js inlined exactly once
+    assert block.count("var METRIC_CONFIG = {") == 1  # app.js inlined exactly once
     # a marker from the controller body is present (dataNode read)
     assert 'getElementById("dashboard-multimetric-data")' in block
 ```
