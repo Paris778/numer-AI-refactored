@@ -24,7 +24,8 @@ Completely eliminate Plotly (the Python package, the `get_plotlyjs()` bundle emb
 dashboard_ui/                       # presentation package (home unchanged)
 ├── __init__.py
 ├── charts.py                       # pure geometry + payload builders (Plotly builders deleted)
-│     data_to_svg_path(...)         #   reference: X,Y scaling -> SVG path string (tested)
+│     data_to_svg_path(...)         #   reference: X/Y scaling -> SVG path string (tested)
+│     svg_area_path(...)            #   reference: closed baseline polygon for fills (tested)
 │     cumulative_series(...)        #   reference: cumsum / cumprod(1+r) (tested)
 │     drawdown_series(...)          #   reference: wealth/peak - 1 (tested)
 │     build_dashboard_payload(...)  #   merges engine output into the JSON data contract
@@ -59,13 +60,10 @@ tests/
   "eras": ["1133", ..., "1218"],
   "meta_downside_mask": [false, ...],
   "metrics": {
-    "<run_id>": {
-      "label": "name · abc12345",
-      "payout": {"standard": [r_1, ...]},
-      "corr20":  {"standard": [rho_1, ...]},
-      "mmc20":   {"standard": [...]}, "corr60": {...}, "mmc60": {...},
-      "bmc": {...}, "cwmm": {...}
-    }
+    "payout": {"<run_id>": {"standard": [r_1, ...], "label": "name · abc12345"}},
+    "corr20":  {"<run_id>": {"standard": [rho_1, ...], "label": "..."}},
+    "mmc20":   {"<run_id>": {"standard": [...]}}, "corr60": {...},
+    "mmc60":   {...}, "bmc": {...}, "cwmm": {...}
   },
   "leaderboard": [{"label": "...", "sharpe": 0.9, "ci_low": 0.7, "ci_high": 1.1,
                     "cagr_1y": 0.12, "max_drawdown": 0.2, "deflated_sharpe": 0.97,
@@ -76,8 +74,9 @@ tests/
 }
 ```
 
-**Rules (all inherited from the v2 contract, unchanged):**
+**Rules:**
 
+- **Metric-first hierarchy.** `metrics` is keyed `metrics[metric_name][run_id]`, **identical to `nmr.dashboard.extract_multimetric_timeseries` output — `build_dashboard_payload` performs no key regrouping**, so `app.js` indexes `payload.metrics[currentMetric][model_id]` (this is also what the v2 controller already does; the review's initial model-first sketch was inverted and is rejected).
 - **Standard arrays only.** Cumulative series and drawdowns are *derived client-side* (decision #7) — this halves the payload and is what keeps the total artifact under the **< 100 KB** hard gate.
 - **Derivation rules:** payout cumulative = `cumprod(1 + r_t)`; correlation-family cumulative = `cumsum(rho_t)`; drawdown = `wealth / peak - 1` (peak = `np.maximum.accumulate`). The Python reference (`cumulative_series`, `drawdown_series`) is asserted against `nmr.dashboard._cumulative_from_standard` in tests (parity, decision #8).
 - Serialization: `sort_keys=True`, `allow_nan=False` (fail loud on non-finite), `</` → `<\/` escaping. No wall-clock fields, no absolute paths.
@@ -88,18 +87,35 @@ tests/
 
 ### 5.1 `dashboard_ui/static/style.css`
 
-Full design system per spec §3.1: dark palette tokens (`--bg: #0d1117`, `--surface: #161b22`, `--border: #30363d`, `--text: #c9d1d9`, `--accent: #58a6ff`, `--danger: #f85149`, `--success: #3fb950`, `--gold: #d29922`), CSS grid KPI cards, responsive table overflow wrapper, pill badges (`.champion`, `.ready`, `.research`, `.hurdle`, `.benchmark`, `.full`, `.gate-fail` tint), tooltip styling, SVG chart container rules. Grows from the current 22-line file into the complete token/component layer.
+Full design system per spec §3.1: dark palette tokens (`--bg: #0d1117`, `--surface: #161b22`, `--border: #30363d`, `--text: #c9d1d9`, `--accent: #58a6ff`, `--danger: #f85149`, `--success: #3fb950`, `--gold: #d29922`), CSS grid KPI cards, responsive table overflow wrapper, pill badges (`.champion`, `.ready`, `.research`, `.hurdle`, `.benchmark`, `.full`, `.gate-fail` tint), tooltip styling, SVG chart container rules, `.grid-line` and `.crosshair` stroke rules. Grows from the current 22-line file into the complete token/component layer.
 
-### 5.2 `dashboard_ui/static/app.js` (thin controller, ~150 lines)
+### 5.2 `dashboard_ui/static/app.js` (thin controller, ~200 lines)
 
-- Reads `#dashboard-data` via `JSON.parse`.
-- `dataToSvgPath(values, width, height, yMin, yMax)` — ~20-line coordinate-scaling helper producing an SVG `<path d="M... L...">` string; mirrors the tested Python reference `data_to_svg_path` (decision #7).
-- **Multi-metric timeseries:** native `<select>` (payout/corr20/mmc20/corr60/mmc60/bmc/cwmm) + Standard/Cumulative toggle buttons; on change derives the cumulative series (cumsum / cumprod), regenerates paths via `dataToSvgPath`, swaps `<path>` elements, updates the axis label and tickformat legend (per metric × view: e.g. payout standard = "Per-Era Net Return" / percent; payout cumulative = "Cumulative Wealth (1.0 Stake)"; corr-family `.4f`). Meta-model drawdown eras render as background `<rect>` spans from `meta_downside_mask`.
-- **Sharpe leaderboard:** horizontal SVG bars sorted ascending, asymmetric CI whiskers (`<line>` per bar), dashed vertical hurdle line at `hurdle_sharpe`, champion hatch/stripe marker.
-- **Similarity matrix:** a native `<table>` of `K×K` cells with `rgba(88, 166, 255, α)` background opacity from correlation magnitude; row/col 0 (top contender) highlighted; diversification badge + equal-weight blended Sharpe card (values computed in Python, rendered server-side).
-- **Underwater drawdown:** SVG area path (downside fill) derived client-side from payout standard.
-- **Tooltip:** one floating div on `mousemove` / `mouseleave` over SVG data points.
-- Scoped to its own DOM root (`#dashboard-root`), never `document`-level globals beyond the IIFE (decision #24 pattern from v2, retained).
+Reads `#dashboard-data` via `JSON.parse`. All geometry mirrors the tested Python reference in `charts.py` (decision #7).
+
+**Coordinate scaling (`dataToSvgPath`, mirrored in Python as `data_to_svg_path`).** SVG places (0,0) at the **top-left**, so the y-axis is inverted. For values indexed `i = 0..N-1` over an inner plot area of `W × H` (viewport minus padding `pad = (top, right, bottom, left)`), with `y_min`/`y_max` the series range:
+
+$$x_i = \text{pad}_{\text{left}} + \frac{i}{N-1} \cdot (W - \text{pad}_{\text{left}} - \text{pad}_{\text{right}})$$
+
+$$y_i = \text{pad}_{\text{top}} + \left(1 - \frac{v_i - y_{\min}}{y_{\max} - y_{\min}}\right) \cdot (H - \text{pad}_{\text{top}} - \text{pad}_{\text{bottom}})$$
+
+- **Degenerate-range guard:** when `abs(y_max - y_min) < 1e-12` (flat series — zero correlation, null baseline), expand the range (`y_min -= 1; y_max += 1`) in **both** the Python reference and `app.js`, so the divisor never zeroes and no `NaN`/`Infinity` path strings are emitted.
+- **Empty input** → empty string (`""`), never a malformed `d` attribute.
+- **Global y-range per metric:** `y_min`/`y_max` are computed across **all active series of the selected metric** (both views), not per line — toggling metrics or models never misaligns the shared axis.
+
+**`svg_area_path` (Python) / area closure (JS).** Filled series (drawdown, return areas) render as closed polygons: the line path `M x0,y0 L x1,y1 … L xN,yN` then closes to the baseline anchor — `L xN, y_base → L x0, y_base → Z` — so the SVG fill covers exactly the region between the curve and the baseline (drawdown baseline `y_base` = the 0-axis).
+
+**Multi-metric timeseries:** native `<select>` (payout/corr20/mmc20/corr60/mmc60/bmc/cwmm) + Standard/Cumulative toggle buttons; on change, derives the cumulative series (cumsum / cumprod), recomputes the global y-range, regenerates paths via `dataToSvgPath`, swaps `<path>` elements, and updates the axis label + tickformat legend (per metric × view: e.g. payout standard = "Per-Era Net Return" / percent; payout cumulative = "Cumulative Wealth (1.0 Stake)"; corr-family `.4f`). Meta-model drawdown eras render as background `<rect>` spans from `meta_downside_mask`.
+
+**Grid lines:** three dashed horizontal `<line class="grid-line">`s at `y_max`, the zero/midpoint, and `y_min`, each with a numeric text label, regenerated on every view change.
+
+**Sharpe leaderboard:** horizontal SVG bars sorted ascending, asymmetric CI whiskers (`<line>` per bar), dashed vertical hurdle line at `hurdle_sharpe`, champion hatch/stripe marker.
+
+**Similarity matrix:** a native `<table>` of `K×K` cells with `rgba(88, 166, 255, α)` background opacity from correlation magnitude; row/col 0 (top contender) highlighted; diversification badge + equal-weight blended Sharpe card (values computed in Python, rendered server-side).
+
+**Underwater drawdown:** SVG area path (downside fill, closed to baseline) derived client-side from payout standard.
+
+**Tooltip + crosshair:** one floating div on `mousemove` / `mouseleave` over SVG data points. Era index from the pointer via proportional mapping `t = round((x_mouse − pad_left) / Δx)` with an explicit bounds check `0 ≤ t < N_eras` (out-of-range → no tooltip). A vertical dashed `<line class="crosshair">` snaps to the nearest era, and the tooltip lists every visible model's value at that era. Scoped to the dashboard root (`#dashboard-root`), never `document`-level globals beyond the IIFE (decision #24 pattern from v2, retained).
 
 ### 5.3 `dashboard_ui/static/layout.html` + `dashboard_ui/report.py`
 
@@ -107,13 +123,15 @@ Full design system per spec §3.1: dark palette tokens (`--bg: #0d1117`, `--surf
 
 `report.py` compiles: formats the template, inlines `style.css` + `app.js`, injects the `dashboard-data` node, and server-renders the deterministic slots — KPI cards, decision table rows (badges, `gate-fail` tinting, `FULL` chips, group headers: Champion → Promoted Full → Fleet → Benchmark), diversification badge + ensemble card, technical accordion. All existing pure helpers (`_kpi_cards`, `_table_rows`, `_row_html`, `_technical_entries`, `_diversification_stats`, `_ensemble_sharpe`) are preserved as-is. The five report sections and the technical accordion are preserved 1:1 from the current output.
 
+**Portable asset resolution (P0):** static assets are anchored to the module location — `_STATIC_DIR = Path(__file__).resolve().parent / "static"` — so the compiler works from any CWD (this pattern already exists in `report.py`/`charts.py`; it is retained and made explicit in the new compiler).
+
 ## 6. Streamlit Rewrite (`dashboard_ui/app.py`)
 
 Only the three render functions change; every pure shaping helper is untouched:
 
 - `render_leaderboard` → `st.bar_chart` (horizontal) for evaluable rows + `st.dataframe` carrying Sharpe, CI bounds, CAGR, Max DD, DSR (CI rendered as columns — native charts have no error bars).
 - `render_fleet` → `st.scatter_chart` (neutralization proportion vs metric).
-- `render_robustness_matrix` → `st.dataframe` of the numeric matrix styled with `Styler.background_gradient(cmap="RdYlGn")`; `pl.DataFrame.to_pandas()` nulls render as blank cells (missing metrics never error the formatter).
+- `render_robustness_matrix` → `st.dataframe` of the numeric matrix styled with `Styler.background_gradient(cmap="RdYlGn")` **and `.format(na_rep="—")`**, so `pl.DataFrame.to_pandas()` nulls render as `—` (never raw float `nan` text and never a formatter error).
 
 Imports drop `plotly.express`; `streamlit` stays. `tests/test_scripts.py` adds a guard that the module source contains no `plotly` reference.
 
@@ -125,18 +143,26 @@ Unchanged engine tests: payload extraction, gate status, capital reconcile, simi
 
 ### `tests/test_dashboard_ui.py` (new — presentation)
 
-1. **Geometry reference math:** `data_to_svg_path` produces exact path strings for known inputs (0, 1, 2-point edge cases; min==max degenerate range); `cumulative_series` parity with `nmr.dashboard._cumulative_from_standard`; `drawdown_series` peak-trough correctness; determinism across calls.
-2. **Payload contract:** `build_dashboard_payload` emits the exact schema (standard-only arrays, labels, leaderboard, similarity, hurdle, ensemble); sorted-key JSON round-trips through the data node.
-3. **HTML compiler:** `_build_html`/`generate_dashboard()` output contains the five section headings, `id="dashboard-data"`, `class="badge"` pills, `gate-fail` tinting, group headers; escapes hostile strings (`<script>`, `"><img onerror>`); byte-deterministic across two calls.
+1. **Geometry reference math** (`charts.data_to_svg_path` / `svg_area_path`):
+   - Exact path strings for known inputs; `N=1` and `N=2` edge cases.
+   - **Vertical inversion:** a larger value yields a *smaller* SVG `y` (returns rise on screen).
+   - **Zero-span guard:** flat input (all-equal values) still yields a finite, well-formed path (never `NaN`/`Inf`).
+   - **Area closure:** `svg_area_path` ends with baseline + `Z` (closed polygon).
+   - Empty input → `""`.
+   - `cumulative_series` parity with `nmr.dashboard._cumulative_from_standard`; `drawdown_series` peak-trough correctness; determinism across calls.
+   - Global-y-range helper: min/max computed across all series of a metric.
+2. **Payload contract:** `build_dashboard_payload` emits the exact schema; **metric-first parity** — payload `metrics` keys equal the engine's `extract_multimetric_timeseries` metric keys with per-model entries intact; leaderboard/similarity/hurdle/ensemble fields present; sorted-key JSON round-trips through the data node.
+3. **HTML compiler:** `_build_html`/`generate_dashboard()` output contains the five section headings, `id="dashboard-data"`, `class="badge"` pills, `gate-fail` tinting, group headers; escapes hostile strings (`<script>`, `"><img onerror>`); byte-deterministic across two calls; compiles when invoked from a different CWD (asset anchoring).
 4. **Artifact contract (hard gate):** `generate_dashboard()` writes the file; `size < 100 KB`; zero occurrences of `plotly` (case-insensitive); no `<script src=`; `id="dashboard-data"` present; report still compiles with an empty registry and with missing v5.3 assets.
 
 ### `tests/test_scripts.py`
 
-Streamlit pure-helper tests unchanged; add the no-plotly-import guard.
+Streamlit pure-helper tests unchanged; add the no-plotly-import guard for `dashboard_ui/app.py`.
 
 ## 8. Docs & Hygiene (same-commit)
 
 - `requirements.txt`: remove `plotly==6.6.0`.
+- **Plotly removal audit (P1):** after the rewrite, `grep -ri "plotly"` across the tree — the string may appear only in historical `docs/superpowers/` specs; **zero** imports or references in `dashboard_ui/`, `tests/`, `configs/`, and root scripts. (Pre-rewrite audit: references exist only in `tests/test_dashboard.py`, `dashboard_ui/{charts,app,report}.py`, and `requirements.txt` — all rewritten by this work; nothing in `tests/test_parity.py`, `tests/test_scripts.py`, or config files.)
 - `AGENTS.md`: dependency-exception line drops Plotly (keeps Streamlit, re-pointed at the native `dashboard_ui/app.py`); executive-dashboard toolkit row re-pointed at the new spec; test-count claims (two places) updated to the new collected count.
 - `ARCHITECTURE.md`: §W and the module table rows for `dashboard_ui/charts.py` / `report.py` / `app.py` — vanilla SVG rendering, native Streamlit, `< 100 KB` budget, `tests/test_dashboard_ui.py`.
 - `CONTRIBUTING.md`: test-count claim updated.
@@ -168,10 +194,10 @@ print(f'SUCCESS: {size_kb:.2f} KB, pure HTML/CSS/JS')
 
 ## 10. Implementation Order (for the writing-plans phase)
 
-1. `dashboard_ui/charts.py` — delete Plotly builders; add `data_to_svg_path`, `cumulative_series`, `drawdown_series`, `build_dashboard_payload`; re-export in `dashboard_ui/__init__.py`.
+1. `dashboard_ui/charts.py` — delete Plotly builders; add `data_to_svg_path`, `svg_area_path`, `cumulative_series`, `drawdown_series`, global-y-range helper, `build_dashboard_payload` (metric-first); re-export in `dashboard_ui/__init__.py`.
 2. `dashboard_ui/static/style.css` — full design system.
-3. `dashboard_ui/static/app.js` — controller + `dataToSvgPath` + tooltip.
+3. `dashboard_ui/static/app.js` — controller + `dataToSvgPath` + area closure + grid lines + crosshair/tooltip.
 4. `dashboard_ui/static/layout.html` + `dashboard_ui/report.py` — compiler rewrite; `dashboard-data` node; drop `plotly.io`/`get_plotlyjs`.
 5. `dashboard_ui/app.py` — native Streamlit rewrite; drop `plotly.express`.
 6. `tests/test_dashboard_ui.py` (new) + prune `tests/test_dashboard.py` + `tests/test_scripts.py` guard.
-7. `requirements.txt`, `AGENTS.md`, `ARCHITECTURE.md`, `CONTRIBUTING.md` — same-commit sync; regenerate `artifacts/dashboard.html`.
+7. `requirements.txt`, `AGENTS.md`, `ARCHITECTURE.md`, `CONTRIBUTING.md` — same-commit sync + plotly audit; regenerate `artifacts/dashboard.html`.
