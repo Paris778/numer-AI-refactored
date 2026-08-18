@@ -49,6 +49,7 @@ A **lean, deterministic research framework** for the [Numerai Classic tournament
 │   ├── registry.py            # RunRegistry — atomic run store + champion promotion
 │   ├── submission.py          # submission build / numerai_tools validation / CSV
 │   └── deployment.py          # cloudpickle predict artifact + integrity manifest
+├── dashboard_ui/              # front-end: charts, report compiler, streamlit app, static assets (presentation only — engine stays in nmr/)
 ├── configs/                   # experiment configs (YAML)
 │   ├── example.yaml           # annotated full schema
 │   └── first_model.yaml       # current competitive config (4×20D-target ensemble)
@@ -62,8 +63,8 @@ A **lean, deterministic research framework** for the [Numerai Classic tournament
 ├── benchmark_runner.py        # CLI: python benchmark_runner.py [--fast-mode] → artifacts/reports/benchmark_hierarchy_scorecard.csv + benchmark_gate_report.csv
 ├── run_campaign.py            # CLI: run a named batch of configs → artifacts/campaigns/
 ├── train_first_model.py       # CLI: train, register, and promote the first model
-├── generate_dashboard.py      # CLI: validation-scorecard leaderboard → artifacts/dashboard.html
-├── dashboard_app.py           # interactive dashboard — streamlit run dashboard_app.py (registry/benchmarks/campaigns, read-only)
+├── generate_dashboard.py      # thin wrapper — builds the executive HTML dashboard (logic in dashboard_ui.report)
+├── dashboard_app.py           # thin wrapper — interactive Streamlit dashboard (logic in dashboard_ui.app)
 ├── pytest.ini                 # pytest configuration
 ├── requirements.txt           # runtime + dev dependencies (all exact-pinned)
 ├── AGENTS.md                  # authoritative reference for AI coding agents
