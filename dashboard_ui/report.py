@@ -1,7 +1,9 @@
 """Compile the executive HTML performance report from the shared engine.
 
-Thin control plane only: data comes from ``nmr.dashboard``, figures from
-``dashboard_ui.charts``, CSS from ``dashboard_ui.static``. No metric math here.
+Thin control plane only: data comes from ``nmr.dashboard``, payload/geometry
+from ``dashboard_ui.charts``, raw assets from ``dashboard_ui.static``. No
+metric math here. The output is a single self-contained HTML file (vanilla
+CSS + JS, no Plotly, no CDN, < 100 KB) that runs offline from ``file://``.
 """
 
 from __future__ import annotations
@@ -11,11 +13,10 @@ import json
 import logging
 import webbrowser
 from pathlib import Path
+from typing import Any
 
 import numpy as np
-import plotly.io as pio
 import polars as pl
-from plotly.offline import get_plotlyjs
 
 from dashboard_ui import charts
 from nmr.benchmark import load_benchmark_file
@@ -35,7 +36,7 @@ from nmr.dashboard import (
 
 logger = logging.getLogger(__name__)
 
-_STATIC_DIR = Path(__file__).parent / "static"
+_STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 
 def _read_asset(name: str) -> str:
@@ -44,6 +45,34 @@ def _read_asset(name: str) -> str:
 
 
 _STYLE_CSS = _read_asset("style.css")
+_APP_JS = _read_asset("app.js")
+_LAYOUT_HTML = _read_asset("layout.html")
+
+_METRIC_CONTROLS_HTML = (
+    '<div class="controls">'
+    '<select id="metric-select">'
+    '<option value="payout">Net Payout Return</option>'
+    '<option value="corr20">CORR (20D)</option>'
+    '<option value="mmc20">MMC (20D)</option>'
+    '<option value="corr60">CORR (60D)</option>'
+    '<option value="mmc60">MMC (60D)</option>'
+    '<option value="bmc">BMC</option>'
+    '<option value="cwmm">CWMM</option>'
+    "</select>"
+    '<button id="view-standard" class="active">Standard View</button>'
+    '<button id="view-cumulative">Cumulative View</button>'
+    '<span id="axis-label" class="axis-label"></span>'
+    "</div>"
+)
+_TS_CHART_HTML = (
+    '<div class="chart-box"><svg id="timeseries-svg" viewBox="0 0 800 320"></svg>'
+    '<div id="timeseries-tooltip" class="tooltip" hidden></div></div>'
+)
+_LB_CHART_HTML = '<div class="chart-box"><svg id="leaderboard-svg" viewBox="0 0 800 420"></svg></div>'
+_DD_CHART_HTML = '<div class="chart-box"><svg id="drawdown-svg" viewBox="0 0 800 240"></svg></div>'
+_EMPTY_TS_HTML = (
+    '<div class="chart-box"><p>Timeseries data unavailable without local v5.3 assets</p></div>'
+)
 
 
 def _fmt(value, *, pct: bool = False) -> str:
@@ -105,7 +134,7 @@ def _kpi_cards(leaderboard: pl.DataFrame, champion: str | None,
             champion_row = champ_frame.row(0, named=True)
         else:
             logger.warning(
-                "generate_dashboard: champion %s not found in leaderboard; "
+                "dashboard_ui.report: champion %s not found in leaderboard; "
                 "treating as none designated", champion,
             )
     return {
@@ -298,24 +327,34 @@ def _ensemble_card_html(value: float | None) -> str:
     )
 
 
-def _build_html(
-    leaderboard: pl.DataFrame,
-    champion: str | None,
-    kpis: dict,
-    figures: dict,
-    multimetric_block: str,
-    badge_html: str,
-    ensemble_card_html: str,
-    registry_dir: Path,
-    technical_entries: list[dict],
-) -> str:
-    """Assemble the full HTML document (single plotly engine in <head>)."""
-    engine_js = get_plotlyjs()
-    figure_html = {
-        name: pio.to_html(fig, include_plotlyjs=False, full_html=False, div_id=name)
-        for name, fig in figures.items()
-    }
+def _kpi_cards_html(kpis: dict) -> str:
+    return (
+        '<div class="kpi"><div class="label">Active Champion</div>'
+        f'<div class="value">{html.escape(kpis["champion_label"])}</div>'
+        f'<div>{html.escape(kpis["champion_detail"])}</div></div>'
+        '<div class="kpi"><div class="label">Top Research Contender</div>'
+        f'<div class="value">{html.escape(kpis["top_contender_label"])}</div>'
+        f'<div>Sharpe {_fmt(kpis["top_contender_sharpe"])} vs hurdle {_fmt(kpis["hurdle_sharpe"])}</div></div>'
+        '<div class="kpi"><div class="label">Fleet Best Return (CAGR)</div>'
+        f'<div class="value">{_fmt(kpis["fleet_best_cagr"], pct=True)}</div></div>'
+        '<div class="kpi"><div class="label">Worst Fleet Drawdown</div>'
+        f'<div class="value">{_fmt(kpis["worst_drawdown"], pct=True)}</div></div>'
+        '<div class="kpi"><div class="label">Capital Readiness</div>'
+        f'<div class="value">{kpis["capital_ready_count"]} / {kpis["fleet_count"]}</div></div>'
+    )
+
+
+def _table_html(leaderboard: pl.DataFrame, champion: str | None) -> str:
     rows_html = "".join(_row_html(row) for row in _table_rows(leaderboard, champion))
+    return (
+        "<table><thead><tr><th>Status</th><th>Model</th><th>Ann. Return</th>"
+        "<th>Sharpe (AC)</th><th>Sharpe CI</th><th>Max DD</th><th>Gain-to-Pain</th>"
+        "<th>Downside</th><th>Confidence (DSR)</th></tr></thead>"
+        f"<tbody>{rows_html}</tbody></table>"
+    )
+
+
+def _accordion_html(technical_entries: list[dict]) -> str:
     accordion = ""
     for entry in technical_entries:
         accordion += (
@@ -323,56 +362,53 @@ def _build_html(
             f"{html.escape(entry['label'])} — technical &amp; audit</summary>"
             f"<pre>{html.escape(entry['json_text'])}</pre></details>"
         )
+    return accordion
+
+
+def _diversification_html(badge_html: str, ensemble_card_html: str) -> str:
     return (
-        f"""<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>NumerAI Executive Performance Report</title>
-<style>
-{_STYLE_CSS}
-</style>
-<!-- plotly-engine-embed -->
-<script>{engine_js}</script>
-</head>
-<body>
-<h1>🏆 NumerAI Executive Performance Report</h1>
-<p>Evaluation window: {kpis['n_eras']} overlap eras · data version {kpis['data_version']}</p>
-<div class="kpis">
-  <div class="kpi"><div class="label">Active Champion</div><div class="value">{html.escape(kpis['champion_label'])}"""
-        f"""</div><div>{html.escape(kpis['champion_detail'])}</div></div>
-  <div class="kpi"><div class="label">Top Research Contender</div>"""
-        f"""<div class="value">{html.escape(kpis['top_contender_label'])}</div><div>Sharpe"""
-        f""" {_fmt(kpis['top_contender_sharpe'])} vs hurdle {_fmt(kpis['hurdle_sharpe'])}</div></div>
-  <div class="kpi"><div class="label">Fleet Best Return (CAGR)</div>"""
-        f"""<div class="value">{_fmt(kpis['fleet_best_cagr'], pct=True)}</div></div>
-  <div class="kpi"><div class="label">Worst Fleet Drawdown</div>"""
-        f"""<div class="value">{_fmt(kpis['worst_drawdown'], pct=True)}</div></div>
-  <div class="kpi"><div class="label">Capital Readiness</div>"""
-        f"""<div class="value">{kpis['capital_ready_count']} / {kpis['fleet_count']}</div></div>
-</div>
-<h2>1. ALPHA GENERATION &amp; MULTI-METRIC PERFORMANCE TRAJECTORY</h2>
-{multimetric_block}
-<h2>2. RISK-ADJUSTED RETURN LEADERBOARD</h2>
-{figure_html['leaderboard']}
-<h2>3. SIGNAL DIVERSIFICATION &amp; PAIRWISE SIMILARITY MATRIX</h2>
-{badge_html}
-{figure_html['similarity']}
-{ensemble_card_html}
-<h2>4. EXECUTIVE ALLOCATION &amp; RISK DECISION TABLE</h2>
-<table>
-<thead><tr><th>Status</th><th>Model</th><th>Ann. Return</th><th>Sharpe (AC)</th><th>Sharpe CI</th><th>Max DD</th>"""
-        f"""<th>Gain-to-Pain</th><th>Downside</th><th>Confidence (DSR)</th></tr></thead>
-<tbody>{rows_html}</tbody>
-</table>
-<h2>5. CAPITAL DRAWDOWN (UNDERWATER TRAJECTORY)</h2>
-{figure_html['drawdown']}
-<h2>Technical &amp; Audit Metadata</h2>
-{accordion}
-</body>
-</html>"""
+        badge_html
+        + '<div id="similarity-host" class="chart-box"></div>'
+        + ensemble_card_html
     )
+
+
+def _build_html(
+    *,
+    kpis: dict,
+    table_html: str,
+    diversification_html: str,
+    accordion_html: str,
+    payload: dict[str, Any],
+) -> str:
+    """Assemble the full HTML document from the layout template + payload.
+
+    Deterministic: fixed template + sorted-key JSON + static assets. The
+    data-node substitution runs LAST so payload text can never be re-processed
+    by a later placeholder replacement.
+    """
+    payload_json = json.dumps(payload, sort_keys=True, allow_nan=False).replace("</", "<\\/")
+    ts_html = _TS_CHART_HTML if payload.get("eras") else _EMPTY_TS_HTML
+    replacements = [
+        ("{{ INLINE_STYLE }}", _STYLE_CSS),
+        ("{{ N_ERAS }}", str(kpis["n_eras"]) if kpis["n_eras"] is not None else "—"),
+        ("{{ DATA_VERSION }}", html.escape(kpis["data_version"])),
+        ("{{ KPI_CARDS }}", _kpi_cards_html(kpis)),
+        ("{{ METRIC_CONTROLS }}", _METRIC_CONTROLS_HTML),
+        ("{{ TIMESERIES_SVG }}", ts_html),
+        ("{{ LEADERBOARD_SVG }}", _LB_CHART_HTML),
+        ("{{ DIVERSIFICATION_SECTION }}", diversification_html),
+        ("{{ DECISION_TABLE }}", table_html),
+        ("{{ DRAWDOWN_SVG }}", _DD_CHART_HTML),
+        ("{{ AUDIT_ACCORDION }}", accordion_html),
+        ("{{ INLINE_DATA_SCRIPT }}",
+         '<script type="application/json" id="dashboard-data">'
+         f"{payload_json}</script>\n<script>\n{_APP_JS}</script>"),
+    ]
+    html_text = _LAYOUT_HTML
+    for key, value in replacements:
+        html_text = html_text.replace(key, value)
+    return html_text
 
 
 def generate_dashboard(
@@ -398,44 +434,42 @@ def generate_dashboard(
 
     champion = read_champion_pointer(registry_dir / "champion.json")
     fleet = leaderboard.filter(pl.col("source").is_in(["trained", "trained_legacy"]))
-    top3 = fleet.sort("corr_sharpe_ac", descending=True, nulls_last=True).head(3)
-    top3_ids = top3.get_column("model_id").to_list()
-
-    payload = extract_multimetric_timeseries(
+    top3_ids = fleet.sort("corr_sharpe_ac", descending=True, nulls_last=True) \
+        .head(3).get_column("model_id").to_list()
+    engine_payload = extract_multimetric_timeseries(
         registry_dir, DEFAULT_DATA_DIR, run_ids=top3_ids,
         include_tier4_ref=True, tier4_column=tier4_column,
     )
-    top5_ids = fleet.sort("corr_sharpe_ac", descending=True, nulls_last=True).head(5) \
-        .get_column("model_id").to_list()
+    top5_ids = fleet.sort("corr_sharpe_ac", descending=True, nulls_last=True) \
+        .head(5).get_column("model_id").to_list()
     labels, _sim_ids, matrix, stress = extract_pairwise_similarity_matrix(
         registry_dir, DEFAULT_DATA_DIR, run_ids=top5_ids,
         include_tier4_ref=True, tier4_column=tier4_column,
     )
     stats = _diversification_stats(matrix)
-    payout_metric = (payload.get("metrics") or {}).get("payout") or {}
-    top3_payout = {
-        mid: payout_metric[mid]
-        for mid in top3_ids
-        if mid in payout_metric
-    }
+    payout_metric = (engine_payload.get("metrics") or {}).get("payout") or {}
+    top3_payout = {mid: payout_metric[mid] for mid in top3_ids if mid in payout_metric}
     ensemble_value = _ensemble_sharpe(top3_payout)
 
-    figures = {
-        "leaderboard": charts.build_leaderboard_bar_chart(
-            _bar_input(leaderboard, champion), hurdle_sharpe=hurdle_sharpe
-        ),
-        "similarity": charts.build_similarity_matrix_chart(labels, matrix),
-        "drawdown": charts.build_drawdown_chart(payload),
-    }
+    payload = charts.build_dashboard_payload(
+        eras=engine_payload.get("eras") or [],
+        meta_downside_mask=engine_payload.get("meta_downside_mask") or [],
+        metrics=engine_payload.get("metrics") or {},
+        leaderboard_bars=_bar_input(leaderboard, champion),
+        similarity_labels=labels,
+        similarity_matrix=matrix,
+        hurdle_sharpe=hurdle_sharpe,
+        ensemble_sharpe=ensemble_value,
+    )
+
     html_text = _build_html(
-        leaderboard=leaderboard, champion=champion,
         kpis=_kpi_cards(leaderboard, champion, hurdle_sharpe),
-        figures=figures,
-        multimetric_block=charts.multimetric_chart_html(payload),
-        badge_html=_badge_html(stats, stress),
-        ensemble_card_html=_ensemble_card_html(ensemble_value),
-        registry_dir=registry_dir,
-        technical_entries=_technical_entries(registry_dir),
+        table_html=_table_html(leaderboard, champion),
+        diversification_html=_diversification_html(
+            _badge_html(stats, stress), _ensemble_card_html(ensemble_value)
+        ),
+        accordion_html=_accordion_html(_technical_entries(registry_dir)),
+        payload=payload,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html_text, encoding="utf-8")

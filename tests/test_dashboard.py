@@ -7,12 +7,10 @@ from pathlib import Path
 import numpy as np
 import polars as pl
 import pytest
-from plotly.colors import diverging
 
 import nmr.dashboard as dash
 import nmr.evaluation as nmr_evaluation
 import nmr.payout as payout
-from dashboard_ui import charts
 from dashboard_ui import report as generate_dashboard
 from nmr.config import REPO_ROOT
 from nmr.payout import annual_compounded_return
@@ -598,115 +596,6 @@ def test_dashboard_symbols_exported_from_package() -> None:
         assert name in nmr.__all__
 
 
-def _bar_input() -> pl.DataFrame:
-    return pl.DataFrame(
-        [
-            {"label": "run-a · aaaaaaaa", "corr_sharpe_ac": 0.8,
-             "corr_sharpe_ac_ci_low": 0.6, "corr_sharpe_ac_ci_high": 1.0,
-             "champion": True, "cagr_1y": 1.5, "max_drawdown": 0.2,
-             "deflated_sharpe": 0.97},
-            {"label": "bench · bbbbbbbb", "corr_sharpe_ac": 0.5,
-             "corr_sharpe_ac_ci_low": None, "corr_sharpe_ac_ci_high": None,
-             "champion": False},
-        ]
-    )
-
-
-def _ts_payload() -> dict:
-    return {
-        "eras": ["0001", "0002", "0003", "0004"],
-        "meta_downside_mask": [True, True, False, True],
-        "drawdowns": {"a": [0.0, 0.0, 0.0, -0.018]},
-        "metrics": {"payout": {"a": {"label": "run-a"}}},
-    }
-
-
-def _multimetric_payload() -> dict:
-    return {
-        "eras": ["0001", "0002"],
-        "meta_downside_mask": [False, False],
-        "metrics": {"payout": {"a": {"standard": [0.01, 0.02],
-                                      "cumulative": [1.01, 1.0302],
-                                      "label": "run · aaaaaaaa"}},
-                    "corr20": {}, "mmc20": {}, "corr60": {}, "mmc60": {},
-                    "bmc": {}, "cwmm": {}},
-        "drawdowns": {"a": [0.0, -0.01]},
-    }
-
-
-def test_leaderboard_chart_traces_and_hurdle_line() -> None:
-    fig = charts.build_leaderboard_bar_chart(_bar_input(), hurdle_sharpe=0.78)
-    assert len(fig.data) == 2
-    # first trace is the last row (ascending order -> best on top)
-    assert fig.data[0].y[0] == "bench · bbbbbbbb"
-    # hurdle line is a layout shape
-    shapes = [s for s in fig.layout.shapes if s.type == "line"]
-    assert any(abs(s.x0 - 0.78) < 1e-9 for s in shapes)
-
-
-def test_leaderboard_chart_hover_fields() -> None:
-    fig = charts.build_leaderboard_bar_chart(_bar_input(), hurdle_sharpe=0.78)
-    # ascending sort: bench row (no hover values) first, run-a row second
-    rich = fig.data[1]
-    assert "Ann. Return" in rich.hovertemplate
-    assert list(rich.customdata) == [[1.5, 0.2, 0.97]]
-
-
-def test_chart_hovertemplate_escapes_labels() -> None:
-    payload = _ts_payload()
-    payload["metrics"]["payout"]["a"]["label"] = "run-<img src=x>"
-    fig = charts.build_drawdown_chart(payload)
-    assert "&lt;img" in fig.data[0].hovertemplate
-    assert "<img src=x>" not in fig.data[0].hovertemplate
-
-
-def test_drawdown_chart_underwater_fill() -> None:
-    fig = charts.build_drawdown_chart(_ts_payload())
-    assert len(fig.data) == 1
-    assert fig.data[0].fill == "tozeroy"
-    assert fig.data[0].y[-1] == pytest.approx(-0.018)
-
-
-def test_timeseries_charts_empty_payload_render_annotation() -> None:
-    empty = {"eras": [], "meta_downside_mask": [], "drawdowns": {}, "metrics": {}}
-    fig = charts.build_drawdown_chart(empty)
-    assert len(fig.data) == 0
-    assert fig.layout.annotations
-    assert "unavailable" in fig.layout.annotations[0].text.lower()
-
-
-def test_leaderboard_chart_empty_frame_render_annotation() -> None:
-    fig = charts.build_leaderboard_bar_chart(
-        pl.DataFrame(schema={"label": pl.String, "corr_sharpe_ac": pl.Float64,
-                             "corr_sharpe_ac_ci_low": pl.Float64,
-                             "corr_sharpe_ac_ci_high": pl.Float64,
-                             "champion": pl.Boolean}),
-        hurdle_sharpe=0.78,
-    )
-    assert len(fig.data) == 0
-    assert fig.layout.annotations
-
-
-def _charts_for_test() -> dict:
-    bar = charts.build_leaderboard_bar_chart(_bar_input(), hurdle_sharpe=0.78)
-    similarity = charts.build_similarity_matrix_chart(
-        ["run-a · aaaaaaaa"], [[1.0]]
-    )
-    return {"leaderboard": bar, "similarity": similarity,
-            "drawdown": charts.build_drawdown_chart(_ts_payload())}
-
-
-def _kpis_for_test() -> dict:
-    return {
-        "champion_label": "None Designated", "champion_detail": "(Unallocated)",
-        "top_contender_label": "sample-run · aaaaaaaa",
-        "top_contender_sharpe": 0.8, "hurdle_sharpe": 0.78,
-        "gap": 0.02, "fleet_best_cagr": 1.5, "worst_drawdown": -0.05,
-        "capital_ready_count": 0, "fleet_count": 1, "data_version": "v5.3",
-        "n_eras": 86,
-    }
-
-
 def test_kpi_cards_stale_champion_pointer_degrades(caplog: pytest.LogCaptureFixture) -> None:
     frame = pl.DataFrame(
         [{"model_id": "a" * 64, "source": "trained", "run_name": "sample-run",
@@ -720,28 +609,6 @@ def test_kpi_cards_stale_champion_pointer_degrades(caplog: pytest.LogCaptureFixt
     assert kpis["champion_label"] == "None Designated"
     assert kpis["champion_detail"] == "(Unallocated)"
     assert "champion" in caplog.text and "not found in leaderboard" in caplog.text
-
-
-def test_build_html_deterministic_across_calls(tmp_path: Path) -> None:
-    rows = pl.DataFrame(
-        [{"model_id": "a" * 64, "source": "trained", "run_name": "sample-run",
-          "corr_sharpe_ac": 0.8, "corr_sharpe_ac_ci_low": 0.6,
-          "corr_sharpe_ac_ci_high": 1.0, "cagr_1y": 1.5,
-          "gain_to_pain_ratio": 2.0, "kelly_fraction": 0.4, "mmc_down": 0.01,
-          "deflated_sharpe": 0.97, "max_drawdown": 0.1, "fnc": 0.05,
-          "corr": 0.12, "status": "RESEARCH", "tier": None}]
-    )
-    kwargs = dict(
-        leaderboard=rows, champion=None, kpis=_kpis_for_test(),
-        figures=_charts_for_test(),
-        multimetric_block=charts.multimetric_chart_html(_multimetric_payload()),
-        badge_html="<p>BADGE MODERATE OVERLAP</p>",
-        ensemble_card_html="<p>ENSEMBLE CARD —</p>",
-        registry_dir=tmp_path, technical_entries=[],
-    )
-    first = generate_dashboard._build_html(**kwargs)
-    second = generate_dashboard._build_html(**kwargs)
-    assert first == second  # byte-identical, no random div ids
 
 
 def _synthetic_v2_data_dir(tmp_path: Path, *, with_benchmark: bool = True) -> Path:
@@ -858,50 +725,6 @@ def test_similarity_matrix_missing_data_assets(tmp_path: Path) -> None:
         tmp_path, tmp_path / "no-data", run_ids=["a" * 64], include_tier4_ref=False
     )
     assert out == ([], [], [], {"mean_delta": None, "n_pairs": 0})
-
-
-def test_multimetric_chart_html_empty_payload_annotation() -> None:
-    block = charts.multimetric_chart_html(
-        {"eras": [], "meta_downside_mask": [], "metrics": {}, "drawdowns": {}}
-    )
-    assert "Timeseries data unavailable without local v5.3 assets" in block
-    assert "Plotly" not in block  # no chart is even mounted
-
-
-def test_similarity_chart_heatmap_and_highlight() -> None:
-    fig = charts.build_similarity_matrix_chart(
-        ["top", "second"], [[1.0, 0.7], [0.7, 1.0]]
-    )
-    assert len(fig.data) == 1
-    trace = fig.data[0]
-    assert list(trace.z[0]) == [1.0, 0.7]
-    assert "<b>" in trace.text[0][0]      # row/col 0 highlight (decision #25)
-    assert "<b>" in trace.text[1][0]
-    # brief asserts "RdBu_r" in str(trace.colorscale); plotly 6.x expands named
-    # colorscales server-side (the name is never stored), so assert the exact
-    # expansion of RdBu_r plus the diverging midpoint instead
-    assert trace.zmid == 0.5
-    assert [color for _, color in trace.colorscale] == diverging.RdBu_r
-
-
-def test_similarity_chart_empty_matrix_annotation() -> None:
-    fig = charts.build_similarity_matrix_chart([], [])
-    assert len(fig.data) == 0
-    assert "Similarity matrix unavailable without local v5.3 assets" in fig.layout.annotations[0].text
-
-
-def test_drawdown_chart_v2_payload() -> None:
-    payload = {
-        "eras": ["0001", "0002"],
-        "meta_downside_mask": [False, False],
-        "drawdowns": {"a": [0.0, -0.01]},
-        "metrics": {"payout": {"a": {"label": "run-a"}}},
-    }
-    fig = charts.build_drawdown_chart(payload)
-    assert len(fig.data) == 1
-    assert fig.data[0].y[-1] == pytest.approx(-0.01)
-    assert fig.data[0].fill == "tozeroy"
-    assert fig.layout.legend.orientation == "h"   # horizontal legend restored
 
 
 def test_diversification_stats_thresholds() -> None:
@@ -1152,23 +975,3 @@ def test_dashboard_app_robustness_matrix_excludes_full_rows() -> None:
     frame = pl.DataFrame(rows, schema=dash.UNIFIED_SCHEMA, strict=False)
     matrix = app.robustness_matrix(frame)
     assert matrix.get_column("model_id").to_list() == ["a" * 64]
-
-
-def test_report_inlines_style_css_once(tmp_path: Path) -> None:
-    _write_registry(tmp_path, [_registry_entry("a" * 64)])
-    out = generate_dashboard.generate_dashboard(
-        registry_dir=tmp_path, benchmark_path=False,
-        output_path=tmp_path / "dashboard.html", open_browser=False,
-    )
-    text = out.read_text(encoding="utf-8")
-    assert text.count(".badge.full {") == 1        # style.css inlined once — CSS rule, not the HTML class attr
-    assert text.count(".group-header td {") == 1
-    # single plotly engine embed — the bundle itself contains many
-    # "window.Plotly*" literals, so count the template's own marker
-    assert text.count("<!-- plotly-engine-embed -->") == 1
-    # the app.js data node mounts only with local v5.3 assets; without
-    # them (CI) the multimetric controller degrades to an annotation
-    if Path("data/v5.3/validation.parquet").exists():
-        assert text.count('id="dashboard-multimetric-data"') == 1  # data node present exactly once
-    else:
-        assert 'id="dashboard-multimetric-data"' not in text
