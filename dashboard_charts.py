@@ -219,6 +219,7 @@ def multimetric_chart_html(payload: dict[str, Any]) -> str:
 
   function applyState() {{
     var metric = payload.metrics[currentMetric] || {{}};
+    var cfg = METRIC_CONFIG[currentMetric][currentView];
     var traces = [];
     var ids = Object.keys(metric).sort();
     for (var i = 0; i < ids.length; i++) {{
@@ -231,7 +232,6 @@ def multimetric_chart_html(payload: dict[str, Any]) -> str:
         hovertemplate: "%{{y:" + cfg.hoverformat + "}}" + "<extra>" + esc(series.label) + "</extra>"
       }});
     }}
-    var cfg = METRIC_CONFIG[currentMetric][currentView];
     var layout = {{
       template: "plotly_dark",
       showlegend: false,

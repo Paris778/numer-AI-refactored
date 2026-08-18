@@ -740,38 +740,39 @@ def extract_multimetric_timeseries(
             metrics["bmc"][model_id] = {
                 "standard": zeros, "cumulative": zeros, "label": label,
             }
-        elif lookups.benchmarks.height > 0 and joined.height > 0:
-            joined_b = joined.join(lookups.benchmarks, on=["era", "id"], how="inner")
-            # reporting path relaxes the evaluation vacuity gate (real meta
-            # window satisfies 20 anyway); alignment below zero-fills missing eras
-            per_bmc = engine.per_era_bmc(
-                joined_b, pred_col="prediction",
-                benchmark_col=tier4_column, target_col="target",
-                min_overlap_eras=1,
-            )
-            aligned = [float(per_bmc.get(era, 0.0)) for era in axis]
-            metrics["bmc"][model_id] = {
-                "standard": aligned,
-                "cumulative": _cumulative_from_standard(aligned, payout=False),
-                "label": label,
-            }
         else:
-            # decision #23: an absent benchmark frame (or a model with no era
-            # overlap with it) zero-fills the BMC slice instead of raising
-            if lookups.benchmarks.height == 0:
-                logger.warning(
-                    "nmr.dashboard: benchmark models absent at %s; bmc zeroed",
-                    data_dir,
+            joined_b = joined.join(lookups.benchmarks, on=["era", "id"], how="inner")
+            if lookups.benchmarks.height > 0 and joined_b.height > 0:
+                # reporting path relaxes the evaluation vacuity gate (real meta
+                # window satisfies 20 anyway); alignment below zero-fills missing eras
+                per_bmc = engine.per_era_bmc(
+                    joined_b, pred_col="prediction",
+                    benchmark_col=tier4_column, target_col="target",
+                    min_overlap_eras=1,
                 )
+                aligned = [float(per_bmc.get(era, 0.0)) for era in axis]
+                metrics["bmc"][model_id] = {
+                    "standard": aligned,
+                    "cumulative": _cumulative_from_standard(aligned, payout=False),
+                    "label": label,
+                }
             else:
-                logger.warning(
-                    "nmr.dashboard: %s shares no eras with the benchmark "
-                    "window; bmc zeroed", model_id,
-                )
-            zeros = [0.0 for _ in axis]
-            metrics["bmc"][model_id] = {
-                "standard": zeros, "cumulative": zeros, "label": label,
-            }
+                # decision #23: an absent benchmark frame, or a model with no era
+                # overlap with it, zero-fills the BMC slice instead of raising
+                if lookups.benchmarks.height == 0:
+                    logger.warning(
+                        "nmr.dashboard: benchmark models absent at %s; bmc zeroed",
+                        data_dir,
+                    )
+                else:
+                    logger.warning(
+                        "nmr.dashboard: %s shares no eras with the benchmark "
+                        "window; bmc zeroed", model_id,
+                    )
+                zeros = [0.0 for _ in axis]
+                metrics["bmc"][model_id] = {
+                    "standard": zeros, "cumulative": zeros, "label": label,
+                }
 
         if joined.height > 0:
             # reporting path relaxes the evaluation vacuity gate (real meta window
