@@ -188,6 +188,15 @@ Expected: FAIL with `AttributeError: module 'dashboard_ui.charts' has no attribu
 ```python
 _METRIC_NAMES = ("payout", "corr20", "mmc20", "corr60", "mmc60", "bmc", "cwmm")
 _ZERO_SPAN_EPS = 1e-12
+_PAYLOAD_ROUND = 6
+
+
+def _round6(value: Any) -> Any:
+    """Round payload floats to 6 decimals (display precision is 4) — keeps the
+    data node honest while fitting the < 100 KB artifact gate (amendment)."""
+    if isinstance(value, (int, float, np.floating)):
+        return round(float(value), _PAYLOAD_ROUND)
+    return value
 
 
 def global_y_range(*series: Sequence[float]) -> tuple[float, float]:
@@ -301,18 +310,19 @@ def build_dashboard_payload(
     shaped_metrics: dict[str, Any] = {}
     for metric, models in metrics.items():
         shaped_metrics[metric] = {
-            model_id: {"standard": list(series["standard"]), "label": series["label"]}
+            model_id: {"standard": [_round6(v) for v in series["standard"]],
+                       "label": series["label"]}
             for model_id, series in models.items()
         }
     rows = [
         {
             "label": row["label"],
-            "sharpe": row["corr_sharpe_ac"],
-            "ci_low": row["corr_sharpe_ac_ci_low"],
-            "ci_high": row["corr_sharpe_ac_ci_high"],
-            "cagr_1y": row.get("cagr_1y"),
-            "max_drawdown": row.get("max_drawdown"),
-            "deflated_sharpe": row.get("deflated_sharpe"),
+            "sharpe": _round6(row["corr_sharpe_ac"]),
+            "ci_low": _round6(row["corr_sharpe_ac_ci_low"]),
+            "ci_high": _round6(row["corr_sharpe_ac_ci_high"]),
+            "cagr_1y": _round6(row.get("cagr_1y")),
+            "max_drawdown": _round6(row.get("max_drawdown")),
+            "deflated_sharpe": _round6(row.get("deflated_sharpe")),
             "champion": row["champion"],
         }
         for row in leaderboard_bars.to_dicts()
@@ -1169,6 +1179,18 @@ def test_build_html_empty_payload_placeholder_message() -> None:
     assert "Timeseries data unavailable without local v5.3 assets" in html_text
 
 
+def test_technical_entries_summary_only(tmp_path: Path) -> None:
+    # < 100 KB gate: the audit accordion must carry config summaries, not
+    # full run.json dumps (~25 KB per run; 29 runs = ~715 KB measured)
+    _write_registry(tmp_path, [_registry_entry("c" * 64)])
+    entries = report._technical_entries(tmp_path)
+    assert len(entries) == 1
+    assert "backend" in entries[0]["json_text"]
+    assert '"scorecard"' not in entries[0]["json_text"]
+    assert '"metrics"' not in entries[0]["json_text"]
+    assert len(entries[0]["json_text"]) < 2048
+
+
 def test_build_html_rejects_non_finite_payload() -> None:
     # fail loud: NaN/Inf must never serialize into the data node (browser
     # JSON.parse would throw on them at runtime)
@@ -1448,6 +1470,12 @@ def _row_html(row: dict) -> str:
 
 
 def _technical_entries(registry_dir: Path) -> list[dict]:
+    """Per-run config summaries for the audit accordion (bounded size).
+
+    Full ``run.json`` dumps (~25 KB per run) blow the < 100 KB artifact gate
+    (measured: 29 runs = ~715 KB), so the accordion carries the curated config
+    summary only; the immutable full payload lives in the registry.
+    """
     entries = []
     for run_file in sorted(registry_dir.glob("*/run.json")):
         try:
@@ -1459,23 +1487,24 @@ def _technical_entries(registry_dir: Path) -> list[dict]:
         manifest = payload.get("manifest") or {}
         cfg = manifest.get("config") or {}
         run_cfg = cfg.get("run") or {}
+        summary = {
+            "backend": (cfg.get("model") or {}).get("backend"),
+            "preset": (cfg.get("model") or {}).get("preset"),
+            "feature_set": (cfg.get("data") or {}).get("feature_set"),
+            "feature_subset": (cfg.get("data") or {}).get("feature_subset"),
+            "neutralization_proportion": (cfg.get("risk") or {}).get(
+                "neutralization_proportion"
+            ),
+            "seed": run_cfg.get("seed"),
+            "device": manifest.get("oof_device"),
+            "targets": (cfg.get("data") or {}).get("targets"),
+        }
         entries.append(
             {
                 "label": f"{run_cfg.get('name', 'unknown')} · "
                          f"{str(payload.get('run_id') or run_file.parent.name)[:8]}",
-                "summary": {
-                    "backend": (cfg.get("model") or {}).get("backend"),
-                    "preset": (cfg.get("model") or {}).get("preset"),
-                    "feature_set": (cfg.get("data") or {}).get("feature_set"),
-                    "feature_subset": (cfg.get("data") or {}).get("feature_subset"),
-                    "neutralization_proportion": (cfg.get("risk") or {}).get(
-                        "neutralization_proportion"
-                    ),
-                    "seed": run_cfg.get("seed"),
-                    "device": manifest.get("oof_device"),
-                    "targets": (cfg.get("data") or {}).get("targets"),
-                },
-                "json_text": json.dumps(payload, indent=2, sort_keys=True),
+                "summary": summary,
+                "json_text": json.dumps(summary, indent=2, sort_keys=True),
             }
         )
     return entries
@@ -1600,7 +1629,9 @@ def _build_html(
     data-node substitution runs LAST so payload text can never be re-processed
     by a later placeholder replacement.
     """
-    payload_json = json.dumps(payload, sort_keys=True, allow_nan=False).replace("</", "<\\/")
+    payload_json = json.dumps(
+        payload, sort_keys=True, allow_nan=False, separators=(",", ":")
+    ).replace("</", "<\\/")
     ts_html = _TS_CHART_HTML if payload.get("eras") else _EMPTY_TS_HTML
     replacements = [
         ("{{ INLINE_STYLE }}", _STYLE_CSS),
@@ -1731,6 +1762,15 @@ __all__ = [
 ]
 
 _ZERO_SPAN_EPS = 1e-12
+_PAYLOAD_ROUND = 6
+
+
+def _round6(value: Any) -> Any:
+    """Round payload floats to 6 decimals (display precision is 4) — keeps the
+    data node honest while fitting the < 100 KB artifact gate (amendment)."""
+    if isinstance(value, (int, float, np.floating)):
+        return round(float(value), _PAYLOAD_ROUND)
+    return value
 
 
 def global_y_range(*series: Sequence[float]) -> tuple[float, float]:
@@ -1844,18 +1884,19 @@ def build_dashboard_payload(
     shaped_metrics: dict[str, Any] = {}
     for metric, models in metrics.items():
         shaped_metrics[metric] = {
-            model_id: {"standard": list(series["standard"]), "label": series["label"]}
+            model_id: {"standard": [_round6(v) for v in series["standard"]],
+                       "label": series["label"]}
             for model_id, series in models.items()
         }
     rows = [
         {
             "label": row["label"],
-            "sharpe": row["corr_sharpe_ac"],
-            "ci_low": row["corr_sharpe_ac_ci_low"],
-            "ci_high": row["corr_sharpe_ac_ci_high"],
-            "cagr_1y": row.get("cagr_1y"),
-            "max_drawdown": row.get("max_drawdown"),
-            "deflated_sharpe": row.get("deflated_sharpe"),
+            "sharpe": _round6(row["corr_sharpe_ac"]),
+            "ci_low": _round6(row["corr_sharpe_ac_ci_low"]),
+            "ci_high": _round6(row["corr_sharpe_ac_ci_high"]),
+            "cagr_1y": _round6(row.get("cagr_1y")),
+            "max_drawdown": _round6(row.get("max_drawdown")),
+            "deflated_sharpe": _round6(row.get("deflated_sharpe")),
             "champion": row["champion"],
         }
         for row in leaderboard_bars.to_dicts()
