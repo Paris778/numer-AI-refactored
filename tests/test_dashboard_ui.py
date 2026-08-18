@@ -353,3 +353,42 @@ def test_technical_entries_summary_only(tmp_path: Path) -> None:
     assert '"scorecard"' not in entries[0]["json_text"]
     assert '"metrics"' not in entries[0]["json_text"]
     assert len(entries[0]["json_text"]) < 2048
+
+
+def test_artifact_contract_real_scale_payload(tmp_path: Path) -> None:
+    # real-scale guard: ~86-era meta window, 4 models x 7 metrics, 10 leaderboard
+    # rows, 29 accordion summaries — pins the < 100 KB gate against growth
+    # (data node grows ~326 B/era, accordion ~465 B/run)
+    eras = [f"{1100 + i}" for i in range(86)]
+    metrics: dict[str, dict] = {}
+    for metric in ("payout", "corr20", "mmc20", "corr60", "mmc60", "bmc", "cwmm"):
+        metrics[metric] = {
+            f"model{i}": {"standard": [0.001 * (j % 7) for j in range(86)],
+                          "label": f"model{i} · abc12345"}
+            for i in range(4)
+        }
+    payload = {
+        "eras": eras,
+        "meta_downside_mask": [j % 5 == 0 for j in range(86)],
+        "metrics": metrics,
+        "leaderboard": [
+            {"label": f"model{i} · abc12345", "sharpe": 0.8 - 0.05 * i,
+             "ci_low": 0.6 - 0.05 * i, "ci_high": 1.0 - 0.05 * i,
+             "cagr_1y": 0.5, "max_drawdown": 0.1, "deflated_sharpe": 0.97,
+             "champion": i == 0}
+            for i in range(10)
+        ],
+        "similarity": {"labels": [f"m{i}" for i in range(6)],
+                       "matrix": [[1.0 if i == j else 0.5 for j in range(6)] for i in range(6)]},
+        "hurdle_sharpe": 0.78,
+        "ensemble_sharpe": 1.2,
+    }
+    _write_registry(tmp_path, [_registry_entry(f"{i:064d}") for i in range(29)])
+    accordion = report._accordion_html(report._technical_entries(tmp_path))
+    html_text = report._build_html(
+        kpis=_kpis_for_test(),
+        table_html="<table><tbody><tr><td>x</td></tr></tbody></table>",
+        diversification_html="<p>BADGE</p>", accordion_html=accordion, payload=payload,
+    )
+    size_kb = len(html_text.encode("utf-8")) / 1024
+    assert size_kb < 100, f"real-scale artifact too large: {size_kb:.2f} KB"

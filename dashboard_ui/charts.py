@@ -31,7 +31,7 @@ _PAYLOAD_ROUND = 6
 def _round6(value: Any) -> Any:
     """Round payload floats to 6 decimals (display precision is 4) — keeps the
     data node honest while fitting the < 100 KB artifact gate (amendment)."""
-    if isinstance(value, (int, float, np.floating)):
+    if isinstance(value, (float, np.floating)):
         return round(float(value), _PAYLOAD_ROUND)
     return value
 
@@ -119,10 +119,12 @@ def cumulative_series(standard: Sequence[float], *, payout: bool) -> list[float]
 
 
 def drawdown_series(cumulative: Sequence[float]) -> list[float]:
-    """wealth/peak - 1 (peak = running maximum)."""
+    """wealth/peak - 1 (peak = running maximum); 0.0 when peak <= 0 (degenerate)."""
     wealth = np.asarray(cumulative, dtype=float)
     peak = np.maximum.accumulate(wealth)
-    return [float(v) for v in wealth / peak - 1.0]
+    safe_peak = np.where(peak > 0.0, peak, np.nan)
+    ratio = np.where(peak > 0.0, wealth / safe_peak - 1.0, 0.0)
+    return [float(v) for v in ratio]
 
 
 def build_dashboard_payload(
@@ -173,6 +175,6 @@ def build_dashboard_payload(
             "labels": list(similarity_labels),
             "matrix": [list(r) for r in similarity_matrix],
         },
-        "hurdle_sharpe": float(hurdle_sharpe),
-        "ensemble_sharpe": ensemble_sharpe,
+        "hurdle_sharpe": _round6(float(hurdle_sharpe)),
+        "ensemble_sharpe": _round6(ensemble_sharpe),
     }
