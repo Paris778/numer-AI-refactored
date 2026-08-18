@@ -1225,7 +1225,7 @@ def test_generate_dashboard_bar_input_excludes_full_rows() -> None:
     assert out.get_column("label").to_list() == ["r1 · " + "a" * 8]
 
 def test_dashboard_app_load_registry_frame_includes_full_sources(tmp_path: Path) -> None:
-    import dashboard_app as app
+    from dashboard_ui import app
 
     entry = _registry_entry("a" * 64)
     entry["manifest"]["config"]["run"]["name"] = "brb1-xgb-v6"
@@ -1243,7 +1243,7 @@ def test_dashboard_app_load_registry_frame_includes_full_sources(tmp_path: Path)
 
 
 def test_dashboard_app_shaped_leaderboard_pins_full_rows_first() -> None:
-    import dashboard_app as app
+    from dashboard_ui import app
 
     rows = [
         {"model_id": "a" * 64, "source": "trained", "run_name": "r1",
@@ -1258,7 +1258,7 @@ def test_dashboard_app_shaped_leaderboard_pins_full_rows_first() -> None:
 
 
 def test_dashboard_app_robustness_matrix_excludes_full_rows() -> None:
-    import dashboard_app as app
+    from dashboard_ui import app
 
     rows = [
         {"model_id": "a" * 64, "source": "trained", "run_name": "r1", "corr_sharpe_ac": 0.5,

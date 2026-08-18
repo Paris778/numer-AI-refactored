@@ -24,7 +24,7 @@ def test_run_campaign_imports_as_control_plane() -> None:
     import run_campaign  # noqa: F401  (import-time smoke)
 
 
-import dashboard_app  # noqa: E402  (lazy: streamlit is heavy at module load)
+from dashboard_ui import app as dashboard_app  # noqa: E402  (lazy: streamlit is heavy at module load)
 
 
 def _registry_entry(run_id: str, *, scorecard: bool = True) -> dict:
@@ -195,7 +195,7 @@ def test_dashboard_app_imports_without_launching() -> None:
     # headless, no server is launched, and every `st.*` call stays inside
     # main()/view functions. `main` was already callable in the Task 2 stub,
     # so the real contract is the five render views per the Task 3 brief.
-    import dashboard_app  # noqa: F401
+    from dashboard_ui import app as dashboard_app
 
     assert callable(dashboard_app.main)
     for view in (
