@@ -300,7 +300,7 @@ if __name__ == "__main__":
 
 - [ ] **Step 4: Update the test import**
 
-`tests/test_dashboard.py` line 13: `import generate_dashboard` → `from dashboard_ui import report as generate_dashboard`
+`tests/test_dashboard.py` line 12: `import generate_dashboard` → `from dashboard_ui import report as generate_dashboard`
 
 (Every existing `generate_dashboard._*` / `generate_dashboard.generate_dashboard(...)` reference now resolves through the alias — no other test edits.)
 
@@ -316,10 +316,13 @@ def test_report_inlines_style_css_once(tmp_path: Path) -> None:
         output_path=tmp_path / "dashboard.html", open_browser=False,
     )
     text = out.read_text(encoding="utf-8")
-    assert text.count(".badge.full {") == 1        # style.css inlined once — CSS rule, not the HTML class attr
+    assert text.count(".badge.full {") == 1                  # style.css inlined once — CSS rule, not the HTML class attr
     assert text.count(".group-header td {") == 1
-    assert text.count("window.Plotly") == 1        # plotly engine embedded exactly once
-    assert text.count("dashboard-multimetric-data") == 1  # app.js data node present
+    assert text.count("<!-- plotly-engine-embed -->") == 1    # plotly engine embedded exactly once
+    # the multimetric data node exists only with local v5.3 assets (CI degrades
+    # to the annotation); mirror the existing end-to-end test's data branching
+    expected_nodes = 1 if Path("data/v5.3/validation.parquet").exists() else 0
+    assert text.count('id="dashboard-multimetric-data"') == expected_nodes
 ```
 
 - [ ] **Step 6: Run the targeted tests**
