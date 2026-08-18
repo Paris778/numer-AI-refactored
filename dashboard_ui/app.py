@@ -1,7 +1,7 @@
 """Pure data-shaping helpers + thin Streamlit render layer for the dashboard.
 
 Thin control plane only: column selection, rename, join, boolean-flag
-extraction, and rendering frames through Streamlit/Plotly. No metric
+extraction, and rendering frames through Streamlit. No metric
 formulas, no transforms, no registry writes. The only computation in the app
 (``fleet_summary``) lives in ``nmr/meta.py`` and is consumed by the render
 layer below.
@@ -16,8 +16,8 @@ Critical semantic: explicit ``None`` checks — a legitimate scorecard value of
 None-discipline lives in ``nmr.dashboard.load_unified_leaderboard``.
 
 Render layer: all ``st.*`` calls live inside ``main()`` or the five view
-functions, so importing this module is side-effect free (streamlit/plotly
-import headless; no server is launched).
+functions, so importing this module is side-effect free (streamlit imports
+headless; no server is launched).
 """
 
 from __future__ import annotations
@@ -27,7 +27,6 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import pandas as pd
-import plotly.express as px
 import polars as pl
 import streamlit as st
 
@@ -300,9 +299,9 @@ def _shaped_leaderboard_pdf(
 
     Pure frame-shaping for :func:`render_leaderboard`, isolated so tests can
     exercise the unique-label logic without a Streamlit runtime. CI bounds are
-    absolute (``corr_sharpe_ac_ci_low``/``_ci_high``); Plotly error bars need
-    per-bar magnitudes, so the deltas are derived here. Rows without CI bounds
-    get NaN deltas, which drop the error bars.
+    absolute (``corr_sharpe_ac_ci_low``/``_ci_high``); per-bar error magnitudes
+    are derived here. Rows without CI bounds get NaN deltas, which drop the
+    error bars.
     """
     shaped = leaderboard.with_columns(pl.col("source").eq("full").alias("_is_full"))
     pdf = shaped.sort(
@@ -321,11 +320,12 @@ def _shaped_leaderboard_pdf(
 
 
 def render_leaderboard(leaderboard: pl.DataFrame, champion: str | None) -> None:
-    """Bar chart of ``corr_sharpe_ac`` with CI error bars + sortable dataframe.
+    """Bar chart of ``corr_sharpe_ac`` + sortable dataframe (native st.* charts).
 
     The chart shows evaluable rows only (EVALUABLE_ROWS — full-version rows
-    carry no validation metrics). The dataframe keeps all rows; full rows are
-    pinned first by ``_shaped_leaderboard_pdf``.
+    carry no validation metrics); CI bounds render as columns in the table
+    (native charts have no error bars). The dataframe keeps all rows; full
+    rows are pinned first by ``_shaped_leaderboard_pdf``.
     """
     if leaderboard.height == 0:
         st.info("No runs to display — train one with `train_first_model.py`.")
@@ -335,20 +335,8 @@ def render_leaderboard(leaderboard: pl.DataFrame, champion: str | None) -> None:
         st.info("No evaluable runs to display (all rows are full versions).")
         return
     pdf = _shaped_leaderboard_pdf(evaluable, champion)
-    fig = px.bar(
-        pdf,
-        x="label",
-        y=_BAR_METRIC,
-        color="source",
-        error_y="ci_plus",
-        error_y_minus="ci_minus",
-        pattern_shape="champion",
-        pattern_shape_map={True: "/", False: ""},
-        hover_data=["run_name", "model_id", "backend", "preset", "corr", "max_drawdown"],
-        title="CORR Sharpe (auto-correlated)",
-    )
-    fig.update_layout(legend_title_text="")
-    st.plotly_chart(fig)
+    st.bar_chart(pdf.set_index("label")[[_BAR_METRIC]], horizontal=True, height=400)
+    st.caption("Bars: CORR Sharpe (auto-correlated). CI bounds in the table below.")
     table_pdf = _shaped_leaderboard_pdf(leaderboard, champion)
     st.dataframe(
         table_pdf.drop(columns=["champion", "ci_plus", "ci_minus", "label"]),
@@ -433,7 +421,7 @@ def render_fleet(
     n_trials: int,
     dsr_confidence: float,
 ) -> None:
-    """Fleet table via ``nmr.meta.fleet_summary`` + neutralization scatter."""
+    """Fleet table via ``nmr.meta.fleet_summary`` + native scatter."""
     if not registry_entries:
         st.info("No registry entries to analyze.")
         return
@@ -441,15 +429,13 @@ def render_fleet(
         registry_entries, n_trials=n_trials, dsr_confidence=dsr_confidence
     )
     st.dataframe(summary)
-    fig = px.scatter(
-        summary.to_pandas(),
+    chart_df = summary.to_pandas()
+    st.scatter_chart(
+        chart_df,
         x="neutralization_proportion",
         y="metric",
         color="preset",
-        hover_data=["run_id", "oof_device", "dsr_pass"],
-        title="Neutralization proportion vs CORR Sharpe",
     )
-    st.plotly_chart(fig)
 
 
 def render_campaigns(campaigns: pl.DataFrame) -> None:
@@ -461,25 +447,19 @@ def render_campaigns(campaigns: pl.DataFrame) -> None:
 
 
 def render_robustness_matrix(registry: pl.DataFrame) -> None:
-    """Plotly heatmap over ``robustness_matrix`` (booleans shown as 0/1)."""
+    """Heatmap-styled dataframe over ``robustness_matrix`` (booleans as 0/1)."""
     matrix = robustness_matrix(registry)
     if matrix.height == 0:
         st.info("No evaluable runs in the registry.")
         return
     numeric = matrix.with_columns(pl.col(flag).cast(pl.Int8) for flag in _ROBUSTNESS_CELLS)
     pdf = numeric.to_pandas().set_index("model_id").astype(float)
-    fig = px.imshow(
-        pdf,
-        x=pdf.columns,
-        y=pdf.index,
-        color_continuous_scale="RdBu_r",
-        aspect="auto",
-        title="Robustness matrix",
-    )
-    st.plotly_chart(fig)
+    styled = pdf.style.background_gradient(cmap="RdYlGn", axis=None).format(na_rep="—")
+    st.dataframe(styled, use_container_width=True)
     st.caption(
         "Boolean cells (has_*) shown as 0/1; numeric cells "
-        "(max_feature_exposure, std_corr, max_drawdown) shown raw."
+        "(max_feature_exposure, std_corr, max_drawdown) shown raw; "
+        "missing values render as —."
     )
     st.dataframe(matrix)
 

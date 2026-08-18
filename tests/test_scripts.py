@@ -191,7 +191,7 @@ def test_campaigns_null_runs_returns_empty_frame(tmp_path) -> None:
 
 
 def test_dashboard_app_imports_without_launching() -> None:
-    # Module-level import must be side-effect free: streamlit/plotly import
+    # Module-level import must be side-effect free: streamlit imports
     # headless, no server is launched, and every `st.*` call stays inside
     # main()/view functions. `main` was already callable in the Task 2 stub,
     # so the real contract is the five render views per the Task 3 brief.
@@ -228,3 +228,11 @@ def test_benchmark_runner_cli_fast_mode_and_horizon() -> None:
     args = benchmark_runner._parse_args_with(["--fast-mode", "--horizon", "60D"])
     assert args.fast_mode is True
     assert args.horizon == "60D"
+
+
+def test_dashboard_app_has_no_plotly_reference() -> None:
+    import inspect
+
+    from dashboard_ui import app as dashboard_app
+
+    assert "plotly" not in inspect.getsource(dashboard_app).lower()
