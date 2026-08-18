@@ -1052,7 +1052,10 @@ Expected: PASS (14 tests).
 - [ ] **Step 7: Full gate + test-count sync + commit**
 
 Run: `.\.venv\Scripts\python -m ruff check .` then `.\.venv\Scripts\python -m pytest -q`
-Expected: all green (old suite untouched; total = 832).
+
+**Plan amendment (controller, 2026-08-18):** rewriting `app.js` (inlined by the current `charts.multimetric_chart_html` / `report._build_html`) breaks 5 Plotly-era tests in `tests/test_dashboard.py` at this task — they assert old-Plotly content markers. All 5 are already on Task 3's prune list, so **prune them in this commit**: `test_html_escapes_user_strings_and_single_plotly_engine`, `test_generate_dashboard_end_to_end_synthetic`, `test_multimetric_chart_html_embeds_payload_and_controls`, `test_build_html_v2_sections_and_four_render_calls`, `test_multimetric_chart_embeds_data_node_and_app_js_once`. Also remove the now-unused `_charts_for_test`/`_kpis_for_test` fixtures and the `from plotly.colors import diverging` / `from dashboard_ui import charts` import lines **only if** no remaining test uses them (the remaining `_kpis_for_test` consumer `test_kpi_cards_stale_champion_pointer_degrades` builds its own frame — verify). Net count: 829 + 3 new − 5 pruned = **827**.
+
+Expected: all green (total = 827).
 Sync the three count claims to the collected number, then:
 
 ```bash
@@ -1878,11 +1881,11 @@ def build_dashboard_payload(
 3. The fixture block `_bar_input` (601–612), `_ts_payload` (614–621), `_multimetric_payload` (623–634).
 4. Tests: `test_leaderboard_chart_traces_and_hurdle_line` (637), `test_leaderboard_chart_hover_fields` (647), `test_chart_hovertemplate_escapes_labels` (655), `test_drawdown_chart_underwater_fill` (663), `test_timeseries_charts_empty_payload_render_annotation` (670), `test_leaderboard_chart_empty_frame_render_annotation` (678).
 5. The fixture block `_charts_for_test` (690–696), `_kpis_for_test` (698–707).
-6. `test_html_escapes_user_strings_and_single_plotly_engine` (710–740).
-7. `test_generate_dashboard_end_to_end_synthetic` (758–779) — replaced by the new e2e test in Task 3 Step 6.
+6. `test_html_escapes_user_strings_and_single_plotly_engine` (710–740) — **already deleted in Task 2** (plan amendment); skip if absent.
+7. `test_generate_dashboard_end_to_end_synthetic` (758–779) — **already deleted in Task 2** (plan amendment); skip if absent. Replaced by the new e2e test in Task 3 Step 6.
 8. `test_build_html_deterministic_across_calls` (782–802).
-9. `test_multimetric_chart_html_embeds_payload_and_controls` (920), `test_multimetric_chart_html_empty_payload_annotation` (947), `test_similarity_chart_heatmap_and_highlight` (955), `test_similarity_chart_empty_matrix_annotation` (971), `test_drawdown_chart_v2_payload` (977), `test_build_html_v2_sections_and_four_render_calls` (1020).
-10. `test_multimetric_chart_embeds_data_node_and_app_js_once` (1277), `test_report_inlines_style_css_once` (1293).
+9. `test_multimetric_chart_html_embeds_payload_and_controls` (920) — **already deleted in Task 2**; skip if absent. `test_multimetric_chart_html_empty_payload_annotation` (947), `test_similarity_chart_heatmap_and_highlight` (955), `test_similarity_chart_empty_matrix_annotation` (971), `test_drawdown_chart_v2_payload` (977), `test_build_html_v2_sections_and_four_render_calls` (1020) — **already deleted in Task 2**; skip if absent.
+10. `test_multimetric_chart_embeds_data_node_and_app_js_once` (1277) — **already deleted in Task 2**; skip if absent. `test_report_inlines_style_css_once` (1293).
 
 **Keep** `test_kpi_cards_stale_champion_pointer_degrades` (743) — it builds its own local frame and tests `report._kpi_cards`, which stays.
 
