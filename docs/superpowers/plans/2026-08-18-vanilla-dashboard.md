@@ -2186,10 +2186,10 @@ Streamlit (interactive dashboard — imported only in `dashboard_ui/app.py` and 
 Run:
 
 ```bash
-grep -ri plotly --exclude=test_scripts.py dashboard_ui/ tests/ configs/ requirements.txt *.py
+grep -rn "import plotly\|from plotly\|plotly\." dashboard_ui/ tests/ configs/ requirements.txt *.py
 ```
 
-Expected: **no output**. The only intentional `plotly` string in code is the negative-assertion guard inside `tests/test_scripts.py` (excluded above); historical specs under `docs/superpowers/specs/2026-08-16-*.md` are outside the scanned paths (allowed — historical records).
+Expected: **no output** — zero Plotly imports, attribute usage, or pin references. (Amendment: a bare `grep -ri plotly` cannot be silent — the plan's own Task 3 docstring in `report.py` says "no Plotly, no CDN", and negative-assertion guards in `tests/test_scripts.py` / `tests/test_dashboard_ui.py` intentionally contain the word. The audit therefore targets *usage*; the word "Plotly" is allowed only in: historical `docs/superpowers/specs/2026-08-16-*.md`, docstrings describing the removal, and negative-assertion test guards.)
 
 - [ ] **Step 6: Regenerate the artifact and verify the contract**
 
