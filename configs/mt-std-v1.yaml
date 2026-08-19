@@ -1,0 +1,42 @@
+# First multi-target standard-preset campaign (mt-std-v1).
+#
+# The first run of the multi-target ensemble machinery on the canonical
+# standard preset: 4 targets x walk_forward 4 folds, medium universe per the
+# feature-universe policy. Everything before this was preset: fast.
+
+run:
+  name: mt-std-v1
+  seed: 20260819
+
+data:
+  version: v5.3
+  feature_set: medium
+  targets:
+    - target_cyrusd_20
+    - target_ender_20
+    - target_jasper_20
+    - target_teager2b_20
+
+split:
+  scheme: walk_forward
+  purge_eras: 8
+  embargo_eras: 0
+  n_folds: 4
+
+model:
+  backend: lightgbm
+  preset: standard
+  device: auto
+  params: {}
+
+evaluation:
+  backend: custom
+  main_target: target_cyrusd_20
+  metrics: [corr, mmc, fnc, sharpe]
+  validation_scorecard: true
+
+ensemble:
+  method: ridge
+
+risk:
+  neutralization_proportion: 1.0
