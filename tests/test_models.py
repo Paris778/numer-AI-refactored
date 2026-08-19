@@ -960,3 +960,183 @@ def test_construct_tree_model_max_leaves_sets_lossguide() -> None:
     )
     assert legacy.get_params()["grow_policy"] == "lossguide"
     assert legacy.get_params()["max_leaves"] == 31
+
+
+def test_train_anchor_fold_requires_exactly_one_fold() -> None:
+    orch = ModelOrchestrator(
+        ModelConfig(backend="lightgbm", preset="fast", params=_tiny_model_params()),
+        seed=7,
+    )
+    with pytest.raises(ValueError, match="exactly one fold"):
+        orch.train_anchor_fold(
+            _model_frame(n_eras=10, rows_per_era=6),
+            feature_cols=["f1", "f2", "f3"],
+            target_col="target",
+            splitter=_walk_forward_splitter(),  # 3 folds, not 1
+            era_col="era",
+        )
+
+
+def test_cross_validation_rejects_overlapping_validation_eras() -> None:
+    from nmr.splitter import Fold
+
+    class _OverlappingSplitter:
+        purge_eras = 1
+
+        def split(self, eras):
+            return [Fold(0, ("1", "2"), ("4", "5")), Fold(1, ("3",), ("4", "5"))]
+
+    orch = ModelOrchestrator(
+        ModelConfig(backend="lightgbm", preset="fast", params=_tiny_model_params()),
+        seed=7,
+    )
+    with pytest.raises(ValueError, match="disjoint across folds"):
+        orch.train_cross_validation(
+            _model_frame(n_eras=5, rows_per_era=6),
+            feature_cols=["f1", "f2", "f3"],
+            target_col="target",
+            splitter=_OverlappingSplitter(),
+            era_col="era",
+        )
+
+
+def test_cross_validation_no_folds_raises() -> None:
+    class _EmptySplitter:
+        purge_eras = 1
+
+        def split(self, eras):
+            return []
+
+    orch = ModelOrchestrator(
+        ModelConfig(backend="lightgbm", preset="fast", params=_tiny_model_params()),
+        seed=7,
+    )
+    with pytest.raises(ValueError, match="No folds produced"):
+        orch.train_cross_validation(
+            _model_frame(n_eras=4, rows_per_era=6),
+            feature_cols=["f1", "f2", "f3"],
+            target_col="target",
+            splitter=_EmptySplitter(),
+            era_col="era",
+        )
+
+
+def test_train_full_history_all_null_targets_raises() -> None:
+    df = _model_frame(n_eras=4, rows_per_era=4).with_columns(
+        pl.lit(None, dtype=pl.Float64).alias("target")
+    )
+    orch = ModelOrchestrator(
+        ModelConfig(backend="lightgbm", preset="fast", params=_tiny_model_params()),
+        seed=7,
+    )
+    with pytest.raises(ValueError, match="No usable training rows"):
+        orch.train_full_history(
+            df, feature_cols=["f1", "f2", "f3"], target_col="target", in_process=True
+        )
+
+
+def test_train_full_history_spawn_without_data_config_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """train_full_history's own guard (models.py:344-349): the spawn path demands
+    the DataConfig before the subprocess machinery is even reached."""
+    monkeypatch.setenv("NMR_FULL_HISTORY_SPAWN_MIN_BYTES", "1")
+    orch = ModelOrchestrator(
+        ModelConfig(backend="lightgbm", preset="fast", params=_tiny_model_params()),
+        seed=7,
+    )
+    with pytest.raises(ValueError, match="DataConfig"):
+        orch.train_full_history(
+            _model_frame(n_eras=4, rows_per_era=4),
+            feature_cols=["f1", "f2", "f3"],
+            target_col="target",
+        )
+
+
+def test_fit_predict_fold_empty_slice_raises() -> None:
+    from nmr.splitter import Fold
+
+    orch = ModelOrchestrator(
+        ModelConfig(backend="lightgbm", preset="fast", params=_tiny_model_params()),
+        seed=7,
+    )
+    fold = Fold(0, ("7",), ("9",))  # leakage-safe (ordered, disjoint) but absent from the frame
+    with pytest.raises(ValueError, match="Degenerate training slice"):
+        orch._fit_predict_fold(
+            _model_frame(n_eras=4, rows_per_era=4),
+            fold=fold,
+            feature_cols=["f1", "f2", "f3"],
+            target_col="target",
+            era_col="era",
+            purge_eras=0,
+        )
+
+
+def test_fit_predict_fold_all_null_targets_raises() -> None:
+    from nmr.splitter import Fold
+
+    df = _model_frame(n_eras=4, rows_per_era=4).with_columns(
+        pl.when(pl.col("era").is_in(["1", "2"]))
+        .then(None)
+        .otherwise(pl.col("target"))
+        .alias("target")
+    )
+    orch = ModelOrchestrator(
+        ModelConfig(backend="lightgbm", preset="fast", params=_tiny_model_params()),
+        seed=7,
+    )
+    fold = Fold(0, ("1", "2"), ("3",))
+    with pytest.raises(ValueError, match="No usable training rows"):
+        orch._fit_predict_fold(
+            df,
+            fold=fold,
+            feature_cols=["f1", "f2", "f3"],
+            target_col="target",
+            era_col="era",
+            purge_eras=0,  # gap 3-2=1 > 0, so the leakage assertion passes
+        )
+
+
+def test_device_candidate_params_dedupes_identical(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """gpu_params == cpu_params → a single candidate (models.py:547-548)."""
+    orch = ModelOrchestrator(
+        ModelConfig(
+            backend="lightgbm", preset="fast", params=_tiny_model_params(), device="auto"
+        ),
+        seed=7,
+    )
+    same = {"dummy": 1}
+    monkeypatch.setattr(orch, "_resolved_params", lambda **kwargs: dict(same))
+    candidates = orch._device_candidate_params(use_gpu=True, n_features=3)
+    assert candidates == [same]
+
+
+def test_xgboost_param_translation_branches() -> None:
+    """num_leaves → max_leaves+lossguide; bare max_leaves → lossguide;
+    min_data_in_leaf → min_child_weight (models.py:597-610)."""
+    orch_nl = ModelOrchestrator(
+        ModelConfig(backend="xgboost", preset="fast", params={"num_leaves": 15}),
+        seed=7,
+    )
+    p = orch_nl._resolved_params(use_gpu=False, n_features=10)
+    assert p["grow_policy"] == "lossguide"
+    assert p["max_leaves"] == 15
+
+    orch_ml = ModelOrchestrator(
+        ModelConfig(backend="xgboost", preset="fast", params={"max_leaves": 15}),
+        seed=7,
+    )
+    p = orch_ml._resolved_params(use_gpu=False, n_features=10)
+    assert p["grow_policy"] == "lossguide"
+    assert p["max_leaves"] == 15
+
+    orch_md = ModelOrchestrator(
+        ModelConfig(
+            backend="xgboost", preset="fast", params={"min_data_in_leaf": 20}
+        ),
+        seed=7,
+    )
+    p = orch_md._resolved_params(use_gpu=False, n_features=10)
+    assert p["min_child_weight"] == 20.0
