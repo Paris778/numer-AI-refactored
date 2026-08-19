@@ -47,14 +47,14 @@ def _synthetic_parity_frame() -> pl.DataFrame:
 
 
 def _oracle_per_era(
-    df: pl.DataFrame, *, pred_col: str, feature_cols: list[str]
+    df: pl.DataFrame, *, pred_col: str, feature_cols: list[str], proportion: float = 1.0
 ) -> np.ndarray:
     parts: list[pl.DataFrame] = []
     for era in df.get_column("era").unique(maintain_order=True).to_list():
         era_df = df.filter(pl.col("era") == era)
         pdf = era_df.to_pandas()
         neutralized = oracle_neutralize(
-            pdf[[pred_col]], pdf[feature_cols], proportion=1.0
+            pdf[[pred_col]], pdf[feature_cols], proportion=proportion
         )
         parts.append(
             era_df.with_columns(
@@ -106,6 +106,44 @@ def test_cached_reuse_across_predictions_matches_fresh_oracle(tmp_path) -> None:
         pred_after=actual,
         expected_rows=df_b.height,
     )
+    assert np.allclose(actual, expected, atol=NEUTRALIZE_ATOL, rtol=0.0, equal_nan=True)
+
+
+@pytest.mark.parametrize("proportion", [0.0, 0.25, 0.5, 0.75])
+def test_neutralization_matches_oracle_across_proportions(
+    tmp_path, proportion: float
+) -> None:
+    """proportion=1.0 is the existing test; the partial blends are equally
+    part of the contract (risk configs sweep this knob)."""
+    df = _synthetic_parity_frame()
+    feature_cols = ["f1", "f2", "f3"]
+    engine = NeutralizationEngine(cache_dir=tmp_path)
+
+    result = engine.neutralize(
+        df, pred_col="pred", feature_cols=feature_cols, proportion=proportion
+    )
+    actual = result.sort(["era", "id"]).get_column("pred").to_numpy()
+    expected = _oracle_per_era(
+        df, pred_col="pred", feature_cols=feature_cols, proportion=proportion
+    )
+    assert np.allclose(actual, expected, atol=NEUTRALIZE_ATOL, rtol=0.0, equal_nan=True)
+
+
+@pytest.mark.parametrize("mutate", ["duplicate_feature", "constant_feature"])
+def test_neutralization_degenerate_features_match_oracle(tmp_path, mutate: str) -> None:
+    df = _synthetic_parity_frame()
+    feature_cols = ["f1", "f2", "f3"]
+    if mutate == "duplicate_feature":
+        df = df.with_columns(pl.col("f1").alias("f1_copy"))
+        feature_cols = ["f1", "f1_copy", "f2", "f3"]
+    elif mutate == "constant_feature":
+        df = df.with_columns(pl.lit(0.5).alias("fconst"))
+        feature_cols = ["f1", "fconst", "f2", "f3"]
+
+    engine = NeutralizationEngine(cache_dir=tmp_path)
+    result = engine.neutralize(df, pred_col="pred", feature_cols=feature_cols, proportion=1.0)
+    actual = result.sort(["era", "id"]).get_column("pred").to_numpy()
+    expected = _oracle_per_era(df, pred_col="pred", feature_cols=feature_cols)
     assert np.allclose(actual, expected, atol=NEUTRALIZE_ATOL, rtol=0.0, equal_nan=True)
 
 
