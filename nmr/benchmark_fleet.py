@@ -15,6 +15,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+import numpy as np
 import polars as pl
 import yaml
 
@@ -27,7 +28,9 @@ from nmr.benchmark import (
     generate_canonical_predictions,
     train_validation_purged_split,
 )
+from nmr.ensemble import Ensembler
 from nmr.features import feature_stability_screen
+from nmr.models import construct_tree_model
 from nmr.risk import NeutralizationEngine
 
 logger = logging.getLogger("nmr.benchmark_fleet")
@@ -41,6 +44,7 @@ __all__ = [
     "VALID_FLEET_NEUTRALIZATION",
     "VALID_FLEET_NEUTRALIZER_SELECTIONS",
     "generate_fleet_lightgbm_predictions",
+    "generate_fleet_xgb_predictions",
     "generate_lagged_target_predictions",
     "load_fleet_config",
     "load_fleet_suite_config",
@@ -340,3 +344,112 @@ def generate_fleet_lightgbm_predictions(
             era_col=era_col, proportion=float(neutralization),
         ).select([era_col, id_col, pred_col]).sort([era_col, id_col])
     return out
+
+
+_ES_KEYS = ("early_stopping_rounds", "holdout_era_frac")
+
+
+def generate_fleet_xgb_predictions(
+    train: pl.DataFrame,
+    val: pl.DataFrame,
+    *,
+    targets: Sequence[str],
+    feature_cols: Sequence[str],
+    params: Mapping[str, Any],
+    seed: int,
+    target_weights: Mapping[str, float] | None = None,
+    purge_eras: int = DEFAULT_BENCHMARK_PURGE_ERAS,
+    era_col: str = "era",
+    id_col: str = "id",
+    pred_col: str = "prediction",
+) -> pl.DataFrame:
+    """Fleet XGBoost: per-target fits, optional early stopping, weighted blend."""
+    if not targets or not feature_cols:
+        raise ValueError("targets and feature_cols must be non-empty")
+    weights = dict(target_weights) if target_weights else {}
+    for target in weights:
+        if target not in targets:
+            raise ValueError(
+                f"target_weights key {target!r} not in targets {list(targets)!r}"
+            )
+    trimmed_train_eras, _ = train_validation_purged_split(
+        train.get_column(era_col).unique().to_list(),
+        val.get_column(era_col).unique().to_list(),
+        purge_eras=purge_eras,
+    )
+    train_rows = train.filter(pl.col(era_col).is_in(trimmed_train_eras))
+    val_rows = val.sort([era_col, id_col])
+    missing_feats = [c for c in feature_cols if c not in train.columns or c not in val.columns]
+    if missing_feats:
+        raise ValueError(f"missing feature columns: {missing_feats}")
+
+    es_rounds = params.get("early_stopping_rounds")
+    holdout_frac = float(params.get("holdout_era_frac", 0.1))
+    fit_eras = list(trimmed_train_eras)
+    holdout_eras: list[str] = []
+    if es_rounds is not None and len(fit_eras) >= 4:
+        n_hold = max(1, int(round(holdout_frac * len(fit_eras))))
+        if n_hold >= len(fit_eras):
+            n_hold = len(fit_eras) // 2
+        holdout_eras = fit_eras[-n_hold:]
+        fit_eras = fit_eras[:-n_hold]
+    model_params = {k: v for k, v in params.items() if k not in _ES_KEYS}
+
+    x_fit = train_rows.filter(pl.col(era_col).is_in(fit_eras)) \
+        .select(feature_cols).cast(pl.Float32).to_pandas()
+    x_val = val_rows.select(feature_cols).cast(pl.Float32).to_pandas()
+    x_hold = None
+    if holdout_eras:
+        hold_rows = train_rows.filter(pl.col(era_col).is_in(holdout_eras))
+        x_hold = hold_rows.select(feature_cols).cast(pl.Float32).to_pandas()
+
+    component_preds: dict[str, np.ndarray] = {}
+    for index, target in enumerate(targets):
+        if target not in train.columns:
+            raise ValueError(f"missing target column: {target!r}")
+        y = train_rows.filter(pl.col(era_col).is_in(fit_eras)) \
+            .get_column(target).cast(pl.Float64).to_numpy()
+        mask = np.isfinite(y)
+        if mask.sum() < 2:
+            raise ValueError(
+                f"target {target!r} has fewer than 2 finite train rows after purge"
+            )
+        extra = (
+            {"early_stopping_rounds": int(es_rounds)} if es_rounds is not None else None
+        )
+        model = construct_tree_model(
+            "xgboost", model_params, seed=seed + index,
+            n_features=len(feature_cols), device="cpu", extra_params=extra,
+        )
+        if x_hold is not None:
+            y_hold = train_rows.filter(pl.col(era_col).is_in(holdout_eras)) \
+                .get_column(target).cast(pl.Float64).to_numpy()
+            mask_h = np.isfinite(y_hold)
+            model.fit(
+                x_fit[mask], y[mask],
+                eval_set=[(x_hold[mask_h], y_hold[mask_h])],
+                verbose=False,
+            )
+        else:
+            model.fit(x_fit[mask], y[mask])
+        component_preds[target] = np.asarray(model.predict(x_val), dtype=float)
+
+    val_index = val_rows.select([era_col, id_col])
+    frame = val_index.with_columns(
+        [pl.Series(target, component_preds[target]) for target in targets]
+    )
+    if weights:
+        total = sum(weights.get(t, 0.0) for t in targets)
+        blend_weights = [weights.get(t, 0.0) / total for t in targets]
+    else:
+        blend_weights = [1.0 / len(targets)] * len(targets)
+    ensembler = Ensembler()
+    blended = ensembler.blend(
+        Ensembler.rank_normalize(frame, pred_cols=list(targets), era_col=era_col),
+        pred_cols=list(targets), weights=blend_weights,
+        era_col=era_col, out_col=pred_col,
+    )
+    gaussianized = Ensembler.rank_normalize(
+        blended, pred_cols=[pred_col], era_col=era_col
+    )
+    return gaussianized.select([era_col, id_col, pred_col]).sort([era_col, id_col])

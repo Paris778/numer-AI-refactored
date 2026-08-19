@@ -737,12 +737,15 @@ def construct_tree_model(
     seed: int,
     n_features: int,
     device: str = "cpu",
+    extra_params: Mapping[str, Any] | None = None,
 ) -> object:
     """Build a deterministic, CPU-default tree estimator from raw params.
 
     Applies the same backend param mapping, colsample flooring, and
     determinism flags as ``ModelOrchestrator``. Used by the benchmark
     hierarchy so benchmark cells never hand-duplicate param resolution.
+    ``extra_params`` are merged AFTER resolution so constructor-only kwargs
+    (e.g. XGBoost ``early_stopping_rounds``) bypass param validation.
     """
     config = ModelConfig(
         backend=backend,
@@ -754,6 +757,8 @@ def construct_tree_model(
     resolved = orchestrator._resolved_params(
         use_gpu=device != "cpu", n_features=int(n_features)
     )
+    if extra_params:
+        resolved.update(dict(extra_params))
     return orchestrator._build_model(resolved)
 
 

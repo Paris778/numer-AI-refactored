@@ -12,6 +12,7 @@ from nmr.benchmark import generate_canonical_predictions
 from nmr.benchmark_fleet import (
     _select_riskiest_features,
     generate_fleet_lightgbm_predictions,
+    generate_fleet_xgb_predictions,
     generate_lagged_target_predictions,
     load_fleet_config,
     load_fleet_suite_config,
@@ -177,7 +178,15 @@ def test_lag_mean_rejects_val_era_overlap():
 
 
 def _tiny_train_val(eras: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)):
-    """Synthetic train (with target) + val (no targets) with 3 features."""
+    """Synthetic train (with target) + val (no targets) with 3 features.
+
+    Val eras derive from ``max(eras) + 1`` and ``max(eras) + 2`` so the
+    purge gap between the trimmed train tail and the first val era is
+    exactly 8 (the default ``purge_eras``) for any window length. Val
+    ``f1``/``f3`` are deterministic per-row drifts (``row``, ``row % 2``)
+    so shallow tree fits produce distinct predictions within each era —
+    rank-gaussianization of tied predictions is not mean-zero/unit-variance.
+    """
     rng = np.random.default_rng(11)
     train_rows, val_rows = [], []
     for i, era in enumerate(eras):
@@ -189,11 +198,11 @@ def _tiny_train_val(eras: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 
                 "f3": float(era % 2),
                 "target": float(i % 3),
             })
-    for era in (13, 14):
+    for era in (max(eras) + 1, max(eras) + 2):
         for row in range(5):
             val_rows.append({
                 "era": f"{era:04d}", "id": f"v{era}_{row}",
-                "f1": rng.normal(0, 1), "f2": rng.normal(0, 1), "f3": 1.0,
+                "f1": float(row), "f2": rng.normal(0, 1), "f3": float(row % 2),
             })
     return pl.DataFrame(train_rows), pl.DataFrame(val_rows)
 
@@ -253,4 +262,58 @@ def test_fleet_lgbm_rejects_unknown_selection():
             train, val, targets=["target"], feature_cols=["f1"],
             params={"n_estimators": 5}, seed=42,
             neutralizer_selection="bogus",
+        )
+
+
+def test_xgb_weighted_blend_normalizes_weights_and_orders_ranks():
+    train, val = _tiny_train_val()
+    params = {"n_estimators": 10, "max_depth": 2, "learning_rate": 0.1}
+    train = train.with_columns(pl.col("target").alias("target_ender_20"))
+    out = generate_fleet_xgb_predictions(
+        train, val, targets=["target", "target_ender_20"],
+        feature_cols=["f1", "f2", "f3"], params=params, seed=42,
+        target_weights={"target": 0.35, "target_ender_20": 0.65},
+    )
+    assert out.columns == ["era", "id", "prediction"]
+    # rank-gaussianized per era: mean ~0, std ~1 within each era
+    for era in out.get_column("era").unique().to_list():
+        vals = out.filter(pl.col("era") == era).get_column("prediction").to_numpy()
+        assert abs(float(vals.mean())) < 1e-6
+        assert abs(float(vals.std(ddof=0)) - 1.0) < 1e-6
+
+
+def test_xgb_weights_default_to_equal():
+    train, val = _tiny_train_val()
+    params = {"n_estimators": 10, "max_depth": 2, "learning_rate": 0.1}
+    a = generate_fleet_xgb_predictions(
+        train, val, targets=["target"], feature_cols=["f1"],
+        params=params, seed=42,
+    )
+    b = generate_fleet_xgb_predictions(
+        train, val, targets=["target"], feature_cols=["f1"],
+        params=params, seed=42, target_weights={"target": 2.0},
+    )
+    assert a.equals(b)  # single target: weight value is irrelevant
+
+
+def test_xgb_early_stopping_engages_on_holdout():
+    train, val = _tiny_train_val(eras=tuple(range(1, 25)))
+    params = {
+        "n_estimators": 50, "max_depth": 2, "learning_rate": 0.1,
+        "early_stopping_rounds": 5, "holdout_era_frac": 0.25,
+    }
+    out = generate_fleet_xgb_predictions(
+        train, val, targets=["target"], feature_cols=["f1", "f2", "f3"],
+        params=params, seed=42,
+    )
+    assert out.height == 10
+
+
+def test_xgb_rejects_weight_for_unknown_target():
+    train, val = _tiny_train_val()
+    with pytest.raises(ValueError, match="target_weights"):
+        generate_fleet_xgb_predictions(
+            train, val, targets=["target"], feature_cols=["f1"],
+            params={"n_estimators": 5}, seed=42,
+            target_weights={"bogus": 1.0},
         )
