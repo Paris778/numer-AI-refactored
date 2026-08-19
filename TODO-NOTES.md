@@ -32,3 +32,9 @@ Deliberately deferred — consciously ignored
      > TODO : remove all    │
  │   the legacy stuff and don't use plotly and integrated graphs. Use html css and javascript from scratch. One       │
  │   module is only responsible for front end stuff. Self contained.   
+
+
+ -----------------
+
+ Is there any benefit to the cofig model style ? Why not python files ? 
+ The current config does not allow for custom feature neutralisation , or feature engineering - Refactor potentially 
