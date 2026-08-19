@@ -363,3 +363,35 @@ def test_mmc_degenerate_columns_match_oracle(mutate: str) -> None:
     assert list(custom) == list(official)
     for era in custom:
         assert custom[era] == pytest.approx(official[era], abs=1e-6, nan_ok=True)
+
+
+@pytest.mark.parametrize("mutate", ["duplicate_feature", "constant_feature", "wide_matrix", "nan_feature"])
+def test_fnc_degenerate_features_match_oracle(mutate: str) -> None:
+    rng = np.random.default_rng(20260819)
+    base = _corr_frame()
+    df = base.with_columns(
+        pl.Series("f1", rng.normal(size=base.height), dtype=pl.Float64),
+        pl.Series("f2", rng.normal(size=base.height), dtype=pl.Float64),
+    )
+    feats = ["f1", "f2"]
+    if mutate == "duplicate_feature":
+        df = df.with_columns(pl.col("f1").alias("f1_copy"))
+        feats = ["f1", "f1_copy"]
+    elif mutate == "constant_feature":
+        df = df.with_columns(pl.lit(0.5).alias("fconst"))
+        feats = ["f1", "fconst"]
+    elif mutate == "wide_matrix":
+        df = df.with_columns(
+            [pl.Series(f"w{i}", rng.normal(size=df.height), dtype=pl.Float64) for i in range(12)]
+        )
+        feats = ["f1", "f2", *[f"w{i}" for i in range(12)]]
+    elif mutate == "nan_feature":
+        df = df.with_columns(
+            pl.when(pl.col("id").str.ends_with("_0")).then(None).otherwise(pl.col("f1")).alias("f1")
+        )
+
+    custom = EvaluationEngine("custom").per_era_fnc(df, pred_col="pred", feature_cols=feats, target_col="target")
+    official = EvaluationEngine("official").per_era_fnc(df, pred_col="pred", feature_cols=feats, target_col="target")
+    assert list(custom) == list(official)
+    for era in custom:
+        assert custom[era] == pytest.approx(official[era], abs=1e-5, nan_ok=True)
