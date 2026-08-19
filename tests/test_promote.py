@@ -533,3 +533,80 @@ def test_ram_guard_over_working_set_raises(tmp_path: Path, monkeypatch: pytest.M
     (reports / "ram_curve.json").write_text(_huge_curve(commit_slope=0.0, ws_slope=1e9), encoding="utf-8")
     with pytest.raises(RuntimeError, match="would thrash"):
         _ram_guard(_config(data), tmp_path / "models")
+
+
+def _write_estimate(reports: Path, payload: dict) -> None:
+    reports.mkdir(parents=True, exist_ok=True)
+    (reports / "full_version_ram_estimate.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_ram_guard_estimate_path_passes_when_under_guard(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """No curve on disk → single-point estimate, through-origin extrapolation."""
+    from nmr.promote import _ram_guard
+
+    data = _make_data(tmp_path / "data")
+    _write_estimate(
+        tmp_path / "reports",
+        {
+            "peak_commit_bytes": 1,
+            "peak_bytes": 1,
+            "parent_peak_commit_bytes": 0,
+            "parent_peak_bytes": 0,
+            "train_validation_rows": 1,
+        },
+    )
+    with caplog.at_level(logging.WARNING, logger="nmr.promote"):
+        _ram_guard(_config(data), tmp_path / "models")  # must not raise
+    assert "single-point estimate extrapolation" in caplog.text
+
+
+def test_ram_guard_estimate_missing_dual_metric_skips(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from nmr.promote import _ram_guard
+
+    data = _make_data(tmp_path / "data")
+    _write_estimate(tmp_path / "reports", {"peak_bytes": 1, "parent_peak_bytes": 0, "train_validation_rows": 1})
+    with caplog.at_level(logging.WARNING, logger="nmr.promote"):
+        _ram_guard(_config(data), tmp_path / "models")  # must not raise
+    assert "lacks dual-metric data" in caplog.text
+
+
+def test_ram_guard_corrupt_curve_falls_back_to_estimate(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from nmr.promote import _ram_guard
+
+    data = _make_data(tmp_path / "data")
+    reports = tmp_path / "reports"
+    reports.mkdir(parents=True)
+    (reports / "ram_curve.json").write_text("{corrupt", encoding="utf-8")
+    _write_estimate(
+        reports,
+        {
+            "peak_commit_bytes": 1,
+            "peak_bytes": 1,
+            "parent_peak_commit_bytes": 0,
+            "parent_peak_bytes": 0,
+            "train_validation_rows": 1,
+        },
+    )
+    with caplog.at_level(logging.WARNING, logger="nmr.promote"):
+        _ram_guard(_config(data), tmp_path / "models")  # must not raise
+    assert "unreadable RAM curve" in caplog.text
+
+
+def test_ram_guard_corrupt_estimate_skips(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    from nmr.promote import _ram_guard
+
+    data = _make_data(tmp_path / "data")
+    reports = tmp_path / "reports"
+    reports.mkdir(parents=True)
+    (reports / "full_version_ram_estimate.json").write_text("{corrupt", encoding="utf-8")
+    with caplog.at_level(logging.WARNING, logger="nmr.promote"):
+        _ram_guard(_config(data), tmp_path / "models")  # must not raise
+    assert "unreadable RAM estimate" in caplog.text
