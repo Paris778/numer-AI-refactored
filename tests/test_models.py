@@ -1140,3 +1140,132 @@ def test_xgboost_param_translation_branches() -> None:
     )
     p = orch_md._resolved_params(use_gpu=False, n_features=10)
     assert p["min_child_weight"] == 20.0
+
+
+def test_assert_fold_is_leakage_safe_raises() -> None:
+    from nmr.splitter import Fold
+
+    orch = ModelOrchestrator(
+        ModelConfig(backend="lightgbm", preset="fast", params=_tiny_model_params()),
+        seed=7,
+    )
+    with pytest.raises(ValueError, match="reuses eras"):
+        orch._assert_fold_is_leakage_safe(Fold(0, ("1", "2", "3"), ("3", "4")), purge_eras=1)
+    with pytest.raises(ValueError, match="degenerate"):
+        orch._assert_fold_is_leakage_safe(Fold(0, (), ("3",)), purge_eras=1)
+    with pytest.raises(ValueError, match="strictly time-ordered"):
+        orch._assert_fold_is_leakage_safe(Fold(0, ("3",), ("2",)), purge_eras=1)
+
+
+def test_full_history_subprocess_child_error_raises(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A child that reports ("error", ...) — here because its data dir does not
+    exist — must surface as RuntimeError in the parent (models.py:722-725)."""
+    from nmr.config import DataConfig
+
+    monkeypatch.setenv("NMR_FULL_HISTORY_SPAWN_MIN_BYTES", "1")
+    orch = ModelOrchestrator(
+        ModelConfig(backend="lightgbm", preset="fast", params=_tiny_model_params()),
+        seed=7,
+    )
+    data_cfg = DataConfig(version="vtest", data_dir=tmp_path / "missing")
+    with pytest.raises(RuntimeError, match="subprocess fit failed"):
+        orch._fit_full_history_subprocess(
+            _model_frame(n_eras=4, rows_per_era=4),
+            feature_cols=["f1", "f2", "f3"],
+            target_col="target",
+            era_col="era",
+            data=data_cfg,
+        )
+
+
+def test_machine_memory_limits_shape() -> None:
+    from nmr.models import _machine_memory_limits
+
+    physical, commit_limit = _machine_memory_limits()
+    assert physical is None or physical > 0
+    assert commit_limit is None or commit_limit > 0
+
+
+def test_peak_memory_counters_and_wrapper() -> None:
+    from nmr.models import _peak_memory_counters, _peak_rss_bytes
+
+    working_set, commit = _peak_memory_counters()
+    assert working_set is None or working_set > 0
+    assert commit is None or commit > 0
+    assert _peak_rss_bytes() == working_set
+
+
+def test_peak_memory_counters_zero_return(monkeypatch: pytest.MonkeyPatch) -> None:
+    """K32GetProcessMemoryInfo returning 0 → (None, None) (models.py:844)."""
+    import ctypes
+    import sys
+
+    if sys.platform != "win32":
+        pytest.skip("Windows K32GetProcessMemoryInfo branch")
+    from nmr.models import _peak_memory_counters
+
+    kernel32 = ctypes.windll.kernel32
+    fake = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t)(
+        lambda *args: 0
+    )
+    monkeypatch.setattr(kernel32, "K32GetProcessMemoryInfo", fake)
+    assert _peak_memory_counters() == (None, None)
+
+
+def test_full_history_fit_worker_in_process_ok_and_error(tmp_path) -> None:
+    """The spawned worker is a plain function: call it in-process so its code is
+    actually counted by coverage (in a spawned child it never would be)."""
+    import json
+    import queue
+
+    import cloudpickle
+
+    from nmr.models import _full_history_fit_worker
+
+    data_root = tmp_path / "data" / "vtest"
+    data_root.mkdir(parents=True)
+    (data_root / "features.json").write_text(
+        json.dumps({"feature_sets": {"small": ["f1", "f2", "f3"]}, "targets": ["target"]}),
+        encoding="utf-8",
+    )
+    df = _model_frame(n_eras=10, rows_per_era=6)
+    df.write_parquet(data_root / "train.parquet")
+
+    spec = {
+        "data": {
+            "version": "vtest",
+            "feature_set": "small",
+            "feature_subset": None,
+            "targets": ("target",),
+            "data_dir": str(data_root.parent),
+            "supplemental_feature_sets": None,
+        },
+        "feature_cols": ["f1", "f2", "f3"],
+        "target_col": "target",
+        "era_col": "era",
+        "backend": "lightgbm",
+        "preset": "fast",
+        "params": _tiny_model_params(),
+        "seed": 7,
+        "include_validation": False,
+    }
+    q = queue.Queue()
+    _full_history_fit_worker(spec, q)
+    status, payload = q.get_nowait()
+    assert status == "ok", payload
+    model_bytes, working_set, commit = payload
+    assert working_set is None or working_set > 0
+    assert commit is None or commit > 0
+    model = cloudpickle.loads(model_bytes)
+    preds = np.asarray(model.predict(df.select(["f1", "f2", "f3"]).to_numpy()), dtype=float)
+    assert preds.shape == (df.height,)
+    assert np.isfinite(preds).all()
+
+    broken = {**spec, "data": {**spec["data"], "data_dir": str(tmp_path / "nope")}}
+    q2 = queue.Queue()
+    _full_history_fit_worker(broken, q2)
+    status2, payload2 = q2.get_nowait()
+    assert status2 == "error"
+    assert "FileNotFoundError" in payload2
