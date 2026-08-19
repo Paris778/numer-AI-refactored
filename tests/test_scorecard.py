@@ -10,6 +10,7 @@ import polars as pl
 import pytest
 from numerai_tools.scoring import correlation_contribution
 
+from nmr._transforms import rank_gaussianize, tie_kept_rank
 from nmr.evaluation import EvaluationEngine
 from nmr.inference import block_bootstrap_ci, era_series_stats, resolve_block_len
 from nmr.payout import (
@@ -657,3 +658,123 @@ def test_capital_metrics_flow_from_payout() -> None:
     assert score.sim_capital_utilization == pytest.approx(
         expected_sim.avg_capital_utilization
     )
+
+
+def test_final_rank_step_is_scorecard_neutral_except_exposure() -> None:
+    """D0 parity proof (SEV-1 #14 fix): per-era ``tie_kept_rank`` of the deploy
+    output leaves every rank-invariant scorecard cell identical, and moves
+    ``max_feature_exposure`` (the one raw-Pearson cell) by design."""
+    rng = np.random.default_rng(3)
+    rows: list[dict[str, float | str]] = []
+    for era_num in range(1, 11):
+        era = f"{era_num:04d}"
+        latent = rng.normal(size=40)
+        for idx in range(40):
+            target = float(np.clip(0.5 + 0.2 * latent[idx], 0.0, 1.0))
+            rows.append({
+                "era": era, "id": f"{era}_{idx:03d}",
+                "prediction": float(0.5 * latent[idx] + 0.5 * rng.normal()),
+                "target": target,
+                "numerai_meta_model": float(0.55 * target + 0.45 * rng.normal()),
+                "f1": float(rng.normal()), "f2": float(rng.normal()),
+                "f3": float(rng.normal()),
+            })
+    full = pl.DataFrame(rows)
+    predictions = full.select(["era", "id", "prediction"])
+    meta_model = full.select(["era", "id", "numerai_meta_model"])
+    targets = full.select(["era", "id", "target"])
+    features = full.select(["era", "id", "f1", "f2", "f3"])
+
+    def _per_era_rank(frame: pl.DataFrame) -> pl.DataFrame:
+        eras = frame.get_column("era").unique().to_list()
+        return pl.concat(
+            [
+                frame.filter(pl.col("era") == era).with_columns(
+                    pl.Series(
+                        "prediction",
+                        tie_kept_rank(
+                            frame.filter(pl.col("era") == era)
+                            .get_column("prediction")
+                            .to_numpy()
+                        ),
+                    )
+                )
+                for era in eras
+            ]
+        ).sort(["era", "id"])
+
+    def _score(preds: pl.DataFrame) -> MetricScorecard:
+        return evaluate_model(
+            preds,
+            meta_model=meta_model,
+            benchmarks=None,
+            features=features,
+            targets=targets,
+            n_trials=1,
+            seed=11,
+            benchmark_col=None,
+            n_boot=10,
+            min_overlap_eras=10,
+        )
+
+    pre = _score(predictions)
+    post = _score(_per_era_rank(predictions))
+
+    invariant = [
+        "corr", "mmc", "fnc", "corr_sharpe_ac", "cwmm",
+        "std_corr", "turnover_mean", "turnover_std", "cagr_1y",
+        "gain_to_pain_ratio", "kelly_fraction", "max_drawdown",
+        "sortino", "calmar", "burn_rate", "mean_payout",
+        "rank_scalar", "deflated_sharpe", "n_eras",
+    ]
+    for name in invariant:
+        assert getattr(pre, name) == getattr(post, name), f"{name} changed"
+
+    # max_feature_exposure is raw Pearson on the prediction column: the rank
+    # step changes it by design (the submitted vector is not feature-neutral,
+    # inherent to the official neutralize -> rank approach). Fixture is
+    # unsaturated (continuous features) so the delta is measurable.
+    assert pre.max_feature_exposure != post.max_feature_exposure
+    assert post.max_feature_exposure < 0.99  # not saturated
+
+    # Mathematical core: rank_gaussianize is invariant to a prior
+    # tie_kept_rank, so FNC (which rank-gaussianizes first) is unaffected.
+    sample = rng.normal(size=200)
+    assert np.allclose(
+        rank_gaussianize(tie_kept_rank(sample)), rank_gaussianize(sample)
+    )
+
+
+def test_degenerate_eras_are_surfaced_not_silent() -> None:
+    """A4 (audit SEV-3): degenerate eras score 0.0 at the engine boundary but
+    must be distinguishable from genuine zero-IC eras — the scorecard exposes
+    them via degenerate_eras / n_degenerate_eras, with values unchanged."""
+    rows: list[dict] = []
+    for era_num in range(1, 11):
+        era = f"{era_num:04d}"
+        constant = era_num == 1
+        for j in range(4):
+            pred = 0.5 if constant else 0.2 * era_num + 0.03 * j
+            rows.append({
+                "era": era, "id": f"{era}_{j}",
+                "prediction": float(pred),
+                "numerai_meta_model": float(0.4 + 0.05 * era_num + 0.03 * j),
+                "target": float((era_num + j) % 4) / 4.0,
+                "f1": float(j % 2), "f2": float(j % 3),
+            })
+    full = pl.DataFrame(rows)
+    predictions = full.select(["era", "id", "prediction"])
+    meta_model = full.select(["era", "id", "numerai_meta_model"])
+    targets = full.select(["era", "id", "target"])
+    features = full.select(["era", "id", "f1", "f2"])
+
+    score = evaluate_model(
+        predictions, meta_model=meta_model, benchmarks=None,
+        features=features, targets=targets, n_trials=1, seed=3,
+        n_boot=5, min_overlap_eras=10,
+    )
+    assert score.degenerate_eras == ("0001",)  # zero-variance predictions
+    assert score.n_degenerate_eras == 1
+    assert score.corr.n_eras == 10  # degenerate era still counted, value 0.0
+    frame = score.to_frame()
+    assert frame.row(0, named=True)["n_degenerate_eras"] == 1

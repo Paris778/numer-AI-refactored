@@ -241,7 +241,20 @@ def fleet_summary(
                     scorecard.get("deflated_sharpe") is not None
                     and float(scorecard["deflated_sharpe"]) >= dsr_confidence
                 ),
-                "max_feature_exposure": scorecard.get("max_feature_exposure"),
+                # Exposure definition boundary (SEV-1 #14): legacy rows (no
+                # scorecard_prediction_scale marker) measured ~machine-epsilon
+                # on unranked preds; null them rather than compare with
+                # post-fix runs. Same rule as the dashboard unified schema.
+                "max_feature_exposure": (
+                    scorecard.get("max_feature_exposure")
+                    if manifest.get("scorecard_prediction_scale") == "percentile_rank"
+                    else None
+                ),
+                "max_feature_exposure_reason": (
+                    None
+                    if manifest.get("scorecard_prediction_scale") == "percentile_rank"
+                    else "pre_rank_fix_definition"
+                ),
                 "oof_device": manifest.get("oof_device"),
                 "preset": model_cfg.get("preset"),
                 "feature_set": data_cfg.get("feature_set"),

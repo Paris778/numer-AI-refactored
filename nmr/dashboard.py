@@ -71,6 +71,7 @@ UNIFIED_SCHEMA = pl.Schema(
         "mmc_down_reason": pl.String, "turnover_mean": pl.Float64,
         "n_eras": pl.Int64, "rank_scalar": pl.Float64, "cvar5": pl.Float64,
         "burn_rate": pl.Float64, "max_feature_exposure": pl.Float64,
+        "max_feature_exposure_reason": pl.String,
         "has_bmc": pl.Boolean, "has_horizon": pl.Boolean,
         "has_perturb": pl.Boolean, "has_regime": pl.Boolean,
         "tier": pl.Int64, "run_dir": pl.String,
@@ -176,6 +177,10 @@ def load_benchmark_frame(benchmark_path: Path) -> pl.DataFrame:
                 "cvar5": row.get("cvar5"),
                 "burn_rate": row.get("burn_rate"),
                 "max_feature_exposure": row.get("max_feature_exposure"),
+                # Benchmark cells keep their exposure values (a designed mixed
+                # population — null models are legitimately exposed); the
+                # definition is unranked, recorded explicitly.
+                "max_feature_exposure_reason": "unranked_predictions",
                 "has_bmc": row.get("bmc") is not None,
                 "has_horizon": row.get("horizon_model_sharpe_20") is not None,
                 "has_perturb": row.get("perturb_ceiling_stability") is not None,
@@ -274,7 +279,21 @@ def load_unified_leaderboard(
                 "rank_scalar": scorecard.get("rank_scalar"),
                 "cvar5": scorecard.get("cvar5"),
                 "burn_rate": scorecard.get("burn_rate"),
-                "max_feature_exposure": scorecard.get("max_feature_exposure"),
+                # Exposure definition boundary (SEV-1 #14): post-fix runs
+                # (scorecard_prediction_scale=percentile_rank) measure exposure
+                # on the ranked (0,1) vector Numerai receives; legacy rows
+                # measured ~machine-epsilon on unranked neutralized preds and
+                # must not be compared with them — null + documented reason.
+                "max_feature_exposure": (
+                    scorecard.get("max_feature_exposure")
+                    if manifest.get("scorecard_prediction_scale") == "percentile_rank"
+                    else None
+                ),
+                "max_feature_exposure_reason": (
+                    None
+                    if manifest.get("scorecard_prediction_scale") == "percentile_rank"
+                    else "pre_rank_fix_definition"
+                ),
                 "has_bmc": scorecard.get("bmc") is not None,
                 "has_horizon": scorecard.get("horizon_model_sharpe_20") is not None,
                 "has_perturb": scorecard.get("perturb_ceiling_stability") is not None,
@@ -328,11 +347,14 @@ _GATE_THRESHOLD_ATTRS = {
     "corr": "corr_min",
     "corr_sharpe_ac": "corr_sharpe_ac_min",
     "fnc": "fnc_min",
-    "deflated_sharpe": "deflated_sharpe_min",
     "gain_to_pain_ratio": "gain_to_pain_min",
     "cagr_1y": "cagr_min",
 }
-_GATE_FIELDS = ("corr", "corr_sharpe_ac", "fnc", "deflated_sharpe",
+# A6 (audit SEV-2 #4): deflated_sharpe is display-only — no search history
+# exists at gate time to bind deflation to, so gating on it was false
+# assurance. The dashboard's CAPITAL READY badge must agree with the benchmark
+# gate, which no longer checks it.
+_GATE_FIELDS = ("corr", "corr_sharpe_ac", "fnc",
                 "gain_to_pain_ratio", "cagr_1y", "turnover_mean")
 _STATUS_SCHEMA = pl.Schema(
     {"model_id": pl.String, "status": pl.String,

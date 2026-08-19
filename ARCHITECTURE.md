@@ -64,8 +64,8 @@ Frozen dataclasses; `__post_init__` validates enums, non-negativity, and non-emp
 
 | Section | Fields (defaults) | Valid values |
 |---|---|---|
-| `data: DataConfig` | `version="v5.3"`, `feature_set="small"`, `feature_subset=None`, `supplemental_feature_sets=None`, `targets=("target",)`, `data_dir=REPO_ROOT/"data"` | feature_set ∈ `("small", "medium", "all")`; feature_subset: any `features.json` set name or `None` (validated at ingestion, §P); supplemental_feature_sets: JSON path merged into the set registry (collision ⇒ `ValueError`, §P) |
-| `split: SplitConfig` | `scheme="walk_forward"`, `purge_eras=8`, `embargo_eras=4`, `n_folds=4` | scheme ∈ `("walk_forward", "anchor")` |
+| `data: DataConfig` | `version="v5.3"`, `feature_set="small"`, `feature_subset=None`, `supplemental_feature_sets=None`, `targets=("target",)`, `horizon="20D"`, `data_dir=REPO_ROOT/"data"` | feature_set ∈ `("small", "medium", "all")`; feature_subset: any `features.json` set name or `None` (validated at ingestion, §P); supplemental_feature_sets: JSON path merged into the set registry (collision ⇒ `ValueError`, §P); horizon ∈ `("20D", "60D")` with the purge law (below) |
+| `split: SplitConfig` | `scheme="walk_forward"`, `purge_eras=8`, `embargo_eras=0`, `n_folds=4` | scheme ∈ `("walk_forward", "anchor")`; **`embargo_eras` must be 0 — non-zero raises (A2, 2026-08-18)** |
 | `model: ModelConfig` | `backend="lightgbm"`, `preset="fast"`, `params={}` | backend ∈ `("lightgbm", "xgboost", "catboost")`, preset ∈ `("fast", "standard", "deep")` |
 | `evaluation: EvalConfig` | `backend="custom"`, `main_target="target"`, `metrics=("corr","mmc","fnc","sharpe")`, `validation_scorecard=True` | backend ∈ `("custom", "official")`; metrics ⊆ `("corr","mmc","fnc","sharpe")` (unknown names ⇒ `ValueError` at load — a typo must not silently compute nothing) |
 | `risk: RiskConfig` | `neutralization_proportion=1.0`, `cache_max_bytes=None` | proportion ∈ [0, 1]; `cache_max_bytes` ≥ 0 or None |
@@ -94,7 +94,7 @@ Geometry: eras deduped and sorted numerically (non-numeric ⇒ `ValueError`). Wi
 - **walk_forward** fold *i*: val = `eras[prefix + i·val_size : prefix + (i+1)·val_size]`, train = `eras[: val_start - purge_eras]`.
 - **anchor**: single fold with `k=1` geometry — one train prefix, one validation window.
 
-Invariants validated on every fold: `max(train) < min(val)`, exactly `purge_eras` eras excluded between them, no era reuse, disjoint validation windows. `embargo_eras` is accepted but **structurally inert** (see [`AGENTS.md`](AGENTS.md#8-critical-operational-hazards)). Purge/embargo convention (8/16 operational vs 4/16 minimum): [docs/DOCS_README.md](docs/DOCS_README.md) §3; official benchmark walk-forward table (156-era blocks): [docs/01-canon/models.md](docs/01-canon/models.md).
+Invariants validated on every fold: `max(train) < min(val)`, exactly `purge_eras` eras excluded between them, no era reuse, disjoint validation windows. `embargo_eras` is **rejected at load when non-zero** (A2, 2026-08-18 — it was structurally inert). Purge/horizon leakage law (A1, 2026-08-18): `data.horizon` (`20D`/`60D`) requires `purge_eras ≥ 8`/`≥ 16` — enforced data-aware via `enforce_purge_horizon_law(era_count, config)` at run time when the dataset has ≥ 2× the floor's eras (real-data regime); target names encoding a horizon (`target_<name>_20/60`) must agree with the declared horizon at config load. Purge/embargo convention: [docs/DOCS_README.md](docs/DOCS_README.md) §3; official benchmark walk-forward table (156-era blocks): [docs/01-canon/models.md](docs/01-canon/models.md).
 
 ### D. Transforms — `nmr/_transforms.py`
 
@@ -145,8 +145,8 @@ Per-era pseudo-inverse cache: key = SHA256 of `{era, sorted feature_cols, row_co
 `ModelOrchestrator(config: ModelConfig, *, seed=42)`:
 - `train_cross_validation(df, *, feature_cols, target_col, splitter, era_col) -> CVResult(oof, models)` — per fold: fit on train eras, predict val eras, stack OOF.
 - `train_anchor_fold(...) -> (model, val_predictions)` — single anchor fold (research use; no longer used for deployment).
-- `train_full_history(df, *, feature_cols, target_col, era_col="era") -> model` — one CPU-only model fit on every era, with null/non-finite targets dropped (logged count; `ValueError` if nothing remains). Used by the deployment pipeline so the artifact reproduces identically on any hosted runtime.
-- **Spawned full-history fits:** fits whose float32 feature matrix exceeds `_FULL_HISTORY_SUBPROCESS_MIN_BYTES` (8 GiB) run in a fresh spawn process with bounded commit; the parent receives `(status, payload)` via `_receive_subprocess_result`, which polls child liveness (5 s poll interval) while awaiting the result queue and drains 5 s after child exit — a child that dies before reporting raises `RuntimeError` promptly instead of hanging the parent forever; a still-alive child is waited on indefinitely (a legitimate full-history fit runs for hours, so no overall timeout).
+- `train_full_history(df, *, feature_cols, target_col, era_col="era", include_validation=False) -> model` — one CPU-only model fit on every era, with null/non-finite targets dropped (logged count; `ValueError` if nothing remains). Used by the deployment pipeline so the artifact reproduces identically on any hosted runtime. `include_validation` (promotion writer): when the fit spawns, the child re-reads train+validation concatenated so the full version sees the validation eras.
+- **Spawned full-history fits:** fits whose float32 feature matrix exceeds `_FULL_HISTORY_SUBPROCESS_MIN_BYTES` (8 GiB; env override `NMR_FULL_HISTORY_SPAWN_MIN_BYTES` lets the rehearsal force the spawn path at small scale) run in a fresh spawn process with bounded commit; the parent receives `(status, (model_bytes, peak_ws, peak_commit))` via `_receive_subprocess_result`, which polls child liveness (5 s poll interval) while awaiting the result queue and drains 5 s after child exit — a child that dies before reporting raises `RuntimeError` promptly instead of hanging the parent forever; a still-alive child is waited on indefinitely (a legitimate full-history fit runs for hours, so no overall timeout). The worker reports its measured peak working set AND commit charge (`_peak_memory_counters`, stdlib-only) — the promotion RAM guard gates on commit + WS.
 - **Memory discipline (recorded 2026-08-10):** `coerce_float32_features(df, feature_cols)` casts exactly-representable schemas (Int*/UInt*/Float32 only — the v5.x integer bins) to a single Float32 polars block; `_feature_frame` returns its **zero-copy numpy view** (polars→numpy verified 0-copy; pandas is skipped — polars→pandas goes through pyarrow and allocates a second full copy, ~36 GiB at 3,555 × 2.1M, the `lgbm_v1` full-history OOM). Float64/mixed schemas pass through untouched. Fold and full-history predicts run in era-batches (`_predict_model_chunked`, 20 eras/chunk) — a full fold-val matrix at 3,555 features (~4.9 GiB float32) exceeds the 4 GiB GPU VRAM (`xgb_v1` CUDA OOM). The **validation stage** predicts in era-batches (`runner._predict_in_era_batches`, 40 eras/chunk) so the deploy closure's float64 `to_numpy` stays ≤ ~1.7 GiB. All paths are bit-identical to the pre-optimization code (Int8 bins exact in float32; per-era closure ops order-independent) — determinism tests cover them.
 - Fold leakage-safety re-asserted at train time (`_assert_fold_is_leakage_safe(fold, purge_eras=...)`): before fitting each fold it enforces no era reuse, non-empty sides, strict time-ordering, and `min(val) − max(train) > purge_eras` (gap ≤ `purge_eras` ⇒ `ValueError`).
 - `_fit_predict_fold` drops null/non-finite target rows from the train slice before fitting (logged dropped count; `ValueError` if nothing remains).
@@ -234,9 +234,12 @@ enum-validated). `BenchmarkHierarchy.run()` scores every cell plus the
 `v53_lgbm_ender60` reference column through `evaluate_model()` and evaluates
 three hard gates: `assert_tier0_null_floor` (|CORR| ≤ 0.005, |AC-Sharpe| ≤ 0.15
 over the three structural nulls; no DSR check — null DSRs span 0.11–1.0),
-`assert_tier4_gate` (7 production thresholds in `configs/benchmarks/tier4_gate.yaml`;
+`assert_tier4_gate` (6 production thresholds in `configs/benchmarks/tier4_gate.yaml`;
 turnover is structurally unavailable on v5.3 — reported as measured=None/pass=None,
-excluded from hard failure), and `assert_hierarchy_monotone` (per-tier max of
+excluded from hard failure; **`deflated_sharpe` is display-only — pass=None, A6 2026-08-18**:
+at n_trials=1 no deflation occurs and no search history exists at gate time, so gating
+on it was false assurance; search-aware DSR lives in `sweep_dsr`/`campaign_evidence`),
+and `assert_hierarchy_monotone` (per-tier max of
 `corr.value`, T0 < T1 < T2 < T3 ≤ T4, atol 1e-5; `rank_scalar` selectable via
 `metric=`). Tier 1–3 fits use `train_validation_purged_split()` (exact 8-era
 buffer, strict ordering); multi-target blends are equal-weight in the rank-Gaussian
@@ -247,7 +250,7 @@ FNE is FNC@medium (full 3,555 is prohibited by the feature-universe policy).
 
 ### N. Runner, Registry, Submission, Deployment
 
-**`nmr/runner.py`** — stage order in §1 diagram. `RunResult(run_id, oof, metrics, artifact, manifest, scorecard=None, validation_predictions=None)`. `run_id` = SHA256 of `{config (data_dir/artifacts_dir/supplemental_feature_sets paths stripped; when supplemental_feature_sets is configured, a supplemental_feature_sets_sha256 of the resolved file's CRLF-normalized contents is included — identical files at different roots hash identically, and editing the file changes run identity), data_version, code_fingerprint, environment_fingerprint}` where code fingerprint = SHA256 over sorted `nmr/*.py` names+contents and environment = Python + versions of numpy/polars/pandas/lightgbm/xgboost (plus `catboost` when `model.backend == "catboost"` — config-aware, §G/§S). Ensemble weights are learned on the validation eras of folds `0..K-2` via `EnsembleConfig.method`; when `n_folds < 2` they fall back to uniform `1/n_components` with a logged warning. OOF metrics are computed on the **final fold's** validation eras only (`scoring_eras`), so the OOF scorecard carries no in-sample weight-fitting bias; the returned OOF frame itself still spans every fold. The manifest records `weights`, `weight_learning_eras`, `scoring_eras`, and `summary_metrics` (OOF aggregates for each requested non-MMC metric). The deploy pipeline is built **at most once** per run, when `deploy or evaluation.validation_scorecard` (`_build_deploy_pipeline`: per-target all-eras CPU-only models + rank-gaussianize + learned weights + neutralize; no `splitter`), and that single closure is shared by the validation stage and the deploy block — never retrained. The **validation stage** (`_run_validation_stage`) loads `validation.parquet` plus `meta_model.parquet` (required — missing ⇒ `FileNotFoundError`) and `validation_benchmark_models.parquet` (optional — BMC/horizon disabled when absent), with target columns = config targets ∪ `main_target` ∪ **every `target`/`target_*` column in the validation schema** (so horizon target pairs reach the scorecard’s inference — loading only config targets silently disabled horizon stability on every runner scorecard), drops the first `split.purge_eras` validation eras (20D-target overlap), scores the shared pipeline, and produces a full `MetricScorecard` with `benchmark_col` = first non-join benchmark column (same convention as `benchmark_runner`); the run manifest records `validation_purge_dropped_first_eras`. Then `_serialize_predict_artifact(predict_fn, model_meta, artifact_path)` serializes (never retrains) to `artifacts/runs/{run_id}/predict.pkl` + manifest. The artifact's `models` metadata carries `targets`/`weights`/`proportion`/`geometry="all_eras"`/`device="cpu"`/`feature_names`; the run manifest adds `pipeline_device="cpu"`.
+**`nmr/runner.py`** — stage order in §1 diagram. `RunResult(run_id, oof, metrics, artifact, manifest, scorecard=None, validation_predictions=None)`. `run_id` = SHA256 of `{config (data_dir/artifacts_dir/supplemental_feature_sets paths stripped; when supplemental_feature_sets is configured, a supplemental_feature_sets_sha256 of the resolved file's CRLF-normalized contents is included — identical files at different roots hash identically, and editing the file changes run identity), data_version, data_fingerprint, code_fingerprint, environment_fingerprint}` where code fingerprint = SHA256 over sorted `nmr/*.py` names+contents and environment = Python + versions of numpy/polars/pandas/lightgbm/xgboost/optuna (plus `catboost` when `model.backend == "catboost"` — config-aware, §G/§S). **data_fingerprint** (B1, 2026-08-18) = SHA256 over per-file snapshots of `train.parquet` + `validation.parquet` (+ `meta_model.parquet`/`validation_benchmark_models.parquet` when `evaluation.validation_scorecard` — config-aware): `{name, footer schema, footer row count, era min, era max, era count}` + `features.json` content SHA256; byte size excluded from the hash (cache key only, cached under `artifacts/cache/`); detection limits documented (restated feature values within unchanged schema/row-count/era-stats are NOT detected); missing data files raise (run_id requires the data snapshot). The run_id scheme bumped once on 2026-08-18 (data term + optuna): future run_ids differ from pre-bump legacy rows; registry rows stay immutable. Ensemble weights are learned on the validation eras of folds `0..K-2` via `EnsembleConfig.method`; when `n_folds < 2` they fall back to uniform `1/n_components` with a logged warning. OOF metrics are computed on the **final fold's** validation eras only (`scoring_eras`), so the OOF scorecard carries no in-sample weight-fitting bias; the returned OOF frame itself still spans every fold. The manifest records `weights`, `weight_learning_eras`, `scoring_eras`, and `summary_metrics` (OOF aggregates for each requested non-MMC metric). The deploy pipeline is built **at most once** per run, when `deploy or evaluation.validation_scorecard` (`_build_deploy_pipeline`: per-target all-eras CPU-only models + rank-gaussianize + learned weights + neutralize; no `splitter`), and that single closure is shared by the validation stage and the deploy block — never retrained. The **validation stage** (`_run_validation_stage`) loads `validation.parquet` plus `meta_model.parquet` (required — missing ⇒ `FileNotFoundError`) and `validation_benchmark_models.parquet` (optional — BMC/horizon disabled when absent), with target columns = config targets ∪ `main_target` ∪ **every `target`/`target_*` column in the validation schema** (so horizon target pairs reach the scorecard’s inference — loading only config targets silently disabled horizon stability on every runner scorecard), drops the first `split.purge_eras` validation eras (20D-target overlap), scores the shared pipeline, and produces a full `MetricScorecard` with `benchmark_col` = first non-join benchmark column (same convention as `benchmark_runner`); the run manifest records `validation_purge_dropped_first_eras`. Then `_serialize_predict_artifact(predict_fn, model_meta, artifact_path)` serializes (never retrains) to `artifacts/runs/{run_id}/predict.pkl` + manifest. The artifact's `models` metadata carries `targets`/`weights`/`proportion`/`geometry="all_eras"`/`device="cpu"`/`feature_names`; the run manifest adds `pipeline_device="cpu"`.
 
 **`nmr/registry.py`** — `RunRegistry(root)`:
 
@@ -404,12 +407,19 @@ Long-running paths print console progress that never enters artifacts: `analyze_
 
 A model **family** is the set of registry runs sharing `manifest.config.run.name`
 (e.g. `brb1-xgb-v6`; duplicate reruns belong to one family). Promotion to a
-**full version** (trained on train+validation, deployed) is marked by a valid
-manifest at `artifacts/models/<family>/full/manifest.json` — manifest
-presence + validity IS the marker. `nmr/families.py` is the read-only
-discovery layer (no writes; the promotion writer is a future workstream).
+**full version** (trained on train+validation, deployed) writes one immutable
+slot per promoted run at `artifacts/models/<family>/full/<run_id>/manifest.json`
+plus an atomic `current.json` pointer (`{"run_id": <64-hex>, "promoted_at": ...}`,
+temp + fsync + `os.replace`) naming the active slot. The pointer + valid slot
+manifest IS the marker. `nmr/families.py` is the read-only discovery layer
+(writes live in `nmr/promote.py`, the promotion writer): resolution is
+pointer-driven — a missing/corrupt/dangling `current.json` fails loud via
+`full_manifest_path` (listing `available_slots`) and yields `None` from the
+tolerant `load_full_version`/`scan_full_versions` scans. Slots are never
+selected by mtime. Old slots remain for rollback; repointing `current.json`
+is a deliberate write.
 
-Manifest schema (`manifest.json`):
+Manifest schema (`manifest.json`, per-slot):
 
 | Field | Requirement |
 |---|---|
@@ -417,12 +427,17 @@ Manifest schema (`manifest.json`):
 | `training_scope` | `"full"` |
 | `promoted_from_run_id` | non-empty registry run id (dangling lineage warns, never invalidates) |
 | `promoted_at` | display metadata only — never in a canonical hash |
-| `artifact_path` | non-empty relative path — no leading `/`, no drive letter, no `..`; resolved against the manifest's own `full/` dir; file must exist (hollow promotions rejected) |
+| `artifact_path` | non-empty relative path — no leading `/`, no drive letter, no `..`; resolved against the manifest's own slot dir; file must exist (hollow promotions rejected) |
 | `config` | snapshot of the promoted research config |
+| `rehearsal` | `true` for a D7 truncated-subset rehearsal artifact — first-class discriminator: excluded from `scan_full_versions`/`family_has_full_version` and NEVER the `current.json` pointer, so it can never be read as a genuine full version at a glance (review directive 2026-08-18) |
+| `training_rows` / `training_era_range` | actual rows + `[min, max]` era range the artifact was fit on — a rehearsal (~68k rows on a subset) is distinguishable from a genuine full version (6.85M rows, `[0001..1231]`) without reading `config_normalizations` |
+| `tier4_gate_passed` / `tier4_receipts` / `override_used` / `config_normalizations` | promotion verdict block — always written by the writer; a failed-gate rehearsal artifact carries `tier4_gate_passed: false` in its own manifest |
 
-Public API: `full_manifest_path`, `load_full_version`, `scan_full_versions`,
+Public API: `full_manifest_path` (fail-loud pointer resolution),
+`available_slots`, `load_full_version`, `scan_full_versions`,
 `family_has_full_version`, `FullVersion`, constants `FAMILY_DIR_NAME` /
-`FULL_DIR_NAME` / `FULL_MANIFEST_NAME` / `DEFAULT_MODELS_DIR`.
+`FULL_DIR_NAME` / `FULL_MANIFEST_NAME` / `CURRENT_POINTER_NAME` /
+`DEFAULT_MODELS_DIR`.
 
 Leaderboard integration (`nmr/dashboard.py`): `UNIFIED_SCHEMA` carries
 `family`, `training_scope` (`"research"` / `"full"`), `has_full_version`.

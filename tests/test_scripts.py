@@ -24,6 +24,24 @@ def test_run_campaign_imports_as_control_plane() -> None:
     import run_campaign  # noqa: F401  (import-time smoke)
 
 
+def test_promote_model_import_surface() -> None:
+    import promote_model  # noqa: F401  (import-time smoke)
+
+    assert callable(promote_model.main)
+
+
+def test_rehearse_promotion_import_surface() -> None:
+    import rehearse_promotion  # noqa: F401  (import-time smoke)
+
+    assert callable(rehearse_promotion.main)
+
+
+def test_real_data_gate_import_surface() -> None:
+    import scripts.real_data_gate as real_data_gate  # noqa: F401
+
+    assert callable(real_data_gate.main)
+
+
 from dashboard_ui import app as dashboard_app  # noqa: E402  (lazy: streamlit is heavy at module load)
 
 
@@ -59,7 +77,9 @@ def _write_registry(tmp_path, entries) -> None:
 
 def test_registry_frame_columns_and_source_tagging(tmp_path) -> None:
     _write_registry(tmp_path, [_registry_entry("a" * 64), _registry_entry("b" * 64, scorecard=False)])
-    frame = dashboard_app.load_registry_frame(tmp_path)
+    # Isolated models dir: the real artifacts/models/ may legitimately hold a
+    # promoted full version (the D7 rehearsal artifact) — tests must not scan it.
+    frame = dashboard_app.load_registry_frame(tmp_path, models_dir=tmp_path / "models")
     assert frame.height == 2
     assert set(frame.columns) >= {
         "model_id", "source", "backend", "preset", "feature_set", "feature_subset",
@@ -94,7 +114,7 @@ def test_leaderboard_bar_labels_unique_on_run_name_collision(tmp_path) -> None:
     for entry in (a, b):
         entry["manifest"]["config"]["run"] = {"name": "same-config-name"}
     _write_registry(tmp_path, [a, b])
-    frame = dashboard_app.load_registry_frame(tmp_path)
+    frame = dashboard_app.load_registry_frame(tmp_path, models_dir=tmp_path / "models")
     assert frame.height == 2
     assert frame.get_column("run_name").n_unique() == 1   # collision is real
     pdf = dashboard_app._shaped_leaderboard_pdf(frame, champion=None)
@@ -130,7 +150,7 @@ def test_benchmarks_and_merge(tmp_path) -> None:
     assert dashboard_app.load_benchmarks(tmp_path / "missing.csv").height == 0
 
     _write_registry(tmp_path, [_registry_entry("d" * 64)])
-    registry = dashboard_app.load_registry_frame(tmp_path)
+    registry = dashboard_app.load_registry_frame(tmp_path, models_dir=tmp_path / "models")
     merged = dashboard_app.merge_leaderboard(registry, benchmarks)
     assert merged.height == 2
     assert set(merged.get_column("source").to_list()) == {"trained", "benchmark"}
@@ -173,7 +193,7 @@ def test_champion_run_id_corrupt_json_returns_none(tmp_path) -> None:
 
 
 def test_load_registry_frame_empty_dir_returns_schema_frame(tmp_path) -> None:
-    frame = dashboard_app.load_registry_frame(tmp_path)
+    frame = dashboard_app.load_registry_frame(tmp_path, models_dir=tmp_path / "models")
     assert frame.height == 0
     assert frame.schema == dashboard_app._LEADERBOARD_SCHEMA
 

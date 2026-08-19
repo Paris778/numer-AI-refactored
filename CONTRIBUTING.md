@@ -27,7 +27,7 @@ All code must follow the eight non-negotiable principles in [`AGENTS.md`](AGENTS
 ### Dependency pinning policy
 
 All direct dependencies in `requirements.txt` are exact-pinned (`==x.y.z`) to the
-versions in the verified venv (2026-08-16: the versions behind the green 828-test
+versions in the verified venv (2026-08-16: the versions behind the green 863-test
 suite). Upgrading a pin is a deliberate act, never a casual `pip install -U`:
 
 1. Edit the pin in `requirements.txt`.
@@ -82,12 +82,12 @@ Useful targeted runs while iterating:
 Before delivering completed work:
 
 ```powershell
-.\.venv\Scripts\python -m ruff check .                   # lint gate, zero findings
-.\.venv\Scripts\python -m pytest -q                      # full suite, zero failures
-.\.venv\Scripts\python benchmark_runner.py --fast-mode   # real-data smoke run (writes artifacts/reports/benchmark_hierarchy_scorecard_smoke.csv + benchmark_gate_report_smoke.csv)
+.\.venv\Scripts\python -m ruff check .                      # lint gate, zero findings
+.\.venv\Scripts\python -m pytest -q                         # full suite, zero failures
+.\.venv\Scripts\python scripts\real_data_gate.py            # real-data gate: oracle parity + real determinism + benchmark --fast-mode, writes artifacts/reports/real_data_gate_receipt.json
 ```
 
-A green unit run without the real-data smoke is not sufficient evidence for changes touching data loading, evaluation, scorecards, or the benchmark harness. Surface any pre-existing failures explicitly — never silently exclude them.
+The **real-data gate replaces the bare smoke run** (E2, 2026-08-18): CI cannot run the v5.3-gated suites (no data on `ubuntu-latest` — they skip there by design, surfaced via `pytest -q -rs`), so CI green is the FAST gate only. The authoritative real-data verification is the local receipt gate: it runs oracle parity (`test_parity.py` + `test_risk_parity.py`), real-data determinism (`test_benchmark_hierarchy.py`), and the benchmark fast-mode smoke, and writes a machine-checkable receipt (`artifacts/reports/real_data_gate_receipt.json` — commands, exit codes, per-suite pass/fail). A green unit run without a fresh receipt is not sufficient evidence for changes touching data loading, evaluation, scorecards, or the benchmark harness. Surface any pre-existing failures explicitly — never silently exclude them.
 
 ---
 

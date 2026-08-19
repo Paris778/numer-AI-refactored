@@ -239,6 +239,21 @@ def test_fleet_summary_columns_and_flags() -> None:
     assert frame.get_column("run_id").to_list() == ["a" * 64, "b" * 64]
 
 
+def test_fleet_summary_exposure_definition_boundary() -> None:
+    """SEV-1 #14 boundary: legacy fleet rows (no scorecard_prediction_scale
+    marker) null their max_feature_exposure with a documented reason instead of
+    reporting ~machine-epsilon beside post-fix values."""
+    legacy = _full_entry("a" * 64, 0.12)
+    postfix = _full_entry("b" * 64, 0.05)
+    postfix["manifest"]["scorecard_prediction_scale"] = "percentile_rank"
+    frame = fleet_summary([legacy, postfix], n_trials=2)
+    rows = {r["run_id"]: r for r in frame.to_dicts()}
+    assert rows["a" * 64]["max_feature_exposure"] is None
+    assert rows["a" * 64]["max_feature_exposure_reason"] == "pre_rank_fix_definition"
+    assert rows["b" * 64]["max_feature_exposure"] == 0.3
+    assert rows["b" * 64]["max_feature_exposure_reason"] is None
+
+
 def test_fleet_summary_flags_legacy_runs_without_scorecard() -> None:
     legacy = {
         "run_id": "c" * 64,

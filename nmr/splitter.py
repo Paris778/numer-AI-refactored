@@ -11,8 +11,9 @@ labels and emits leakage-safe folds with these invariants:
 
 For the forward-only schemes implemented here (``walk_forward`` and ``anchor``),
 training is structurally restricted to eras strictly earlier than validation.
-That makes ``embargo_eras`` inert by design; it is reserved for a future
-two-sided scheme where post-validation training eras can exist.
+``embargo_eras`` was inert by design and is now REJECTED at load (config A2:
+``SplitConfig`` raises on non-zero values) — ``purge_eras`` is the active
+leakage buffer.
 """
 
 from __future__ import annotations
@@ -35,8 +36,9 @@ class Fold:
 class PurgedEraSplitter:
     """Pure era-grouped splitter driven by :class:`SplitConfig`.
 
-    ``embargo_eras`` is accepted for API continuity with the broader roadmap,
-    but it has no effect for the forward-only schemes currently implemented.
+    ``embargo_eras`` is rejected at load (config A2: non-zero raises) — it was
+    inert for the forward-only schemes and is not accepted as a config knob
+    that lies.
     """
 
     def __init__(self, split: SplitConfig) -> None:

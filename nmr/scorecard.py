@@ -108,6 +108,15 @@ class MetricScorecard:
 
     metric_timing_seconds: dict[str, float] | None
     eval_total_seconds: float
+    # A4 (audit SEV-3): era labels whose per-era metrics short-circuited
+    # (degenerate — 0.0-normalized at the engine boundary), so they are
+    # distinguishable from genuine zero-IC eras. Deterministic; the count
+    # enters the canonical frame.
+    degenerate_eras: tuple[str, ...] = ()
+
+    @property
+    def n_degenerate_eras(self) -> int:
+        return len(self.degenerate_eras)
 
     def to_frame(self) -> pl.DataFrame:
         row: dict[str, Any] = {
@@ -140,6 +149,7 @@ class MetricScorecard:
             "sim_portfolio_mdd": self.sim_portfolio_mdd,
             "sim_capital_utilization": self.sim_capital_utilization,
             "quality_metric_total_seconds": self.eval_total_seconds,
+            "n_degenerate_eras": self.n_degenerate_eras,
         }
 
         metric_timings = self.metric_timing_seconds or {}
@@ -698,6 +708,22 @@ def evaluate_model(
 
     eval_total_seconds = round(time.perf_counter() - eval_start, 6)
 
+    t0 = time.perf_counter()
+    # A4 (audit SEV-3): surface the eras that short-circuited (degenerate —
+    # 0.0-normalized at the engine boundary) so they are distinguishable from
+    # genuine zero-IC eras. Values are unchanged; only visibility is added.
+    degenerate_eras = tuple(
+        evaluator.degenerate_eras(
+            base,
+            era_col=era_col,
+            pred_col=pred_col,
+            target_col=main_target,
+            meta_col=meta_col,
+            feature_cols=feature_cols,
+        )
+    )
+    _mark("degenerate_eras", t0)
+
     return MetricScorecard(
         model_id=model_id,
         n_eras=payout.n_eras,
@@ -742,4 +768,5 @@ def evaluate_model(
         sim_capital_utilization=payout.overlapping_sim.avg_capital_utilization,
         metric_timing_seconds=metric_timing_seconds,
         eval_total_seconds=eval_total_seconds,
+        degenerate_eras=degenerate_eras,
     )

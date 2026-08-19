@@ -18,7 +18,7 @@ data:
 split:
   scheme: walk_forward      # walk_forward | anchor
   purge_eras: 8             # 20D targets; use 16 for 60D
-  embargo_eras: 4
+  embargo_eras: 0           # inert knob (A2): must be 0; purge_eras is the active buffer
   n_folds: 4
 
 model:

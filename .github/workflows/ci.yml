@@ -20,4 +20,10 @@ jobs:
       - name: Lint (ruff check)
         run: python -m ruff check .
       - name: Run test suite
-        run: python -m pytest -q
+        # -rs surfaces every skip reason so a green build does not read as
+        # "real-data verified": the v5.3-gated tests (oracle parity, real
+        # determinism, dashboard real-registry checks) skip in CI by design.
+        # The real-data gate is the local pre-sign-off receipt
+        # (scripts/real_data_gate.py, CONTRIBUTING.md) — CI green is the fast
+        # gate only.
+        run: python -m pytest -q -rs

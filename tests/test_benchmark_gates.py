@@ -227,6 +227,36 @@ def test_tier4_gate_allows_unavailable_turnover() -> None:
     assert_tier4_gate(card, GATE)
 
 
+def test_tier4_gate_ignores_deflated_sharpe() -> None:
+    """A6 (audit SEV-2 #4): deflated_sharpe is display-only — at n_trials=1 no
+    deflation occurs and there is no search history at gate time, so gating on
+    it provided false assurance (a tier-0 null scored 0.99999). The gate must
+    pass on strong hard fields regardless of deflated_sharpe, and the report
+    must mark it display-only (never a pass/fail)."""
+    card = _make_scorecard(
+        corr=dataclasses.replace(_make_scorecard().corr, value=0.04),
+        corr_sharpe_ac=dataclasses.replace(_make_scorecard().corr_sharpe_ac, value=1.8),
+        fnc=0.03,
+        deflated_sharpe=0.0,  # would fail the old 0.95 threshold
+        gain_to_pain_ratio=2.0,
+        cagr_1y=0.1,
+        turnover_mean=0.1,
+    )
+    assert_tier4_gate(card, GATE)  # must NOT raise on deflated_sharpe
+
+    from nmr.benchmark import BenchmarkHierarchyResult, gate_report_frame
+
+    result = BenchmarkHierarchyResult(
+        scorecards={"probe": card}, tier_of={"probe": 4}, gate=GATE,
+        null_floor_ok=True, null_floor_errors=(), tier4_violations=(),
+        monotone_ok=True, monotone_error=None,
+    )
+    frame = gate_report_frame(result)
+    row = frame.filter(pl.col("field") == "deflated_sharpe").row(0, named=True)
+    assert row["measured"] == 0.0
+    assert row["pass"] is None  # display-only, never a pass/fail
+
+
 def _corr_ladder(
     scalars: list[tuple[int, float]],
 ) -> tuple[dict[str, MetricScorecard], dict[str, int]]:

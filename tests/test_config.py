@@ -163,3 +163,75 @@ def test_eval_metrics_rejects_unknown_names() -> None:
 def test_eval_metrics_accepts_known_names() -> None:
     for names in (("corr",), ("corr", "mmc", "fnc", "sharpe")):
         assert EvalConfig(metrics=names).metrics == tuple(names)
+
+
+def _cfg_dict(*, data: dict | None = None, split: dict | None = None) -> dict:
+    base: dict = {"data": {"feature_set": "small", "targets": ["target"]},
+                  "split": {"purge_eras": 8}}
+    base["data"].update(data or {})
+    base["split"].update(split or {})
+    return base
+
+
+def test_horizon_default_and_validation() -> None:
+    from nmr.config import config_from_dict
+
+    assert DataConfig().horizon == "20D"
+    assert config_from_dict(_cfg_dict()).data.horizon == "20D"
+    with pytest.raises(ValueError, match="horizon"):
+        config_from_dict(_cfg_dict(data={"horizon": "30D"}))
+
+
+def test_purge_horizon_law_20d_ok_60d_insufficient() -> None:
+    from nmr.config import config_from_dict, enforce_purge_horizon_law
+
+    # 20D + purge 8 is the law's minimum — accepted.
+    assert config_from_dict(_cfg_dict()).split.purge_eras == 8
+    # 60D + purge 8 loads (the floor is data-aware) but a real-size dataset
+    # (574 eras) rejects it at run time.
+    cfg60 = config_from_dict(_cfg_dict(data={"horizon": "60D"}))
+    with pytest.raises(ValueError, match="purge_eras"):
+        enforce_purge_horizon_law(574, cfg60)
+    # 60D + purge 16 on real data — accepted.
+    cfg60ok = config_from_dict(
+        _cfg_dict(data={"horizon": "60D"}, split={"purge_eras": 16})
+    )
+    enforce_purge_horizon_law(574, cfg60ok)
+    # Small synthetic datasets are governed by the splitter's geometry.
+    enforce_purge_horizon_law(12, config_from_dict(_cfg_dict(split={"purge_eras": 1})))
+    # stricter-than-law purges are fine.
+    enforce_purge_horizon_law(
+        574, config_from_dict(_cfg_dict(split={"purge_eras": 16}))
+    )
+
+
+def test_target_name_horizon_agreement() -> None:
+    from nmr.config import config_from_dict
+
+    # target_cyrusd_60 with declared 20D — contradiction, rejected.
+    with pytest.raises(ValueError, match="encodes horizon"):
+        config_from_dict(
+            _cfg_dict(data={"horizon": "20D", "targets": ["target", "target_cyrusd_60"]})
+        )
+    # agreement: 60D target with 60D horizon + purge 16 — accepted.
+    cfg = config_from_dict(
+        _cfg_dict(
+            data={"horizon": "60D", "targets": ["target_cyrusd_60"]},
+            split={"purge_eras": 16},
+        )
+    )
+    assert cfg.data.horizon == "60D"
+    # un-encoded names impose no constraint.
+    assert config_from_dict(_cfg_dict(data={"targets": ["target"]})).data.horizon == "20D"
+
+
+def test_embargo_eras_must_be_zero() -> None:
+    """A2 (audit SEV-3): embargo_eras was an inert, documented knob — now
+    rejected at load; purge_eras is the active leakage buffer."""
+    assert SplitConfig().embargo_eras == 0
+    with pytest.raises(ValueError, match="embargo_eras"):
+        SplitConfig(embargo_eras=4)
+    from nmr.config import config_from_dict
+
+    with pytest.raises(ValueError, match="embargo_eras"):
+        config_from_dict(_cfg_dict(split={"embargo_eras": 4}))

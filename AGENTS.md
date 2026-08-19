@@ -30,12 +30,12 @@ These four files obey a strict **Single Source of Truth (SSOT) hierarchy**. One 
 
 ## 1. Agent Identity & Mission
 
-You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (828 tests, sole functional gate) + `ruff check` (lint gate, `ruff.toml` E/F/I/UP @120, pinned in `requirements-dev.txt`). Both enforced by CI (`.github/workflows/ci.yml`).
+You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (863 tests, sole functional gate) + `ruff check` (lint gate, `ruff.toml` E/F/I/UP @120, pinned in `requirements-dev.txt`). Both enforced by CI (`.github/workflows/ci.yml`).
 
 Your mission:
 
 - Maximize tournament performance (CORR, MMC, FNC, era-wise Sharpe) while maximizing research velocity.
-- Preserve **bit-level determinism** of every pipeline stage — same config + data + code ⇒ same run_id, same OOF, same scorecard hash.
+- Preserve **bit-level determinism** of every pipeline stage — same config + data + code ⇒ same run_id, same OOF, same scorecard hash. The **data term is enforced**: a snapshot `data_fingerprint` (era stats, schema, row counts, `features.json` content — B1, 2026-08-18) enters the run_id, so a growing `validation.parquet` changes run identity.
 - Treat temporal leakage as a correctness bug, never a tuning detail.
 - Keep the `nmr/` package the only tested boundary; keep notebooks and scripts a thin control plane.
 
@@ -108,7 +108,7 @@ When modifying or generating code, enforce these seven invariants:
 3. **Era-Purged Validation Only.** `PurgedEraSplitter` is the sole fold authority: train eras strictly precede validation eras with an exact `purge_eras` buffer excluded from both. 8-era purge for 20D targets, 16 for 60D.
 4. **Rank-Domain Ensembling.** Components are per-era rank-gaussianized before blending; blended output is re-gaussianized. Never blend raw regression outputs.
 5. **Per-Era Scoring First.** All metrics are computed per era, then aggregated (mean/std/Sharpe/drawdown). Flattened pooled metrics are forbidden.
-6. **Canonical Hashes Exclude Timing.** `run_id`, `canonical_scorecards_bytes()`, and neutralization cache keys must be reproducible cross-process: no wall-clock fields, no absolute paths (`data_dir`/`artifacts_dir` are stripped from run_id payloads).
+6. **Canonical Hashes Exclude Timing.** `run_id`, `canonical_scorecards_bytes()`, and neutralization cache keys must be reproducible cross-process: no wall-clock fields, no absolute paths (`data_dir`/`artifacts_dir` are stripped from run_id payloads; `data_fingerprint` is the data snapshot marker — byte size excluded, detection limits documented in `_data_fingerprint`).
 7. **Atomic Registry Writes.** All registry JSON writes go through temp-file + fsync + `os.replace()`. `champion.json` is a single atomic pointer — never hand-edit or partially write registry state.
 </system_invariants>
 
@@ -141,7 +141,8 @@ When modifying or generating code, enforce these seven invariants:
 | Change perturbation/horizon/regime diagnostics | `nmr/robustness.py` |
 | Change the benchmark hierarchy (cells, gates, thresholds) | `nmr/benchmark.py` + `configs/benchmarks/` + `benchmark_runner.py` |
 | Change the executive dashboard data engine (leaderboard, gate projection, capital recompute, payout timeseries) | `nmr/dashboard.py` + the `dashboard_ui/` package (`charts.py`, `report.py`, `app.py`; thin wrappers `generate_dashboard.py` / `dashboard_app.py`) (spec: `docs/superpowers/specs/2026-08-18-vanilla-dashboard-design.md`) |
-| Change model-family / full-version discovery | `nmr/families.py` — read-only scan of `artifacts/models/<family>/full/manifest.json` (spec: `ARCHITECTURE.md` Model Families section) |
+| Change model-family / full-version discovery | `nmr/families.py` — read-only scan of `artifacts/models/<family>/full/<run_id>/manifest.json` + atomic `current.json` pointer (spec: `ARCHITECTURE.md` Model Families section) |
+| Promote a run to a full version (train+validation, Model Uploads `predict.pkl`) | `nmr/promote.py` (`promote_full_version`, `rehearse_promotion`) + `promote_model.py` / `rehearse_promotion.py` CLIs; acceptance gate `nmr/submission.py::accept_promoted_artifact` (raw output vs the official validator) |
 | Change campaign orchestration | `nmr/campaign.py` + `run_campaign.py` (spec: `ARCHITECTURE.md` §R) |
 | Inspect runs / campaigns interactively | `dashboard_ui/app.py` (thin wrapper `dashboard_app.py`) — `streamlit run` (read-only) |
 | Analyze the dataset / run one analysis stage | `analyze_dataset.py` — modular stages, `--only`/`--skip` (deps auto-included), progress markers (stage registry: `ARCHITECTURE.md` §O) |
@@ -194,7 +195,7 @@ Four gates, in order of rigor — **exact commands live only in [`CONTRIBUTING.m
 
 1. **Fast gate** — `ruff check .` + full `pytest -q` after every meaningful change.
 2. **Targeted subsets** while iterating — oracle parity (`tests/test_parity.py` + `tests/test_risk_parity.py`) and determinism hashes (`tests/test_benchmark_hierarchy.py`).
-3. **Pre-sign-off gate** (mandatory before delivering work) — full 828-test suite plus the real-data benchmark smoke (`benchmark_runner.py --fast-mode` → `artifacts/reports/benchmark_hierarchy_scorecard_smoke.csv` + `benchmark_gate_report_smoke.csv`).
+3. **Pre-sign-off gate** (mandatory before delivering work) — full 863-test suite plus the real-data benchmark smoke (`benchmark_runner.py --fast-mode` → `artifacts/reports/benchmark_hierarchy_scorecard_smoke.csv` + `benchmark_gate_report_smoke.csv`).
 4. **End-of-session gate (mandatory)** — after finishing a coding session (before stopping or handing off for review), run the linter and functional gate on the final state: `ruff check .` + `pytest -q`. Never end a session with unverified changes; report the actual results, including any skips or pre-existing failures.
 
 Real-data tests require the `data/v5.3/` parquet assets (see [`README.md`](README.md#data-assets)). If they are missing, report which tests were skipped — never claim full verification. CI (`.github/workflows/ci.yml`) enforces the fast gate on every push/PR (see [`CONTRIBUTING.md`](CONTRIBUTING.md#testing--verification)).
@@ -227,22 +228,27 @@ Real v5.3 scorecard fixtures are flaky if rows are limited **before** establishi
 - **Long jobs:** background tasks die when the session closes — for multi-hour runs use `nohup ./.venv/Scripts/python <script> > <log> 2>&1 &` and poll the log (stage markers + era ticks make progress visible).
 - **Analysis runtime:** full-universe (`--features all`) analysis is ~4–5 h, dominated by the three 3,555-feature streaming passes (ic_by_era + 2 screens, each re-streaming the parquet); cupy accelerates the per-era rankdata (measured: `ARCHITECTURE.md` §U). The screen passes could be derived from the persisted long-form (dedup, ~1–1.5 h saved) — deferred.
 
-### RAM ceiling & full-universe training (recorded 2026-08-10)
-- **Machine:** 63.7 GiB RAM total. The **full 3,555-feature universe is memory-marginal**: a dense float32 feature array alone is ~28 GiB (2.12M train rows), and the deploy/validation path's float64 `to_numpy` is ~54 GiB. Peak for a solo full-universe fit ≈ 40–45 GiB — **run full-universe jobs only when the machine is otherwise idle** (a concurrent analysis/benchmark job caused the `lgbm_v1` campaign OOM: `_ArrayMemoryError: 28.1 GiB, shape (3555, 2123070)`).
-- **Memory guards live in code** (`coerce_float32_features`, zero-copy numpy views, era-batched predicts — full spec: `ARCHITECTURE.md` §G). OOF neutralization at 3,555 features is compute-bound (per-era pinv, ~3.5 h) — not a memory issue, do not "optimize" the math (oracle parity).
+### Full-version training is RAM-bound on this box (measured 2026-08-18)
+- **Machine:** 63.7 GiB RAM, 148.8 GiB commit limit. The **full version** (train+validation, 6.85M rows, medium/780 features) is **marginal-to-infeasible** here. Three-point measured curve (`artifacts/reports/ram_curve.json`, spawned worker, commit + working set): `commit = 2.57 + 8.87e-6·rows` GiB (R² = 0.993, upper bound — marginal rate declines −28%/−19% across points) and `ws = 1.10 + 8.18e-6·rows` GiB. Extrapolated combined (child + parent): **commit ≈ 61–65 GiB** (43% of the 148.8 GiB commit limit — no OOM), **working set ≈ 55–58 GiB = 86–90% of physical** — above the 0.85 thrash guard. `promote_full_version`'s RAM guard refuses with the measured numbers in the error (dual-metric: commit vs commit limit, WS vs physical RAM). **Stage 2 (full-history promotion at medium) is deferred, not attempted; the D7 Stage-1 truncated artifact is the accepted deliverable.** The earlier conflicting full-universe figures (40–45 vs ~71 GiB) are retired — the measured curve supersedes both.
+- **Open hypothesis (next cycle):** the per-row commit slope (~8.9e-6 GiB/row) implies ~2.5 float32-equivalents held simultaneously. Suspects: (1) sklearn `check_array` copying a non-C-contiguous polars→numpy view inside `LGBMRegressor.fit`; (2) LightGBM `Dataset` construction (addressable via `lgb.Dataset(..., free_raw_data=True)` instead of the sklearn wrapper). Measured target: drive `b` from 8.87e-6 → ~5e-6 GiB/row → full-scale commit ≈ 40 GiB, making full-version promotion feasible on this box. Own cycle with its own determinism proof.
+- **Full-universe training** (3,555 features): **run only when the machine is otherwise idle** (a concurrent analysis/benchmark job caused the `lgbm_v1` campaign OOM: `_ArrayMemoryError: 28.1 GiB, shape (3555, 2123070)`).
+- **Memory guards live in code** (`coerce_float32_features`, zero-copy numpy views, era-batched predicts, the spawned full-history worker + dual-metric RAM guard — full spec: `ARCHITECTURE.md` §G). OOF neutralization at 3,555 features is compute-bound (per-era pinv, ~3.5 h) — not a memory issue, do not "optimize" the math (oracle parity).
 
 ### Feature-universe policy (director directive, 2026-08-14)
 All routine research, screening, HPO, and model iteration uses `medium` (780), `small` (42), or screen-derived subsets (`derived_feature_sets.json`). The full `all` universe (3,555) is **prohibited** for routine iteration (RAM ceiling above; ~3.5 h per-era neutralization; empirically weaker OOF IC). Approved exceptions: feature-bagged sub-ensembles, or single-shot offline deploy fits. Analysis dumps and the pre-modelling study are generated with `--features medium`.
 - **Full-universe campaign cells:** if a 3,555-feature variant OOMs, re-run it solo with the current code; never run two full-universe jobs concurrently.
 
-### `embargo_eras` is structurally inert
-`SplitConfig.embargo_eras` is validated and accepted but unused by fold geometry (schema: `ARCHITECTURE.md` §C). Do not rely on it as an active safeguard; do not remove it without a schema decision.
+### `embargo_eras` is rejected at load (A2, 2026-08-18)
+`SplitConfig.embargo_eras` was validated, documented, and structurally inert — a config knob that lies (audit SEV-3). It now defaults to `0` and **any non-zero value raises `ValueError` at load** (`purge_eras` is the active leakage buffer). Stored pre-change registry manifests carry `embargo_eras: 4`; the promotion writer normalizes those to 0 and records the change in `config_normalizations` — never silently re-accepting the knob.
 
 ### `cloudpickle` deserialization executes arbitrary code
 `load_predict()` verifies a SHA256 manifest (corruption detection only, **not** authentication) then calls `cloudpickle.loads()`. Only load artifacts produced by this repo. Pin `cloudpickle==3.1.1` — Numerai's hosted runtime must unpickle what we pickle.
 
 ### Deployment closure embeds `nmr._transforms` helpers by value
-`cloudpickle.register_pickle_by_value(nmr._transforms)` embeds the transform helpers by value into the deployed `predict.pkl`; the artifact's predict path depends only on numpy/scipy/pandas at load time (no `nmr` import). The fidelity test (`tests/test_runner.py::test_runner_deploy_serializes_reloadable_predict`) is the drift guard — never hand-duplicate the transform math inside the closure.
+`cloudpickle.register_pickle_by_value(nmr._transforms)` embeds the transform helpers by value into the deployed `predict.pkl`; the artifact's predict path depends only on numpy/scipy/pandas at load time (no `nmr` import). The fidelity test (`tests/test_runner.py::test_runner_deploy_serializes_reloadable_predict`) is the drift guard — never hand-duplicate the transform math inside the closure. The closure's final step is a **per-era `tie_kept_rank` to (0,1)** (SEV-1 #14, 2026-08-18): the raw output is the submission under Model Uploads and must pass `numerai_tools` validation unaided — `nmr/submission.accept_promoted_artifact` is the acceptance gate.
+
+### `max_feature_exposure` definition boundary (2026-08-18)
+The deploy closure's final rank step changed the exposure definition: post-fix runs measure exposure on the submitted (0,1) vector; pre-fix legacy rows measured ~machine epsilon on unranked neutralized preds (a dead diagnostic, finding #15). Legacy rows are **nulled** in the dashboard unified schema and `fleet_summary` with `max_feature_exposure_reason: pre_rank_fix_definition` — never compare the two populations.
 
 ### CatBoost-backed deploy artifacts
 Local `load_predict` fidelity is tested, but CatBoost availability in Numerai's hosted predict runtime is **UNVERIFIED** — validate a catboost deploy against the hosted runtime before staking on it.

@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from nmr._oof import train_multi_target_oof
 from nmr.config import ExperimentConfig, set_global_seeds
 from nmr.data import IngestionAgent
 from nmr.ensemble import Ensembler
@@ -372,22 +373,14 @@ def _train_multi_target_oof(
     splitter: PurgedEraSplitter,
     targets: Sequence[str],
 ) -> pl.DataFrame:
-    stacked: pl.DataFrame | None = None
-    for target in targets:
-        result = modeler.train_cross_validation(
-            df,
-            feature_cols=feature_cols,
-            target_col=target,
-            splitter=splitter,
-            era_col="era",
-        )
-        part = result.oof.rename({"prediction": f"pred_{target}"})
-        if stacked is None:
-            stacked = part
-        else:
-            stacked = stacked.join(part, on=["id", "era"], how="inner")
-    assert stacked is not None
-    return stacked
+    """C10 (audit SEV-2 #5): thin alias over the shared OOF implementation.
+
+    The duplicated copy this replaced could silently drift from the runner's
+    OOF path; the single source now lives in ``nmr._oof``.
+    """
+    return train_multi_target_oof(
+        modeler, df, feature_cols=feature_cols, splitter=splitter, targets=targets
+    )
 
 
 def _held_out_partition(

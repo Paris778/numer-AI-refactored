@@ -10,6 +10,7 @@ import pytest
 
 import nmr.dashboard as dash
 import nmr.evaluation as nmr_evaluation
+import nmr.families as fam
 import nmr.payout as payout
 from dashboard_ui import report as generate_dashboard
 from nmr.config import REPO_ROOT
@@ -137,7 +138,9 @@ def _write_registry(tmp_path: Path, entries: list[dict]) -> None:
 
 def test_load_unified_leaderboard_registry_only(tmp_path: Path) -> None:
     _write_registry(tmp_path, [_registry_entry("a" * 64), _registry_entry("b" * 64, scorecard=False)])
-    frame = dash.load_unified_leaderboard(tmp_path, benchmark_path=False)
+    frame = dash.load_unified_leaderboard(
+        tmp_path, benchmark_path=False, models_dir=tmp_path / "models"
+    )
     assert frame.height == 2
     rows = {r["model_id"]: r for r in frame.to_dicts()}
     assert rows["a" * 64]["source"] == "trained"
@@ -156,12 +159,30 @@ def test_load_unified_leaderboard_zero_scorecard_value_not_legacy(tmp_path: Path
     assert frame.row(0, named=True)["source"] == "trained"
 
 
+def test_load_unified_leaderboard_exposure_definition_boundary(tmp_path: Path) -> None:
+    """SEV-1 #14 boundary: legacy rows (no scorecard_prediction_scale marker)
+    measured exposure on unranked preds (~machine epsilon) and must not sit
+    silently beside post-fix rows — nulled with a documented reason."""
+    legacy = _registry_entry("a" * 64)
+    postfix = _registry_entry("b" * 64)
+    postfix["manifest"]["scorecard_prediction_scale"] = "percentile_rank"
+    _write_registry(tmp_path, [legacy, postfix])
+    frame = dash.load_unified_leaderboard(tmp_path, benchmark_path=False)
+    rows = {r["model_id"]: r for r in frame.to_dicts()}
+    assert rows["a" * 64]["max_feature_exposure"] is None
+    assert rows["a" * 64]["max_feature_exposure_reason"] == "pre_rank_fix_definition"
+    assert rows["b" * 64]["max_feature_exposure"] == 0.3
+    assert rows["b" * 64]["max_feature_exposure_reason"] is None
+
+
 def test_load_unified_leaderboard_corrupt_run_json_skipped(tmp_path: Path) -> None:
     _write_registry(tmp_path, [_registry_entry("d" * 64)])
     bad_dir = tmp_path / ("e" * 64)
     bad_dir.mkdir(parents=True, exist_ok=True)
     (bad_dir / "run.json").write_text("{not json", encoding="utf-8")
-    frame = dash.load_unified_leaderboard(tmp_path, benchmark_path=False)
+    frame = dash.load_unified_leaderboard(
+        tmp_path, benchmark_path=False, models_dir=tmp_path / "models"
+    )
     assert frame.height == 1
 
 
@@ -172,17 +193,22 @@ def test_load_unified_leaderboard_merges_benchmarks(tmp_path: Path) -> None:
         "model_id,corr,corr_sharpe_ac,std_corr,max_drawdown,strategy_group,tier\n"
         "bench_a,0.05,0.5,0.3,0.2,linear,1\n",
     )
-    frame = dash.load_unified_leaderboard(tmp_path, benchmark_path=bench)
+    frame = dash.load_unified_leaderboard(
+        tmp_path, benchmark_path=bench, models_dir=tmp_path / "models"
+    )
     assert frame.height == 2
     assert set(frame.get_column("source").to_list()) == {"trained", "benchmark"}
     bench_row = frame.filter(pl.col("source") == "benchmark").row(0, named=True)
     assert bench_row["family"] is None
     assert bench_row["training_scope"] is None
     assert bench_row["has_full_version"] is False
+    assert bench_row["max_feature_exposure_reason"] == "unranked_predictions"
 
 
 def test_load_unified_leaderboard_empty_registry_returns_schema_frame(tmp_path: Path) -> None:
-    frame = dash.load_unified_leaderboard(tmp_path, benchmark_path=False)
+    frame = dash.load_unified_leaderboard(
+        tmp_path, benchmark_path=False, models_dir=tmp_path / "models"
+    )
     assert frame.height == 0
     assert frame.schema == dash.UNIFIED_SCHEMA
 
@@ -762,13 +788,23 @@ def test_unified_schema_has_family_columns() -> None:
 
 
 def _write_models_dir(tmp_path: Path, families: dict[str, dict]) -> Path:
-    """families: {family: manifest-dict}; a predict.pkl artifact is auto-created."""
+    """families: {family: manifest-dict}; a predict.pkl artifact is auto-created.
+
+    Writes the versioned D2 layout: ``full/<run_id>/predict.pkl`` +
+    ``manifest.json``, plus the atomic ``current.json`` pointer.
+    """
     models = tmp_path / "models"
     for family, manifest in families.items():
+        run_id = manifest.get("promoted_from_run_id") or "a" * 64
         full = models / family / "full"
-        full.mkdir(parents=True)
-        (full / "predict.pkl").write_text("weights", encoding="utf-8")
-        (full / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        slot = full / run_id
+        slot.mkdir(parents=True)
+        (slot / "predict.pkl").write_text("weights", encoding="utf-8")
+        (slot / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        (full / fam.CURRENT_POINTER_NAME).write_text(
+            json.dumps({"run_id": run_id, "promoted_at": "2026-08-17T12:00:00Z"}),
+            encoding="utf-8",
+        )
     return models
 
 
@@ -811,7 +847,8 @@ def test_load_unified_leaderboard_family_columns_and_full_rows(tmp_path: Path) -
     assert full["corr_sharpe_ac"] is None
     assert full["backend"] == "xgboost"
     assert full["feature_subset"] == "medium"
-    assert full["run_dir"] == str(models / "brb1-xgb-v6" / "full")
+    # D2 versioned layout: the full row's run_dir is the immutable slot dir.
+    assert full["run_dir"] == str(models / "brb1-xgb-v6" / "full" / ("a" * 64))
 
 
 def test_load_unified_leaderboard_scan_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

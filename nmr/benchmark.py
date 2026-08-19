@@ -786,12 +786,12 @@ def assert_tier4_gate(scorecard: MetricScorecard, gate: Tier4GateConfig) -> None
         strict=False,
     )
     _check("fnc", float(scorecard.fnc), float(gate.fnc_min), strict=False)
-    _check(
-        "deflated_sharpe",
-        float(scorecard.deflated_sharpe),
-        float(gate.deflated_sharpe_min),
-        strict=False,
-    )
+    # deflated_sharpe is NOT a hard gate (A6, audit SEV-2 #4): at n_trials=1
+    # no deflation occurs, and there is no search history to bind deflation to
+    # at gate time — gating on it provided false assurance (a tier-0 null
+    # scored 0.99999). It remains display-only on the scorecard and leaderboard;
+    # search-aware DSR lives in sweep_dsr / campaign_evidence where a search
+    # genuinely exists.
     _check(
         "gain_to_pain_ratio",
         float(scorecard.gain_to_pain_ratio),
@@ -1287,21 +1287,26 @@ def gate_report_frame(result: BenchmarkHierarchyResult) -> pl.DataFrame:
         ("corr_sharpe_ac", gate.corr_sharpe_ac_min,
          float(card.corr_sharpe_ac.value), False),
         ("fnc", gate.fnc_min, float(card.fnc), False),
-        ("deflated_sharpe", gate.deflated_sharpe_min,
-         float(card.deflated_sharpe), False),
         ("gain_to_pain_ratio", gate.gain_to_pain_min,
          float(card.gain_to_pain_ratio), False),
         ("cagr_1y", gate.cagr_min, float(card.cagr_1y), True),
         ("turnover_mean", gate.turnover_max,
          float(card.turnover_mean) if card.turnover_mean is not None else None,
          False),
+        # deflated_sharpe: display-only (A6) — never a pass/fail threshold.
+        ("deflated_sharpe", gate.deflated_sharpe_min,
+         float(card.deflated_sharpe), None),
     ]
     out_rows = []
     for field, threshold, measured, strict in rows:
-        if measured is None:
+        # strict=None marks display-only fields (deflated_sharpe, A6) — never
+        # a pass/fail.
+        if measured is None or strict is None:
             passed = None
+        elif strict:
+            passed = measured > threshold
         else:
-            passed = measured > threshold if strict else measured >= threshold
+            passed = measured >= threshold
         out_rows.append({
             "model_id": reference_id,
             "field": field,

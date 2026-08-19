@@ -7,6 +7,7 @@ import json
 import numpy as np
 import pandas as pd
 import polars as pl
+import pytest
 
 from nmr.config import (
     DataConfig,
@@ -18,6 +19,7 @@ from nmr.config import (
 )
 from nmr.data import IngestionAgent
 from nmr.deployment import load_predict
+from nmr.models import ModelOrchestrator
 from nmr.runner import ExperimentRunner
 from nmr.splitter import PurgedEraSplitter
 
@@ -150,6 +152,42 @@ def test_runner_deploy_serializes_reloadable_predict(tmp_path) -> None:
     assert prediction.index.tolist() == [f"id_{i}" for i in range(6)]
     assert prediction["prediction"].notna().all()
     assert prediction["prediction"].nunique() > 1  # non-constant pipeline output
+    # Submission-contract range: raw deploy output must be strictly in (0,1)
+    # (numerai_tools validate_values hard-asserts between 0 and 1) — the
+    # closure's per-era tie_kept_rank step guarantees (0.5/n, (n-0.5)/n).
+    pred_values = prediction["prediction"]
+    assert ((pred_values > 0) & (pred_values < 1)).all()
+
+
+def test_deploy_predict_ranks_per_era_not_whole_frame(tmp_path) -> None:
+    """Discriminates per-era from whole-frame ranking in the deploy closure.
+
+    The final (0,1) step must rank WITHIN each era: an era of ``n`` rows must
+    independently span ``(0.5/n, (n-0.5)/n)``. A whole-frame rank is globally
+    monotone (per-era metric-invariance proofs and the (0,1) range check both
+    pass under it), so only this per-era bound catches the regression.
+    """
+    cfg = _config(tmp_path)
+    result = ExperimentRunner(cfg).run(deploy=True)
+    assert result.artifact is not None
+    loaded_predict = load_predict(result.artifact.path)
+    live = pd.DataFrame(
+        {
+            "f1": [0.0, 0.02, 0.04, 0.06, 0.08, 0.1, 0.0, 0.03, 0.07],
+            "f2": [0.0, 0.01, 0.02, 0.0, 0.01, 0.02, 0.02, 0.0, 0.01],
+            "era": ["0001", "0001", "0001", "0002", "0002", "0002",
+                    "0003", "0003", "0003"],
+        },
+        index=[f"id_{i}" for i in range(9)],
+    )
+    prediction = loaded_predict(live)
+    values = prediction["prediction"].to_numpy()
+    era_col = live["era"].to_numpy()
+    for era in np.unique(era_col):
+        block = values[era_col == era]
+        n = block.size
+        assert block.min() == pytest.approx(0.5 / n, rel=1e-12)
+        assert block.max() == pytest.approx((n - 0.5) / n, rel=1e-12)
 
 
 def test_run_id_is_path_independent_and_seed_sensitive(tmp_path) -> None:
@@ -342,19 +380,18 @@ def test_runner_catboost_end_to_end(tmp_path) -> None:
     assert pred["prediction"].nunique() > 1  # non-constant pipeline output
 
 
-def test_environment_fingerprint_lightgbm_keeps_legacy_shape(tmp_path) -> None:
-    """Backend-aware fingerprint must not invalidate existing lightgbm run_ids.
-
-    The lightgbm config must resolve to the exact pre-change five-package
-    fingerprint (byte-identical dict), so no existing run_id changes and the
-    cross-process reproducibility guarantee is untouched for lightgbm/xgboost.
+def test_environment_fingerprint_lightgbm_shape(tmp_path) -> None:
+    """Backend-aware fingerprint: lightgbm configs fingerprint the base
+    packages plus optuna (B2, 2026-08-18) but never catboost.
     """
     cfg = _config(tmp_path)  # lightgbm backend
     assert cfg.model.backend == "lightgbm"
     packages = ExperimentRunner._environment_fingerprint(cfg.model.backend)["packages"]
-    assert set(packages) == {"numpy", "polars", "pandas", "lightgbm", "xgboost"}
+    assert set(packages) == {
+        "numpy", "polars", "pandas", "lightgbm", "xgboost", "optuna"
+    }
     assert "catboost" not in packages
-    # Legacy (pre-change) shape: the no-arg call must be byte-identical.
+    # The no-arg call must be byte-identical to the backend-specific one.
     assert packages == ExperimentRunner._environment_fingerprint()["packages"]
 
 
@@ -710,3 +747,71 @@ def test_validation_stage_enables_horizon_diagnostics(tmp_path) -> None:
         "runner did not load them"
     )
     assert reason != "benchmark unavailable"
+
+
+def test_run_id_changes_when_data_changes(tmp_path) -> None:
+    """B1 (audit SEV-1 #3): the data term enters run identity as a snapshot
+    fingerprint — same config/code/env with a changed data snapshot must
+    produce a different run_id (validation grows weekly by design)."""
+    cfg = _config(tmp_path)
+    id_a = ExperimentRunner.compute_run_id(cfg)
+
+    data_root = tmp_path / "data" / "vtest"
+    val = pl.read_parquet(data_root / "validation.parquet")
+    last_era = str(max(int(e) for e in val.get_column("era").unique()))
+    val.filter(pl.col("era") != last_era).write_parquet(
+        data_root / "validation.parquet"
+    )
+    id_b = ExperimentRunner.compute_run_id(cfg)
+    assert id_a != id_b
+
+
+def test_run_id_requires_data_snapshot(tmp_path) -> None:
+    """B1: run_id fails loud without the data snapshot (dry-run needs data)."""
+    cfg = _config(tmp_path)
+    (tmp_path / "data" / "vtest" / "validation.parquet").unlink()
+    with pytest.raises(ValueError, match="data fingerprint"):
+        ExperimentRunner.compute_run_id(cfg)
+
+
+def test_run_id_sensitive_to_optuna_version(tmp_path, monkeypatch) -> None:
+    """B2: optuna entered the env fingerprint — a pin bump must flag drift."""
+    import nmr.runner as runner_mod
+
+    cfg = _config(tmp_path)
+    versions = {
+        "numpy": "1.0", "polars": "1.0", "pandas": "1.0",
+        "lightgbm": "1.0", "xgboost": "1.0", "optuna": "3.0",
+    }
+    monkeypatch.setattr(runner_mod, "_package_version", lambda name: versions.get(name))
+    id_a = runner_mod.ExperimentRunner.compute_run_id(cfg)
+    versions["optuna"] = "4.0"
+    id_b = runner_mod.ExperimentRunner.compute_run_id(cfg)
+    assert id_a != id_b
+
+
+def test_runner_and_research_share_oof_implementation(tmp_path) -> None:
+    """C10 (audit SEV-2 #5): the runner's OOF delegate, research's alias, and
+    the shared helper must produce identical output — one implementation."""
+    from nmr._oof import train_multi_target_oof
+    from nmr.research import _train_multi_target_oof as research_oof
+
+    cfg = _config(tmp_path)
+    runner = ExperimentRunner(cfg)
+    train_df = _build_train_frame()
+    splitter = PurgedEraSplitter(cfg.split)
+    orch = ModelOrchestrator(cfg.model, seed=cfg.run.seed)
+    targets = list(cfg.data.targets)
+
+    shared = train_multi_target_oof(
+        orch, train_df, feature_cols=["f1", "f2"], splitter=splitter, targets=targets
+    )
+    via_runner = runner._train_multi_target_oof(
+        train_df, feature_cols=["f1", "f2"], splitter=splitter,
+        model_orchestrator=orch,
+    )
+    via_research = research_oof(
+        orch, train_df, feature_cols=["f1", "f2"], splitter=splitter, targets=targets
+    )
+    assert shared.equals(via_runner)
+    assert shared.equals(via_research)

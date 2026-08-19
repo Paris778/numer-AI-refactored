@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import random
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,57 @@ VALID_EVAL_BACKENDS = ("custom", "official")
 VALID_EVAL_METRICS = ("corr", "mmc", "fnc", "sharpe")
 VALID_SPLIT_SCHEMES = ("walk_forward", "anchor")
 VALID_ENSEMBLE_METHODS = ("ridge", "non_negative")
+VALID_HORIZONS = ("20D", "60D")
+# Leakage law (AGENTS.md §4): 8-era purge for 20D targets, 16 for 60D. These
+# are MINIMUMs — stricter purges are allowed, weaker ones are a correctness
+# bug and rejected at load time.
+PURGE_ERAS_20D = 8
+PURGE_ERAS_60D = 16
+# Horizon-encoding target-name convention (ARCHITECTURE.md §K): targets end
+# with ``20``/``60`` (e.g. ``target_cyrusd_20``, ``ender60``) and must agree
+# with the declared data.horizon.
+_HORIZON_TARGET_RE = re.compile(r"(20|60)$")
+
+
+def _validate_purge_vs_horizon(config: ExperimentConfig) -> None:
+    """Horizon/target-name consistency at config load (leakage law, AGENTS.md §4).
+
+    The purge FLOOR is data-aware and enforced at run time via
+    :func:`enforce_purge_horizon_law` (a real 574-era dataset must use ≥ 8
+    purge for 20D / ≥ 16 for 60D; small synthetic datasets are governed by the
+    splitter's own geometry). Here we validate that target names encoding a
+    horizon (``target_<name>_20/60``, ``ender60``) agree with the declared
+    ``data.horizon`` — mixed-horizon sets fail loud.
+    """
+    for target in config.data.targets:
+        match = _HORIZON_TARGET_RE.search(target)
+        if not match:
+            continue
+        encoded = f"{match.group(1)}D"
+        if encoded != config.data.horizon:
+            raise ValueError(
+                f"data.targets entry {target!r} encodes horizon {encoded} but "
+                f"data.horizon={config.data.horizon}; set the horizon explicitly "
+                "or fix the target"
+            )
+
+
+def enforce_purge_horizon_law(era_count: int, config: ExperimentConfig) -> None:
+    """Enforce the purge/horizon floor once the era count is known.
+
+    ``era_count`` is the number of distinct training eras. The convention floor
+    (8 for 20D, 16 for 60D) applies when the dataset has at least twice the
+    floor's eras (the real-data regime); smaller datasets are governed by the
+    splitter's own geometry and may legitimately use smaller purges.
+    """
+    floor = PURGE_ERAS_20D if config.data.horizon == "20D" else PURGE_ERAS_60D
+    if era_count >= 2 * floor and config.split.purge_eras < floor:
+        raise ValueError(
+            f"split.purge_eras={config.split.purge_eras} < minimum {floor} for "
+            f"data.horizon={config.data.horizon} on {era_count} eras "
+            f"(leakage law: {PURGE_ERAS_20D} eras for 20D targets, "
+            f"{PURGE_ERAS_60D} for 60D)"
+        )
 
 __all__ = [
     "REPO_ROOT",
@@ -38,6 +90,11 @@ __all__ = [
     "EnsembleConfig",
     "RunConfig",
     "ExperimentConfig",
+    "PURGE_ERAS_20D",
+    "PURGE_ERAS_60D",
+    "VALID_HORIZONS",
+    "config_from_dict",
+    "enforce_purge_horizon_law",
     "load_config",
     "set_global_seeds",
 ]
@@ -58,11 +115,16 @@ class DataConfig:
     feature_subset: str | None = None
     supplemental_feature_sets: Path | None = None
     targets: tuple[str, ...] = ("target",)
+    horizon: str = "20D"
     data_dir: Path = REPO_ROOT / "data"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "targets", tuple(self.targets))
         object.__setattr__(self, "data_dir", _resolve_path(self.data_dir))
+        if self.horizon not in VALID_HORIZONS:
+            raise ValueError(
+                f"data.horizon={self.horizon!r} not in {VALID_HORIZONS}"
+            )
         if self.supplemental_feature_sets is not None:
             object.__setattr__(
                 self,
@@ -104,7 +166,7 @@ class SplitConfig:
 
     scheme: str = "walk_forward"
     purge_eras: int = 8  # 20D targets; use 16 for 60D horizons
-    embargo_eras: int = 4
+    embargo_eras: int = 0
     n_folds: int = 4
 
     def __post_init__(self) -> None:
@@ -112,8 +174,18 @@ class SplitConfig:
             raise ValueError(
                 f"split.scheme={self.scheme!r} not in {VALID_SPLIT_SCHEMES}"
             )
-        if self.purge_eras < 0 or self.embargo_eras < 0:
-            raise ValueError("purge_eras and embargo_eras must be >= 0")
+        if self.embargo_eras != 0:
+            # A2 (audit SEV-3): the knob was validated, documented, and
+            # structurally inert — a config knob that lies. It is now rejected
+            # at load: purge_eras is the active leakage buffer, and a non-zero
+            # embargo was never used by fold geometry.
+            raise ValueError(
+                "split.embargo_eras must be 0: the knob is structurally inert "
+                "(purge_eras is the active leakage buffer); non-zero values "
+                "were never used by fold geometry and are rejected at load"
+            )
+        if self.purge_eras < 0:
+            raise ValueError("purge_eras must be >= 0")
         if self.n_folds < 1:
             raise ValueError("split.n_folds must be >= 1")
 
@@ -253,6 +325,29 @@ def _build(cls: type, data: dict[str, Any]):
     return cls(**data)
 
 
+def config_from_dict(raw: dict[str, Any]) -> ExperimentConfig:
+    """Build a validated :class:`ExperimentConfig` from a raw section mapping.
+
+    Shared by :func:`load_config` (YAML) and the promotion writer
+    (``nmr/promote.py`` reconstructing a stored run's config after
+    normalization). Unknown sections/keys and invalid values raise
+    ``ValueError`` so misconfigured experiments fail fast.
+    """
+    if not isinstance(raw, dict):
+        raise ValueError("Top-level config must be a mapping")
+    unknown = set(raw) - set(_SECTIONS)
+    if unknown:
+        raise ValueError(f"Unknown config sections: {sorted(unknown)}")
+    config = ExperimentConfig(
+        **{
+            section: _build(cls, raw.get(section, {}))
+            for section, cls in _SECTIONS.items()
+        }
+    )
+    _validate_purge_vs_horizon(config)
+    return config
+
+
 def load_config(path: str | Path) -> ExperimentConfig:
     """Load and validate an :class:`ExperimentConfig` from a YAML file.
 
@@ -260,17 +355,7 @@ def load_config(path: str | Path) -> ExperimentConfig:
     invalid values raise ``ValueError`` so misconfigured experiments fail fast.
     """
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or {}
-    if not isinstance(raw, dict):
-        raise ValueError("Top-level config must be a mapping")
-    unknown = set(raw) - set(_SECTIONS)
-    if unknown:
-        raise ValueError(f"Unknown config sections: {sorted(unknown)}")
-    return ExperimentConfig(
-        **{
-            section: _build(cls, raw.get(section, {}))
-            for section, cls in _SECTIONS.items()
-        }
-    )
+    return config_from_dict(raw)
 
 
 def set_global_seeds(seed: int) -> None:

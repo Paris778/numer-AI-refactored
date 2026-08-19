@@ -20,12 +20,19 @@ import pandas as pd
 import polars as pl
 
 from nmr import _transforms
+from nmr._oof import train_multi_target_oof
 from nmr._transforms import (
     neutralize_array,
     rank_gaussianize,
     rank_gaussianize_unit_variance,
+    tie_kept_rank,
 )
-from nmr.config import ExperimentConfig, set_global_seeds
+from nmr.config import (
+    DataConfig,
+    ExperimentConfig,
+    enforce_purge_horizon_law,
+    set_global_seeds,
+)
 from nmr.data import IngestionAgent
 from nmr.deployment import DeploymentArtifact, serialize_predict
 from nmr.ensemble import Ensembler
@@ -124,6 +131,12 @@ class ExperimentRunner:
         train_df = agent.load(
             "train",
             columns=["era", "id", *feature_cols, *target_cols],
+        )
+        # Leakage law (AGENTS.md §4): data-aware purge/horizon floor — enforced
+        # now that the era count is known (real-data regime only; small
+        # synthetic datasets are governed by the splitter's geometry).
+        enforce_purge_horizon_law(
+            len(set(train_df.get_column("era").to_list())), self._config
         )
         logger.info(
             "[run] train data loaded: rows=%d cols=%d",
@@ -237,13 +250,14 @@ class ExperimentRunner:
 
         pipeline = None
         if deploy or self._config.evaluation.validation_scorecard:
-            pipeline = self._build_deploy_pipeline(
+            pipeline = _build_deploy_pipeline(
                 orchestrator=model_orchestrator,
                 train_df=train_df,
                 feature_cols=feature_cols,
                 target_cols=target_cols,
                 weights=weights,
                 proportion=neutralization_proportion,
+                data=self._config.data,
             )
 
         scorecard = None
@@ -262,7 +276,7 @@ class ExperimentRunner:
         if deploy:
             logger.info("[run] serializing deploy artifact")
             assert pipeline is not None  # built once above when deploy=True
-            artifact = self._serialize_predict_artifact(
+            artifact = _serialize_predict_artifact(
                 predict_fn=pipeline[0],
                 model_meta=pipeline[1],
                 artifact_path=(
@@ -284,6 +298,12 @@ class ExperimentRunner:
             "summary_metrics": summary_metrics,
             "pipeline_device": self._config.model.device,
             "oof_device": model_orchestrator.resolved_device,
+            # Present for every run whose validation/deploy closure ends with
+            # the per-era (0,1) tie_kept_rank step. Absent in pre-fix legacy
+            # rows: their max_feature_exposure was measured on unranked
+            # predictions (~machine epsilon) and is not comparable to post-fix
+            # values (dashboard/meta null it with a documented reason).
+            "scorecard_prediction_scale": "percentile_rank",
             "metrics": dataclasses.asdict(metrics),
             "code_fingerprint": self._code_fingerprint(),
             "environment": self._environment_fingerprint(self._config.model.backend),
@@ -308,38 +328,30 @@ class ExperimentRunner:
         splitter: PurgedEraSplitter,
         model_orchestrator: ModelOrchestrator,
     ) -> pl.DataFrame:
+        """Delegate to the shared OOF implementation (C10, audit SEV-2 #5).
+
+        The runner and research.py once each carried a copy of the
+        leakage-critical OOF construction; the single source now lives in
+        ``nmr._oof.train_multi_target_oof`` and this method only adds
+        run-scoped logging.
+        """
         targets = self._config.data.targets
         logger.info(
             "[train_multi_target_oof] training %d target(s): %s", len(targets), targets
         )
-        stacked: pl.DataFrame | None = None
-        for idx, target in enumerate(targets, start=1):
-            logger.info(
-                "[train_multi_target_oof] target %d/%d: %s", idx, len(targets), target
-            )
-            t0 = time.time()
-            cv_result = model_orchestrator.train_cross_validation(
-                train_df,
-                feature_cols=feature_cols,
-                target_col=target,
-                splitter=splitter,
-                era_col="era",
-            )
-            logger.info(
-                "[train_multi_target_oof] target %d/%d complete in %.1fs (oof rows=%d)",
-                idx,
-                len(targets),
-                time.time() - t0,
-                cv_result.oof.height,
-            )
-            target_oof = cv_result.oof.rename({"prediction": f"pred_{target}"})
-            if stacked is None:
-                stacked = target_oof
-            else:
-                stacked = stacked.join(target_oof, on=["id", "era"], how="inner")
-
-        assert stacked is not None
-        logger.info("[train_multi_target_oof] stacked OOF shape: %s", stacked.shape)
+        t0 = time.time()
+        stacked = train_multi_target_oof(
+            model_orchestrator,
+            train_df,
+            feature_cols=feature_cols,
+            splitter=splitter,
+            targets=targets,
+        )
+        logger.info(
+            "[train_multi_target_oof] stacked OOF complete in %.1fs (shape: %s)",
+            time.time() - t0,
+            stacked.shape,
+        )
         return stacked
 
     def _run_validation_stage(
@@ -426,94 +438,6 @@ class ExperimentRunner:
         )
         return scorecard, preds, purge
 
-    def _build_deploy_pipeline(
-        self,
-        *,
-        orchestrator: ModelOrchestrator,
-        train_df: pl.DataFrame,
-        feature_cols: Sequence[str],
-        target_cols: Sequence[str],
-        weights: Sequence[float],
-        proportion: float,
-    ) -> tuple[Callable[[pd.DataFrame], pd.DataFrame], dict[str, object]]:
-        """Train per-target full-history models ONCE and return (predict, model_meta).
-
-        The closure's code path references only numpy/pandas plus the shared
-        transform helpers; cloudpickle.register_pickle_by_value(nmr._transforms)
-        embeds those helpers by value so the artifact loads without `nmr`.
-        """
-        logger.info("[build_deploy_pipeline] training full-history models (CPU-only)")
-        trained: dict[str, object] = {}
-        for target in target_cols:
-            trained[target] = orchestrator.train_full_history(
-                train_df,
-                feature_cols=feature_cols,
-                target_col=target,
-                era_col="era",
-                data=self._config.data,
-            )
-        ordered_features = list(feature_cols)
-        target_order = list(target_cols)
-        weight_array = np.asarray(list(weights), dtype=float)
-
-        def predict(
-            live_features: pd.DataFrame,
-            live_benchmark_models: pd.DataFrame = None,
-        ) -> pd.DataFrame:
-            del live_benchmark_models
-            frame = live_features.loc[:, ordered_features]
-            components = [
-                np.asarray(trained[t].predict(frame), dtype=float)
-                for t in target_order
-            ]
-            design = np.column_stack(components)
-            if "era" in live_features.columns:
-                era_values = live_features["era"].astype(str).to_numpy()
-            else:
-                era_values = np.full(len(live_features), "1")
-            feature_matrix = frame.to_numpy(dtype=float)
-            blended = np.empty(len(live_features), dtype=float)
-            for era in np.unique(era_values):
-                mask = era_values == era
-                block = design[mask]
-                normalized = np.column_stack(
-                    [
-                        rank_gaussianize_unit_variance(block[:, i])
-                        for i in range(block.shape[1])
-                    ]
-                )
-                combined = rank_gaussianize(normalized.dot(weight_array))
-                blended[mask] = neutralize_array(
-                    combined, feature_matrix[mask], proportion
-                )
-            return pd.DataFrame({"prediction": blended}, index=live_features.index)
-
-        meta = {
-            "targets": target_order,
-            "weights": [float(w) for w in weights],
-            "proportion": float(proportion),
-            "geometry": "all_eras",
-            "device": "cpu",
-            "feature_names": ordered_features,
-        }
-        return predict, meta
-
-    def _serialize_predict_artifact(
-        self,
-        *,
-        predict_fn: Callable[[pd.DataFrame], pd.DataFrame],
-        model_meta: dict[str, object],
-        artifact_path: Path,
-    ) -> DeploymentArtifact:
-        """Serialize the prebuilt pipeline closure. Does NOT retrain models."""
-        cloudpickle.register_pickle_by_value(_transforms)
-        return serialize_predict(
-            predict_fn,
-            path=artifact_path,
-            feature_names=list(model_meta["feature_names"]),
-            models=model_meta,
-        )
-
     @staticmethod
     def _compute_run_id(config: ExperimentConfig) -> str:
         config_payload = _to_jsonable(dataclasses.asdict(config))
@@ -522,6 +446,12 @@ class ExperimentRunner:
         payload: dict[str, Any] = {
             "config": config_payload,
             "data_version": config.data.version,
+            # B1 (audit SEV-1 #3): the data term enters run identity as a
+            # snapshot fingerprint (era range, row counts, schema, features.json
+            # content) — not the literal version string. Same config + same
+            # data snapshot + same code + same env ⇒ same run_id, enforced on
+            # the data term. See _data_fingerprint for detection limits.
+            "data_fingerprint": _data_fingerprint(config),
             "code_fingerprint": ExperimentRunner._code_fingerprint(),
             "environment": ExperimentRunner._environment_fingerprint(config.model.backend),
         }
@@ -580,7 +510,7 @@ class ExperimentRunner:
         """
         packages = {
             name: _package_version(name)
-            for name in ["numpy", "polars", "pandas", "lightgbm", "xgboost"]
+            for name in ["numpy", "polars", "pandas", "lightgbm", "xgboost", "optuna"]
         }
         if backend == "catboost":
             packages["catboost"] = _package_version("catboost")
@@ -590,11 +520,217 @@ class ExperimentRunner:
         }
 
 
+def _build_deploy_pipeline(
+    *,
+    orchestrator: ModelOrchestrator,
+    train_df: pl.DataFrame,
+    feature_cols: Sequence[str],
+    target_cols: Sequence[str],
+    weights: Sequence[float],
+    proportion: float,
+    data: DataConfig,
+) -> tuple[Callable[[pd.DataFrame], pd.DataFrame], dict[str, object]]:
+    """Train per-target full-history models ONCE and return (predict, model_meta).
+
+    Module-level so the promotion writer (nmr/promote.py) shares the exact
+    closure construction with the runner — no second copy of the riskiest
+    code. The closure's code path references only numpy/pandas plus the shared
+    transform helpers; cloudpickle.register_pickle_by_value(nmr._transforms)
+    embeds those helpers by value so the artifact loads without `nmr`.
+    """
+    logger.info("[build_deploy_pipeline] training full-history models (CPU-only)")
+    trained: dict[str, object] = {}
+    for target in target_cols:
+        trained[target] = orchestrator.train_full_history(
+            train_df,
+            feature_cols=feature_cols,
+            target_col=target,
+            era_col="era",
+            data=data,
+        )
+    ordered_features = list(feature_cols)
+    target_order = list(target_cols)
+    weight_array = np.asarray(list(weights), dtype=float)
+
+    def predict(
+        live_features: pd.DataFrame,
+        live_benchmark_models: pd.DataFrame = None,
+    ) -> pd.DataFrame:
+        del live_benchmark_models
+        frame = live_features.loc[:, ordered_features]
+        components = [
+            np.asarray(trained[t].predict(frame), dtype=float)
+            for t in target_order
+        ]
+        design = np.column_stack(components)
+        if "era" in live_features.columns:
+            era_values = live_features["era"].astype(str).to_numpy()
+        else:
+            era_values = np.full(len(live_features), "1")
+        feature_matrix = frame.to_numpy(dtype=float)
+        blended = np.empty(len(live_features), dtype=float)
+        for era in np.unique(era_values):
+            mask = era_values == era
+            block = design[mask]
+            normalized = np.column_stack(
+                [
+                    rank_gaussianize_unit_variance(block[:, i])
+                    for i in range(block.shape[1])
+                ]
+            )
+            combined = rank_gaussianize(normalized.dot(weight_array))
+            # Final (0,1) percentile-rank step per era, AFTER neutralization —
+            # the canonical neutralize -> rank order (Numerai's own notebook).
+            # Required by the submission contract: raw output must be in (0,1)
+            # (numerai_tools validate_values hard-asserts it); the deploy
+            # artifact is consumed verbatim by Model Uploads. Rank-invariant
+            # metrics are unaffected; max_feature_exposure legitimately moves
+            # off machine-epsilon (the submitted vector is not feature-neutral).
+            blended[mask] = tie_kept_rank(
+                neutralize_array(combined, feature_matrix[mask], proportion)
+            )
+        return pd.DataFrame({"prediction": blended}, index=live_features.index)
+
+    meta = {
+        "targets": target_order,
+        "weights": [float(w) for w in weights],
+        "proportion": float(proportion),
+        "geometry": "all_eras",
+        "device": "cpu",
+        "feature_names": ordered_features,
+        "output_range": "tie_kept_rank (0,1) exclusive, per era",
+    }
+    return predict, meta
+
+
+def _serialize_predict_artifact(
+    *,
+    predict_fn: Callable[[pd.DataFrame], pd.DataFrame],
+    model_meta: dict[str, object],
+    artifact_path: Path,
+) -> DeploymentArtifact:
+    """Serialize the prebuilt pipeline closure. Does NOT retrain models."""
+    cloudpickle.register_pickle_by_value(_transforms)
+    return serialize_predict(
+        predict_fn,
+        path=artifact_path,
+        feature_names=list(model_meta["feature_names"]),
+        models=model_meta,
+    )
+
+
 def _package_version(name: str) -> str | None:
     try:
         return version(name)
     except PackageNotFoundError:
         return None
+
+
+_DATA_FINGERPRINT_CACHE_NAME = "data_fingerprint.json"
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _parquet_snapshot(name: str, path: Path) -> dict[str, Any]:
+    """Deterministic per-file snapshot: footer schema, row count, era stats.
+
+    Row count comes from the parquet footer metadata; era min/max/count reads
+    only the era column (fast). Byte size is deliberately excluded (a
+    re-download with different compression must not change identity).
+    """
+    schema = pl.scan_parquet(path).collect_schema().names()
+    row_count = pl.scan_parquet(path).select(pl.len()).collect().item()
+    era_stats = (
+        pl.scan_parquet(path)
+        .select(
+            pl.col("era").min().alias("era_min"),
+            pl.col("era").max().alias("era_max"),
+            pl.len().alias("era_count"),
+        )
+        .collect()
+        .row(0)
+    )
+    return {
+        "name": name,
+        "schema": list(schema),
+        "row_count": int(row_count),
+        "era_min": era_stats[0],
+        "era_max": era_stats[1],
+        "era_count": int(era_stats[2]),
+    }
+
+
+def _data_fingerprint(config: ExperimentConfig) -> str:
+    """SHA256 over a deterministic snapshot of the data-defining files.
+
+    Per-file records for the files the run learns from and is scored on:
+    ``{name, footer schema, footer row count, era min, era max, era count}``
+    for train/validation (plus meta/benchmarks when
+    ``evaluation.validation_scorecard`` consumes them — config-aware), and
+    ``features.json`` by content SHA256.
+
+    **Detection limits (documented):** restated feature values within an
+    unchanged schema/row-count/era-stats are NOT detected; local edits are
+    caught by the mtime-based cache invalidation. This is a snapshot marker,
+    not a full content hash (a 28 GB+ parquet hash per run is disproportionate).
+
+    Cached under ``artifacts/cache/`` keyed on (path, mtime, size) so repeated
+    run_id computation is cheap. **Fail-loud** on missing data files: run_id
+    requires the data snapshot (``run_campaign.py --dry-run`` needs the data
+    present).
+    """
+    files = [
+        ("train.parquet", True),
+        ("validation.parquet", True),
+        ("meta_model.parquet", config.evaluation.validation_scorecard),
+        (
+            "validation_benchmark_models.parquet",
+            config.evaluation.validation_scorecard,
+        ),
+    ]
+    records: list[dict[str, Any]] = []
+    cache_keys: list[str] = []
+    for name, required in files:
+        path = config.data.path(name)
+        if required and not path.is_file():
+            raise ValueError(f"run_id requires the data fingerprint; {path} missing")
+        if not path.is_file():
+            continue
+        stat = path.stat()
+        cache_keys.append(f"{name}:{stat.st_mtime_ns}:{stat.st_size}")
+        records.append(_parquet_snapshot(name, path))
+    features_path = config.data.data_dir / config.data.version / "features.json"
+    if not features_path.is_file():
+        raise ValueError(
+            f"run_id requires the data fingerprint; {features_path} missing"
+        )
+    stat = features_path.stat()
+    cache_keys.append(f"features.json:{stat.st_mtime_ns}:{stat.st_size}")
+    records.append({"name": "features.json", "sha256": _sha256_file(features_path)})
+
+    cache_path = config.run.artifacts_dir / "cache" / _DATA_FINGERPRINT_CACHE_NAME
+    key = hashlib.sha256("\n".join(cache_keys).encode("utf-8")).hexdigest()
+    try:
+        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        cached = {}
+    if cached.get("key") == key:
+        return str(cached["fingerprint"])
+    fingerprint = hashlib.sha256(
+        json.dumps(records, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(
+        json.dumps({"key": key, "fingerprint": fingerprint}, sort_keys=True),
+        encoding="utf-8",
+    )
+    return fingerprint
 
 
 def _to_jsonable(value: Any) -> Any:

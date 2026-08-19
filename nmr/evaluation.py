@@ -9,6 +9,10 @@ Degenerate eras are normalized at the engine boundary:
 - zero-variance predictions/targets/meta -> 0.0
 - non-finite oracle/custom results -> 0.0
 
+The scorecard surfaces WHICH eras were degenerate via ``degenerate_eras`` /
+``n_degenerate_eras`` (A4, audit SEV-3) so they remain distinguishable from
+genuine zero-IC eras — values are unchanged, only visibility is added.
+
 Summary Sharpe uses population standard deviation (`ddof=0`). When `std == 0`,
 Sharpe is defined as `0.0`.
 """
@@ -529,6 +533,41 @@ class EvaluationEngine:
             if np.std(arr) == 0.0:
                 return True
         return False
+
+    def degenerate_eras(
+        self,
+        df: pl.DataFrame,
+        *,
+        era_col: str,
+        pred_col: str,
+        target_col: str,
+        meta_col: str,
+        feature_cols: Sequence[str],
+    ) -> list[str]:
+        """Era labels whose per-era metrics short-circuit (degenerate).
+
+        Matches the engine's boundary (module docstring): fewer than 2 usable
+        rows, or zero-variance / non-finite predictions, targets, meta, or
+        features — the eras that normalize to 0.0. Exposed (A4, audit SEV-3)
+        so degenerate eras are distinguishable from genuine zero-IC eras in
+        the scorecard.
+        """
+        eras = sorted_era_labels(df.get_column(era_col).to_list())
+        parts = {
+            str(part.get_column(era_col).to_list()[0]): part
+            for part in df.partition_by(era_col, maintain_order=True)
+        }
+        required = [pred_col, target_col, meta_col, *feature_cols]
+        out: list[str] = []
+        for era in eras:
+            clean = clean_frame(parts[era], required)
+            if self._should_short_circuit(
+                self._column_values(clean, pred_col),
+                self._column_values(clean, target_col),
+                self._column_values(clean, meta_col),
+            ):
+                out.append(era)
+        return out
 
     def _normalize_score(self, value: float) -> float:
         return 0.0 if not math.isfinite(value) else float(value)

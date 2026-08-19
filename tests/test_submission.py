@@ -4,10 +4,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
+import pandas as pd
 import polars as pl
 import pytest
 
-from nmr.submission import build_submission, validate_submission, write_submission
+from nmr._transforms import tie_kept_rank
+from nmr.deployment import serialize_predict
+from nmr.submission import (
+    accept_promoted_artifact,
+    build_submission,
+    validate_submission,
+    write_submission,
+)
 
 
 def _raw_predictions() -> pl.DataFrame:
@@ -100,3 +109,114 @@ def test_build_submission_ranks_inputs_with_exact_zero_and_one_to_open_interval(
     assert submission.get_column("prediction").min() > 0.0
     assert submission.get_column("prediction").max() < 1.0
     validate_submission(submission, live_ids=submission.get_column("id").to_list())
+
+
+def _ranked_predict_fn() -> object:
+    def predict(
+        live_features: pd.DataFrame,
+        live_benchmark_models: pd.DataFrame | None = None,
+    ) -> pd.DataFrame:
+        del live_benchmark_models
+        signal = (
+            np.asarray(live_features.iloc[:, 0], dtype=float)
+            - np.asarray(live_features.iloc[:, 1], dtype=float)
+        )
+        # The fixed closure's final per-era (0,1) step.
+        return pd.DataFrame(
+            {"prediction": tie_kept_rank(signal)}, index=live_features.index
+        )
+
+    return predict
+
+
+def _unranked_predict_fn() -> object:
+    """The pre-fix closure: neutralize and stop — output is unbounded."""
+
+    def predict(
+        live_features: pd.DataFrame,
+        live_benchmark_models: pd.DataFrame | None = None,
+    ) -> pd.DataFrame:
+        del live_benchmark_models
+        signal = (
+            np.asarray(live_features.iloc[:, 0], dtype=float)
+            - np.asarray(live_features.iloc[:, 1], dtype=float)
+        )
+        return pd.DataFrame({"prediction": signal}, index=live_features.index)
+
+    return predict
+
+
+def _live_fixture(n: int = 40) -> pd.DataFrame:
+    rng = np.random.default_rng(0)
+    return pd.DataFrame(
+        {
+            "f1": rng.normal(size=n),
+            "f2": rng.normal(size=n),
+        },
+        index=[f"id_{i}" for i in range(n)],
+    )
+
+
+def test_accept_promoted_artifact_valid(tmp_path: Path) -> None:
+    artifact = serialize_predict(
+        _ranked_predict_fn(), path=tmp_path / "predict.pkl", feature_names=["f1", "f2"]
+    )
+    live = _live_fixture()
+    bench = pd.DataFrame({"dummy": [0.1] * live.shape[0]}, index=live.index)
+    raw = accept_promoted_artifact(
+        artifact.path, live_features=live, live_benchmark_models=bench
+    )
+    assert list(raw.columns) == ["prediction"]
+    values = raw["prediction"].to_numpy()
+    assert ((values > 0) & (values < 1)).all()
+    assert np.isfinite(values).all()
+
+
+def test_accept_promoted_artifact_rejects_unranked_output(tmp_path: Path) -> None:
+    """The masking trap + SEV-1 #14 regression guard: the raw output must pass
+    the validator UNAIDED. If the closure's (0,1) step is ever removed, this
+    gate fails — it must never repair the output before validating it."""
+    artifact = serialize_predict(
+        _unranked_predict_fn(), path=tmp_path / "predict.pkl", feature_names=["f1", "f2"]
+    )
+    with pytest.raises(ValueError, match=r"\(0,1\)"):
+        accept_promoted_artifact(
+            artifact.path, live_features=_live_fixture(), live_benchmark_models=None
+        )
+
+
+def test_accept_promoted_artifact_rejects_nonfinite_and_wrong_columns(
+    tmp_path: Path,
+) -> None:
+    def nan_predict(
+        live_features: pd.DataFrame,
+        live_benchmark_models: pd.DataFrame | None = None,
+    ) -> pd.DataFrame:
+        del live_benchmark_models
+        values = np.full(len(live_features), np.nan)
+        return pd.DataFrame({"prediction": values}, index=live_features.index)
+
+    artifact = serialize_predict(
+        nan_predict, path=tmp_path / "predict.pkl", feature_names=["f1", "f2"]
+    )
+    with pytest.raises(ValueError, match="finite"):
+        accept_promoted_artifact(
+            artifact.path, live_features=_live_fixture(), live_benchmark_models=None
+        )
+
+    def wrong_cols_predict(
+        live_features: pd.DataFrame,
+        live_benchmark_models: pd.DataFrame | None = None,
+    ) -> pd.DataFrame:
+        del live_benchmark_models
+        return pd.DataFrame(
+            {"not_prediction": [0.5] * len(live_features)}, index=live_features.index
+        )
+
+    artifact2 = serialize_predict(
+        wrong_cols_predict, path=tmp_path / "predict2.pkl", feature_names=["f1", "f2"]
+    )
+    with pytest.raises(ValueError, match="prediction"):
+        accept_promoted_artifact(
+            artifact2.path, live_features=_live_fixture(), live_benchmark_models=None
+        )

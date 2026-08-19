@@ -745,7 +745,10 @@ def test_full_history_subprocess_fit_matches_in_process(tmp_path) -> None:
 
     import cloudpickle
 
-    subprocess_model = cloudpickle.loads(payload)
+    model_bytes, working_set, commit = payload
+    assert working_set is None or working_set > 0  # measured peak RSS
+    assert commit is None or commit > 0  # measured peak commit charge
+    subprocess_model = cloudpickle.loads(model_bytes)
     feats = orchestrator._feature_frame(df, feature_cols=["f1", "f2", "f3"])
     a = in_process.predict(feats)
     b = subprocess_model.predict(feats)
@@ -928,3 +931,32 @@ def test_resolved_params_floors_all_present_alias_members() -> None:
     assert resolved["colsample_bytree"] >= 10.0 / 42.0
     assert resolved["feature_fraction"] >= 10.0 / 42.0
     assert resolved["sub_feature"] >= 10.0 / 42.0
+
+
+def test_construct_tree_model_max_leaves_sets_lossguide() -> None:
+    """A5 (audit SEV-3): a config specifying max_leaves directly must mean
+    leaf-wise growth — under XGBoost's default depthwise policy max_leaves is
+    silently inert (the tier-2 XGB cell's max_leaves: 15 was a no-op)."""
+    from nmr.models import construct_tree_model
+
+    model = construct_tree_model(
+        "xgboost", {"max_depth": 4, "max_leaves": 15}, seed=42, n_features=780
+    )
+    params = model.get_params()
+    assert params["grow_policy"] == "lossguide"
+    assert params["max_leaves"] == 15
+
+    # An explicit grow_policy wins over the max_leaves inference.
+    explicit = construct_tree_model(
+        "xgboost",
+        {"max_depth": 4, "max_leaves": 15, "grow_policy": "depthwise"},
+        seed=42, n_features=780,
+    )
+    assert explicit.get_params()["grow_policy"] == "depthwise"
+
+    # num_leaves continues to set lossguide + max_leaves (legacy behavior).
+    legacy = construct_tree_model(
+        "xgboost", {"num_leaves": 31}, seed=42, n_features=780
+    )
+    assert legacy.get_params()["grow_policy"] == "lossguide"
+    assert legacy.get_params()["max_leaves"] == 31

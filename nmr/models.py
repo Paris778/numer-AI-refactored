@@ -14,6 +14,7 @@ folds directly and refuses to widen scope into ranking, ensembling, or scoring.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -196,6 +197,12 @@ class ModelOrchestrator:
         self._config = config
         self._seed = seed
         self.resolved_device: str | None = None
+        # Measured peak RSS + commit charge of the last spawned full-history
+        # fit (bytes), or None when unknown / not spawned. Commit is the
+        # quantity that gates the promotion (the full-universe thrash was a
+        # commit-limit crossing). Read by the promotion rehearsal.
+        self.last_full_history_peak_bytes: int | None = None
+        self.last_full_history_peak_commit_bytes: int | None = None
 
     def train_anchor_fold(
         self,
@@ -290,21 +297,35 @@ class ModelOrchestrator:
         era_col: str = "era",
         in_process: bool = False,
         data: DataConfig | None = None,
+        include_validation: bool = False,
     ) -> object:
         """Fit a single CPU-only model on every era (deployment/validation artifact).
 
         CPU-only by design: determinism is per-device and the deployed model must
         reproduce identically on any hosted runtime (which may lack a GPU).
 
-        Memory discipline (2026-08-12): when the float32 feature matrix would
-        exceed ``_FULL_HISTORY_SUBPROCESS_MIN_BYTES`` the fit runs in a freshly
-        spawned process with its own address space. A full-universe fit peaks at
-        ~71 GiB of commit (polars frame + LightGBM construction copy + bins);
-        running it in the long-lived campaign process stacks that on the run's
-        accumulated commit (CV + neutralization) and crosses the machine's
-        commit limit — Windows then thrashes (measured: 1.1 iters/s vs ~50).
-        The child re-reads the data itself and returns the pickled booster;
-        results are bit-identical (same code path, same seed).
+        ``include_validation`` (promotion writer only): when the fit spawns a
+        subprocess, the child re-reads BOTH ``train.parquet`` and
+        ``validation.parquet`` (concatenated) so a full version trained on
+        train+validation sees the validation eras the research run never did.
+        The in-process path fits whatever frame the caller passes, so callers
+        pass the concat directly there.
+
+        Memory discipline (2026-08-12, measured curve 2026-08-18): when the
+        float32 feature matrix would exceed ``_FULL_HISTORY_SUBPROCESS_MIN_BYTES``
+        the fit runs in a freshly spawned process with its own address space.
+        The full-version (train+validation) memory profile is MEASURED, not
+        guessed — see ``artifacts/reports/ram_curve.json`` and the AGENTS.md
+        hazard: at medium (780 features, 6.85M rows) combined commit
+        extrapolates to ~61-65 GiB and combined working set to 86-90% of
+        physical RAM (marginal-to-infeasible on this box; the promotion RAM
+        guard refuses with the measured numbers). Earlier conflicting
+        full-universe figures (40-45 vs ~71 GiB) are retired in favor of that
+        curve. Running the fit in the long-lived campaign process stacks it on
+        the run's accumulated commit (CV + neutralization) and crosses the
+        machine's commit limit — Windows then thrashes (measured: 1.1 iters/s
+        vs ~50). The child re-reads the data itself and returns the pickled
+        booster; results are bit-identical (same code path, same seed).
         """
         train_df = df.filter(pl.col(era_col).is_not_null())
         train_df = train_df.filter(
@@ -329,6 +350,7 @@ class ModelOrchestrator:
             return self._fit_full_history_subprocess(
                 train_df, feature_cols=feature_cols, target_col=target_col,
                 era_col=era_col, data=data,
+                include_validation=include_validation,
             )
         model = self._fit_model(
             features=self._feature_frame(train_df, feature_cols=feature_cols),
@@ -577,6 +599,12 @@ class ModelOrchestrator:
         if num_leaves is not None:
             params.setdefault("grow_policy", "lossguide")
             params.setdefault("max_leaves", num_leaves)
+        elif "max_leaves" in params:
+            # A config specifying max_leaves directly (without num_leaves) means
+            # leaf-wise growth: under XGBoost's default depthwise policy
+            # max_leaves is silently inert (audit SEV-3: the tier-2 XGB cell's
+            # max_leaves: 15 was a no-op). An explicit grow_policy wins.
+            params.setdefault("grow_policy", "lossguide")
         if min_data_in_leaf is not None:
             params.setdefault("min_child_weight", float(min_data_in_leaf))
         params["colsample_bytree"] = _raise_to_colsample_floor(
@@ -617,11 +645,19 @@ class ModelOrchestrator:
     def _should_spawn_full_history(
         self, train_df: pl.DataFrame, feature_cols: Sequence[str]
     ) -> bool:
-        """True when the float32 feature matrix would exceed the spawn threshold."""
-        return (
-            train_df.height * len(feature_cols) * 4
-            > _FULL_HISTORY_SUBPROCESS_MIN_BYTES
+        """True when the float32 feature matrix would exceed the spawn threshold.
+
+        Env override ``NMR_FULL_HISTORY_SPAWN_MIN_BYTES`` lowers the threshold
+        so the D7 truncated rehearsal (and tests) can force the fresh-process
+        path at small scale — the least-exercised code in this module.
+        """
+        threshold = int(
+            os.environ.get(
+                "NMR_FULL_HISTORY_SPAWN_MIN_BYTES",
+                str(_FULL_HISTORY_SUBPROCESS_MIN_BYTES),
+            )
         )
+        return train_df.height * len(feature_cols) * 4 > threshold
 
     def _fit_full_history_subprocess(
         self,
@@ -631,8 +667,13 @@ class ModelOrchestrator:
         target_col: str,
         era_col: str,
         data: DataConfig,
+        include_validation: bool = False,
     ) -> object:
-        """Fit the full-history model in a fresh process (bounded commit)."""
+        """Fit the full-history model in a fresh process (bounded commit).
+
+        ``include_validation`` (promotion writer): the child re-reads
+        train+validation so the full version sees the validation eras.
+        """
         if data is None:
             raise ValueError(
                 "subprocess full-history fit requires the DataConfig — pass "
@@ -664,6 +705,7 @@ class ModelOrchestrator:
             "preset": self._config.preset,
             "params": dict(self._config.params),
             "seed": self._seed,
+            "include_validation": include_validation,
         }
         logger.info(
             "[train_full_history] spawning fresh-process fit "
@@ -682,7 +724,10 @@ class ModelOrchestrator:
                 f"full-history subprocess fit failed (exit={proc.exitcode}): {payload}"
             )
         self.resolved_device = "cpu"  # train_full_history is CPU-only by design
-        return cloudpickle.loads(payload)
+        model_bytes, working_set, commit = payload
+        self.last_full_history_peak_bytes = working_set
+        self.last_full_history_peak_commit_bytes = commit
+        return cloudpickle.loads(model_bytes)
 
 
 def construct_tree_model(
@@ -746,15 +791,146 @@ def _receive_subprocess_result(out_q, proc) -> tuple:
     return result
 
 
+def _peak_memory_counters() -> tuple[int | None, int | None]:
+    """Peak (working set, commit charge) of the calling process, stdlib-only.
+
+    Windows: ``PROCESS_MEMORY_COUNTERS`` gives both ``PeakWorkingSetSize``
+    (RSS) and ``PeakPagefileUsage`` (peak commit charge). COMMIT is the
+    quantity that produced the documented full-universe thrash (~71 GiB
+    commit) — the RAM guard gates on commit, never on working set. Unix has no
+    commit counter; the resource fallback reports ``ru_maxrss`` as working set
+    only (commit is None). Returns ``(None, None)`` when unavailable.
+    """
+    try:
+        import ctypes  # Windows
+
+        class _ProcessMemoryCounters(ctypes.Structure):
+            _fields_ = [
+                ("cb", ctypes.c_ulong),
+                ("PageFaultCount", ctypes.c_ulong),
+                ("PeakWorkingSetSize", ctypes.c_size_t),
+                ("WorkingSetSize", ctypes.c_size_t),
+                ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                ("PagefileUsage", ctypes.c_size_t),
+                ("PeakPagefileUsage", ctypes.c_size_t),
+            ]
+
+        kernel32 = ctypes.windll.kernel32
+        # Typed signatures are REQUIRED on 64-bit Windows: GetCurrentProcess
+        # returns a HANDLE, and without restype=c_void_p ctypes truncates it to
+        # c_int, making the subsequent memory-info call fail (measured as a
+        # 0-byte peak — the exact failure the rehearsal is meant to catch).
+        kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+        kernel32.GetCurrentProcess.argtypes = []
+        kernel32.K32GetProcessMemoryInfo.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(_ProcessMemoryCounters),
+            ctypes.c_size_t,
+        ]
+        kernel32.K32GetProcessMemoryInfo.restype = ctypes.c_int
+        counters = _ProcessMemoryCounters()
+        counters.cb = ctypes.sizeof(_ProcessMemoryCounters)
+        process = kernel32.GetCurrentProcess()
+        if kernel32.K32GetProcessMemoryInfo(
+            process, ctypes.byref(counters), counters.cb
+        ):
+            return (
+                int(counters.PeakWorkingSetSize),
+                int(counters.PeakPagefileUsage),
+            )
+        return None, None
+    except Exception:  # pragma: no cover - platform-dependent, best-effort
+        try:
+            import resource  # Unix: ru_maxrss (KiB on Linux) — working set only
+
+            return int(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss) * 1024, None
+        except Exception:
+            return None, None
+
+
+def _peak_rss_bytes() -> int | None:
+    """Backward-compatible wrapper: peak working set only."""
+    working_set, _ = _peak_memory_counters()
+    return working_set
+
+
+def _machine_memory_limits() -> tuple[int | None, int | None]:
+    """Physical RAM and commit limit of THIS machine, stdlib-only.
+
+    Returns ``(physical_total_bytes, commit_limit_bytes)``. Windows:
+    ``GetPerformanceInfo`` (fields are in pages; ``PageSize`` converts).
+    Unix: physical via ``sysconf``; commit limit N/A (None). The two metrics
+    guard different failure modes: commit vs commit limit (hard OOM), working
+    set vs physical RAM (thrash — the documented 1.1 iters/s collapse).
+    """
+    try:
+        import ctypes  # Windows: GetPerformanceInfo (psapi.dll / K32GetPerformanceInfo)
+
+        class _PerformanceInformation(ctypes.Structure):
+            _fields_ = [
+                ("cb", ctypes.c_ulong),
+                ("CommitTotal", ctypes.c_size_t),
+                ("CommitLimit", ctypes.c_size_t),
+                ("CommitPeak", ctypes.c_size_t),
+                ("PhysicalTotal", ctypes.c_size_t),
+                ("PhysicalAvailable", ctypes.c_size_t),
+                ("SystemCache", ctypes.c_size_t),
+                ("KernelTotal", ctypes.c_size_t),
+                ("KernelPaged", ctypes.c_size_t),
+                ("KernelNonpaged", ctypes.c_size_t),
+                ("PageSize", ctypes.c_size_t),
+                ("HandleCount", ctypes.c_ulong),
+                ("ProcessCount", ctypes.c_ulong),
+                ("ThreadCount", ctypes.c_ulong),
+            ]
+
+        info = _PerformanceInformation()
+        info.cb = ctypes.sizeof(_PerformanceInformation)
+        fn = None
+        for dll_name, fn_name in (
+            ("psapi", "GetPerformanceInfo"),
+            ("kernel32", "K32GetPerformanceInfo"),
+        ):
+            try:
+                dll = getattr(ctypes.windll, dll_name)
+                candidate = getattr(dll, fn_name)
+                candidate.argtypes = [ctypes.POINTER(_PerformanceInformation), ctypes.c_ulong]
+                candidate.restype = ctypes.c_int
+                fn = candidate
+                break
+            except (AttributeError, OSError):
+                continue
+        if fn is not None and fn(ctypes.byref(info), info.cb):
+            page = int(info.PageSize)
+            return int(info.PhysicalTotal) * page, int(info.CommitLimit) * page
+        return None, None
+    except Exception:  # pragma: no cover - platform-dependent, best-effort
+        try:
+            import os as _os
+
+            pages = _os.sysconf("SC_PHYS_PAGES")
+            page_size = _os.sysconf("SC_PAGE_SIZE")
+            return int(pages) * int(page_size), None
+        except Exception:
+            return None, None
+
+
 def _full_history_fit_worker(spec: dict, out_q) -> None:
     """Spawned-process fitter for memory-bounded full-history training.
 
     Runs in a fresh address space: re-loads the train split via
-    ``IngestionAgent``, fits the same CPU-only model (identical code path and
-    seed as the in-process variant), and returns the cloudpickled booster.
+    ``IngestionAgent`` (plus the validation split when ``include_validation``
+    is set — the promotion writer's full version trains on train+validation),
+    fits the same CPU-only model (identical code path and seed as the
+    in-process variant), and returns the cloudpickled booster plus the
+    measured peak RSS (for the promotion rehearsal's RAM extrapolation).
     """
     try:
         import cloudpickle
+        import polars as pl
 
         from nmr.config import DataConfig, ModelConfig, set_global_seeds
         from nmr.data import IngestionAgent
@@ -762,10 +938,10 @@ def _full_history_fit_worker(spec: dict, out_q) -> None:
         set_global_seeds(spec["seed"])
         data = DataConfig(**spec["data"])
         agent = IngestionAgent(data)
-        df = agent.load(
-            "train",
-            columns=["era", "id", *spec["feature_cols"], spec["target_col"]],
-        )
+        columns = ["era", "id", *spec["feature_cols"], spec["target_col"]]
+        df = agent.load("train", columns=columns)
+        if spec.get("include_validation"):
+            df = pl.concat([df, agent.load("validation", columns=columns)])
         orch = ModelOrchestrator(
             ModelConfig(
                 backend=spec["backend"],
@@ -782,7 +958,8 @@ def _full_history_fit_worker(spec: dict, out_q) -> None:
             era_col=spec["era_col"],
             in_process=True,
         )
-        out_q.put(("ok", cloudpickle.dumps(model)))
+        working_set, commit = _peak_memory_counters()
+        out_q.put(("ok", (cloudpickle.dumps(model), working_set, commit)))
     except Exception as exc:  # surface the child's failure loudly in the parent
         out_q.put(("error", repr(exc)))
 

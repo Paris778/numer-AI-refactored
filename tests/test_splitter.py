@@ -33,7 +33,7 @@ class TestValidation:
 class TestWalkForward:
     def test_walk_forward_yields_requested_fold_count(self) -> None:
         splitter = PurgedEraSplitter(
-            SplitConfig(n_folds=4, purge_eras=1, embargo_eras=2)
+            SplitConfig(n_folds=4, purge_eras=1, embargo_eras=0)
         )
         folds = splitter.split(_eras(1, 25))
         assert len(folds) == 4
@@ -41,7 +41,7 @@ class TestWalkForward:
 
     def test_walk_forward_is_expanding_and_strictly_past_only(self) -> None:
         splitter = PurgedEraSplitter(
-            SplitConfig(n_folds=4, purge_eras=1, embargo_eras=2)
+            SplitConfig(n_folds=4, purge_eras=1, embargo_eras=0)
         )
         folds = splitter.split(_eras(1, 25))
 
@@ -52,7 +52,7 @@ class TestWalkForward:
 
     def test_walk_forward_honors_purge_gap_and_excludes_buffer(self) -> None:
         splitter = PurgedEraSplitter(
-            SplitConfig(n_folds=4, purge_eras=2, embargo_eras=1)
+            SplitConfig(n_folds=4, purge_eras=2, embargo_eras=0)
         )
         folds = splitter.split(_eras(1, 30))
 
@@ -64,18 +64,15 @@ class TestWalkForward:
             assert purge_buffer.isdisjoint(set(map(int, fold.train_eras)))
             assert purge_buffer.isdisjoint(set(map(int, fold.val_eras)))
 
-    def test_walk_forward_is_invariant_to_embargo_eras(self) -> None:
-        eras = _eras(1, 25)
-        base = PurgedEraSplitter(SplitConfig(n_folds=4, purge_eras=1, embargo_eras=0))
-        widened = PurgedEraSplitter(
+    def test_walk_forward_rejects_nonzero_embargo(self) -> None:
+        # A2 (audit SEV-3): embargo_eras was structurally inert; non-zero
+        # now raises at load - purge_eras is the active leakage buffer.
+        with pytest.raises(ValueError, match="embargo_eras"):
             SplitConfig(n_folds=4, purge_eras=1, embargo_eras=12)
-        )
-
-        assert base.split(eras) == widened.split(eras)
 
     def test_walk_forward_is_deterministic(self) -> None:
         splitter = PurgedEraSplitter(
-            SplitConfig(n_folds=4, purge_eras=1, embargo_eras=2)
+            SplitConfig(n_folds=4, purge_eras=1, embargo_eras=0)
         )
         eras = [
             "10",
@@ -98,7 +95,7 @@ class TestWalkForward:
 
     def test_walk_forward_matches_benchmark_geometry(self) -> None:
         splitter = PurgedEraSplitter(
-            SplitConfig(n_folds=4, purge_eras=8, embargo_eras=4)
+            SplitConfig(n_folds=4, purge_eras=8, embargo_eras=0)
         )
         folds = splitter.split(_eras(1, 780))
         starts = [int(fold.val_eras[0]) for fold in folds]
@@ -110,7 +107,7 @@ class TestWalkForward:
 class TestAnchor:
     def test_anchor_structure_is_correct(self) -> None:
         splitter = PurgedEraSplitter(
-            SplitConfig(scheme="anchor", purge_eras=1, embargo_eras=2)
+            SplitConfig(scheme="anchor", purge_eras=1, embargo_eras=0)
         )
         folds = splitter.split(_eras(1, 10))
 
@@ -120,29 +117,23 @@ class TestAnchor:
         assert fold.val_eras == ("6", "7", "8", "9", "10")
         assert set(fold.train_eras).isdisjoint(set(fold.val_eras))
 
-    def test_anchor_is_invariant_to_embargo_eras(self) -> None:
-        eras = _eras(1, 10)
-        base = PurgedEraSplitter(
-            SplitConfig(scheme="anchor", purge_eras=1, embargo_eras=0)
-        )
-        widened = PurgedEraSplitter(
+    def test_anchor_rejects_nonzero_embargo(self) -> None:
+        # A2: same rejection for the anchor scheme.
+        with pytest.raises(ValueError, match="embargo_eras"):
             SplitConfig(scheme="anchor", purge_eras=1, embargo_eras=12)
-        )
-
-        assert base.split(eras) == widened.split(eras)
 
 
 class TestInfeasibility:
     def test_infeasible_walk_forward_raises(self) -> None:
         splitter = PurgedEraSplitter(
-            SplitConfig(n_folds=4, purge_eras=8, embargo_eras=4)
+            SplitConfig(n_folds=4, purge_eras=8, embargo_eras=0)
         )
         with pytest.raises(ValueError, match="too small"):
             splitter.split(_eras(1, 12))
 
     def test_infeasible_anchor_raises(self) -> None:
         splitter = PurgedEraSplitter(
-            SplitConfig(scheme="anchor", purge_eras=5, embargo_eras=1)
+            SplitConfig(scheme="anchor", purge_eras=5, embargo_eras=0)
         )
         with pytest.raises(ValueError, match="too small"):
             splitter.split(_eras(1, 6))

@@ -66,7 +66,10 @@ from .campaign import (
     write_campaign_log,
 )
 from .config import (
+    PURGE_ERAS_20D,
+    PURGE_ERAS_60D,
     REPO_ROOT,
+    VALID_HORIZONS,
     DataConfig,
     EnsembleConfig,
     EvalConfig,
@@ -75,6 +78,8 @@ from .config import (
     RiskConfig,
     RunConfig,
     SplitConfig,
+    config_from_dict,
+    enforce_purge_horizon_law,
     load_config,
     set_global_seeds,
 )
@@ -104,15 +109,18 @@ from .evaluation import (
     sorted_era_labels,
 )
 from .families import (
+    CURRENT_POINTER_NAME,
     DEFAULT_MODELS_DIR,
     FAMILY_DIR_NAME,
     FULL_DIR_NAME,
     FULL_MANIFEST_NAME,
     FullVersion,
+    available_slots,
     family_has_full_version,
     full_manifest_path,
     load_full_version,
     scan_full_versions,
+    validate_family_name,
 )
 from .features import (
     feature_stability_screen,
@@ -174,6 +182,13 @@ from .payout import (
     sortino,
     time_to_recovery,
 )
+from .promote import (
+    PromotionResult,
+    RehearsalResult,
+    promote_full_version,
+    rehearse_promotion,
+    resolve_champion_run_id,
+)
 from .refresh import (
     CURRENT_DATA_VERSION,
     EXPANDING_FILES,
@@ -204,7 +219,12 @@ from .robustness import (
 from .runner import ExperimentRunner, RunResult
 from .scorecard import MetricCell, MetricScorecard, evaluate_model
 from .splitter import Fold, PurgedEraSplitter
-from .submission import build_submission, validate_submission, write_submission
+from .submission import (
+    accept_promoted_artifact,
+    build_submission,
+    validate_submission,
+    write_submission,
+)
 
 __all__ = [
     "FeatureCorrResult",
@@ -236,6 +256,11 @@ __all__ = [
     "EnsembleConfig",
     "RunConfig",
     "ExperimentConfig",
+    "PURGE_ERAS_20D",
+    "PURGE_ERAS_60D",
+    "VALID_HORIZONS",
+    "config_from_dict",
+    "enforce_purge_horizon_law",
     "load_config",
     "set_global_seeds",
     "BenchmarkCellConfig",
@@ -298,11 +323,14 @@ __all__ = [
     "FAMILY_DIR_NAME",
     "FULL_DIR_NAME",
     "FULL_MANIFEST_NAME",
+    "CURRENT_POINTER_NAME",
     "FullVersion",
+    "available_slots",
     "family_has_full_version",
     "full_manifest_path",
     "load_full_version",
     "scan_full_versions",
+    "validate_family_name",
     "feature_stability_screen",
     "resolve_feature_sets",
     "resolve_small_feature_set",
@@ -345,6 +373,11 @@ __all__ = [
     "fleet_summary",
     "paired_era_comparison",
     "promotion_verdict",
+    "PromotionResult",
+    "promote_full_version",
+    "resolve_champion_run_id",
+    "RehearsalResult",
+    "rehearse_promotion",
     "read_champion_pointer",
     "reconcile_capital_metrics",
     "OverlappingSimulationResult",
@@ -386,6 +419,7 @@ __all__ = [
     "build_submission",
     "validate_submission",
     "write_submission",
+    "accept_promoted_artifact",
     "__version__",
 ]
 __version__ = "0.1.0"
