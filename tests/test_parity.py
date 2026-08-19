@@ -395,3 +395,41 @@ def test_fnc_degenerate_features_match_oracle(mutate: str) -> None:
     assert list(custom) == list(official)
     for era in custom:
         assert custom[era] == pytest.approx(official[era], abs=1e-5, nan_ok=True)
+
+
+def test_bmc_multi_era_and_nan_benchmark_match_oracle() -> None:
+    meta_model, benchmarks, features, targets = _slice3_inputs(n_eras=40, rows_per_era=20)
+    cfg_pred = targets.select(["era", "id"]).with_columns(
+        (0.7 * pl.col("id").cum_count()).cast(pl.Float64).alias("prediction")
+    )
+    base = (
+        cfg_pred.join(targets.select(["era", "id", "target"]), on=["era", "id"], how="inner")
+        .join(benchmarks, on=["era", "id"], how="left")  # nulls where unmatched
+    )
+    # inject explicit NaN benchmark rows too (missing-benchmark left-join case)
+    base = base.with_columns(
+        pl.when(pl.col("v52_lgbm_cyrusd20").is_null())
+        .then(np.nan)
+        .otherwise(pl.col("v52_lgbm_cyrusd20"))
+        .alias("v52_lgbm_cyrusd20")
+    )
+
+    evaluator = EvaluationEngine("custom")
+    per_era = evaluator.per_era_bmc(
+        base, pred_col="prediction", benchmark_col="v52_lgbm_cyrusd20",
+        target_col="target", min_overlap_eras=20,
+    )
+    eras = sorted(per_era, key=int)
+    assert len(eras) >= 20
+    for one_era in eras[:3]:  # spot-check three eras against the direct oracle
+        pdf = base.filter(pl.col("era") == one_era).select(
+            ["prediction", "v52_lgbm_cyrusd20", "target"]
+        ).to_pandas()
+        direct = float(
+            correlation_contribution(
+                pdf[["prediction"]],
+                pdf["v52_lgbm_cyrusd20"].rename("v52_lgbm_cyrusd20"),
+                pdf["target"].rename("target"),
+            )["prediction"]
+        )
+        assert per_era[one_era] == pytest.approx(direct, abs=1e-6)
