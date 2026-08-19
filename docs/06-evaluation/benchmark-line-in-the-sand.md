@@ -34,3 +34,19 @@ Tier 1–3 `anchors` in the YAMLs are sanity reference lines logged against meas
 - **FNE is FNC@medium (780),** not the full 3,555 universe: full-universe validation FNC is memory-prohibited by the feature-universe policy. The tier-4 gate field `fnc_min` is measured against medium.
 - Tier-4 point estimates are identical between fast and full modes (the reference is a data column); only tier 1–3 rungs degrade in fast mode.
 - Run: `python benchmark_runner.py --data-dir data/v5.3 --seed 42 --n-boot 1000` (full) or `--fast-mode` (smoke). Outputs: `artifacts/reports/benchmark_hierarchy_scorecard.csv` + `benchmark_gate_report.csv`; the smoke convention writes `benchmark_hierarchy_scorecard_smoke.csv` + `benchmark_gate_report_smoke.csv`.
+
+## Untiered Benchmark Fleet
+
+A fourth config layer, `configs/benchmarks/fleet/`, holds benchmark models
+with **no tier assignment**: silly heuristics, tutorial small/deep variants,
+community example scripts (shallow/deep), and the Finance Arena v0.2-v1.5.1
+recreations — 19 cells. They are scored through the identical
+`evaluate_model` pipeline and reported in
+`artifacts/reports/benchmark_fleet_scorecard.csv` with a `placement` column
+(measured CORR vs the per-tier max-corr rungs), informational tier-4 gate
+verdicts, and a `selection_bias` flag (true only for the v1.5.1 search cell,
+whose candidate selection uses validation — never compare it naively).
+
+Fleet results never participate in the hard gates (null floor, tier-4 gate,
+monotonicity). Anchors are report-only and re-pinned after measurement.
+Full design: `docs/superpowers/specs/2026-08-19-benchmark-fleet-design.md`.

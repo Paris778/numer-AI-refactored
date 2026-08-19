@@ -30,7 +30,7 @@ These four files obey a strict **Single Source of Truth (SSOT) hierarchy**. One 
 
 ## 1. Agent Identity & Mission
 
-You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (927 tests, sole functional gate) + `ruff check` (lint gate, `ruff.toml` E/F/I/UP @120, pinned in `requirements-dev.txt`). Both enforced by CI (`.github/workflows/ci.yml`).
+You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (976 tests, sole functional gate) + `ruff check` (lint gate, `ruff.toml` E/F/I/UP @120, pinned in `requirements-dev.txt`). Both enforced by CI (`.github/workflows/ci.yml`).
 
 Your mission:
 
@@ -141,6 +141,7 @@ When modifying or generating code, enforce these seven invariants:
 | Run the mutation gate | `scripts/mutation_gate.py` (CI-only; mutmut refuses Windows) |
 | Change perturbation/horizon/regime diagnostics | `nmr/robustness.py` |
 | Change the benchmark hierarchy (cells, gates, thresholds) | `nmr/benchmark.py` + `configs/benchmarks/` + `benchmark_runner.py` |
+| Change the untiered benchmark fleet (configs, generators, runner) | `nmr/benchmark_fleet.py` + `configs/benchmarks/fleet/` (spec: `docs/superpowers/specs/2026-08-19-benchmark-fleet-design.md`) |
 | Change the executive dashboard data engine (leaderboard, gate projection, capital recompute, payout timeseries) | `nmr/dashboard.py` + the `dashboard_ui/` package (`charts.py`, `report.py`, `app.py`; thin wrappers `generate_dashboard.py` / `dashboard_app.py`) (spec: `docs/superpowers/specs/2026-08-18-vanilla-dashboard-design.md`) |
 | Change model-family / full-version discovery | `nmr/families.py` — read-only scan of `artifacts/models/<family>/full/<run_id>/manifest.json` + atomic `current.json` pointer (spec: `ARCHITECTURE.md` Model Families section) |
 | Promote a run to a full version (train+validation, Model Uploads `predict.pkl`) | `nmr/promote.py` (`promote_full_version`, `rehearse_promotion`) + `promote_model.py` / `rehearse_promotion.py` CLIs; acceptance gate `nmr/submission.py::accept_promoted_artifact` (raw output vs the official validator) |
@@ -196,7 +197,7 @@ Four gates, in order of rigor — **exact commands live only in [`CONTRIBUTING.m
 
 1. **Fast gate** — `ruff check .` + full `pytest -q` after every meaningful change.
 2. **Targeted subsets** while iterating — oracle parity (`tests/test_parity.py` + `tests/test_risk_parity.py`) and determinism hashes (`tests/test_benchmark_hierarchy.py`).
-3. **Pre-sign-off gate** (mandatory before delivering work) — full 927-test suite plus the real-data benchmark smoke (`benchmark_runner.py --fast-mode` → `artifacts/reports/benchmark_hierarchy_scorecard_smoke.csv` + `benchmark_gate_report_smoke.csv`).
+3. **Pre-sign-off gate** (mandatory before delivering work) — full 976-test suite plus the real-data benchmark smoke (`benchmark_runner.py --fast-mode` → `artifacts/reports/benchmark_hierarchy_scorecard_smoke.csv` + `benchmark_gate_report_smoke.csv`).
 4. **End-of-session gate (mandatory)** — after finishing a coding session (before stopping or handing off for review), run the linter and functional gate on the final state: `ruff check .` + `pytest -q`. Never end a session with unverified changes; report the actual results, including any skips or pre-existing failures.
 
 Real-data tests require the `data/v5.3/` parquet assets (see [`README.md`](README.md#data-assets)). If they are missing, report which tests were skipped — never claim full verification. CI (`.github/workflows/ci.yml`) enforces the fast gate on every push/PR (see [`CONTRIBUTING.md`](CONTRIBUTING.md#testing--verification)).
@@ -217,6 +218,9 @@ These are real, verified issues — do not "fix" them silently as a side effect.
 
 ### Benchmark hierarchy runtime
 Full hierarchy runs are multi-hour (medium tree fits on ~2.1M train rows). Use `--fast-mode` for smoke; the FNE gate is FNC@medium per the feature-universe policy.
+
+### Fleet deep-cell runtime & selection bias (2026-08-19)
+Fleet deep cells (20k/30k-tree LightGBM fits on ~2.1M train rows) are multi-hour CPU jobs; a full 19-cell fleet run is tens of CPU-hours across waves — use `nohup` + log polling; fast-mode overrides keep the smoke gate minutes-scale. `fa_v151_ridge_ensemble` is **selection-biased by design** (candidate selection uses validation, as the notebook did) — its scorecard row carries `selection_bias: true`; never compare it naively against unbiased cells. Fleet results never participate in the hard gates.
 
 ### Era-overlap-before-limit rule for real-data fixtures
 Build real v5.3 scorecard payloads from **overlap eras first** (join/filter by shared eras across validation/meta/benchmarks), then limit/window — limiting first produces flaky fixtures. `NonVacuityError` fires when overlap < `MIN_OVERLAP_ERAS` (20).

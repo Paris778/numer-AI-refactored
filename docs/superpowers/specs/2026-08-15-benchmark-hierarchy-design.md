@@ -202,3 +202,9 @@ The first real-data smoke run on v5.3 measured the gates against actual data. Th
 2. **Tier-4 gate — `assert_tier4_gate`.** `corr_sharpe_ac_min` re-pinned 1.50 → **0.78** (measured 0.7808 for `v53_lgbm_ender60` over the 86-era meta overlap; the aspirational 1.50 would fail the shipped reference). `corr_min` 0.0286 confirmed by measurement (0.02927). **Turnover semantics changed**: turnover is structurally unavailable on v5.3 (consecutive validation eras share zero ids), so it is reported as measured=None/pass=None in the gate report, **excluded from hard failure**, and logged loudly — superseding the "missing/None field ⇒ gate FAIL" rule.
 3. **Monotonicity — `assert_hierarchy_monotone`.** Default metric changed from the rank scalar to **per-tier max of `corr.value`**; `rank_scalar` remains selectable via `metric="rank_scalar"`. Evidence: the real-data corr ladder 0.00294 < 0.00478 < 0.00741 < 0.00952 ≤ 0.02927 orders all five tiers cleanly, while rank_scalar's noise spread swamps the null-vs-ridge rung. `atol = 1e-5` unchanged.
 4. **Fit topology confirmed unchanged:** purged train→validation split (exact 8-era buffer), float32 end-to-end, rank-Gaussian multi-target blends, FNE = FNC@medium.
+5. **Untiered benchmark fleet (2026-08-19):** a new untiered config layer
+   (`configs/benchmarks/fleet/`, `nmr/benchmark_fleet.py`) adds 19 recreated
+   community/tutorial/Finance-Arena benchmark models scored through the same
+   evaluation pipeline, with report-only placement against the tier rungs.
+   Tiers, gates, and monotonicity semantics are unchanged. Design:
+   `docs/superpowers/specs/2026-08-19-benchmark-fleet-design.md`.

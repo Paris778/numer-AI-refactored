@@ -27,7 +27,7 @@ All code must follow the eight non-negotiable principles in [`AGENTS.md`](AGENTS
 ### Dependency pinning policy
 
 All direct dependencies in `requirements.txt` are exact-pinned (`==x.y.z`) to the
-versions in the verified venv (green full suite as of 2026-08-16; 927 tests
+versions in the verified venv (green full suite as of 2026-08-16; 976 tests
 after the 2026-08-19 coverage-hardening + parity-depth work). Upgrading a pin is a deliberate act, never a casual `pip install -U`:
 
 1. Edit the pin in `requirements.txt`.

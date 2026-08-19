@@ -248,6 +248,24 @@ params resolve through `nmr.models.construct_tree_model` (colsample floor,
 determinism flags). Determinism: `scorecards_sha256` (timing fields stripped).
 FNE is FNC@medium (full 3,555 is prohibited by the feature-universe policy).
 
+### Untiered benchmark fleet (`nmr/benchmark_fleet.py`)
+
+Fleet config schema (`FleetCellConfig` — the tiered cell fields minus `tier`,
+plus `source`, `target_weights`, `neutralizer_selection`, `neutralizer_count`),
+five generators (`target_lag_mean` — trailing-train target mean; fleet
+`lightgbm` — canonical fits + optional riskiest-50 neutralizer selection via
+`feature_stability_screen`; fleet `xgboost` — multi-target weighted rank
+blend + optional tail-holdout early stopping; `mlp` — sklearn MLPRegressor
+with `_standardize_feature_block`; `ridge_stack` — fixed/search two-layer
+ridge stacking, horizon-aware 8/16-era internal purge, search mode =
+config-driven grids with validation-based candidate selection), and the
+`BenchmarkFleet` runner (scored via `evaluate_model`, report-only placement
+vs per-tier max-corr rungs, tier-4 verdict columns). Runner CLI:
+`--fleet-configs` (default `configs/benchmarks/fleet`), `--fleet-output`
+(default `artifacts/reports/benchmark_fleet_scorecard.csv`), `--no-fleet`.
+Fleet scorecards join `canonical_scorecards_bytes`. Spec:
+`docs/superpowers/specs/2026-08-19-benchmark-fleet-design.md`.
+
 ### N. Runner, Registry, Submission, Deployment
 
 **`nmr/runner.py`** — stage order in §1 diagram. `RunResult(run_id, oof, metrics, artifact, manifest, scorecard=None, validation_predictions=None)`. `run_id` = SHA256 of `{config (data_dir/artifacts_dir/supplemental_feature_sets paths stripped; when supplemental_feature_sets is configured, a supplemental_feature_sets_sha256 of the resolved file's CRLF-normalized contents is included — identical files at different roots hash identically, and editing the file changes run identity), data_version, data_fingerprint, code_fingerprint, environment_fingerprint}` where code fingerprint = SHA256 over sorted `nmr/*.py` names+contents and environment = Python + versions of numpy/polars/pandas/lightgbm/xgboost/optuna (plus `catboost` when `model.backend == "catboost"` — config-aware, §G/§S). **data_fingerprint** (B1, 2026-08-18) = SHA256 over per-file snapshots of `train.parquet` + `validation.parquet` (+ `meta_model.parquet`/`validation_benchmark_models.parquet` when `evaluation.validation_scorecard` — config-aware): `{name, footer schema, footer row count, era min, era max, era count}` + `features.json` content SHA256; byte size excluded from the hash (cache key only, cached under `artifacts/cache/`); detection limits documented (restated feature values within unchanged schema/row-count/era-stats are NOT detected); missing data files raise (run_id requires the data snapshot). The run_id scheme bumped once on 2026-08-18 (data term + optuna): future run_ids differ from pre-bump legacy rows; registry rows stay immutable. Ensemble weights are learned on the validation eras of folds `0..K-2` via `EnsembleConfig.method`; when `n_folds < 2` they fall back to uniform `1/n_components` with a logged warning. OOF metrics are computed on the **final fold's** validation eras only (`scoring_eras`), so the OOF scorecard carries no in-sample weight-fitting bias; the returned OOF frame itself still spans every fold. The manifest records `weights`, `weight_learning_eras`, `scoring_eras`, and `summary_metrics` (OOF aggregates for each requested non-MMC metric). The deploy pipeline is built **at most once** per run, when `deploy or evaluation.validation_scorecard` (`_build_deploy_pipeline`: per-target all-eras CPU-only models + rank-gaussianize + learned weights + neutralize; no `splitter`), and that single closure is shared by the validation stage and the deploy block — never retrained. The **validation stage** (`_run_validation_stage`) loads `validation.parquet` plus `meta_model.parquet` (required — missing ⇒ `FileNotFoundError`) and `validation_benchmark_models.parquet` (optional — BMC/horizon disabled when absent), with target columns = config targets ∪ `main_target` ∪ **every `target`/`target_*` column in the validation schema** (so horizon target pairs reach the scorecard’s inference — loading only config targets silently disabled horizon stability on every runner scorecard), drops the first `split.purge_eras` validation eras (20D-target overlap), scores the shared pipeline, and produces a full `MetricScorecard` with `benchmark_col` = first non-join benchmark column (same convention as `benchmark_runner`); the run manifest records `validation_purge_dropped_first_eras`. Then `_serialize_predict_artifact(predict_fn, model_meta, artifact_path)` serializes (never retrains) to `artifacts/runs/{run_id}/predict.pkl` + manifest. The artifact's `models` metadata carries `targets`/`weights`/`proportion`/`geometry="all_eras"`/`device="cpu"`/`feature_names`; the run manifest adds `pipeline_device="cpu"`.
@@ -489,6 +507,7 @@ research.py  ──> _oof, config, data, ensemble, evaluation, inference, models
 scorecard.py ──> evaluation, inference, payout, research, robustness
 opt.py       ──> config (ExperimentConfig), inference, models (resolve_model_params), research (_held_out_metric, _override_config, SweepResult)
 benchmark.py ──> ensemble, features, models, risk, scorecard
+benchmark_fleet.py ──> benchmark, ensemble, features, models, risk, scorecard
 meta.py      ──> analysis, config, data, evaluation, features, inference
 runner.py    ──> _oof, _transforms, config, data, deployment, ensemble, evaluation, models, risk, scorecard, splitter
 registry.py  ──> _atomicio, runner (RunResult)
