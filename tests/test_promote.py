@@ -16,6 +16,7 @@ import pandas as pd
 import polars as pl
 import pytest
 
+from nmr.benchmark import Tier4GateConfig
 from nmr.config import (
     DataConfig,
     EnsembleConfig,
@@ -392,3 +393,60 @@ def test_rehearse_promotion_end_to_end(tmp_path: Path) -> None:
     assert slot_manifest["rehearsal"] is True
     assert slot_manifest["training_rows"] == result.train_validation_rows
     assert not (tmp_path / "models" / "brb1-lgbm-v6" / "full" / CURRENT_POINTER_NAME).exists()
+
+
+def _gate() -> Tier4GateConfig:
+    return Tier4GateConfig(
+        corr_min=0.0286,
+        corr_sharpe_ac_min=0.5,
+        fnc_min=0.01,
+        deflated_sharpe_min=0.3,
+        gain_to_pain_min=1.0,
+        cagr_min=0.05,
+        turnover_max=0.05,
+    )
+
+
+def test_evaluate_gate_missing_evidence_fails() -> None:
+    """A hard field with no measured value is a failure — never promoted on faith."""
+    from nmr.promote import _evaluate_gate
+
+    scorecard = {k: v for k, v in _passing_scorecard().items() if k != "corr"}
+    passed, receipts = _evaluate_gate(scorecard, _gate())
+    assert passed is False
+    assert receipts["corr"]["measured"] is None
+    assert receipts["corr"]["passed"] is False
+    assert receipts["cagr_1y"]["passed"] is True  # other fields still evaluated
+
+
+def test_evaluate_gate_strict_cagr_fails_at_threshold() -> None:
+    """cagr_1y uses strict `>`: equality at the threshold fails (promote.py:165)."""
+    from nmr.promote import _evaluate_gate
+
+    scorecard = _passing_scorecard()
+    scorecard["cagr_1y"] = 0.05  # exactly cagr_min — strict needs strictly greater
+    passed, receipts = _evaluate_gate(scorecard, _gate())
+    assert passed is False
+    assert receipts["cagr_1y"]["passed"] is False
+
+
+def test_load_registry_run_corrupt_json(tmp_path: Path) -> None:
+    from nmr.promote import _load_registry_run
+
+    registry = tmp_path / "registry"
+    run_dir = registry / _RID
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text("{not json", encoding="utf-8")
+    with pytest.raises(ValueError, match="corrupt run.json"):
+        _load_registry_run(registry, _RID)
+
+
+def test_load_registry_run_non_mapping(tmp_path: Path) -> None:
+    from nmr.promote import _load_registry_run
+
+    registry = tmp_path / "registry"
+    run_dir = registry / _RID
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text("[]", encoding="utf-8")
+    with pytest.raises(ValueError, match="not a mapping"):
+        _load_registry_run(registry, _RID)
