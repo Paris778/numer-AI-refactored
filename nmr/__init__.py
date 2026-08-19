@@ -54,6 +54,8 @@ from .benchmark import (
     score_benchmark_column,
     scorecards_sha256,
     scorecards_to_frame,
+    tier4_gate_verdict,
+    tier_max_corrs,
     train_validation_purged_split,
     write_scorecards_csv,
 )
@@ -291,6 +293,8 @@ __all__ = [
     "score_benchmark_column",
     "scorecards_sha256",
     "scorecards_to_frame",
+    "tier4_gate_verdict",
+    "tier_max_corrs",
     "train_validation_purged_split",
     "write_scorecards_csv",
     "CampaignConfig",

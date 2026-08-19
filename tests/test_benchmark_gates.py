@@ -16,6 +16,8 @@ from nmr.benchmark import (
     assert_tier0_null_floor,
     assert_tier4_gate,
     score_benchmark_column,
+    tier4_gate_verdict,
+    tier_max_corrs,
 )
 from nmr.scorecard import MetricScorecard, evaluate_model
 
@@ -314,3 +316,80 @@ def test_monotone_missing_scorecard_raises() -> None:
     del cards["t3_probe"]
     with pytest.raises(ValueError, match="t3_probe"):
         assert_hierarchy_monotone(cards, tier_of=tier_of)
+
+
+def make_scorecard(
+    *,
+    corr: float = 0.03,
+    sharpe: float = 0.8,
+    fnc: float = 0.02,
+    gpr: float = 1.5,
+    cagr: float = 0.01,
+    turnover: float | None = 0.1,
+) -> MetricScorecard:
+    """Build a tier-4-gate probe scorecard over the synthetic fixture.
+
+    ``corr``/``sharpe`` replace the ``MetricCell.value`` of ``corr`` and
+    ``corr_sharpe_ac``; the remaining kwargs map one-to-one onto
+    ``MetricScorecard`` fields (``gpr`` -> ``gain_to_pain_ratio``,
+    ``cagr`` -> ``cagr_1y``, ``turnover`` -> ``turnover_mean``).
+    """
+    card = _make_scorecard()
+    return dataclasses.replace(
+        card,
+        corr=dataclasses.replace(card.corr, value=float(corr)),
+        corr_sharpe_ac=dataclasses.replace(
+            card.corr_sharpe_ac, value=float(sharpe)
+        ),
+        fnc=float(fnc),
+        gain_to_pain_ratio=float(gpr),
+        cagr_1y=float(cagr),
+        turnover_mean=turnover,
+    )
+
+
+def _gate() -> Tier4GateConfig:
+    return Tier4GateConfig(
+        corr_min=0.0286, corr_sharpe_ac_min=0.78, fnc_min=0.020,
+        deflated_sharpe_min=0.95, gain_to_pain_min=1.50,
+        cagr_min=0.0, turnover_max=0.35,
+    )
+
+
+def test_tier4_gate_verdict_shape_and_pass() -> None:
+    card = make_scorecard(
+        corr=0.03, sharpe=0.8, fnc=0.02, gpr=1.5, cagr=0.01, turnover=0.1
+    )
+    verdict = tier4_gate_verdict(card, _gate())
+    assert verdict == {
+        "corr": True, "corr_sharpe_ac": True, "fnc": True,
+        "deflated_sharpe": None, "gain_to_pain_ratio": True,
+        "cagr_1y": True, "turnover_mean": True,
+    }
+
+
+def test_tier4_gate_verdict_cagr_strict_and_turnover_none() -> None:
+    card = make_scorecard(
+        corr=0.03, sharpe=0.8, fnc=0.02, gpr=1.5, cagr=0.0, turnover=None
+    )
+    verdict = tier4_gate_verdict(card, _gate())
+    assert verdict["cagr_1y"] is False          # strict >, not >=
+    assert verdict["turnover_mean"] is None     # structurally unavailable
+
+
+def test_tier4_gate_verdict_turnover_high_fails() -> None:
+    card = make_scorecard(
+        corr=0.03, sharpe=0.8, fnc=0.02, gpr=1.5, cagr=0.01, turnover=0.9
+    )
+    verdict = tier4_gate_verdict(card, _gate())
+    assert verdict["turnover_mean"] is False   # <= max, not >=
+
+
+def test_tier_max_corrs_orders_by_tier() -> None:
+    cards = {
+        "t0": make_scorecard(corr=0.002),
+        "t1": make_scorecard(corr=0.005),
+        "t4": make_scorecard(corr=0.029),
+    }
+    rungs = tier_max_corrs(cards, {"t0": 0, "t1": 1, "t4": 4})
+    assert rungs == {0: 0.002, 1: 0.005, 4: 0.029}

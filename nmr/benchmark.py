@@ -59,6 +59,8 @@ __all__ = [
     "score_benchmark_column",
     "scorecards_sha256",
     "scorecards_to_frame",
+    "tier4_gate_verdict",
+    "tier_max_corrs",
     "train_validation_purged_split",
     "write_scorecards_csv",
 ]
@@ -749,6 +751,50 @@ def assert_tier0_null_floor(
                 )
 
 
+def _tier4_gate_rows(
+    scorecard: MetricScorecard, gate: Tier4GateConfig
+) -> list[tuple[str, float | None, float, bool | None]]:
+    """(field, observed, threshold, strict) rows for the 7 tier-4 fields.
+
+    ``strict=None`` marks display-only fields (deflated_sharpe, A6) that are
+    never pass/fail; ``observed=None`` marks structurally unavailable fields
+    (turnover on v5.3).
+    """
+    card = scorecard
+    return [
+        ("corr", float(card.corr.value), float(gate.corr_min), False),
+        ("corr_sharpe_ac", float(card.corr_sharpe_ac.value),
+         float(gate.corr_sharpe_ac_min), False),
+        ("fnc", float(card.fnc), float(gate.fnc_min), False),
+        ("deflated_sharpe", float(card.deflated_sharpe),
+         float(gate.deflated_sharpe_min), None),
+        ("gain_to_pain_ratio", float(card.gain_to_pain_ratio),
+         float(gate.gain_to_pain_min), False),
+        ("cagr_1y", float(card.cagr_1y), float(gate.cagr_min), True),
+        ("turnover_mean",
+         None if card.turnover_mean is None else float(card.turnover_mean),
+         float(gate.turnover_max), False),
+    ]
+
+
+def tier4_gate_verdict(
+    scorecard: MetricScorecard, gate: Tier4GateConfig
+) -> dict[str, bool | None]:
+    """Per-threshold pass/fail booleans; None = unavailable/display-only."""
+    _assert_scorecard_finite(scorecard, model_id=scorecard.model_id)
+    verdict: dict[str, bool | None] = {}
+    for field, observed, threshold, strict in _tier4_gate_rows(scorecard, gate):
+        if observed is None or strict is None:
+            verdict[field] = None
+        elif field == "turnover_mean":
+            verdict[field] = observed <= threshold
+        elif strict:
+            verdict[field] = observed > threshold
+        else:
+            verdict[field] = observed >= threshold
+    return verdict
+
+
 def assert_tier4_gate(scorecard: MetricScorecard, gate: Tier4GateConfig) -> None:
     """Production capital gate: reject candidates below the 7 hard thresholds.
 
@@ -758,9 +804,19 @@ def assert_tier4_gate(scorecard: MetricScorecard, gate: Tier4GateConfig) -> None
     """
     _assert_scorecard_finite(scorecard, model_id=scorecard.model_id)
     violations: list[str] = []
-
-    def _check(field: str, observed: float, threshold: float, strict: bool) -> None:
-        if strict:
+    for field, observed, threshold, strict in _tier4_gate_rows(scorecard, gate):
+        if observed is None or strict is None:
+            continue
+        if field == "turnover_mean":
+            # turnover is an upper bound (<=), not a lower bound (>=); the
+            # generic branches below would report a low turnover as a
+            # violation, which would change hard-gate behavior.
+            if observed > threshold:
+                violations.append(
+                    "turnover_mean: "
+                    f"observed={observed:.8f}, need <= {threshold:.4f}"
+                )
+        elif strict:
             if observed <= threshold:
                 violations.append(
                     f"{field}: observed={observed:.8f}, need > {threshold:.8f}"
@@ -769,42 +825,27 @@ def assert_tier4_gate(scorecard: MetricScorecard, gate: Tier4GateConfig) -> None
             violations.append(
                 f"{field}: observed={observed:.8f}, need >= {threshold:.8f}"
             )
-
-    if scorecard.turnover_mean is not None:
-        if float(scorecard.turnover_mean) > float(gate.turnover_max):
-            violations.append(
-                "turnover_mean: "
-                f"observed={float(scorecard.turnover_mean):.8f}, "
-                f"need <= {gate.turnover_max:.4f}"
-            )
-
-    _check("corr", float(scorecard.corr.value), float(gate.corr_min), strict=False)
-    _check(
-        "corr_sharpe_ac",
-        float(scorecard.corr_sharpe_ac.value),
-        float(gate.corr_sharpe_ac_min),
-        strict=False,
-    )
-    _check("fnc", float(scorecard.fnc), float(gate.fnc_min), strict=False)
-    # deflated_sharpe is NOT a hard gate (A6, audit SEV-2 #4): at n_trials=1
-    # no deflation occurs, and there is no search history to bind deflation to
-    # at gate time — gating on it provided false assurance (a tier-0 null
-    # scored 0.99999). It remains display-only on the scorecard and leaderboard;
-    # search-aware DSR lives in sweep_dsr / campaign_evidence where a search
-    # genuinely exists.
-    _check(
-        "gain_to_pain_ratio",
-        float(scorecard.gain_to_pain_ratio),
-        float(gate.gain_to_pain_min),
-        strict=False,
-    )
-    _check("cagr_1y", float(scorecard.cagr_1y), float(gate.cagr_min), strict=True)
-
     if violations:
         raise ValueError(
             f"Tier-4 gate violations for {scorecard.model_id!r}: "
             + "; ".join(violations)
         )
+
+
+def tier_max_corrs(
+    scorecards: Mapping[str, MetricScorecard],
+    tier_of: Mapping[str, int],
+) -> dict[int, float]:
+    """Per-tier max of mean CORR (the monotonicity ladder metric)."""
+    tiers = sorted(set(tier_of.values()))
+    out: dict[int, float] = {}
+    for tier in tiers:
+        members = [mid for mid, t in tier_of.items() if t == tier]
+        missing = [mid for mid in members if mid not in scorecards]
+        if missing:
+            raise ValueError(f"Missing scorecards for tier {tier}: {missing}")
+        out[tier] = max(float(scorecards[mid].corr.value) for mid in members)
+    return out
 
 
 def assert_hierarchy_monotone(
@@ -828,19 +869,18 @@ def assert_hierarchy_monotone(
     if tiers_present != [0, 1, 2, 3, 4]:
         raise ValueError(f"tier_of must cover all tiers 0..4, got {tiers_present}")
 
-    scalar_by_tier: dict[int, float] = {}
-    for tier in (0, 1, 2, 3, 4):
-        members = [mid for mid, t in tier_of.items() if t == tier]
-        if not members:
-            raise ValueError(f"No scorecards for tier {tier}")
-        missing = [mid for mid in members if mid not in scorecards]
-        if missing:
-            raise ValueError(f"Missing scorecards for tier {tier}: {missing}")
-        if metric == "corr":
-            scalar_by_tier[tier] = max(
-                float(scorecards[mid].corr.value) for mid in members
-            )
-        else:
+    scalar_by_tier: dict[int, float]
+    if metric == "corr":
+        scalar_by_tier = tier_max_corrs(scorecards, tier_of)
+    else:
+        scalar_by_tier = {}
+        for tier in (0, 1, 2, 3, 4):
+            members = [mid for mid, t in tier_of.items() if t == tier]
+            if not members:
+                raise ValueError(f"No scorecards for tier {tier}")
+            missing = [mid for mid in members if mid not in scorecards]
+            if missing:
+                raise ValueError(f"Missing scorecards for tier {tier}: {missing}")
             scalar_by_tier[tier] = max(
                 float(scorecards[mid].rank_scalar) for mid in members
             )
@@ -1282,25 +1322,9 @@ def gate_report_frame(result: BenchmarkHierarchyResult) -> pl.DataFrame:
             reference_id = mid
             break
     card = result.scorecards[reference_id]
-    rows = [
-        ("corr", gate.corr_min, float(card.corr.value), False),
-        ("corr_sharpe_ac", gate.corr_sharpe_ac_min,
-         float(card.corr_sharpe_ac.value), False),
-        ("fnc", gate.fnc_min, float(card.fnc), False),
-        ("gain_to_pain_ratio", gate.gain_to_pain_min,
-         float(card.gain_to_pain_ratio), False),
-        ("cagr_1y", gate.cagr_min, float(card.cagr_1y), True),
-        ("turnover_mean", gate.turnover_max,
-         float(card.turnover_mean) if card.turnover_mean is not None else None,
-         False),
-        # deflated_sharpe: display-only (A6) — never a pass/fail threshold.
-        ("deflated_sharpe", gate.deflated_sharpe_min,
-         float(card.deflated_sharpe), None),
-    ]
+    rows = _tier4_gate_rows(card, gate)
     out_rows = []
-    for field, threshold, measured, strict in rows:
-        # strict=None marks display-only fields (deflated_sharpe, A6) — never
-        # a pass/fail.
+    for field, measured, threshold, strict in rows:
         if measured is None or strict is None:
             passed = None
         elif strict:
