@@ -337,3 +337,29 @@ def test_corr_degenerate_eras_match_oracle(mutate: str) -> None:
     assert list(custom) == list(official)
     for era in custom:
         assert custom[era] == pytest.approx(official[era], abs=1e-6, nan_ok=True)
+
+
+@pytest.mark.parametrize("mutate", ["constant_meta", "ties_meta", "nan_meta", "nan_pred"])
+def test_mmc_degenerate_columns_match_oracle(mutate: str) -> None:
+    base = _corr_frame()
+    df = base.with_columns(
+        pl.Series("meta", np.linspace(0.1, 0.9, base.height), dtype=pl.Float64)
+    )
+    if mutate == "constant_meta":
+        df = df.with_columns(pl.lit(0.5).alias("meta"))
+    elif mutate == "ties_meta":
+        df = df.with_columns(pl.Series("meta", [0.2, 0.2, 0.5, 0.5, 0.9, 0.9, 0.4, 0.4] * 2, dtype=pl.Float64))
+    elif mutate == "nan_meta":
+        df = df.with_columns(
+            pl.when(pl.col("id").str.ends_with("_0")).then(None).otherwise(pl.col("meta")).alias("meta")
+        )
+    elif mutate == "nan_pred":
+        df = df.with_columns(
+            pl.when(pl.col("id").str.ends_with("_0")).then(None).otherwise(pl.col("pred")).alias("pred")
+        )
+
+    custom = EvaluationEngine("custom").per_era_mmc(df, pred_col="pred", meta_col="meta", target_col="target")
+    official = EvaluationEngine("official").per_era_mmc(df, pred_col="pred", meta_col="meta", target_col="target")
+    assert list(custom) == list(official)
+    for era in custom:
+        assert custom[era] == pytest.approx(official[era], abs=1e-6, nan_ok=True)
