@@ -4,14 +4,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 import pytest
 
+from nmr.benchmark import generate_canonical_predictions
 from nmr.benchmark_fleet import (
+    _select_riskiest_features,
+    generate_fleet_lightgbm_predictions,
     generate_lagged_target_predictions,
     load_fleet_config,
     load_fleet_suite_config,
 )
+from nmr.risk import NeutralizationEngine
 
 
 def _write_yaml(tmp_path: Path, text: str) -> Path:
@@ -169,3 +174,83 @@ def test_lag_mean_rejects_val_era_overlap():
     bad_train = _lag_train().with_columns(pl.lit("0010").alias("era"))
     with pytest.raises(ValueError, match="strictly earlier"):
         generate_lagged_target_predictions(bad_train, _val_index(), target="target")
+
+
+def _tiny_train_val(eras: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)):
+    """Synthetic train (with target) + val (no targets) with 3 features."""
+    rng = np.random.default_rng(11)
+    train_rows, val_rows = [], []
+    for i, era in enumerate(eras):
+        for row in range(5):
+            train_rows.append({
+                "era": f"{era:04d}", "id": f"t{era}_{row}",
+                "f1": float(i) + rng.normal(0, 0.01),
+                "f2": rng.normal(0, 1),
+                "f3": float(era % 2),
+                "target": float(i % 3),
+            })
+    for era in (13, 14):
+        for row in range(5):
+            val_rows.append({
+                "era": f"{era:04d}", "id": f"v{era}_{row}",
+                "f1": rng.normal(0, 1), "f2": rng.normal(0, 1), "f3": 1.0,
+            })
+    return pl.DataFrame(train_rows), pl.DataFrame(val_rows)
+
+
+def test_select_riskiest_ranks_by_cross_regime_variance():
+    train, _ = _tiny_train_val()
+    # f1 drifts monotonically across eras -> highest cross_regime_variance
+    out = _select_riskiest_features(
+        train, feature_cols=["f1", "f2", "f3"], target_col="target", count=1
+    )
+    assert out == ["f1"]
+
+
+def test_fleet_lgbm_selection_none_matches_canonical():
+    train, val = _tiny_train_val()
+    params = {"n_estimators": 10, "learning_rate": 0.1, "max_depth": 2, "num_leaves": 4}
+    fleet_out = generate_fleet_lightgbm_predictions(
+        train, val, targets=["target"], feature_cols=["f1", "f2", "f3"],
+        params=params, seed=42, neutralization=0.5, neutralizer_selection="none",
+    )
+    canonical = generate_canonical_predictions(
+        train, val, targets=["target"], feature_cols=["f1", "f2", "f3"],
+        params=params, seed=42, neutralization=0.5,
+    )
+    assert fleet_out.equals(canonical)
+
+
+def test_fleet_lgbm_riskiest_50_matches_manual_pipeline():
+    train, val = _tiny_train_val()
+    params = {"n_estimators": 10, "learning_rate": 0.1, "max_depth": 2, "num_leaves": 4}
+    neutralizers = _select_riskiest_features(
+        train, feature_cols=["f1", "f2", "f3"], target_col="target", count=2
+    )
+    fleet_out = generate_fleet_lightgbm_predictions(
+        train, val, targets=["target"], feature_cols=["f1", "f2", "f3"],
+        params=params, seed=42, neutralization=1.0,
+        neutralizer_selection="riskiest_50", neutralizer_count=2,
+    )
+    raw = generate_canonical_predictions(
+        train, val, targets=["target"], feature_cols=["f1", "f2", "f3"],
+        params=params, seed=42, neutralization=0.0,
+    )
+    with_features = raw.join(
+        val.select(["era", "id", *neutralizers]), on=["era", "id"], how="inner"
+    )
+    manual = NeutralizationEngine().neutralize(
+        with_features, pred_col="prediction",
+        feature_cols=neutralizers, era_col="era", proportion=1.0,
+    ).select(["era", "id", "prediction"]).sort(["era", "id"])
+    assert fleet_out.equals(manual)
+
+
+def test_fleet_lgbm_rejects_unknown_selection():
+    train, val = _tiny_train_val()
+    with pytest.raises(ValueError, match="neutralizer_selection"):
+        generate_fleet_lightgbm_predictions(
+            train, val, targets=["target"], feature_cols=["f1"],
+            params={"n_estimators": 5}, seed=42,
+            neutralizer_selection="bogus",
+        )

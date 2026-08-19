@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -19,11 +19,16 @@ import polars as pl
 import yaml
 
 from nmr.benchmark import (
+    DEFAULT_BENCHMARK_PURGE_ERAS,
     DEFAULT_BENCHMARK_SEED,
     VALID_INPUT_SPACES,
     _freeze_mapping,
     _reject_unknown_keys,
+    generate_canonical_predictions,
+    train_validation_purged_split,
 )
+from nmr.features import feature_stability_screen
+from nmr.risk import NeutralizationEngine
 
 logger = logging.getLogger("nmr.benchmark_fleet")
 
@@ -35,6 +40,7 @@ __all__ = [
     "VALID_FLEET_MODEL_KINDS",
     "VALID_FLEET_NEUTRALIZATION",
     "VALID_FLEET_NEUTRALIZER_SELECTIONS",
+    "generate_fleet_lightgbm_predictions",
     "generate_lagged_target_predictions",
     "load_fleet_config",
     "load_fleet_suite_config",
@@ -248,3 +254,89 @@ def generate_lagged_target_predictions(
         .sort([era_col, id_col])
         .with_columns(pl.lit(value, dtype=pl.Float64).alias(pred_col))
     )
+
+
+def _select_riskiest_features(
+    train: pl.DataFrame,
+    *,
+    feature_cols: Sequence[str],
+    target_col: str,
+    count: int,
+    era_col: str = "era",
+) -> list[str]:
+    """Top-``count`` features by cross-regime drift (framework risk screen).
+
+    Ranked by ``cross_regime_variance`` descending, nulls last, feature name
+    ascending as the deterministic tie-break. Documented deviation from the
+    notebooks' ``get_biggest_change_features`` (same intent — most unstable
+    features — via the framework-tested screen).
+    """
+    if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+        raise ValueError(f"count must be a positive int, got {count!r}")
+    screen = feature_stability_screen(
+        train, feature_cols=list(feature_cols), target_col=target_col,
+        era_col=era_col,
+    )
+    # polars >= 1.41 dropped Expr.nulls_last()/Expr.desc(); the kwargs form
+    # below is the equivalent (variance desc with nulls last, name asc).
+    ranked = screen.sort(
+        by=["cross_regime_variance", "feature"],
+        descending=[True, False],
+        nulls_last=[True, False],
+    )
+    return ranked.get_column("feature").to_list()[:count]
+
+
+def generate_fleet_lightgbm_predictions(
+    train: pl.DataFrame,
+    val: pl.DataFrame,
+    *,
+    targets: Sequence[str],
+    feature_cols: Sequence[str],
+    params: Mapping[str, Any],
+    seed: int,
+    neutralization: float = 0.0,
+    neutralizer_selection: str = "none",
+    neutralizer_count: int = DEFAULT_NEUTRALIZER_COUNT,
+    purge_eras: int = DEFAULT_BENCHMARK_PURGE_ERAS,
+    era_col: str = "era",
+    id_col: str = "id",
+    pred_col: str = "prediction",
+) -> pl.DataFrame:
+    """Fleet LightGBM: canonical fits + optional riskiest-feature neutralization."""
+    if neutralizer_selection not in VALID_FLEET_NEUTRALIZER_SELECTIONS:
+        raise ValueError(
+            f"neutralizer_selection={neutralizer_selection!r} not in "
+            f"{VALID_FLEET_NEUTRALIZER_SELECTIONS}"
+        )
+    trimmed_train_eras, _ = train_validation_purged_split(
+        train.get_column(era_col).unique().to_list(),
+        val.get_column(era_col).unique().to_list(),
+        purge_eras=purge_eras,
+    )
+    train_rows = train.filter(pl.col(era_col).is_in(trimmed_train_eras))
+
+    if neutralizer_selection == "riskiest_50":
+        neutralizer_cols = _select_riskiest_features(
+            train_rows, feature_cols=feature_cols,
+            target_col=list(targets)[0], count=neutralizer_count, era_col=era_col,
+        )
+    else:
+        neutralizer_cols = list(feature_cols)
+
+    out = generate_canonical_predictions(
+        train, val, targets=list(targets), feature_cols=list(feature_cols),
+        params=params, seed=seed, neutralization=0.0,
+        purge_eras=purge_eras, era_col=era_col, id_col=id_col, pred_col=pred_col,
+    )
+
+    if float(neutralization) > 0.0:
+        with_features = out.join(
+            val.select([era_col, id_col, *neutralizer_cols]),
+            on=[era_col, id_col], how="inner",
+        )
+        out = NeutralizationEngine().neutralize(
+            with_features, pred_col=pred_col, feature_cols=neutralizer_cols,
+            era_col=era_col, proportion=float(neutralization),
+        ).select([era_col, id_col, pred_col]).sort([era_col, id_col])
+    return out
