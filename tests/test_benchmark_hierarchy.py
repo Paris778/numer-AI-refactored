@@ -9,16 +9,19 @@ from pathlib import Path
 
 import numpy as np
 import polars as pl
+import pytest
 
 from nmr.benchmark import (
     BenchmarkCellConfig,
     BenchmarkHierarchy,
     BenchmarkSuiteSpec,
     Tier4GateConfig,
+    canonical_scorecards_bytes,
     gate_report_frame,
     hierarchy_frame,
     scorecards_sha256,
 )
+from nmr.scorecard import MetricCell, MetricScorecard
 
 
 def _data_dir(tmp_path: Path) -> Path:
@@ -181,3 +184,40 @@ def test_monotone_failure_surfaces_in_result(tmp_path: Path) -> None:
     assert isinstance(result.monotone_ok, bool)
     assert isinstance(result.null_floor_ok, bool)
     assert result.tier4_violations == ()
+
+
+def _scorecard(model_id: str) -> MetricScorecard:
+    """Synthetic scorecard for canonical-bytes determinism tests."""
+
+    def cell(value: float) -> MetricCell:
+        return MetricCell(value=value, ci_low=None, ci_high=None, n_eras=10)
+
+    return MetricScorecard(
+        model_id=model_id, n_eras=10, rank_scalar=0.0, deflated_sharpe=0.0,
+        mean_payout=cell(0.0), corr=cell(0.0), mmc=cell(0.0), fnc=0.0,
+        corr_sharpe_ac=cell(0.0), cvar5=0.0, max_drawdown=0.1,
+        burn_rate=0.0, mmc_sharpe_ac=0.0, sortino=0.0, calmar=0.0,
+        std_corr=0.1, max_burn_streak=0, time_to_recovery=0,
+        horizon_stability=None, horizon_reason=None, regime_corr=None,
+        regime_reason=None, perturbation=None, max_feature_exposure=0.0,
+        bmc=None, bmc_reason=None, cwmm=None, cwmm_reason=None,
+        book_correlation=None,
+        cagr_1y=0.0, gain_to_pain_ratio=0.0, kelly_fraction=0.0,
+        mmc_down=None, mmc_down_n_eras=0, mmc_down_reason=None,
+        turnover_mean=None, turnover_std=None, turnover_reason=None,
+        sim_portfolio_cagr=0.0, sim_portfolio_mdd=0.0,
+        sim_capital_utilization=0.0,
+        metric_timing_seconds=None, eval_total_seconds=0.0,
+    )
+
+
+def test_canonical_bytes_include_fleet_scorecards_and_reject_collisions():
+    base = {"t0": _scorecard("t0"), "t1": _scorecard("t1")}
+    fleet = {"fleet_extra": _scorecard("fleet_extra")}
+    solo = canonical_scorecards_bytes(base)
+    combined = canonical_scorecards_bytes(base, fleet_scorecards=fleet)
+    assert solo != combined
+    with pytest.raises(ValueError, match="collision"):
+        canonical_scorecards_bytes(
+            base, fleet_scorecards={"t0": _scorecard("t0")}
+        )

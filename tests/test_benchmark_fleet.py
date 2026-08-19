@@ -2,17 +2,26 @@
 
 from __future__ import annotations
 
+import json as _json
 from pathlib import Path
 
 import numpy as np
 import polars as pl
 import pytest
 
-from nmr.benchmark import generate_canonical_predictions
+from nmr.benchmark import (
+    BenchmarkData,
+    generate_canonical_predictions,
+    load_benchmark_data,
+)
 from nmr.benchmark_fleet import (
+    BenchmarkFleet,
+    FleetCellConfig,
     _era_sharpe,
     _select_riskiest_features,
     _stack_partitions,
+    fleet_frame,
+    fleet_placement,
     generate_fleet_lightgbm_predictions,
     generate_fleet_xgb_predictions,
     generate_lagged_target_predictions,
@@ -20,6 +29,7 @@ from nmr.benchmark_fleet import (
     generate_ridge_stack_predictions,
     load_fleet_config,
     load_fleet_suite_config,
+    write_fleet_csv,
 )
 from nmr.risk import NeutralizationEngine
 
@@ -563,3 +573,124 @@ def test_ridge_stack_search_is_seed_deterministic():
         val_targets=val.select(["era", "id", "main"]), benchmarks=bench,
     )
     assert a.equals(b)
+
+
+def test_fleet_placement_edges_and_intervals():
+    rungs = {0: 0.002, 1: 0.005, 2: 0.007, 3: 0.0095, 4: 0.029}
+    assert fleet_placement(0.001, rungs) == "below tier 0"
+    assert fleet_placement(0.030, rungs) == "above tier 4"
+    assert fleet_placement(0.005, rungs) == "tier1..tier2"
+    assert fleet_placement(0.0095, rungs) == "tier3..tier4"
+    with pytest.raises(ValueError, match="rungs"):
+        fleet_placement(0.01, {})
+
+
+def test_fleet_placement_rejects_out_of_range_corr():
+    with pytest.raises(ValueError, match="corr"):
+        fleet_placement(1.5, {0: 0.002, 1: 0.005})
+
+
+def _write_synthetic_benchmark_data(tmp_path: Path) -> BenchmarkData:
+    """Minimal on-disk v5.3-like assets for a full fleet run.
+
+    Val eras start at ``0041`` so the purge gap between the trimmed train
+    tail (``0032``) and the first val era is exactly the 8-era default
+    ``purge_eras`` expected by ``train_validation_purged_split``. The val
+    frame carries a ``target`` column (``evaluate_model`` scores against it)
+    and the train frame carries a correlated ``target_aux`` so the
+    search-mode ridge-stack cell has a viable specialist target.
+    """
+    rng = np.random.default_rng(9)
+    eras_train = [f"{e:04d}" for e in range(1, 41)]
+    eras_val = [f"{e:04d}" for e in range(41, 47)]
+    rows_train = []
+    for era in eras_train:
+        for i in range(6):
+            target = rng.normal(0, 1)
+            rows_train.append({
+                "era": era, "id": f"t{era}_{i}",
+                "f1": rng.normal(0, 1), "f2": rng.normal(0, 1),
+                "target": target,
+                "target_aux": target + 0.5 * rng.normal(0, 1),
+            })
+    rows_val = [
+        {"era": era, "id": f"v{era}_{i}",
+         "f1": rng.normal(0, 1), "f2": rng.normal(0, 1), "target": rng.normal(0, 1)}
+        for era in eras_val for i in range(6)
+    ]
+    pl.DataFrame(rows_train).write_parquet(tmp_path / "train.parquet")
+    pl.DataFrame(rows_val).write_parquet(tmp_path / "validation.parquet")
+    pl.DataFrame([
+        {"era": era, "id": f"v{era}_{i}", "numerai_meta_model": rng.normal(0, 1)}
+        for era in eras_val for i in range(6)
+    ]).write_parquet(tmp_path / "meta_model.parquet")
+    pl.DataFrame([
+        {"era": era, "id": f"v{era}_{i}", "v53_lgbm_ender20": rng.normal(0, 1)}
+        for era in eras_val for i in range(6)
+    ]).write_parquet(tmp_path / "validation_benchmark_models.parquet")
+    features = {
+        "feature_sets": {"small": ["f1", "f2"], "medium": ["f1", "f2"]},
+        "targets": ["target"],
+    }
+    (tmp_path / "features.json").write_text(_json.dumps(features), encoding="utf-8")
+    return load_benchmark_data(tmp_path)
+
+
+def test_benchmark_fleet_run_scores_and_places(tmp_path):
+    data = _write_synthetic_benchmark_data(tmp_path)
+    cells = (
+        FleetCellConfig(
+            benchmark_id="silly_target_lag_mean", source="test",
+            input_space="none", model_kind="target_lag_mean",
+            targets=("target",), params={"window": 1},
+        ),
+        FleetCellConfig(
+            benchmark_id="tutorial_hello_deep", source="test",
+            input_space="small", model_kind="lightgbm",
+            targets=("target",),
+            params={"n_estimators": 10, "learning_rate": 0.1,
+                    "max_depth": 2, "num_leaves": 4},
+            fast_mode_params={"n_estimators": 5},
+        ),
+    )
+    fleet = BenchmarkFleet(
+        spec=cells, data=data, seed=42, horizon="20D", n_boot=1,
+        min_overlap_eras=2, fast_mode=True,
+    )
+    result = fleet.run(
+        tier_rungs={0: 0.0, 1: 0.0, 2: 0.0, 3: 0.0, 4: 0.0}, gate=None
+    )
+    assert set(result.scorecards) == {"silly_target_lag_mean", "tutorial_hello_deep"}
+    assert result.gate_verdicts["silly_target_lag_mean"] == {}
+    assert result.selection_bias == {
+        "silly_target_lag_mean": False, "tutorial_hello_deep": False
+    }
+    for placement in result.placements.values():
+        assert placement.startswith(("below", "above", "tier"))
+    frame = fleet_frame(result)
+    assert "placement" in frame.columns and "selection_bias" in frame.columns
+    path = write_fleet_csv(result, tmp_path / "fleet.csv")
+    assert path.exists()
+
+
+def test_benchmark_fleet_search_cell_marks_selection_bias(tmp_path):
+    data = _write_synthetic_benchmark_data(tmp_path)
+    params = dict(_SEARCH_PARAMS)
+    params.update({
+        "main_target": "target",
+        "specialists": ["target_aux"],
+        "snnr_weights": {"target_aux": 1.0},
+        "top_k": 1,
+    })
+    cell = FleetCellConfig(
+        benchmark_id="fa_v151_ridge_ensemble", source="test",
+        input_space="small", model_kind="ridge_stack",
+        targets=("target",),
+        params=params,
+    )
+    fleet = BenchmarkFleet(
+        spec=(cell,), data=data, seed=42, horizon="20D", n_boot=1,
+        min_overlap_eras=2, fast_mode=True,
+    )
+    result = fleet.run(tier_rungs={}, gate=None)
+    assert result.selection_bias["fa_v151_ridge_ensemble"] is True

@@ -932,7 +932,23 @@ def write_scorecards_csv(
     return path
 
 
-def canonical_scorecards_bytes(scorecards: Mapping[str, MetricScorecard]) -> bytes:
+def canonical_scorecards_bytes(
+    scorecards: Mapping[str, MetricScorecard],
+    fleet_scorecards: Mapping[str, MetricScorecard] | None = None,
+) -> bytes:
+    """Canonical, timing-stripped scorecard serialization for determinism.
+
+    ``fleet_scorecards`` are merged into the same canonical payload so fleet
+    determinism is covered by the same cross-process hash. Id collisions
+    between the hierarchy and fleet mappings raise (both are scored domains).
+    """
+    if fleet_scorecards:
+        collision = set(scorecards) & set(fleet_scorecards)
+        if collision:
+            raise ValueError(
+                f"benchmark id collision between hierarchy and fleet: {sorted(collision)}"
+            )
+        scorecards = {**scorecards, **fleet_scorecards}
     frame = scorecards_to_frame(scorecards).sort("model_id")
     # Timing fields are wall-clock dependent and must not participate in
     # cross-process determinism hashes.

@@ -26,27 +26,36 @@ from nmr.benchmark import (
     DEFAULT_BENCHMARK_PURGE_ERAS,
     DEFAULT_BENCHMARK_SEED,
     VALID_INPUT_SPACES,
+    BenchmarkData,
+    Tier4GateConfig,
     _freeze_mapping,
     _reject_unknown_keys,
     _standardize_feature_block,
     generate_canonical_predictions,
+    resolve_benchmark_feature_cols,
+    scorecards_to_frame,
+    tier4_gate_verdict,
     train_validation_purged_split,
 )
 from nmr.ensemble import Ensembler
 from nmr.features import feature_stability_screen
 from nmr.models import construct_tree_model
 from nmr.risk import NeutralizationEngine
+from nmr.scorecard import MetricScorecard, evaluate_model
 
 logger = logging.getLogger("nmr.benchmark_fleet")
 
-# Generator/runner/placement names (generate_*, fleet_frame, BenchmarkFleet, ...)
-# join this list in the tasks that define them.
+# Generators, config loaders, the fleet runner, placement, and frame writers.
 __all__ = [
+    "BenchmarkFleet",
     "FleetCellConfig",
     "FleetFileConfig",
+    "FleetResult",
     "VALID_FLEET_MODEL_KINDS",
     "VALID_FLEET_NEUTRALIZATION",
     "VALID_FLEET_NEUTRALIZER_SELECTIONS",
+    "fleet_frame",
+    "fleet_placement",
     "generate_fleet_lightgbm_predictions",
     "generate_fleet_xgb_predictions",
     "generate_lagged_target_predictions",
@@ -54,6 +63,7 @@ __all__ = [
     "generate_ridge_stack_predictions",
     "load_fleet_config",
     "load_fleet_suite_config",
+    "write_fleet_csv",
 ]
 
 VALID_FLEET_MODEL_KINDS: tuple[str, ...] = (
@@ -928,3 +938,266 @@ def _ridge_stack_search(
         pred_cols=[pred_col], weights=[1.0], era_col=era_col, out_col=pred_col,
     )
     return out.select([era_col, id_col, pred_col]).sort([era_col, id_col])
+
+
+@dataclasses.dataclass(frozen=True)
+class FleetResult:
+    scorecards: Mapping[str, MetricScorecard]
+    sources: Mapping[str, str]
+    placements: Mapping[str, str]
+    gate_verdicts: Mapping[str, Mapping[str, bool | None]]
+    selection_bias: Mapping[str, bool]
+
+
+def fleet_placement(corr: float, rungs: Mapping[int, float]) -> str:
+    """Place a measured CORR against the per-tier max-corr ladder rungs."""
+    if not rungs:
+        raise ValueError("rungs must be non-empty")
+    if (
+        not isinstance(corr, (int, float)) or isinstance(corr, bool)
+        or not -1.0 <= float(corr) <= 1.0
+    ):
+        raise ValueError(f"corr must be a float in [-1, 1], got {corr!r}")
+    ordered = sorted(rungs.items())
+    if corr < ordered[0][1]:
+        return "below tier 0"
+    if corr > ordered[-1][1]:
+        return f"above tier {ordered[-1][0]}"
+    for index in range(len(ordered) - 1):
+        tier_low, value_low = ordered[index]
+        tier_high, value_high = ordered[index + 1]
+        if value_low <= corr < value_high:
+            return f"tier{tier_low}..tier{tier_high}"
+    return f"tier{ordered[-1][0]}"
+
+
+class BenchmarkFleet:
+    """Untiered fleet of benchmark models (spec 2026-08-19-benchmark-fleet-design)."""
+
+    def __init__(
+        self,
+        *,
+        spec: tuple[FleetCellConfig, ...],
+        data: BenchmarkData,
+        seed: int = DEFAULT_BENCHMARK_SEED,
+        horizon: str = "20D",
+        n_boot: int = 1000,
+        min_overlap_eras: int = 20,
+        fast_mode: bool = False,
+    ) -> None:
+        if not spec:
+            raise ValueError("fleet spec has no cells")
+        self._spec = spec
+        self._data = data
+        self._seed = int(seed)
+        self._horizon = horizon
+        self._n_boot = int(n_boot)
+        self._min_overlap_eras = int(min_overlap_eras)
+        self._fast_mode = bool(fast_mode)
+        self._schema_cols = pl.read_parquet_schema(data.validation_path).names()
+        self._target_cols = ["era", "id"] + [
+            c for c in self._schema_cols if c == "target" or c.startswith("target_")
+        ]
+
+    def _feature_cols(self, cell: FleetCellConfig) -> list[str]:
+        return resolve_benchmark_feature_cols(
+            self._data.features_json, cell.input_space, self._schema_cols
+        )
+
+    def _cell_params(self, cell: FleetCellConfig) -> dict[str, Any]:
+        params = dict(cell.params)
+        if self._fast_mode and cell.fast_mode_params:
+            params.update(dict(cell.fast_mode_params))
+        return params
+
+    def _predictions_for_cell(
+        self, cell: FleetCellConfig
+    ) -> tuple[pl.DataFrame, pl.DataFrame]:
+        feature_cols = self._feature_cols(cell)
+        params = self._cell_params(cell)
+        val_id = pl.read_parquet(self._data.validation_path, columns=["era", "id"])
+
+        if cell.input_space == "none":
+            small_cols = resolve_benchmark_feature_cols(
+                self._data.features_json, "small", self._schema_cols
+            )
+            val_features = pl.read_parquet(
+                self._data.validation_path, columns=["era", "id", *small_cols]
+            )
+        else:
+            val_features = pl.read_parquet(
+                self._data.validation_path,
+                columns=["era", "id", *feature_cols],
+            )
+
+        if cell.model_kind == "target_lag_mean":
+            train_targets = pl.read_parquet(
+                self._data.train_path, columns=["era", cell.targets[0]]
+            )
+            preds = generate_lagged_target_predictions(
+                train_targets, val_id, target=cell.targets[0],
+                window=int(params.get("window", 1)),
+            )
+            return preds, val_features
+
+        if cell.model_kind == "ridge_stack":
+            stack_targets = [
+                str(params["main_target"]), *map(str, params["specialists"])
+            ]
+            train = pl.read_parquet(
+                self._data.train_path,
+                columns=["era", "id", *feature_cols, *stack_targets],
+            )
+            is_search = params.get("mode") == "search"
+            val_cols = ["era", "id", *feature_cols]
+            if is_search:
+                val_cols.append(str(params["main_target"]))
+            val = pl.read_parquet(
+                self._data.validation_path, columns=val_cols
+            )
+            preds = generate_ridge_stack_predictions(
+                train, val,
+                main_target=str(params["main_target"]),
+                specialists=[str(t) for t in params["specialists"]],
+                feature_cols=feature_cols, params=params, seed=cell.seed,
+                neutralization=float(cell.neutralization or 0.0),
+                val_targets=(
+                    val.select(["era", "id", str(params["main_target"])])
+                    if is_search else None
+                ),
+                benchmarks=self._data.benchmarks,
+            )
+            return preds, val_features
+
+        train = pl.read_parquet(
+            self._data.train_path,
+            columns=["era", "id", *feature_cols, *cell.targets],
+        )
+        val = pl.read_parquet(
+            self._data.validation_path, columns=["era", "id", *feature_cols]
+        )
+        if cell.model_kind == "lightgbm":
+            preds = generate_fleet_lightgbm_predictions(
+                train, val, targets=list(cell.targets), feature_cols=feature_cols,
+                params=params, seed=cell.seed,
+                neutralization=float(cell.neutralization or 0.0),
+                neutralizer_selection=cell.neutralizer_selection,
+                neutralizer_count=cell.neutralizer_count,
+            )
+        elif cell.model_kind == "xgboost":
+            preds = generate_fleet_xgb_predictions(
+                train, val, targets=list(cell.targets), feature_cols=feature_cols,
+                params=params, seed=cell.seed,
+                target_weights=(
+                    dict(cell.target_weights) if cell.target_weights else None
+                ),
+            )
+        elif cell.model_kind == "mlp":
+            preds = generate_mlp_predictions(
+                train, val, target=cell.targets[0], feature_cols=feature_cols,
+                params=params, seed=cell.seed,
+            )
+        else:
+            raise ValueError(f"Unsupported fleet model kind: {cell.model_kind!r}")
+        return preds, val_features
+
+    def run(
+        self,
+        *,
+        tier_rungs: Mapping[int, float],
+        gate: Tier4GateConfig | None,
+    ) -> FleetResult:
+        scorecards: dict[str, MetricScorecard] = {}
+        sources: dict[str, str] = {}
+        selection_bias: dict[str, bool] = {}
+        val_targets = pl.read_parquet(
+            self._data.validation_path, columns=self._target_cols
+        )
+        for cell in self._spec:
+            logger.info("[fleet] %s (kind=%s)", cell.benchmark_id, cell.model_kind)
+            preds, val_features = self._predictions_for_cell(cell)
+            scorecards[cell.benchmark_id] = evaluate_model(
+                preds,
+                meta_model=self._data.meta_model,
+                benchmarks=self._data.benchmarks,
+                features=val_features,
+                targets=val_targets,
+                n_trials=1,
+                seed=cell.seed,
+                horizon=self._horizon,
+                main_target="target",
+                benchmark_col=None,
+                n_boot=self._n_boot,
+                min_overlap_eras=self._min_overlap_eras,
+                model_id=cell.benchmark_id,
+            )
+            sources[cell.benchmark_id] = cell.source
+            selection_bias[cell.benchmark_id] = (
+                cell.model_kind == "ridge_stack"
+                and cell.params.get("mode") == "search"
+            )
+            if cell.anchors:
+                measured = float(scorecards[cell.benchmark_id].corr.value)
+                for key, anchor in cell.anchors.items():
+                    logger.info(
+                        "    anchor %s=%.4f (measured=%.6f)",
+                        key, float(anchor), measured,
+                    )
+        placements = (
+            {
+                mid: fleet_placement(float(card.corr.value), tier_rungs)
+                for mid, card in scorecards.items()
+            }
+            if tier_rungs
+            else {}
+        )
+        gate_verdicts: dict[str, Mapping[str, bool | None]] = {}
+        for mid, card in scorecards.items():
+            gate_verdicts[mid] = (
+                tier4_gate_verdict(card, gate) if gate is not None else {}
+            )
+        return FleetResult(
+            scorecards=scorecards,
+            sources=sources,
+            placements=placements,
+            gate_verdicts=gate_verdicts,
+            selection_bias=selection_bias,
+        )
+
+
+def fleet_frame(result: FleetResult) -> pl.DataFrame:
+    """Scorecard rows + placement/selection-bias/gate-verdict columns."""
+    frame = scorecards_to_frame(result.scorecards)
+    extra = pl.DataFrame({
+        "model_id": list(result.scorecards.keys()),
+        "source": [result.sources[mid] for mid in result.scorecards],
+        "placement": [result.placements[mid] for mid in result.scorecards],
+        "selection_bias": [
+            result.selection_bias[mid] for mid in result.scorecards
+        ],
+    })
+    out = frame.join(extra, on="model_id", how="left")
+    verdict_fields = (
+        "corr", "corr_sharpe_ac", "fnc", "deflated_sharpe",
+        "gain_to_pain_ratio", "cagr_1y", "turnover_mean",
+    )
+    # Gate series must follow the joined frame's row order, which
+    # ``scorecards_to_frame`` sorts by model_id.
+    sorted_ids = sorted(result.scorecards)
+    for field in verdict_fields:
+        out = out.with_columns(
+            pl.Series(
+                f"gate_{field}",
+                [result.gate_verdicts[mid].get(field) for mid in sorted_ids],
+            )
+        )
+    return out.sort("model_id")
+
+
+def write_fleet_csv(result: FleetResult, output_path: str | Path) -> Path:
+    path = Path(output_path)
+    if path.suffix.lower() != ".csv":
+        raise ValueError(f"output_path must be a .csv file: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fleet_frame(result).write_csv(path)
+    return path
