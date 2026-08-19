@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -30,7 +31,7 @@ from nmr.config import (
 )
 from nmr.deployment import load_predict
 from nmr.families import CURRENT_POINTER_NAME, available_slots, load_full_version
-from nmr.promote import promote_full_version, rehearse_promotion
+from nmr.promote import PromotionResult, promote_full_version, rehearse_promotion
 from nmr.runner import ExperimentRunner
 
 _RID = "a" * 64
@@ -716,3 +717,140 @@ def test_build_truncated_data_insufficient_eras(tmp_path: Path) -> None:
         _build_truncated_data(
             stored, tmp_path / "rehearsal", train_eras=9, validation_eras=1
         )
+
+
+def test_measure_full_history_peak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Runs the real promotion training path (spawn forced, train+validation)
+    and returns measured peaks — the curve measurement, exercised at toy scale."""
+    from nmr.promote import measure_full_history_peak
+
+    monkeypatch.setenv("NMR_FULL_HISTORY_SPAWN_MIN_BYTES", "1")
+    data = _make_data(tmp_path / "data")
+    stored = _stored_config_dict(data)
+    child_ws, child_commit, parent_ws, parent_commit, rows = measure_full_history_peak(
+        stored,
+        feature_cols=["f1", "f2"],
+        target_cols=["target"],
+        weights=[1.0],
+        data_dir=data,
+        seed=42,
+    )
+    assert rows > 0
+    assert child_ws is None or child_ws > 0
+    assert child_commit is None or child_commit > 0
+    assert parent_ws is None or parent_ws > 0
+    assert parent_commit is None or parent_commit > 0
+
+
+def test_rehearse_restores_env_and_removes_stale_pointer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The env override is restored to its prior value and a stale current.json
+    left by an earlier rehearsal is removed (a rehearsal is never the full version)."""
+    monkeypatch.setenv("NMR_FULL_HISTORY_SPAWN_MIN_BYTES", "7777")
+    data = _make_data(tmp_path / "data")
+    registry = tmp_path / "registry"
+    _write_registry(registry, stored_config=_stored_config_dict(data))
+    full_dir = tmp_path / "models" / "brb1-lgbm-v6" / "full"
+    full_dir.mkdir(parents=True)
+    (full_dir / CURRENT_POINTER_NAME).write_text(
+        json.dumps({"run_id": "c" * 64}), encoding="utf-8"
+    )
+    result = rehearse_promotion(
+        _RID,
+        "brb1-lgbm-v6",
+        models_dir=tmp_path / "models",
+        registry_dir=registry,
+        rehearsal_data_root=tmp_path / "rehearsal",
+        train_eras=6,
+        validation_eras=6,
+    )
+    assert result.acceptance_passed is True
+    assert os.environ["NMR_FULL_HISTORY_SPAWN_MIN_BYTES"] == "7777"
+    assert not (full_dir / CURRENT_POINTER_NAME).exists()
+
+
+def test_rehearse_manifest_without_config_refused(tmp_path: Path) -> None:
+    registry = tmp_path / "registry"
+    run_dir = registry / _RID
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(
+        json.dumps({"run_id": _RID, "manifest": {}, "scorecard": _passing_scorecard()}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="no config dict"):
+        rehearse_promotion(
+            _RID, "brb1-lgbm-v6", models_dir=tmp_path / "models", registry_dir=registry
+        )
+
+
+def _fake_promotion_result(tmp_path: Path) -> PromotionResult:
+    artifact = tmp_path / "fake_predict.pkl"
+    artifact.write_bytes(b"not-a-real-model")
+    return PromotionResult(
+        artifact_path=artifact,
+        manifest_path=tmp_path / "manifest.json",
+        run_id=_RID,
+        family="brb1-lgbm-v6",
+        tier4_gate_passed=False,
+        override_used=True,
+    )
+
+
+def test_rehearse_missing_feature_cols_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The post-promotion feature_cols check (promote.py:870-872) — the promotion
+    itself is stubbed out so the test never fits a model."""
+    data = _make_data(tmp_path / "data")
+    registry = tmp_path / "registry"
+    _write_registry(
+        registry, stored_config=_stored_config_dict(data), feature_cols=[]
+    )
+    fake = _fake_promotion_result(tmp_path)
+    monkeypatch.setattr("nmr.promote.promote_full_version", lambda *a, **k: fake)
+    with pytest.raises(ValueError, match="no feature_cols"):
+        rehearse_promotion(
+            _RID,
+            "brb1-lgbm-v6",
+            models_dir=tmp_path / "models",
+            registry_dir=registry,
+            rehearsal_data_root=tmp_path / "rehearsal",
+            train_eras=6,
+            validation_eras=6,
+        )
+
+
+def test_rehearse_acceptance_failure_propagates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The Phase-D acceptance criterion is NOT overridable: a failed raw-contract
+    validation is logged at ERROR and re-raised (promote.py:883-894)."""
+    data = _make_data(tmp_path / "data")
+    registry = tmp_path / "registry"
+    _write_registry(registry, stored_config=_stored_config_dict(data))
+    fake = _fake_promotion_result(tmp_path)
+    monkeypatch.setattr("nmr.promote.promote_full_version", lambda *a, **k: fake)
+
+    def _boom(*args, **kwargs) -> None:
+        raise ValueError("boom")
+
+    monkeypatch.setattr("nmr.submission.accept_promoted_artifact", _boom)
+    with (
+        caplog.at_level(logging.ERROR, logger="nmr.promote"),
+        pytest.raises(ValueError, match="boom"),
+    ):
+        rehearse_promotion(
+            _RID,
+            "brb1-lgbm-v6",
+            models_dir=tmp_path / "models",
+            registry_dir=registry,
+            rehearsal_data_root=tmp_path / "rehearsal",
+            train_eras=6,
+            validation_eras=6,
+        )
+    assert "acceptance FAILED" in caplog.text
