@@ -59,6 +59,15 @@ from .benchmark import (
     train_validation_purged_split,
     write_scorecards_csv,
 )
+from .benchmark_fleet import (
+    VALID_FLEET_MODEL_KINDS,
+    VALID_FLEET_NEUTRALIZATION,
+    VALID_FLEET_NEUTRALIZER_SELECTIONS,
+    FleetCellConfig,
+    FleetFileConfig,
+    load_fleet_config,
+    load_fleet_suite_config,
+)
 from .campaign import (
     CampaignConfig,
     CampaignLog,
@@ -297,6 +306,13 @@ __all__ = [
     "tier_max_corrs",
     "train_validation_purged_split",
     "write_scorecards_csv",
+    "FleetCellConfig",
+    "FleetFileConfig",
+    "VALID_FLEET_MODEL_KINDS",
+    "VALID_FLEET_NEUTRALIZATION",
+    "VALID_FLEET_NEUTRALIZER_SELECTIONS",
+    "load_fleet_config",
+    "load_fleet_suite_config",
     "CampaignConfig",
     "CampaignRun",
     "CampaignLog",

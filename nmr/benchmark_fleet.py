@@ -1,0 +1,197 @@
+"""Untiered benchmark fleet: community & tutorial model recreation layer.
+
+Fleet cells are benchmark models without a tier assignment: they are scored
+through the same ``evaluate_model`` pipeline as the 5-tier hierarchy and
+their measured scorecards place them against the tier ladder indirectly.
+Spec: docs/superpowers/specs/2026-08-19-benchmark-fleet-design.md.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import logging
+from collections.abc import Mapping
+from pathlib import Path
+from types import MappingProxyType
+from typing import Any
+
+import yaml
+
+from nmr.benchmark import (
+    DEFAULT_BENCHMARK_SEED,
+    VALID_INPUT_SPACES,
+    _freeze_mapping,
+    _reject_unknown_keys,
+)
+
+logger = logging.getLogger("nmr.benchmark_fleet")
+
+# Generator/runner/placement names (generate_*, fleet_frame, BenchmarkFleet, ...)
+# join this list in the tasks that define them; today only the schema is public.
+__all__ = [
+    "FleetCellConfig",
+    "FleetFileConfig",
+    "VALID_FLEET_MODEL_KINDS",
+    "VALID_FLEET_NEUTRALIZATION",
+    "VALID_FLEET_NEUTRALIZER_SELECTIONS",
+    "load_fleet_config",
+    "load_fleet_suite_config",
+]
+
+VALID_FLEET_MODEL_KINDS: tuple[str, ...] = (
+    "target_lag_mean", "lightgbm", "xgboost", "mlp", "ridge_stack",
+)
+VALID_FLEET_NEUTRALIZATION: tuple[float | None, ...] = (None, 0.25, 0.35, 0.5, 1.0)
+VALID_FLEET_NEUTRALIZER_SELECTIONS: tuple[str, ...] = ("none", "riskiest_50")
+DEFAULT_NEUTRALIZER_COUNT: int = 50
+
+
+@dataclasses.dataclass(frozen=True)
+class FleetCellConfig:
+    benchmark_id: str
+    source: str
+    input_space: str
+    model_kind: str
+    targets: tuple[str, ...] = ("target",)
+    target_weights: Mapping[str, float] | None = None
+    params: Mapping[str, Any] = dataclasses.field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    seed: int = DEFAULT_BENCHMARK_SEED
+    neutralization: float | None = None
+    neutralizer_selection: str = "none"
+    neutralizer_count: int = DEFAULT_NEUTRALIZER_COUNT
+    fast_mode_params: Mapping[str, Any] | None = None
+    anchors: Mapping[str, float] | None = None
+
+    def __post_init__(self) -> None:
+        if not self.benchmark_id or not isinstance(self.benchmark_id, str):
+            raise ValueError(f"benchmark_id must be a non-empty string: {self.benchmark_id!r}")
+        if not self.source or not isinstance(self.source, str):
+            raise ValueError(f"source must be a non-empty string: {self.source!r}")
+        if self.input_space not in VALID_INPUT_SPACES:
+            raise ValueError(
+                f"input_space={self.input_space!r} not in {VALID_INPUT_SPACES}"
+            )
+        if self.model_kind not in VALID_FLEET_MODEL_KINDS:
+            raise ValueError(
+                f"model_kind={self.model_kind!r} not in {VALID_FLEET_MODEL_KINDS}"
+            )
+        if not isinstance(self.targets, tuple) or not self.targets:
+            raise ValueError("targets must be a non-empty tuple")
+        if not all(isinstance(t, str) and t for t in self.targets):
+            raise ValueError(f"targets must be non-empty strings: {self.targets!r}")
+        if self.model_kind == "target_lag_mean":
+            if self.input_space != "none":
+                raise ValueError(
+                    "target_lag_mean requires input_space='none', "
+                    f"got {self.input_space!r}"
+                )
+            if len(self.targets) != 1:
+                raise ValueError(
+                    "target_lag_mean requires exactly one single target, "
+                    f"got {self.targets!r}"
+                )
+        if self.model_kind == "ridge_stack":
+            for key in ("mode", "main_target", "specialists"):
+                if key not in self.params:
+                    raise ValueError(
+                        f"ridge_stack requires params.{key}"
+                    )
+            if self.params["mode"] not in ("fixed", "search"):
+                raise ValueError(
+                    f"ridge_stack params.mode must be 'fixed' or 'search', "
+                    f"got {self.params['mode']!r}"
+                )
+        if self.neutralization not in VALID_FLEET_NEUTRALIZATION:
+            raise ValueError(
+                f"neutralization={self.neutralization!r} not in "
+                f"{VALID_FLEET_NEUTRALIZATION}"
+            )
+        if self.neutralizer_selection not in VALID_FLEET_NEUTRALIZER_SELECTIONS:
+            raise ValueError(
+                f"neutralizer_selection={self.neutralizer_selection!r} not in "
+                f"{VALID_FLEET_NEUTRALIZER_SELECTIONS}"
+            )
+        if not isinstance(self.neutralizer_count, int) or isinstance(self.neutralizer_count, bool) \
+                or self.neutralizer_count < 1:
+            raise ValueError(
+                f"neutralizer_count must be a positive int, got {self.neutralizer_count!r}"
+            )
+        if not isinstance(self.seed, int) or isinstance(self.seed, bool):
+            raise ValueError(f"seed must be an int, got {self.seed!r}")
+        object.__setattr__(self, "params", _freeze_mapping(self.params, name="params"))
+        if self.target_weights is not None:
+            weights = dict(self.target_weights)
+            for target in weights:
+                if target not in self.targets:
+                    raise ValueError(
+                        f"target_weights key {target!r} not in targets {self.targets!r}"
+                    )
+            if not all(isinstance(w, (int, float)) and not isinstance(w, bool)
+                       and float(w) > 0.0 for w in weights.values()):
+                raise ValueError("target_weights must be positive numbers")
+            object.__setattr__(
+                self, "target_weights",
+                _freeze_mapping(self.target_weights, name="target_weights"),
+            )
+        if self.fast_mode_params is not None:
+            object.__setattr__(
+                self, "fast_mode_params",
+                _freeze_mapping(self.fast_mode_params, name="fast_mode_params"),
+            )
+        if self.anchors is not None:
+            object.__setattr__(
+                self, "anchors",
+                _freeze_mapping(self.anchors, name="anchors"),
+            )
+
+
+@dataclasses.dataclass(frozen=True)
+class FleetFileConfig:
+    cells: tuple[FleetCellConfig, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.cells:
+            raise ValueError("fleet config requires non-empty cells")
+        ids = [cell.benchmark_id for cell in self.cells]
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"duplicate benchmark ids in file: {ids}")
+
+
+def load_fleet_config(path: str | Path) -> FleetFileConfig:
+    """Load and validate a single fleet config file."""
+    raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"fleet config must be a mapping, got {type(raw).__name__}")
+    _reject_unknown_keys(FleetFileConfig, raw)
+    if not isinstance(raw.get("cells", []), list):
+        raise ValueError("cells must be a list")
+    cells: list[FleetCellConfig] = []
+    for data in raw.get("cells", []):
+        if not isinstance(data, dict):
+            raise ValueError(f"fleet cell must be a mapping, got {type(data).__name__}")
+        data = dict(data)
+        if "neutralization" in data and data["neutralization"] == "none":
+            data["neutralization"] = None
+        if isinstance(data.get("targets"), list):
+            data["targets"] = tuple(data["targets"])
+        _reject_unknown_keys(FleetCellConfig, data)
+        cells.append(FleetCellConfig(**data))
+    return FleetFileConfig(cells=tuple(cells))
+
+
+def load_fleet_suite_config(config_dir: str | Path) -> tuple[FleetCellConfig, ...]:
+    """Load every *.yaml in config_dir, dedupe ids, sort by benchmark_id."""
+    directory = Path(config_dir)
+    files = sorted(p for p in directory.glob("*.yaml"))
+    if not files:
+        raise ValueError(f"no fleet config files found in {directory}")
+    all_cells: list[FleetCellConfig] = []
+    for path in files:
+        all_cells.extend(load_fleet_config(path).cells)
+    ids = [cell.benchmark_id for cell in all_cells]
+    if len(set(ids)) != len(ids):
+        seen = sorted({i for i in ids if ids.count(i) > 1})
+        raise ValueError(f"duplicate benchmark ids across configs: {seen}")
+    return tuple(sorted(all_cells, key=lambda c: c.benchmark_id))
