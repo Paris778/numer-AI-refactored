@@ -18,6 +18,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 import yaml
+from sklearn.neural_network import MLPRegressor
 
 from nmr.benchmark import (
     DEFAULT_BENCHMARK_PURGE_ERAS,
@@ -25,6 +26,7 @@ from nmr.benchmark import (
     VALID_INPUT_SPACES,
     _freeze_mapping,
     _reject_unknown_keys,
+    _standardize_feature_block,
     generate_canonical_predictions,
     train_validation_purged_split,
 )
@@ -46,6 +48,7 @@ __all__ = [
     "generate_fleet_lightgbm_predictions",
     "generate_fleet_xgb_predictions",
     "generate_lagged_target_predictions",
+    "generate_mlp_predictions",
     "load_fleet_config",
     "load_fleet_suite_config",
 ]
@@ -453,3 +456,64 @@ def generate_fleet_xgb_predictions(
         blended, pred_cols=[pred_col], era_col=era_col
     )
     return gaussianized.select([era_col, id_col, pred_col]).sort([era_col, id_col])
+
+
+_VALID_MLP_PARAM_KEYS: tuple[str, ...] = (
+    "hidden_layer_sizes", "activation", "solver", "alpha", "learning_rate_init",
+    "batch_size", "max_iter", "early_stopping", "n_iter_no_change",
+    "validation_fraction",
+)
+
+
+def generate_mlp_predictions(
+    train: pl.DataFrame,
+    val: pl.DataFrame,
+    *,
+    target: str,
+    feature_cols: Sequence[str],
+    params: Mapping[str, Any],
+    seed: int,
+    purge_eras: int = DEFAULT_BENCHMARK_PURGE_ERAS,
+    era_col: str = "era",
+    id_col: str = "id",
+    pred_col: str = "prediction",
+) -> pl.DataFrame:
+    """Fleet MLP (sklearn MLPRegressor): standardized features, fixed seed."""
+    if not feature_cols:
+        raise ValueError("feature_cols must be non-empty")
+    unknown = sorted(set(params) - set(_VALID_MLP_PARAM_KEYS))
+    if unknown:
+        raise ValueError(f"unknown mlp param keys: {unknown}")
+    trimmed_train_eras, _ = train_validation_purged_split(
+        train.get_column(era_col).unique().to_list(),
+        val.get_column(era_col).unique().to_list(),
+        purge_eras=purge_eras,
+    )
+    train_rows = train.filter(pl.col(era_col).is_in(trimmed_train_eras))
+    val_rows = val.sort([era_col, id_col])
+    if target not in train.columns:
+        raise ValueError(f"missing target column: {target!r}")
+    missing_feats = [c for c in feature_cols if c not in train.columns or c not in val.columns]
+    if missing_feats:
+        raise ValueError(f"missing feature columns: {missing_feats}")
+
+    x_train = train_rows.select(feature_cols).cast(pl.Float32).to_numpy(writable=True)
+    x_val = val_rows.select(feature_cols).cast(pl.Float32).to_numpy(writable=True)
+    y = train_rows.get_column(target).cast(pl.Float64).to_numpy()
+    mask = np.isfinite(y)
+    if mask.sum() < 2:
+        raise ValueError(
+            f"target {target!r} has fewer than 2 finite train rows after purge"
+        )
+    x_train, x_val = _standardize_feature_block(x_train, x_val)
+
+    model = MLPRegressor(**dict(params), random_state=seed)
+    model.fit(x_train[mask], y[mask])
+    raw = np.asarray(model.predict(x_val), dtype=float)
+
+    frame = val_rows.select([era_col, id_col]).with_columns(pl.Series(pred_col, raw))
+    blended = Ensembler().blend(
+        Ensembler.rank_normalize(frame, pred_cols=[pred_col], era_col=era_col),
+        pred_cols=[pred_col], weights=[1.0], era_col=era_col, out_col=pred_col,
+    )
+    return blended.select([era_col, id_col, pred_col]).sort([era_col, id_col])

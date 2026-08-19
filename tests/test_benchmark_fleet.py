@@ -14,6 +14,7 @@ from nmr.benchmark_fleet import (
     generate_fleet_lightgbm_predictions,
     generate_fleet_xgb_predictions,
     generate_lagged_target_predictions,
+    generate_mlp_predictions,
     load_fleet_config,
     load_fleet_suite_config,
 )
@@ -316,4 +317,47 @@ def test_xgb_rejects_weight_for_unknown_target():
             train, val, targets=["target"], feature_cols=["f1"],
             params={"n_estimators": 5}, seed=42,
             target_weights={"bogus": 1.0},
+        )
+
+
+_MLP_KEYS = (
+    "hidden_layer_sizes", "activation", "solver", "alpha", "learning_rate_init",
+    "batch_size", "max_iter", "early_stopping", "n_iter_no_change",
+    "validation_fraction",
+)
+
+
+def test_mlp_same_seed_is_deterministic():
+    train, val = _tiny_train_val()
+    params = {"hidden_layer_sizes": (8, 4), "max_iter": 30, "batch_size": 4,
+              "learning_rate_init": 0.01}
+    a = generate_mlp_predictions(
+        train, val, target="target", feature_cols=["f1", "f2", "f3"],
+        params=params, seed=42,
+    )
+    b = generate_mlp_predictions(
+        train, val, target="target", feature_cols=["f1", "f2", "f3"],
+        params=params, seed=42,
+    )
+    assert a.equals(b)
+
+
+def test_mlp_constant_feature_stays_finite():
+    train, val = _tiny_train_val()
+    train = train.with_columns(pl.lit(1.0).alias("f4"))
+    val = val.with_columns(pl.lit(1.0).alias("f4"))
+    out = generate_mlp_predictions(
+        train, val, target="target", feature_cols=["f1", "f2", "f3", "f4"],
+        params={"hidden_layer_sizes": (8, 4), "max_iter": 30, "batch_size": 4},
+        seed=42,
+    )
+    assert out.get_column("prediction").is_finite().all()
+
+
+def test_mlp_rejects_unknown_param_key():
+    train, val = _tiny_train_val()
+    with pytest.raises(ValueError, match="unknown mlp param"):
+        generate_mlp_predictions(
+            train, val, target="target", feature_cols=["f1"],
+            params={"hidden_layer_sizes": (4,), "bogus": 1}, seed=42,
         )
