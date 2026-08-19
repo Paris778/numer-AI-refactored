@@ -90,6 +90,12 @@ def test_tier4_gate_verdict_cagr_strict_and_turnover_none():
     assert verdict["turnover_mean"] is None     # structurally unavailable
 
 
+def test_tier4_gate_verdict_turnover_high_fails():
+    card = make_scorecard(corr=0.03, sharpe=0.8, fnc=0.02, gpr=1.5, cagr=0.01, turnover=0.9)
+    verdict = tier4_gate_verdict(card, _gate())
+    assert verdict["turnover_mean"] is False   # <= max, not >=
+
+
 def test_tier_max_corrs_orders_by_tier():
     cards = {
         "t0": make_scorecard(corr=0.002),
@@ -145,6 +151,8 @@ def tier4_gate_verdict(
     for field, observed, threshold, strict in _tier4_gate_rows(scorecard, gate):
         if observed is None or strict is None:
             verdict[field] = None
+        elif field == "turnover_mean":
+            verdict[field] = observed <= threshold
         elif strict:
             verdict[field] = observed > threshold
         else:
@@ -167,7 +175,13 @@ def assert_tier4_gate(scorecard: MetricScorecard, gate: Tier4GateConfig) -> None
     for field, observed, threshold, strict in _tier4_gate_rows(scorecard, gate):
         if observed is None or strict is None:
             continue
-        if strict:
+        if field == "turnover_mean":
+            if observed > threshold:
+                violations.append(
+                    "turnover_mean: "
+                    f"observed={observed:.8f}, need <= {threshold:.4f}"
+                )
+        elif strict:
             if observed <= threshold:
                 violations.append(
                     f"{field}: observed={observed:.8f}, need > {threshold:.8f}"
@@ -175,11 +189,6 @@ def assert_tier4_gate(scorecard: MetricScorecard, gate: Tier4GateConfig) -> None
         elif observed < threshold:
             violations.append(
                 f"{field}: observed={observed:.8f}, need >= {threshold:.8f}"
-            )
-        if field == "turnover_mean" and observed > threshold:
-            violations.append(
-                "turnover_mean: "
-                f"observed={observed:.8f}, need <= {threshold:.4f}"
             )
     if violations:
         raise ValueError(
@@ -278,14 +287,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-import yaml
 
 from nmr.benchmark_fleet import (
-    FleetCellConfig,
     load_fleet_config,
     load_fleet_suite_config,
-    VALID_FLEET_MODEL_KINDS,
-    VALID_FLEET_NEUTRALIZATION,
 )
 
 
@@ -414,59 +419,43 @@ from __future__ import annotations
 
 import dataclasses
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
-import numpy as np
-import polars as pl
 import yaml
 
 from nmr.benchmark import (
-    DEFAULT_BENCHMARK_PURGE_ERAS,
     DEFAULT_BENCHMARK_SEED,
     VALID_INPUT_SPACES,
     _freeze_mapping,
     _reject_unknown_keys,
-    _standardize_feature_block,
-    generate_canonical_predictions,
-    generate_tree_predictions,
-    train_validation_purged_split,
-)
-from nmr.ensemble import Ensembler
-from nmr.features import feature_stability_screen
-from nmr.models import construct_tree_model
-from nmr.risk import NeutralizationEngine
-from nmr.scorecard import MetricScorecard, evaluate_model
-from nmr.benchmark import (
-    BenchmarkData,
-    Tier4GateConfig,
-    scorecards_to_frame,
-    tier4_gate_verdict,
 )
 
 logger = logging.getLogger("nmr.benchmark_fleet")
+# NOTE: Tasks 3-9 re-add the imports their generators need
+# (numpy, polars, _standardize_feature_block, generate_canonical_predictions,
+#  Ensembler, feature_stability_screen, construct_tree_model,
+#  NeutralizationEngine, MetricScorecard/evaluate_model, BenchmarkData,
+#  Tier4GateConfig, scorecards_to_frame, tier4_gate_verdict, Ridge, MLPRegressor,
+#  lightgbm.early_stopping) and extend __all__ accordingly — one task at a time,
+# so the lint gate stays green between tasks.
 
 __all__ = [
-    "BenchmarkFleet",
     "FleetCellConfig",
     "FleetFileConfig",
-    "FleetResult",
     "VALID_FLEET_MODEL_KINDS",
     "VALID_FLEET_NEUTRALIZATION",
     "VALID_FLEET_NEUTRALIZER_SELECTIONS",
-    "fleet_frame",
-    "fleet_placement",
-    "generate_fleet_lightgbm_predictions",
-    "generate_fleet_xgb_predictions",
-    "generate_lagged_target_predictions",
-    "generate_mlp_predictions",
-    "generate_ridge_stack_predictions",
     "load_fleet_config",
     "load_fleet_suite_config",
-    "write_fleet_csv",
 ]
+# NOTE: this task imports only what the schema needs (lint gate: no unused
+# imports, no undefined __all__ names). Tasks 3-9 add generator/runner
+# symbols and their imports (`generate_canonical_predictions`,
+# `construct_tree_model`, `NeutralizationEngine`, `Ensembler`, etc.) back
+# to this file as they implement them.
 
 VALID_FLEET_MODEL_KINDS: tuple[str, ...] = (
     "target_lag_mean", "lightgbm", "xgboost", "mlp", "ridge_stack",
@@ -810,7 +799,12 @@ from nmr.benchmark_fleet import (
 
 
 def _tiny_train_val(eras: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)):
-    """Synthetic train (with target) + val (no targets) with 3 features."""
+    """Synthetic train (with target) + val (no targets) with 3 features.
+
+    Val eras are derived as (max(train)+1, max(train)+2) so the exact 8-era
+    purge gap holds for every ``eras`` argument (train_validation_purged_split
+    enforces max(trimmed_train) + 9 == min(val)).
+    """
     rng = np.random.default_rng(11)
     train_rows, val_rows = [], []
     for i, era in enumerate(eras):
@@ -822,11 +816,14 @@ def _tiny_train_val(eras: tuple[int, ...] = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 
                 "f3": float(era % 2),
                 "target": float(i % 3),
             })
-    for era in (20, 21):
+    for era in (max(eras) + 1, max(eras) + 2):
         for row in range(5):
             val_rows.append({
                 "era": f"{era:04d}", "id": f"v{era}_{row}",
-                "f1": rng.normal(0, 1), "f2": rng.normal(0, 1), "f3": 1.0,
+                # deterministic per-row drift: tiny fixtures can otherwise
+                # yield constant per-era predictions and fail the per-era
+                # rank-gaussian mean/std assertions
+                "f1": float(row), "f2": rng.normal(0, 1), "f3": float(row % 2),
             })
     return pl.DataFrame(train_rows), pl.DataFrame(val_rows)
 
@@ -919,9 +916,10 @@ def _select_riskiest_features(
         era_col=era_col,
     )
     ranked = screen.sort(
-        by=[pl.col("cross_regime_variance").nulls_last().desc(), pl.col("feature")],
+        by=["cross_regime_variance", "feature"],
         descending=[True, False],
-    )
+        nulls_last=[True, False],
+    )  # polars >= 1.41: kwargs form (Expr.nulls_last()/desc() removed)
     return ranked.get_column("feature").to_list()[:count]
 
 
@@ -1405,7 +1403,7 @@ def test_stack_partitions_tail_and_purge_8():
 def test_stack_partitions_purge_16_when_60d_present():
     eras = [f"{e:04d}" for e in range(1, 40)]
     spec, meta = _stack_partitions(eras, meta_tail_pct=0.10, specialists=["target_ender_60"])
-    assert spec[-1] == "0023"  # meta = 0036..0039, 16-era purge = 0024..0035
+    assert spec[-1] == "0019"  # meta = 0036..0039, 16-era purge = 0020..0035
     assert set(spec) & set(meta) == set()
 
 
@@ -1432,7 +1430,7 @@ def _stack_train_val():
             row["aux2"] = None
     val_rows = [
         {"era": f"{era:04d}", "id": f"v{era}_{row}", "f1": rng.normal(0, 1), "f2": rng.normal(0, 1)}
-        for era in (50, 51) for row in range(6)
+        for era in (41, 42) for row in range(6)
     ]
     return pl.DataFrame(train_rows), pl.DataFrame(val_rows)
 
@@ -1567,6 +1565,14 @@ def generate_ridge_stack_predictions(
             val_targets=val_targets, benchmarks=benchmarks,
             era_col=era_col, id_col=id_col, pred_col=pred_col,
         )
+
+Transitional note for Task 7 (ruff F821): `_ridge_stack_search` is defined in Task 8. To keep the lint gate green in Task 7, add this module-level transitional stub right after the dispatch above, with a comment saying Task 8 replaces it with the real implementation:
+
+```python
+def _ridge_stack_search(*args: object, **kwargs: object) -> pl.DataFrame:
+    """Transitional stub — the search-mode implementation arrives in Task 8."""
+    raise NotImplementedError("ridge_stack search mode is implemented in the next task")
+```
 
     spec_eras, meta_eras = _stack_partitions(
         trimmed_train_eras,
@@ -1708,11 +1714,11 @@ def _search_train_val():
         {"era": f"{era:04d}", "id": f"v{era}_{row}",
          "f1": rng.normal(0, 1), "f2": rng.normal(0, 1),
          "main": float(era % 5) + rng.normal(0, 0.5)}
-        for era in (70, 71) for row in range(8)
+        for era in (61, 62) for row in range(8)
     ]
     bench_rows = [
         {"era": f"{era:04d}", "id": f"v{era}_{row}", "v53_lgbm_ender20": rng.normal(0, 1)}
-        for era in (70, 71) for row in range(8)
+        for era in (61, 62) for row in range(8)
     ]
     return pl.DataFrame(train_rows), pl.DataFrame(val_rows), pl.DataFrame(bench_rows)
 
@@ -1942,7 +1948,7 @@ def _ridge_stack_search(
     if len(kept) < int(params["min_specialists"]):
         raise ValueError(
             f"only {len(kept)} specialists survive the Sharpe floor, "
-            f"need >= {params['min_specialists']}"
+            f"need >= min_specialists={params['min_specialists']}"
         )
 
     # 3. Meta features: per-era-ranked specialist predictions on meta tail + val.
@@ -2117,16 +2123,18 @@ def _write_synthetic_benchmark_data(tmp_path: Path) -> BenchmarkData:
     """Minimal on-disk v5.3-like assets for a full fleet run."""
     rng = np.random.default_rng(9)
     eras_train = [f"{e:04d}" for e in range(1, 41)]
-    eras_val = [f"{e:04d}" for e in range(50, 56)]
+    eras_val = [f"{e:04d}" for e in range(41, 47)]
     rows_train = [
         {"era": era, "id": f"t{era}_{i}",
-         "f1": rng.normal(0, 1), "f2": rng.normal(0, 1), "target": rng.normal(0, 1)}
+         "f1": rng.normal(0, 1), "f2": rng.normal(0, 1),
+         "target": rng.normal(0, 1), "target_aux": rng.normal(0, 1)}
         for era in eras_train for i in range(6)
     ]
     rows_val = [
-        {"era": era, "id": f"v{era}_{i}", "f1": rng.normal(0, 1), "f2": rng.normal(0, 1)}
+        {"era": era, "id": f"v{era}_{i}", "f1": rng.normal(0, 1), "f2": rng.normal(0, 1),
+         "target": rng.normal(0, 1)}
         for era in eras_val for i in range(6)
-    ]
+    ]  # val carries `target` because evaluate_model(main_target="target") needs the join
     pl.DataFrame(rows_train).write_parquet(tmp_path / "train.parquet")
     pl.DataFrame(rows_val).write_parquet(tmp_path / "validation.parquet")
     pl.DataFrame([
@@ -2188,8 +2196,27 @@ def test_benchmark_fleet_search_cell_marks_selection_bias(tmp_path):
         benchmark_id="fa_v151_ridge_ensemble", source="test",
         input_space="small", model_kind="ridge_stack",
         targets=("target",),
-        params={"mode": "search", "main_target": "target",
-                "specialists": ["target"]},
+        # specialists must NOT include main_target (polars duplicate-column
+        # projection would raise), and the search params must be complete.
+        params={
+            "mode": "search", "main_target": "target",
+            "specialists": ["target_aux"],
+            "meta_tail_pct": 0.10, "nan_fill": True,
+            "snnr_weights": {"target_aux": 1.0},
+            "top_k": 1, "min_coverage": 0.5, "min_abs_main_corr": 0.0,
+            "priority_hints": [],
+            "specialist_alpha_grid": [0.01, 1.0],
+            "specialist_sharpe_floor": -10.0, "min_specialists": 1,
+            "meta_alpha_grid": [0.01],
+            "meta_lgbm_params": {
+                "max_depth": 2, "n_estimators": 10, "learning_rate": 0.1,
+                "colsample_bytree": 0.8, "subsample": 0.8, "reg_lambda": 1.0,
+                "early_stopping_rounds": 5, "valid_tail_pct": 0.2,
+                "min_valid_eras": 1,
+            },
+            "decorr_grid": [0.0], "neutralization_grid": [0.0],
+            "benchmark_col": "v53_lgbm_ender20",
+        },
     )
     fleet = BenchmarkFleet(
         spec=(cell,), data=data, seed=42, horizon="20D", n_boot=1,
@@ -2272,7 +2299,7 @@ def fleet_placement(corr: float, rungs: Mapping[int, float]) -> str:
     for index in range(len(ordered) - 1):
         tier_low, value_low = ordered[index]
         tier_high, value_high = ordered[index + 1]
-        if value_low <= corr <= value_high:
+        if value_low <= corr < value_high:
             return f"tier{tier_low}..tier{tier_high}"
     return f"tier{ordered[-1][0]}"
 
@@ -2449,10 +2476,13 @@ class BenchmarkFleet:
                         "    anchor %s=%.4f (measured=%.6f)",
                         key, float(anchor), measured,
                     )
-        placements = {
-            mid: fleet_placement(float(card.corr.value), tier_rungs)
-            for mid, card in scorecards.items()
-        }
+        placements = (
+            {
+                mid: fleet_placement(float(card.corr.value), tier_rungs)
+                for mid, card in scorecards.items()
+            }
+            if tier_rungs else {}
+        )  # empty ladder => no placements (placement is report-only)
         gate_verdicts: dict[str, Mapping[str, bool | None]] = {}
         for mid, card in scorecards.items():
             gate_verdicts[mid] = (
@@ -2487,9 +2517,9 @@ def fleet_frame(result: FleetResult) -> pl.DataFrame:
         out = out.with_columns(
             pl.Series(
                 f"gate_{field}",
-                [result.gate_verdicts[mid].get(field) for mid in result.scorecards],
+                [result.gate_verdicts[mid].get(field) for mid in sorted(result.scorecards)],
             )
-        )
+        )  # scorecards_to_frame sorts by model_id — verdicts must follow that order
     return out.sort("model_id")
 
 
