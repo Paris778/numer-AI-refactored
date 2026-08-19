@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 from pathlib import Path
 
 import pandas as pd
@@ -450,3 +451,29 @@ def test_load_registry_run_non_mapping(tmp_path: Path) -> None:
     (run_dir / "run.json").write_text("[]", encoding="utf-8")
     with pytest.raises(ValueError, match="not a mapping"):
         _load_registry_run(registry, _RID)
+
+
+def test_ram_guard_curve_path_passes_when_under_guard(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Zero-intercept/zero-slope curve → extrapolated commit ≈ 0 → guard passes,
+    exercising the fitted-curve branch end to end (promote.py:259-297)."""
+    from nmr.promote import _ram_guard
+
+    data = _make_data(tmp_path / "data")
+    config = _config(data)
+    reports = tmp_path / "reports"
+    reports.mkdir(parents=True)
+    (reports / "ram_curve.json").write_text(
+        json.dumps(
+            {
+                "fit": {"intercept_gib": 0.0, "slope_gib_per_row": 0.0},
+                "fit_ws": {"intercept_gib": 0.0, "slope_gib_per_row": 0.0},
+                "points": [{"parent_commit_gib": 0.0, "parent_ws_gib": 0.0}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with caplog.at_level(logging.INFO, logger="nmr.promote"):
+        _ram_guard(config, tmp_path / "models")  # must not raise
+    assert "extrapolated full-version combined commit" in caplog.text
