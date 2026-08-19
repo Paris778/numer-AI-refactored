@@ -285,3 +285,55 @@ def test_slice3_bmc_oracle_parity() -> None:
     )
 
     assert per_era[one_era] == pytest.approx(direct, abs=1e-6)
+
+
+def _corr_frame(*, n_eras: int = 2, n_rows: int = 8, seed: int = 20260819) -> pl.DataFrame:
+    rng = np.random.default_rng(seed)
+    rows = []
+    for era in range(1, n_eras + 1):
+        for idx in range(n_rows):
+            rows.append(
+                {
+                    "era": str(era),
+                    "id": f"{era}_{idx}",
+                    "pred": float(np.clip(rng.normal(0.5 + 0.05 * era, 0.2), 0.0, 1.0)),
+                    "target": float(rng.choice([0.0, 0.25, 0.5, 0.75, 1.0])),
+                }
+            )
+    return pl.DataFrame(rows)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        "constant_pred",
+        "constant_target",
+        "nan_pred",
+        "ties_pred",
+        "single_row",
+        "two_rows",
+    ],
+)
+def test_corr_degenerate_eras_match_oracle(mutate: str) -> None:
+    """Degenerate inputs never drift the custom path from numerai_tools."""
+    df = _corr_frame()
+    if mutate == "constant_pred":
+        df = df.with_columns(pl.lit(0.5).alias("pred"))
+    elif mutate == "constant_target":
+        df = df.with_columns(pl.lit(0.5).alias("target"))
+    elif mutate == "nan_pred":
+        df = df.with_columns(
+            pl.when(pl.col("id").str.ends_with("_0")).then(None).otherwise(pl.col("pred")).alias("pred")
+        )
+    elif mutate == "ties_pred":
+        df = df.with_columns(pl.Series("pred", [0.1, 0.1, 0.5, 0.5, 0.9, 0.9, 0.2, 0.2] * 2, dtype=pl.Float64))
+    elif mutate == "single_row":
+        df = pl.concat([df.group_by("era", maintain_order=True).head(1)])
+    elif mutate == "two_rows":
+        df = pl.concat([df.group_by("era", maintain_order=True).head(2)])
+
+    custom = EvaluationEngine("custom").per_era_corr(df, pred_col="pred", target_col="target")
+    official = EvaluationEngine("official").per_era_corr(df, pred_col="pred", target_col="target")
+    assert list(custom) == list(official)
+    for era in custom:
+        assert custom[era] == pytest.approx(official[era], abs=1e-6, nan_ok=True)
