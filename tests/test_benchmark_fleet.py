@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import polars as pl
 import pytest
 
 from nmr.benchmark_fleet import (
+    generate_lagged_target_predictions,
     load_fleet_config,
     load_fleet_suite_config,
 )
@@ -115,3 +117,55 @@ def test_suite_config_aggregates_and_dedupes(tmp_path):
     (tmp_path / "b.yaml").write_text(MINIMAL, encoding="utf-8")
     with pytest.raises(ValueError, match="duplicate benchmark ids"):
         load_fleet_suite_config(tmp_path)
+
+
+def _lag_train() -> pl.DataFrame:
+    rows = []
+    for era in (1, 2, 3, 4):
+        for i in range(3):
+            rows.append({"era": f"{era:04d}", "target": float(era)})
+    return pl.DataFrame(rows)
+
+
+def _val_index() -> pl.DataFrame:
+    return pl.DataFrame(
+        [{"era": f"{era:04d}", "id": f"{era}_{i}"}
+         for era in (10, 11) for i in range(4)]
+    )
+
+
+def test_lag_mean_window_one_uses_last_train_era():
+    out = generate_lagged_target_predictions(
+        _lag_train(), _val_index(), target="target", window=1
+    )
+    assert out.columns == ["era", "id", "prediction"]
+    assert out.height == 8
+    # last train era is "0004" with target mean 4.0 -> constant for every val row
+    assert (out.get_column("prediction") == 4.0).all()
+
+
+def test_lag_mean_window_two_pools_rows():
+    out = generate_lagged_target_predictions(
+        _lag_train(), _val_index(), target="target", window=2
+    )
+    # trailing two train eras: 3.0 and 4.0 -> pooled mean 3.5
+    assert (out.get_column("prediction") == 3.5).all()
+
+
+def test_lag_mean_never_reads_val_targets():
+    val = _val_index()  # deliberately has no target column at all
+    out = generate_lagged_target_predictions(_lag_train(), val, target="target")
+    assert out.height == 8
+
+
+def test_lag_mean_rejects_bad_window():
+    with pytest.raises(ValueError, match="window"):
+        generate_lagged_target_predictions(_lag_train(), _val_index(), target="target", window=0)
+    with pytest.raises(ValueError, match="window"):
+        generate_lagged_target_predictions(_lag_train(), _val_index(), target="target", window=5)
+
+
+def test_lag_mean_rejects_val_era_overlap():
+    bad_train = _lag_train().with_columns(pl.lit("0010").alias("era"))
+    with pytest.raises(ValueError, match="strictly earlier"):
+        generate_lagged_target_predictions(bad_train, _val_index(), target="target")

@@ -65,6 +65,7 @@ from .benchmark_fleet import (
     VALID_FLEET_NEUTRALIZER_SELECTIONS,
     FleetCellConfig,
     FleetFileConfig,
+    generate_lagged_target_predictions,
     load_fleet_config,
     load_fleet_suite_config,
 )
@@ -311,6 +312,7 @@ __all__ = [
     "VALID_FLEET_MODEL_KINDS",
     "VALID_FLEET_NEUTRALIZATION",
     "VALID_FLEET_NEUTRALIZER_SELECTIONS",
+    "generate_lagged_target_predictions",
     "load_fleet_config",
     "load_fleet_suite_config",
     "CampaignConfig",

@@ -15,6 +15,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+import polars as pl
 import yaml
 
 from nmr.benchmark import (
@@ -27,13 +28,14 @@ from nmr.benchmark import (
 logger = logging.getLogger("nmr.benchmark_fleet")
 
 # Generator/runner/placement names (generate_*, fleet_frame, BenchmarkFleet, ...)
-# join this list in the tasks that define them; today only the schema is public.
+# join this list in the tasks that define them.
 __all__ = [
     "FleetCellConfig",
     "FleetFileConfig",
     "VALID_FLEET_MODEL_KINDS",
     "VALID_FLEET_NEUTRALIZATION",
     "VALID_FLEET_NEUTRALIZER_SELECTIONS",
+    "generate_lagged_target_predictions",
     "load_fleet_config",
     "load_fleet_suite_config",
 ]
@@ -195,3 +197,54 @@ def load_fleet_suite_config(config_dir: str | Path) -> tuple[FleetCellConfig, ..
         seen = sorted({i for i in ids if ids.count(i) > 1})
         raise ValueError(f"duplicate benchmark ids across configs: {seen}")
     return tuple(sorted(all_cells, key=lambda c: c.benchmark_id))
+
+
+def generate_lagged_target_predictions(
+    train: pl.DataFrame,
+    val_index: pl.DataFrame,
+    *,
+    target: str,
+    window: int = 1,
+    era_col: str = "era",
+    id_col: str = "id",
+    pred_col: str = "prediction",
+) -> pl.DataFrame:
+    """Silly baseline: per validation era, predict the trailing-train target mean.
+
+    All rows pooled across the trailing ``window`` train eras; train targets
+    only, so the prediction is leak-safe by construction.
+    """
+    if isinstance(window, bool) or not isinstance(window, int) or window < 1:
+        raise ValueError(f"window must be a positive int, got {window!r}")
+    if target not in train.columns:
+        raise ValueError(f"train missing target column: {target!r}")
+    for col in (era_col, id_col):
+        if col not in val_index.columns:
+            raise ValueError(f"val_index missing required column: {col!r}")
+
+    train_eras = sorted(train.get_column(era_col).unique().to_list())
+    val_eras = sorted(val_index.get_column(era_col).unique().to_list())
+    if not train_eras or not val_eras:
+        raise ValueError("train and val_index must each contain at least one era")
+    if max(int(e) for e in train_eras) >= min(int(e) for e in val_eras):
+        raise ValueError("train eras must be strictly earlier than validation eras")
+    if window > len(train_eras):
+        raise ValueError(
+            f"window={window} exceeds available train eras ({len(train_eras)})"
+        )
+
+    trailing = train_eras[-window:]
+    pooled = (
+        train.filter(pl.col(era_col).is_in(trailing))
+        .select(pl.col(target).cast(pl.Float64))
+        .drop_nulls()
+    )
+    if pooled.is_empty():
+        raise ValueError(f"trailing train eras have no finite {target!r} rows")
+    value = float(pooled.get_column(target).mean())
+
+    return (
+        val_index.select([era_col, id_col])
+        .sort([era_col, id_col])
+        .with_columns(pl.lit(value, dtype=pl.Float64).alias(pred_col))
+    )
