@@ -26,4 +26,19 @@ jobs:
         # The real-data gate is the local pre-sign-off receipt
         # (scripts/real_data_gate.py, CONTRIBUTING.md) — CI green is the fast
         # gate only.
-        run: python -m pytest -q -rs
+        #
+        # Coverage: package-level specs ONLY. Never --cov=nmr.<submodule>:
+        # coverage resolves dotted sources via find_spec inside a trace
+        # callback, re-entering numpy's in-flight extension init on py3.12
+        # ("cannot load module more than once per process"). See
+        # CONTRIBUTING.md (coverage footgun).
+        run: python -m pytest -q -rs --cov=nmr --cov=dashboard_ui --cov-branch --cov-report=term-missing --cov-report=json
+      - name: Coverage gate
+        # PROVISIONAL floors (2026-08-19): local full-suite measurement was
+        # global 92.0% / promote.py 99.4% / models.py 97.7%, minus a 0.5pt
+        # calibration margin AND a 2pt provisional CI delta (12 data-gated
+        # tests skip in CI; Linux ctypes branches differ). First CI run on
+        # these floors CONFIRMS or adjusts them by the same arithmetic.
+        # RATCHET: floors only move up — lowering one requires written
+        # justification.
+        run: python scripts/coverage_gate.py --global-min 89.5 --module-min "nmr/promote.py:96" --module-min "nmr/models.py:95"
