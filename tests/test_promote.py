@@ -477,3 +477,59 @@ def test_ram_guard_curve_path_passes_when_under_guard(
     with caplog.at_level(logging.INFO, logger="nmr.promote"):
         _ram_guard(config, tmp_path / "models")  # must not raise
     assert "extrapolated full-version combined commit" in caplog.text
+
+
+def _huge_curve(*, commit_slope: float, ws_slope: float, ws_intercept: float = 0.0) -> str:
+    return json.dumps(
+        {
+            "fit": {"intercept_gib": 0.0, "slope_gib_per_row": commit_slope},
+            "fit_ws": {"intercept_gib": ws_intercept, "slope_gib_per_row": ws_slope},
+            "points": [{"parent_commit_gib": 0.0, "parent_ws_gib": 0.0}],
+        }
+    )
+
+
+def test_ram_guard_over_ceiling_raises(tmp_path: Path) -> None:
+    """combined commit > 45 GiB ceiling → RuntimeError naming the guard."""
+    from nmr.promote import _ram_guard
+
+    data = _make_data(tmp_path / "data")
+    reports = tmp_path / "reports"
+    reports.mkdir(parents=True)
+    (reports / "ram_curve.json").write_text(_huge_curve(commit_slope=1e9, ws_slope=0.0), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="exceeds the 45 GiB guard"):
+        _ram_guard(_config(data), tmp_path / "models")
+
+
+def test_ram_guard_over_commit_limit_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """combined commit under the ceiling but over the machine commit limit."""
+    from nmr.models import _machine_memory_limits
+    from nmr.promote import _ram_guard
+
+    _, commit_limit = _machine_memory_limits()
+    if commit_limit is None:
+        pytest.skip("platform reports no commit limit (Unix)")
+    monkeypatch.setattr("nmr.promote._RAM_GUARD_BYTES", 2**70)
+    data = _make_data(tmp_path / "data")
+    reports = tmp_path / "reports"
+    reports.mkdir(parents=True)
+    (reports / "ram_curve.json").write_text(_huge_curve(commit_slope=1e9, ws_slope=0.0), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="exceeds the machine commit limit"):
+        _ram_guard(_config(data), tmp_path / "models")
+
+
+def test_ram_guard_over_working_set_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """commit small but combined working set > 85% of physical RAM → thrash refusal."""
+    from nmr.models import _machine_memory_limits
+    from nmr.promote import _ram_guard
+
+    physical, _ = _machine_memory_limits()
+    if physical is None:
+        pytest.skip("platform reports no physical RAM")
+    monkeypatch.setattr("nmr.promote._RAM_GUARD_BYTES", 2**70)
+    data = _make_data(tmp_path / "data")
+    reports = tmp_path / "reports"
+    reports.mkdir(parents=True)
+    (reports / "ram_curve.json").write_text(_huge_curve(commit_slope=0.0, ws_slope=1e9), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="would thrash"):
+        _ram_guard(_config(data), tmp_path / "models")
