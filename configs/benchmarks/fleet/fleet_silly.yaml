@@ -1,0 +1,8 @@
+# Wave 0 — silly baselines (audit §1: rolling historic target mean).
+cells:
+  - benchmark_id: silly_target_lag_mean
+    source: docs/05-notebooks (audit §1)
+    input_space: none
+    model_kind: target_lag_mean
+    targets: [target]
+    params: {window: 1}

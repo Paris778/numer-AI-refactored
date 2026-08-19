@@ -1,0 +1,144 @@
+# Wave 3+4 — Finance Arena recreations (mined read-only from
+# ../numer-AI/models/version_0/v0.x and version_1/v1.5). Deviations per spec:
+# purged trimmed-train fit (8-era), NeutralizationEngine, single seed, CPU.
+# The 17 SNNR specialists are pinned from
+# ../numer-AI/exploratory_notebooks/outputs/snnr_weights_vs_correlation_v5.2.csv.
+cells:
+  - benchmark_id: fa_v02_xgb
+    source: ../numer-AI/models/version_0/v0.2/finance_arena_v0.2.ipynb
+    input_space: small
+    model_kind: xgboost
+    targets: [target]
+    params: {n_estimators: 2000, learning_rate: 0.01, max_depth: 6, subsample: 0.8, colsample_bytree: 0.1, early_stopping_rounds: 50, holdout_era_frac: 0.1}
+    fast_mode_params: {n_estimators: 50, early_stopping_rounds: 5}
+
+  - benchmark_id: fa_v03_lgbm_mt
+    source: ../numer-AI/models/version_0/v0.3/finance_arena_v0.3.ipynb
+    input_space: small
+    model_kind: lightgbm
+    targets: [target, target_ender_20, target_victor_20]
+    params: {n_estimators: 20000, learning_rate: 0.01, max_depth: 6, num_leaves: 64}
+    neutralization: 0.5
+    fast_mode_params: {n_estimators: 50}
+
+  - benchmark_id: fa_v04_xgb_weighted
+    source: ../numer-AI/models/version_0/v0.4/finance_arena_v0.4.ipynb
+    input_space: small
+    model_kind: xgboost
+    targets: [target, target_jasper_20, target_teager2b_20, target_claudia_20]
+    target_weights: {target: 0.35, target_jasper_20: 0.30, target_teager2b_20: 0.23, target_claudia_20: 0.12}
+    params: {n_estimators: 2000, learning_rate: 0.01, max_depth: 6, subsample: 0.8, colsample_bytree: 0.1}
+    neutralization: 0.35
+    fast_mode_params: {n_estimators: 50}
+
+  - benchmark_id: fa_v05_ridge_stack
+    source: ../numer-AI/models/version_0/v0.5/finance_arena_v0.5.ipynb
+    input_space: small
+    model_kind: ridge_stack
+    targets: [target_ender_20]
+    params:
+      mode: fixed
+      main_target: target_ender_20
+      meta_tail_pct: 0.30
+      alpha: 1.0e-6
+      meta_alpha: 1.0e-6
+      specialists: [target_jasper_20, target_teager2b_20, target_claudia_20, target_rowan_20, target_waldo_20, target_ender_60, target_xerxes_20, target_jeremy_20, target_cyrusd_20, target_agnes_20, target_victor_20, target_ralph_20, target_caroline_20, target_delta_20, target_tyler_20, target_sam_20, target_echo_20]
+    neutralization: 0.5
+
+  - benchmark_id: fa_v060_mlp
+    source: ../numer-AI/models/version_0/v0.6/finance_arena_v0.6.0.ipynb
+    input_space: small
+    model_kind: mlp
+    targets: [target_ender_20]
+    params:
+      hidden_layer_sizes: [256, 128, 64]
+      activation: relu
+      solver: adam
+      alpha: 0.001
+      learning_rate_init: 0.001
+      batch_size: 1024
+      max_iter: 150
+      early_stopping: true
+      n_iter_no_change: 15
+      validation_fraction: 0.05
+    neutralization: 0.5
+    fast_mode_params: {max_iter: 20, hidden_layer_sizes: [8, 4], batch_size: 32}
+
+  - benchmark_id: fa_v150_ridge_stack_tail10
+    source: ../numer-AI/models/version_1/v1.5/fa_v1.5.0_ridge_ensemble.ipynb
+    input_space: small
+    model_kind: ridge_stack
+    targets: [target_ender_20]
+    params:
+      mode: fixed
+      main_target: target_ender_20
+      meta_tail_pct: 0.10
+      alpha: 1.0e-6
+      meta_alpha: 1.0e-6
+      specialists: [target_jasper_20, target_teager2b_20, target_claudia_20, target_rowan_20, target_waldo_20, target_ender_60, target_xerxes_20, target_jeremy_20, target_cyrusd_20, target_agnes_20, target_victor_20, target_ralph_20, target_caroline_20, target_delta_20, target_tyler_20, target_sam_20, target_echo_20]
+
+  - benchmark_id: fa_v151_ridge_ensemble
+    source: ../numer-AI/models/version_1/v1.5/fa_v1.5.1_ridge_ensemble.ipynb
+    input_space: small
+    model_kind: ridge_stack
+    targets: [target_ender_20]
+    params:
+      mode: search
+      main_target: target_ender_20
+      meta_tail_pct: 0.10
+      nan_fill: true
+      snnr_weights:
+        target_jasper_20: 0.300272
+        target_teager2b_20: 0.226785
+        target_claudia_20: 0.090945
+        target_rowan_20: 0.077177
+        target_waldo_20: 0.061258
+        target_ender_60: 0.041783
+        target_xerxes_20: 0.034451
+        target_jeremy_20: 0.034373
+        target_cyrusd_20: 0.026915
+        target_agnes_20: 0.020739
+        target_victor_20: 0.019592
+        target_ralph_20: 0.014911
+        target_caroline_20: 0.014023
+        target_delta_20: 0.013578
+        target_tyler_20: 0.012408
+        target_sam_20: 0.005609
+        target_echo_20: 0.005179
+      specialists: [target_jasper_20, target_teager2b_20, target_claudia_20, target_rowan_20, target_waldo_20, target_ender_60, target_xerxes_20, target_jeremy_20, target_cyrusd_20, target_agnes_20, target_victor_20, target_ralph_20, target_caroline_20, target_delta_20, target_tyler_20, target_sam_20, target_echo_20]
+      top_k: 12
+      min_coverage: 0.50
+      min_abs_main_corr: 0.01
+      priority_hints: [target_victor_20, target_xerxes_20, target_teager_20]
+      specialist_alpha_grid: [0.01, 0.03162277660168379, 0.1, 0.31622776601683794, 1.0, 3.1622776601683795, 10.0, 31.622776601683793, 100.0, 316.22776601683796, 1000.0, 3162.2776601683795, 10000.0]
+      specialist_sharpe_floor: 0.50
+      min_specialists: 6
+      meta_alpha_grid: [0.01, 0.05623413251903491, 0.31622776601683794, 1.7782794100389228, 10.0, 56.23413251903491, 316.22776601683796, 1778.2794100389228, 10000.0]
+      meta_lgbm_params:
+        max_depth: 3
+        n_estimators: 500
+        learning_rate: 0.03
+        colsample_bytree: 0.8
+        subsample: 0.8
+        reg_lambda: 1.0
+        early_stopping_rounds: 50
+        valid_tail_pct: 0.20
+        min_valid_eras: 5
+      decorr_grid: [0.00, 0.05, 0.10]
+      neutralization_grid: [0.0, 0.1, 0.2, 0.3, 0.4, 0.5]
+      benchmark_col: v53_lgbm_ender20
+    fast_mode_params:
+      specialist_alpha_grid: [0.01, 1.0, 10000.0]
+      meta_alpha_grid: [0.01, 1.0, 10000.0]
+      neutralization_grid: [0.0]
+      decorr_grid: [0.00]
+      meta_lgbm_params:
+        max_depth: 3
+        n_estimators: 50
+        learning_rate: 0.1
+        colsample_bytree: 0.8
+        subsample: 0.8
+        reg_lambda: 1.0
+        early_stopping_rounds: 5
+        valid_tail_pct: 0.20
+        min_valid_eras: 1

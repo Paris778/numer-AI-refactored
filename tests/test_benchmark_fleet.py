@@ -694,3 +694,16 @@ def test_benchmark_fleet_search_cell_marks_selection_bias(tmp_path):
     )
     result = fleet.run(tier_rungs={}, gate=None)
     assert result.selection_bias["fa_v151_ridge_ensemble"] is True
+
+
+_REPO_FLEET_DIR = Path(__file__).resolve().parents[1] / "configs" / "benchmarks" / "fleet"
+
+
+def test_real_fleet_configs_load_with_all_19_cells():
+    cells = load_fleet_suite_config(_REPO_FLEET_DIR)
+    ids = [c.benchmark_id for c in cells]
+    assert len(ids) == 19
+    assert len(set(ids)) == 19
+    assert "fa_v151_ridge_ensemble" in ids and "silly_target_lag_mean" in ids
+    search = next(c for c in cells if c.benchmark_id == "fa_v151_ridge_ensemble")
+    assert search.params["mode"] == "search"
