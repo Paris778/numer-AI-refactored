@@ -1,0 +1,4 @@
+# Docs carry byte-budget checks (tests/test_docs_hygiene.py) that measure the
+# committed blob size; CRLF checkouts on Windows inflate the working tree and
+# trip those checks. Markdown is always authored LF — pin it.
+*.md text eol=lf
