@@ -610,3 +610,109 @@ def test_ram_guard_corrupt_estimate_skips(
     with caplog.at_level(logging.WARNING, logger="nmr.promote"):
         _ram_guard(_config(data), tmp_path / "models")  # must not raise
     assert "unreadable RAM estimate" in caplog.text
+
+
+def test_resolve_champion_run_id(tmp_path: Path) -> None:
+    from nmr.promote import resolve_champion_run_id
+
+    registry = tmp_path / "registry"
+    registry.mkdir()
+    with pytest.raises(FileNotFoundError, match="no champion"):
+        resolve_champion_run_id(registry)
+    champion = registry / "champion.json"
+    champion.write_text("{corrupt", encoding="utf-8")
+    with pytest.raises(ValueError, match="corrupt champion"):
+        resolve_champion_run_id(registry)
+    champion.write_text(json.dumps({"run_id": "not-hex"}), encoding="utf-8")
+    with pytest.raises(ValueError, match="no valid run_id"):
+        resolve_champion_run_id(registry)
+    champion.write_text(json.dumps({"run_id": _RID}), encoding="utf-8")
+    assert resolve_champion_run_id(registry) == _RID
+
+
+def test_promote_manifest_without_config_refused(tmp_path: Path) -> None:
+    registry = tmp_path / "registry"
+    run_dir = registry / _RID
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(
+        json.dumps({"run_id": _RID, "manifest": {}, "scorecard": _passing_scorecard()}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="no config dict"):
+        promote_full_version(
+            _RID, "brb1-lgbm-v6", models_dir=tmp_path / "models", registry_dir=registry
+        )
+
+
+def test_promote_gate_missing_from_yaml_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import types
+
+    data = _make_data(tmp_path / "data")
+    registry = tmp_path / "registry"
+    _write_registry(registry, stored_config=_stored_config_dict(data))
+    monkeypatch.setattr(
+        "nmr.promote.load_benchmark_file", lambda path: types.SimpleNamespace(gate=None)
+    )
+    with pytest.raises(ValueError, match="no gate"):
+        promote_full_version(
+            _RID, "brb1-lgbm-v6", models_dir=tmp_path / "models", registry_dir=registry
+        )
+
+
+def test_promote_corrupt_current_pointer_requires_force(tmp_path: Path) -> None:
+    data = _make_data(tmp_path / "data")
+    registry = tmp_path / "registry"
+    _write_registry(registry, stored_config=_stored_config_dict(data))
+    full_dir = tmp_path / "models" / "brb1-lgbm-v6" / "full"
+    full_dir.mkdir(parents=True)
+    (full_dir / CURRENT_POINTER_NAME).write_text("{corrupt", encoding="utf-8")
+    with pytest.raises(ValueError, match="repointing requires force"):
+        promote_full_version(
+            _RID, "brb1-lgbm-v6", models_dir=tmp_path / "models", registry_dir=registry
+        )
+
+
+def test_promote_missing_feature_cols_refused(tmp_path: Path) -> None:
+    data = _make_data(tmp_path / "data")
+    registry = tmp_path / "registry"
+    _write_registry(registry, stored_config=_stored_config_dict(data), feature_cols=[])
+    with pytest.raises(ValueError, match="no feature_cols"):
+        promote_full_version(
+            _RID, "brb1-lgbm-v6", models_dir=tmp_path / "models", registry_dir=registry
+        )
+
+
+def test_promote_weight_count_mismatch_refused(tmp_path: Path) -> None:
+    data = _make_data(tmp_path / "data")
+    registry = tmp_path / "registry"
+    _write_registry(
+        registry, stored_config=_stored_config_dict(data), weights=[1.0, 1.0]
+    )
+    with pytest.raises(ValueError, match="do not match targets"):
+        promote_full_version(
+            _RID, "brb1-lgbm-v6", models_dir=tmp_path / "models", registry_dir=registry
+        )
+
+
+def test_build_truncated_data_missing_asset(tmp_path: Path) -> None:
+    from nmr.promote import _build_truncated_data
+
+    stored = _stored_config_dict(tmp_path / "data")
+    stored["data"]["data_dir"] = str(tmp_path / "empty")
+    with pytest.raises(FileNotFoundError, match="data assets missing"):
+        _build_truncated_data(
+            stored, tmp_path / "rehearsal", train_eras=1, validation_eras=1
+        )
+
+
+def test_build_truncated_data_insufficient_eras(tmp_path: Path) -> None:
+    from nmr.promote import _build_truncated_data
+
+    data = _make_data(tmp_path / "data")  # 8 train eras
+    stored = _stored_config_dict(data)
+    with pytest.raises(ValueError, match="rehearsal needs 9/1"):
+        _build_truncated_data(
+            stored, tmp_path / "rehearsal", train_eras=9, validation_eras=1
+        )
