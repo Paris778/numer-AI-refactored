@@ -18,6 +18,7 @@ artifacts/**
 !artifacts/**/.gitkeep
 # pytest coverage artifact
 .coverage
+coverage.json
 htmlcov/
 data/v5.3/validation_example_preds.csv
 
