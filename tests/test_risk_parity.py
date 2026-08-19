@@ -147,9 +147,40 @@ def test_neutralization_degenerate_features_match_oracle(tmp_path, mutate: str) 
     assert np.allclose(actual, expected, atol=NEUTRALIZE_ATOL, rtol=0.0, equal_nan=True)
 
 
+def test_zero_variance_era_divergence_is_intentional(tmp_path) -> None:
+    """The oracle NaNs zero-variance prediction columns (scoring.py:394);
+    we return them unchanged. Pinned, documented divergence — matching the
+    oracle would put NaN into the deploy closure and break the (0,1)
+    submission contract. Re-evaluate only if the oracle changes behavior."""
+    df = pl.DataFrame(
+        {
+            "era": ["1", "1", "2", "2", "2"],
+            "id": ["a", "b", "c", "d", "e"],
+            "pred": [0.5, 0.5, 0.1, 0.5, 0.9],
+            "f1": [1.0, 2.0, 3.0, 4.0, 5.0],
+        }
+    )
+    engine = NeutralizationEngine(cache_dir=tmp_path)
+    result = engine.neutralize(df, pred_col="pred", feature_cols=["f1"], proportion=1.0)
+    era1 = result.filter(pl.col("era") == "1").get_column("pred").to_numpy()
+    assert np.array_equal(era1, np.array([0.5, 0.5]))  # unchanged, not NaN
+
+    # Pin the oracle's actual behavior too, so an upstream change is noticed.
+    pdf = df.filter(pl.col("era") == "1").select(["pred", "f1"]).to_pandas()
+    oracle_out = oracle_neutralize(pdf[["pred"]], pdf[["f1"]], proportion=1.0)["pred"].to_numpy()
+    assert np.isnan(oracle_out).all()
+
+    # The healthy era still matches the oracle exactly (parity holds off the
+    # degenerate set).
+    era2_custom = result.filter(pl.col("era") == "2").get_column("pred").to_numpy()
+    era2_expected = _oracle_per_era(
+        df.filter(pl.col("era") == "2"), pred_col="pred", feature_cols=["f1"]
+    )
+    assert np.allclose(era2_custom, era2_expected, atol=NEUTRALIZE_ATOL, rtol=0.0, equal_nan=True)
+
+
 _REAL_VALIDATION = Path("data/v5.3/validation.parquet")
 _REAL_FEATURES = Path("data/v5.3/features.json")
-
 
 @pytest.mark.skipif(
     not (_REAL_VALIDATION.exists() and _REAL_FEATURES.exists()),
