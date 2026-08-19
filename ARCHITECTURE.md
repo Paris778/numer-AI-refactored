@@ -211,7 +211,7 @@ Payout weights, ±5% clip, and stake thresholds follow [docs/01-canon/staking.md
 
 Flow: join predictions ∩ meta ∩ targets ∩ features on `[era]` or `[era, id]` (optional left-join benchmarks) → per-era CORR/MMC/FNC (+BMC/CWMM when benchmark/meta available) → payout report → `MetricCell(value, ci_low, ci_high, n_eras)` bootstrap cells → feature-exposure, horizon-stability, regime, and perturbation diagnostics. Horizon targets inferred by regex `_([a-zA-Z0-9]+)(?:20|60)$` on `benchmark_col`, requiring both `target_{name}_20` and `target_{name}_60`.
 
-`MetricScorecard` (frozen, 43 fields) includes `rank_scalar`, `deflated_sharpe`, `mean_payout/corr/mmc/corr_sharpe_ac/bmc/cwmm` cells, `fnc`, `cvar5`, `max_drawdown`, `burn_rate`, `sortino`, `calmar`, `max_feature_exposure`, robustness sub-results, the capital-readiness block (v2.5), and `metric_timing_seconds` + `eval_total_seconds` instrumentation. Capital-readiness fields: `cagr_1y`, `gain_to_pain_ratio`, `kelly_fraction`, `sim_portfolio_cagr`, `sim_portfolio_mdd`, `sim_capital_utilization` (floats, from `PayoutResult`/`OverlappingSimulationResult`); `mmc_down` (mean MMC over the eras where the meta model's per-era CORR < 0 — `None` + `mmc_down_reason="insufficient_downside_eras"` when fewer than `_MMC_DOWN_MIN_ERAS` (5) such eras; `mmc_down_n_eras` always records the count, `mmc_down_reason` is `None` otherwise); `turnover_mean`/`turnover_std` (mean and population std ddof=0 of `1 − ρ_k` transitions — both `None` when the join lacks the id column (`turnover_reason="id column unavailable"`) or fewer than 2 valid transitions exist (`"insufficient_transitions"`), `None` reason otherwise). `to_frame()` flattens to a single-row Polars frame (cells expand to `{name}`, `{name}_ci_low`, `{name}_ci_high`, `{name}_n_eras`; timings become `timing_*` columns + `quality_metric_timings_json` / `quality_metric_total_seconds`). **Timing columns are excluded from canonical hashing** (§M).
+`MetricScorecard` (frozen, 44 fields) includes `rank_scalar`, `deflated_sharpe`, `mean_payout/corr/mmc/corr_sharpe_ac/bmc/cwmm` cells, `fnc`, `cvar5`, `max_drawdown`, `burn_rate`, `sortino`, `calmar`, `max_feature_exposure`, `degenerate_eras`, robustness sub-results, the capital-readiness block (v2.5), and `metric_timing_seconds` + `eval_total_seconds` instrumentation. Capital-readiness fields: `cagr_1y`, `gain_to_pain_ratio`, `kelly_fraction`, `sim_portfolio_cagr`, `sim_portfolio_mdd`, `sim_capital_utilization` (floats, from `PayoutResult`/`OverlappingSimulationResult`); `mmc_down` (mean MMC over the eras where the meta model's per-era CORR < 0 — `None` + `mmc_down_reason="insufficient_downside_eras"` when fewer than `_MMC_DOWN_MIN_ERAS` (5) such eras; `mmc_down_n_eras` always records the count, `mmc_down_reason` is `None` otherwise); `turnover_mean`/`turnover_std` (mean and population std ddof=0 of `1 − ρ_k` transitions — both `None` when the join lacks the id column (`turnover_reason="id column unavailable"`) or fewer than 2 valid transitions exist (`"insufficient_transitions"`), `None` reason otherwise). `degenerate_eras: tuple[str, ...]` (A4, 2026-08-18) lists the era labels whose per-era CORR was normalized to `0.0` at the engine boundary (<2 usable rows, zero variance, or non-finite values — §E): metric values are unchanged, but the eras are now surfaced rather than silently pooled into the aggregates. `to_frame()` flattens to a single-row Polars frame (cells expand to `{name}`, `{name}_ci_low`, `{name}_ci_high`, `{name}_n_eras`; timings become `timing_*` columns + `quality_metric_timings_json` / `quality_metric_total_seconds`). **Timing columns are excluded from canonical hashing** (§M).
 
 The evaluation spec of record (metrics, gates, build slices E1–E6) is [docs/06-evaluation/evaluation-suite-bible.md](docs/06-evaluation/evaluation-suite-bible.md).
 
@@ -295,6 +295,11 @@ def predict(live_features: pd.DataFrame, live_benchmark_models: pd.DataFrame | N
 | [run_campaign.py](run_campaign.py) | Run a named batch of configs and record trial lineage (see §R) |
 | [analyze_dataset.py](analyze_dataset.py) | Modular dataset analysis: 17 named stages (`overview`, `targets`, `ic_by_era`, `screens`, `screens_train`, `summary`, `psi`, `drift`, `derived_sets`, `corr_medium`, `corr_all`, `set_membership`, `ic_by_split`, `regimes`, `benchmarks`, `meta_ortho`, `manifest`). Flags: `--only a,b` / `--skip a,b` run a subset (dependencies auto-included; `manifest` always runs), `--features small\|medium\|all`, `--max-eras N`, `--full-all-matrix`. `screens` writes the **descriptive full-span** screen (`feature_ic_screen.parquet`, eras 0001..1231 — never an input to subset derivation); `screens_train` writes the **train-only** screen (`feature_ic_screen_train.parquet`, eras 0001..0574); `derived_sets` reads **only** the train-only screen and writes `derived_feature_sets.json` (`screen_stable`, `screen_nonlinear`, `screen_linear_or_nonlinear`, `screen_drift_filtered` — pure functions of the train-only screen + drift dumps, sorted; see §P); `drift` writes the PSI + W1 + adversarial-AUC profile (`feature_drift_profile.parquet`, `w1_norm = w1 / σ_train`); `meta_ortho` writes per-feature meta-model orthogonality; the FNE profile uses an 11-point neutralization grid. Stage boundaries and per-era ticks print progress to stdout/stderr (never into artifacts); the manifest records `stages_run` + a machine-hardware summary (informational — never hashed). |
 | [hardware_status.py](hardware_status.py) | Print machine specs + live resource status (`--record` writes `artifacts/reports/hardware_specs.json`); all logic in `nmr/hardware.py` (stdlib only) |
+| [promote_model.py](promote_model.py) | Promote a registry run to a full version (Model Uploads `predict.pkl`): `--run-id` / `--family` / `--models-dir` / `--override-gate` / `--force`; all logic in `nmr/promote.py`; writes `artifacts/models/<family>/full/<run_id>/{predict.pkl, manifest.json}` and, on a tier-4 gate pass, the atomic `current.json` pointer; prints the Model Uploads upload instructions |
+| [rehearse_promotion.py](rehearse_promotion.py) | Truncated-window promotion rehearsal (D7 Stage 1): exercises the whole promotion path — including the spawned full-history fit (`NMR_FULL_HISTORY_SPAWN_MIN_BYTES`) — at small scale, measures peak commit + working set for the RAM guard, and writes a `rehearsal: true` artifact that is excluded from `scan_full_versions` and never becomes `current.json` |
+| [measure_ram_curve.py](measure_ram_curve.py) | Three-point full-history **commit** curve (measured, not estimated): runs real worker fits at increasing row counts in fresh subprocesses, fits `peak = a + b·rows`, and writes `artifacts/reports/ram_curve.json` (intercept, slope, R², extrapolation factor, both anchors). All logic in `nmr/promote.py` / `nmr/models.py` |
+| [refresh_data.py](refresh_data.py) | Round-aware dataset refresh + era-ledger update (`--dry-run`, `--check-only`, `--strict`, `--live-only`); policy in `nmr/refresh.py`, this script only wires `numerapi` calls and file I/O |
+| [render_dataset_report.py](render_dataset_report.py) | Renders the LLM-optimized pre-modelling dataset & feature study from the `analyze_dataset.py` dumps + campaign logs (consumes `nmr.config`, `nmr.meta`, `nmr.refresh`) |
 
 ### P. Feature-Set Resolution & Stability Screening — `nmr/features.py`
 
@@ -453,32 +458,42 @@ null `training_scope` remain visible).
 
 ## 3. Module Dependency Graph
 
+Verified against the source imports (`tests/test_docs_hygiene.py::test_architecture_documents_every_module`
+asserts every `nmr/*.py` appears here).
+
 ```
-config.py        (leaf — no nmr imports)
-_transforms.py   (leaf)
-features.py      (leaf — stdlib/NumPy/Polars only)
-refresh.py       (leaf — stdlib only; pure refresh policy, no I/O/numerapi)
+_atomicio.py  (leaf — temp + fsync + os.replace writers)
+_gpu.py       (leaf — optional cupy rankdata, automatic scipy fallback)
+_transforms.py(leaf — rank/gaussianize/power-1.5/neutralize)
+config.py     (leaf — no nmr imports)
+hardware.py   (leaf — stdlib system probing)
+inference.py  (leaf — NumPy/SciPy only)
+refresh.py    (leaf — stdlib only; pure refresh policy, no I/O/numerapi)
+features.py   (leaf — stdlib/NumPy/Polars only)
 
 data.py      ──> config (DataConfig)
 splitter.py  ──> config (SplitConfig)
-risk.py      ──> config (REPO_ROOT)
 families.py  ──> config (REPO_ROOT)
-models.py    ──> config (ModelConfig), splitter (Fold, PurgedEraSplitter)
 evaluation.py──> _transforms (power_1_5, rank_gaussianize)
 ensemble.py  ──> _transforms (rank_gaussianize, rank_gaussianize_unit_variance)
-submission.py──> _transforms (tie_kept_rank), numerai_tools.submissions
-inference.py (leaf — NumPy/SciPy only)
-meta.py      ──> evaluation, inference
 payout.py    ──> inference
-research.py  ──> config, data, models, splitter, risk, evaluation
-opt.py       ──> config (ExperimentConfig), models (resolve_model_params), research (_held_out_metric, _override_config, SweepResult)
-robustness.py──> inference, _transforms
-scorecard.py ──> evaluation, inference, payout, research, robustness
-benchmark.py ──> scorecard, models, features, risk, ensemble, inference
-runner.py    ──> config, data, splitter, models, ensemble, risk, evaluation, deployment
-registry.py  ──> runner (RunResult)
 campaign.py  ──> _atomicio
-deployment.py (leaf — cloudpickle/stdlib)
+deployment.py──> _atomicio (cloudpickle artifact + integrity manifest)
+risk.py      ──> _atomicio, _transforms, config
+submission.py──> _transforms (tie_kept_rank), deployment, numerai_tools.submissions
+models.py    ──> config (ModelConfig), data, splitter (Fold, PurgedEraSplitter)
+_oof.py      ──> models, splitter          (shared multi-target OOF: runner + research)
+robustness.py──> _transforms, evaluation, inference
+analysis.py  ──> _transforms, features, inference
+research.py  ──> _oof, config, data, ensemble, evaluation, inference, models, risk, splitter
+scorecard.py ──> evaluation, inference, payout, research, robustness
+opt.py       ──> config (ExperimentConfig), inference, models (resolve_model_params), research (_held_out_metric, _override_config, SweepResult)
+benchmark.py ──> ensemble, features, models, risk, scorecard
+meta.py      ──> analysis, config, data, evaluation, features, inference
+runner.py    ──> _oof, _transforms, config, data, deployment, ensemble, evaluation, models, risk, scorecard, splitter
+registry.py  ──> _atomicio, runner (RunResult)
+dashboard.py ──> benchmark, config, ensemble, evaluation, families, payout, scorecard
+promote.py   ──> _atomicio, benchmark, config, data, families, models, runner, submission
 
 nmr/__init__.py re-exports the public API of all modules (keep imports and __all__ in sync).
 ```

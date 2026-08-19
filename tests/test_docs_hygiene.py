@@ -221,3 +221,32 @@ def test_no_stale_doc_references():
             if stale in text:
                 problems.append(f"{doc.name}: stale reference to {stale!r}")
     assert not problems, "Stale doc references:\n" + "\n".join(problems)
+
+# --- T7: architecture SSOT covers every module and control-plane script ------
+
+def _architecture_text() -> str:
+    return (REPO_ROOT / "ARCHITECTURE.md").read_text(encoding="utf-8")
+
+
+def test_architecture_documents_every_module():
+    text = _architecture_text()
+    missing = sorted(
+        p.name
+        for p in (REPO_ROOT / "nmr").glob("*.py")
+        if p.stem != "__init__" and p.name not in text
+    )
+    assert not missing, (
+        "nmr modules absent from ARCHITECTURE.md (add to the module dependency "
+        "graph in section 3):\n" + "\n".join(missing)
+    )
+
+
+def test_architecture_documents_every_control_plane_script():
+    text = _architecture_text()
+    missing = sorted(
+        p.name for p in REPO_ROOT.glob("*.py") if p.name not in text
+    )
+    assert not missing, (
+        "Root control-plane scripts absent from ARCHITECTURE.md (add to the "
+        "section O scripts table):\n" + "\n".join(missing)
+    )

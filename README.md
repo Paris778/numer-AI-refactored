@@ -47,7 +47,9 @@ A **lean, deterministic research framework** for the [Numerai Classic tournament
 │   ├── campaign.py            # campaign orchestration — trial-lineage logs
 │   ├── runner.py              # ExperimentRunner — deterministic end-to-end pipeline
 │   ├── registry.py            # RunRegistry — atomic run store + champion promotion
-│   ├── submission.py          # submission build / numerai_tools validation / CSV
+│   ├── promote.py             # promotion writer — full-version training, tier-4 gate, versioned slots
+│   ├── _oof.py                # shared multi-target OOF construction (runner + research)
+│   ├── submission.py          # submission build / numerai_tools validation / promoted-artifact acceptance gate
 │   └── deployment.py          # cloudpickle predict artifact + integrity manifest
 ├── dashboard_ui/              # front-end: charts, report compiler, streamlit app, static assets (presentation only — engine stays in nmr/)
 ├── configs/                   # experiment configs (YAML)
@@ -56,13 +58,16 @@ A **lean, deterministic research framework** for the [Numerai Classic tournament
 ├── tests/                     # unit / parity / determinism / real-data tests
 ├── data/                      # local Numerai v5.3 assets (parquets git-ignored)
 ├── artifacts/                 # runs, registry, caches, campaigns, benchmark CSVs (generated)
-│   └── models/                # promoted full-version markers (<family>/full/manifest.json)
+│   └── models/                # promoted full versions — <family>/full/<run_id>/{predict.pkl,manifest.json} + atomic current.json pointer
 ├── docs/                      # curated Numerai knowledge base — start at docs/DOCS_README.md
 ├── notebooks/                 # researcher control plane (thin, zero business logic)
 ├── .kimi-code/skills/          # project Kimi skills — research protocols for agents (map: ARCHITECTURE.md §T)
+├── scripts/                   # real_data_gate.py — local pre-sign-off receipt gate (real-data suites + receipt JSON)
 ├── benchmark_runner.py        # CLI: python benchmark_runner.py [--fast-mode] → artifacts/reports/benchmark_hierarchy_scorecard.csv + benchmark_gate_report.csv
 ├── run_campaign.py            # CLI: run a named batch of configs → artifacts/campaigns/
 ├── train_first_model.py       # CLI: train, register, and promote the first model
+├── promote_model.py           # CLI: promote a registry run to a full version (Model Uploads predict.pkl)
+├── rehearse_promotion.py      # CLI: truncated-window promotion rehearsal (measures the RAM guard)
 ├── generate_dashboard.py      # thin wrapper — builds the executive HTML dashboard (logic in dashboard_ui.report)
 ├── dashboard_app.py           # thin wrapper — interactive Streamlit dashboard (logic in dashboard_ui.app)
 ├── pytest.ini                 # pytest configuration
@@ -132,7 +137,13 @@ A prominent `[WARNING]` is printed when the API lists a newer data version than 
 
 # 4. Browse runs and campaigns interactively (read-only)
 streamlit run dashboard_app.py   # interactive leaderboard + fleet + campaign views (read-only)
+
+# 5. Ship it: promote a run to a full version for Numerai Model Uploads
+.\.venv\Scripts\python rehearse_promotion.py --run-id <run_id> --family <family>   # truncated rehearsal first — proves the path, measures the RAM guard
+.\.venv\Scripts\python promote_model.py     --run-id <run_id> --family <family>   # → artifacts/models/<family>/full/<run_id>/predict.pkl
 ```
+
+**The money path is Numerai Model Uploads.** `promote_model.py` trains a full version on train+validation and writes a cloudpickled `predict.pkl` that Numerai runs each round. Two gates protect it: the run must clear the tier-4 production thresholds (`--override-gate` records the failure in the artifact's own manifest), and the artifact's **raw** predictions must pass `numerai_tools` validation on real `live.parquet` — a promotion that fails contract validation is refused outright and cannot be overridden.
 
 The dashboard ranks trained runs and benchmarks on the same validation-scorecard definitions (CORR/Sharpe from the `scorecard` block in `run.json`); runs without a validation scorecard are shown separately in a legacy (train-OOF metrics) section.
 
