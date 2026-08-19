@@ -541,6 +541,7 @@ missing. `--live-only` skips expanding files. Writes are atomic via `_atomicio`.
 | Package for hosted upload | `nmr.deployment.serialize_predict` | `predict.pkl` + manifest |
 | HPO sweep | `nmr.research.HyperparameterSweep.run` | `SweepResult` |
 | Neutralization tuning | `nmr.research.neutralization_frontier` | proportion → `MetricSummary` curve |
+| Mutation gate | `scripts/mutation_gate.py` (CI-only; mutmut refuses native Windows) | `artifacts/reports/mutation_receipt.json` |
 
 ---
 

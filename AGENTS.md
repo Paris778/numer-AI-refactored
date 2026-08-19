@@ -138,6 +138,7 @@ When modifying or generating code, enforce these seven invariants:
 | Change scorecard fields / evaluation flow | `nmr/scorecard.py` — `MetricScorecard`, `evaluate_model` |
 | Change HPO sweeps / neutralization frontier | `nmr/research.py` |
 | Change HPO search strategy | `nmr/opt.py` — `bayesian_sweep` (Optuna, user-granted dep) |
+| Run the mutation gate | `scripts/mutation_gate.py` (CI-only; mutmut refuses Windows) |
 | Change perturbation/horizon/regime diagnostics | `nmr/robustness.py` |
 | Change the benchmark hierarchy (cells, gates, thresholds) | `nmr/benchmark.py` + `configs/benchmarks/` + `benchmark_runner.py` |
 | Change the executive dashboard data engine (leaderboard, gate projection, capital recompute, payout timeseries) | `nmr/dashboard.py` + the `dashboard_ui/` package (`charts.py`, `report.py`, `app.py`; thin wrappers `generate_dashboard.py` / `dashboard_app.py`) (spec: `docs/superpowers/specs/2026-08-18-vanilla-dashboard-design.md`) |
@@ -257,7 +258,10 @@ Local `load_predict` fidelity is tested, but CatBoost availability in Numerai's 
 `ruff check .` (config `ruff.toml`: E/F/I/UP, line-length 120) is the CI lint gate; ruff is pinned in `requirements-dev.txt` and installed via `./.venv/Scripts/python -m pip` (never the `Scripts/pip` shim). pytest remains the sole *functional* gate. `ruff format` is NOT adopted — deferred to a dedicated Phase-2 reformat commit.
 
 ### Coverage specs must be package-level (2026-08-19)
-Coverage commands must use package-level `--cov` specs only (`--cov=nmr --cov=dashboard_ui`) — dotted submodule specs (`--cov=nmr.promote`) crash at conftest import on py3.12 + coverage 7.x (root cause + working form: `CONTRIBUTING.md` coverage footgun). The CI coverage gate lives in `scripts/coverage_gate.py` (per-module floors for `nmr/promote.py` + `nmr/models.py`, global floor, ratchet-up-only).
+Coverage commands must use package-level `--cov` specs only (`--cov=nmr --cov=dashboard_ui`) — dotted submodule specs crash at conftest import on py3.12 + coverage 7.x (detail: `CONTRIBUTING.md` footgun). CI coverage gate: `scripts/coverage_gate.py` (per-module floors for promote/models + global, ratchet-up-only).
+
+### Mutation gate is CI-only (mutmut refuses native Windows)
+mutmut is fork-based (`os.fork`); on Windows it exits with "use WSL" (issue #397). The gate runs only on Linux CI (`.github/workflows/mutation.yml`: weekly + manual, measurement-first, survivor floors ratchet down only, receipt commits back to `ci/mutation-receipt`). Never on the push path.
 
 ### `../numer-AI/` is read-only legacy
 The V1 repo is mined for logic only. Never import from it, never modify it, never add it to any path.
