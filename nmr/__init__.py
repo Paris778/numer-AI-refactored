@@ -69,6 +69,7 @@ from .benchmark_fleet import (
     generate_fleet_xgb_predictions,
     generate_lagged_target_predictions,
     generate_mlp_predictions,
+    generate_ridge_stack_predictions,
     load_fleet_config,
     load_fleet_suite_config,
 )
@@ -319,6 +320,7 @@ __all__ = [
     "generate_fleet_xgb_predictions",
     "generate_lagged_target_predictions",
     "generate_mlp_predictions",
+    "generate_ridge_stack_predictions",
     "load_fleet_config",
     "load_fleet_suite_config",
     "CampaignConfig",

@@ -18,6 +18,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 import yaml
+from sklearn.linear_model import Ridge
 from sklearn.neural_network import MLPRegressor
 
 from nmr.benchmark import (
@@ -49,6 +50,7 @@ __all__ = [
     "generate_fleet_xgb_predictions",
     "generate_lagged_target_predictions",
     "generate_mlp_predictions",
+    "generate_ridge_stack_predictions",
     "load_fleet_config",
     "load_fleet_suite_config",
 ]
@@ -517,3 +519,174 @@ def generate_mlp_predictions(
         pred_cols=[pred_col], weights=[1.0], era_col=era_col, out_col=pred_col,
     )
     return blended.select([era_col, id_col, pred_col]).sort([era_col, id_col])
+
+
+def _stack_partitions(
+    trimmed: Sequence[str],
+    *,
+    meta_tail_pct: float,
+    specialists: Sequence[str],
+) -> tuple[list[str], list[str]]:
+    """Split purged train eras into specialist-train and meta-tail partitions.
+
+    The boundary gets a horizon-aware purge buffer mirroring the splitter
+    convention: 16 eras when any 60D specialist is present, else 8.
+    """
+    if not 0.0 < float(meta_tail_pct) < 1.0:
+        raise ValueError(f"meta_tail_pct must be in (0, 1), got {meta_tail_pct!r}")
+    eras = list(trimmed)
+    n_meta = max(1, int(round(float(meta_tail_pct) * len(eras))))
+    stack_purge = 16 if any(str(t).endswith("_60") for t in specialists) else 8
+    if len(eras) - n_meta - stack_purge < 2:
+        raise ValueError(
+            "not enough train eras for stack split: "
+            f"eras={len(eras)}, meta_tail={n_meta}, purge={stack_purge}"
+        )
+    meta = eras[-n_meta:]
+    spec = eras[: len(eras) - n_meta - stack_purge]
+    return spec, meta
+
+
+def generate_ridge_stack_predictions(
+    train: pl.DataFrame,
+    val: pl.DataFrame,
+    *,
+    main_target: str,
+    specialists: Sequence[str],
+    feature_cols: Sequence[str],
+    params: Mapping[str, Any],
+    seed: int,
+    neutralization: float = 0.0,
+    val_targets: pl.DataFrame | None = None,
+    benchmarks: pl.DataFrame | None = None,
+    purge_eras: int = DEFAULT_BENCHMARK_PURGE_ERAS,
+    era_col: str = "era",
+    id_col: str = "id",
+    pred_col: str = "prediction",
+) -> pl.DataFrame:
+    """Two-layer ridge stacking: per-target specialists -> meta ridge.
+
+    Fixed mode: one Ridge per specialist (``params.alpha``), meta Ridge
+    (``params.meta_alpha``) on per-era-ranked tail OOF predictions.
+    Search mode (v1.5.1) delegates to :func:`_ridge_stack_search`.
+    """
+    mode = params.get("mode")
+    if mode not in ("fixed", "search"):
+        raise ValueError(f"params.mode must be 'fixed' or 'search', got {mode!r}")
+    if not specialists or not feature_cols:
+        raise ValueError("specialists and feature_cols must be non-empty")
+    if main_target not in train.columns:
+        raise ValueError(f"train missing main target column: {main_target!r}")
+
+    trimmed_train_eras, _ = train_validation_purged_split(
+        train.get_column(era_col).unique().to_list(),
+        val.get_column(era_col).unique().to_list(),
+        purge_eras=purge_eras,
+    )
+    train_rows = train.filter(pl.col(era_col).is_in(trimmed_train_eras))
+    val_rows = val.sort([era_col, id_col])
+    missing_feats = [c for c in feature_cols if c not in train.columns or c not in val.columns]
+    if missing_feats:
+        raise ValueError(f"missing feature columns: {missing_feats}")
+
+    # v1.5.1 NaN strategy: fill features with 0.5 (neutral) before any fit.
+    if bool(params.get("nan_fill", False)):
+        train_rows = train_rows.with_columns(
+            [pl.col(c).fill_null(0.5) for c in feature_cols]
+        )
+        val_rows = val_rows.with_columns(
+            [pl.col(c).fill_null(0.5) for c in feature_cols]
+        )
+
+    if mode == "search":
+        return _ridge_stack_search(
+            train_rows, val_rows, main_target=main_target,
+            specialists=list(specialists), feature_cols=list(feature_cols),
+            params=params, seed=seed, neutralization=float(neutralization),
+            val_targets=val_targets, benchmarks=benchmarks,
+            era_col=era_col, id_col=id_col, pred_col=pred_col,
+        )
+
+    spec_eras, meta_eras = _stack_partitions(
+        trimmed_train_eras,
+        meta_tail_pct=float(params["meta_tail_pct"]),
+        specialists=list(specialists),
+    )
+    spec_rows = train_rows.filter(pl.col(era_col).is_in(spec_eras))
+    meta_rows = train_rows.filter(pl.col(era_col).is_in(meta_eras))
+    alpha = float(params["alpha"])
+    meta_alpha = float(params["meta_alpha"])
+
+    x_spec = spec_rows.select(feature_cols).cast(pl.Float32).to_numpy()
+    x_meta = meta_rows.select(feature_cols).cast(pl.Float32).to_numpy()
+    x_val = val_rows.select(feature_cols).cast(pl.Float32).to_numpy()
+
+    meta_pred_frames: list[pl.DataFrame] = []
+    val_pred_frames: list[pl.DataFrame] = []
+    for target in specialists:
+        if target not in train.columns:
+            raise ValueError(f"train missing specialist target column: {target!r}")
+        y = spec_rows.get_column(target).cast(pl.Float64).to_numpy()
+        mask = np.isfinite(y)
+        if mask.sum() < 2:
+            raise ValueError(f"specialist {target!r} has <2 finite train rows")
+        model = Ridge(alpha=alpha, fit_intercept=True, random_state=seed)
+        model.fit(x_spec[mask], y[mask])
+        meta_pred_frames.append(
+            meta_rows.select([era_col, id_col]).with_columns(
+                pl.Series(target, np.asarray(model.predict(x_meta), dtype=float))
+            )
+        )
+        val_pred_frames.append(
+            val_rows.select([era_col, id_col]).with_columns(
+                pl.Series(target, np.asarray(model.predict(x_val), dtype=float))
+            )
+        )
+
+    meta_ranked = meta_pred_frames[0]
+    for part in meta_pred_frames[1:]:
+        meta_ranked = meta_ranked.join(part, on=[era_col, id_col], how="inner")
+    meta_ranked = Ensembler.rank_normalize(
+        meta_ranked, pred_cols=list(specialists), era_col=era_col
+    )
+    val_ranked = val_pred_frames[0]
+    for part in val_pred_frames[1:]:
+        val_ranked = val_ranked.join(part, on=[era_col, id_col], how="inner")
+    val_ranked = Ensembler.rank_normalize(
+        val_ranked, pred_cols=list(specialists), era_col=era_col
+    )
+
+    meta_y = meta_rows.select([era_col, id_col, main_target]).drop_nulls()
+    meta_X = meta_ranked.join(meta_y, on=[era_col, id_col], how="inner")
+    if meta_X.height < 2:
+        raise ValueError("fewer than 2 aligned meta-train rows")
+    meta_model = Ridge(alpha=meta_alpha, fit_intercept=True, random_state=seed)
+    meta_model.fit(
+        meta_X.select(specialists).cast(pl.Float32).to_numpy(),
+        meta_X.get_column(main_target).cast(pl.Float64).to_numpy(),
+    )
+    raw = np.asarray(
+        meta_model.predict(val_ranked.select(specialists).cast(pl.Float32).to_numpy()),
+        dtype=float,
+    )
+    frame = val_ranked.select([era_col, id_col]).with_columns(pl.Series(pred_col, raw))
+    out = Ensembler().blend(
+        Ensembler.rank_normalize(frame, pred_cols=[pred_col], era_col=era_col),
+        pred_cols=[pred_col], weights=[1.0], era_col=era_col, out_col=pred_col,
+    ).select([era_col, id_col, pred_col]).sort([era_col, id_col])
+
+    if float(neutralization) > 0.0:
+        with_features = out.join(
+            val.select([era_col, id_col, *feature_cols]),
+            on=[era_col, id_col], how="inner",
+        )
+        out = NeutralizationEngine().neutralize(
+            with_features, pred_col=pred_col, feature_cols=list(feature_cols),
+            era_col=era_col, proportion=float(neutralization),
+        ).select([era_col, id_col, pred_col]).sort([era_col, id_col])
+    return out
+
+
+def _ridge_stack_search(*args: object, **kwargs: object) -> pl.DataFrame:
+    """Transitional stub — the search-mode implementation arrives in Task 8."""
+    raise NotImplementedError("ridge_stack search mode is implemented in the next task")

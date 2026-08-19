@@ -11,10 +11,12 @@ import pytest
 from nmr.benchmark import generate_canonical_predictions
 from nmr.benchmark_fleet import (
     _select_riskiest_features,
+    _stack_partitions,
     generate_fleet_lightgbm_predictions,
     generate_fleet_xgb_predictions,
     generate_lagged_target_predictions,
     generate_mlp_predictions,
+    generate_ridge_stack_predictions,
     load_fleet_config,
     load_fleet_suite_config,
 )
@@ -360,4 +362,84 @@ def test_mlp_rejects_unknown_param_key():
         generate_mlp_predictions(
             train, val, target="target", feature_cols=["f1"],
             params={"hidden_layer_sizes": (4,), "bogus": 1}, seed=42,
+        )
+
+
+def test_stack_partitions_tail_and_purge_8():
+    eras = [f"{e:04d}" for e in range(1, 31)]
+    spec, meta = _stack_partitions(eras, meta_tail_pct=0.10, specialists=["target_x_20"])
+    assert meta == [f"{e:04d}" for e in range(28, 31)]   # trailing 3
+    assert spec[-1] == "0019"                             # 8-era purge (0020..0027)
+    assert set(spec) & set(meta) == set()
+
+
+def test_stack_partitions_purge_16_when_60d_present():
+    eras = [f"{e:04d}" for e in range(1, 40)]
+    spec, meta = _stack_partitions(eras, meta_tail_pct=0.10, specialists=["target_ender_60"])
+    assert spec[-1] == "0019"  # meta = 0036..0039, 16-era purge = 0020..0035
+    assert set(spec) & set(meta) == set()
+
+
+def test_stack_partitions_raises_when_not_enough_eras():
+    eras = [f"{e:04d}" for e in range(1, 8)]
+    with pytest.raises(ValueError, match="stack split"):
+        _stack_partitions(eras, meta_tail_pct=0.5, specialists=["target_x_20"])
+
+
+def _stack_train_val():
+    rng = np.random.default_rng(23)
+    train_rows = []
+    for era in range(1, 41):
+        for row in range(6):
+            train_rows.append({
+                "era": f"{era:04d}", "id": f"t{era}_{row}",
+                "f1": rng.normal(0, 1), "f2": rng.normal(0, 1),
+                "main": rng.normal(0, 1),
+                "aux1": rng.normal(0, 1),
+                "aux2": rng.normal(0, 1),
+            })
+    for i, row in enumerate(train_rows):  # NaN some aux2 rows: per-target masking
+        if i % 7 == 0:
+            row["aux2"] = None
+    val_rows = [
+        {"era": f"{era:04d}", "id": f"v{era}_{row}", "f1": rng.normal(0, 1), "f2": rng.normal(0, 1)}
+        for era in (41, 42) for row in range(6)
+    ]
+    return pl.DataFrame(train_rows), pl.DataFrame(val_rows)
+
+
+def test_ridge_stack_fixed_never_reads_val_targets_and_is_ranked():
+    train, val = _stack_train_val()
+    out = generate_ridge_stack_predictions(  # val has no target cols — purity contract
+        train, val, main_target="main", specialists=["aux1", "aux2"],
+        feature_cols=["f1", "f2"],
+        params={"mode": "fixed", "alpha": 1e-6, "meta_alpha": 1e-6, "meta_tail_pct": 0.10},
+        seed=42,
+    )
+    assert out.columns == ["era", "id", "prediction"]
+    for era in out.get_column("era").unique().to_list():
+        vals = out.filter(pl.col("era") == era).get_column("prediction").to_numpy()
+        assert abs(float(vals.mean())) < 1e-6
+
+
+def test_ridge_stack_fixed_is_seed_deterministic():
+    train, val = _stack_train_val()
+    params = {"mode": "fixed", "alpha": 1e-6, "meta_alpha": 1e-6, "meta_tail_pct": 0.10}
+    a = generate_ridge_stack_predictions(
+        train, val, main_target="main", specialists=["aux1", "aux2"],
+        feature_cols=["f1", "f2"], params=params, seed=42,
+    )
+    b = generate_ridge_stack_predictions(
+        train, val, main_target="main", specialists=["aux1", "aux2"],
+        feature_cols=["f1", "f2"], params=params, seed=42,
+    )
+    assert a.equals(b)
+
+
+def test_ridge_stack_rejects_unknown_mode():
+    train, val = _stack_train_val()
+    with pytest.raises(ValueError, match="mode"):
+        generate_ridge_stack_predictions(
+            train, val, main_target="main", specialists=["aux1"],
+            feature_cols=["f1"], params={"mode": "bogus", "alpha": 1.0}, seed=42,
         )
