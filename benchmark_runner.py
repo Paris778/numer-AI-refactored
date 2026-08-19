@@ -17,6 +17,12 @@ from nmr.benchmark import (
     hierarchy_frame,
     load_benchmark_data,
     load_benchmark_suite_config,
+    tier_max_corrs,
+)
+from nmr.benchmark_fleet import (
+    BenchmarkFleet,
+    load_fleet_suite_config,
+    write_fleet_csv,
 )
 
 
@@ -47,6 +53,17 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("artifacts") / "reports" / "benchmark_gate_report.csv",
     )
+    parser.add_argument(
+        "--fleet-configs",
+        type=Path,
+        default=Path("configs") / "benchmarks" / "fleet",
+    )
+    parser.add_argument(
+        "--fleet-output",
+        type=Path,
+        default=Path("artifacts") / "reports" / "benchmark_fleet_scorecard.csv",
+    )
+    parser.add_argument("--no-fleet", action="store_true")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--n-boot", type=_min_one_int, default=1000)
     parser.add_argument("--min-overlap-eras", type=int, default=20)
@@ -115,6 +132,38 @@ def main() -> int:
             "tier4 gate %s: measured=%s threshold=%s pass=%s",
             row["field"], row["measured"], row["threshold"], row["pass"],
         )
+
+    if not args.no_fleet:
+        try:
+            fleet_cells = load_fleet_suite_config(args.fleet_configs)
+        except ValueError as exc:
+            log.error("FLEET CONFIG FAILURE: %s", exc)
+            return 1
+        rungs = tier_max_corrs(result.scorecards, result.tier_of)
+        fleet = BenchmarkFleet(
+            spec=fleet_cells,
+            data=data,
+            seed=args.seed,
+            horizon=args.horizon,
+            n_boot=1 if args.fast_mode else args.n_boot,
+            min_overlap_eras=args.min_overlap_eras,
+            fast_mode=args.fast_mode,
+        )
+        t1 = time.perf_counter()
+        log.info(
+            "Running %d fleet cells%s",
+            len(fleet_cells), " (fast mode)" if args.fast_mode else "",
+        )
+        fleet_result = fleet.run(tier_rungs=rungs, gate=spec.gate)
+        log.info("Fleet scored in %.1fs", time.perf_counter() - t1)
+        write_fleet_csv(fleet_result, args.fleet_output)
+        log.info("Fleet scorecard written to %s", args.fleet_output)
+        for mid in fleet_result.scorecards:
+            log.info(
+                "fleet %s: placement=%s selection_bias=%s",
+                mid, fleet_result.placements[mid],
+                fleet_result.selection_bias[mid],
+            )
 
     hard_failures: list[str] = []
     if not result.null_floor_ok:

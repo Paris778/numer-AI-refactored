@@ -9,6 +9,7 @@ import numpy as np
 import polars as pl
 import pytest
 
+from benchmark_runner import _parse_args_with
 from nmr.benchmark import (
     BenchmarkData,
     generate_canonical_predictions,
@@ -707,3 +708,17 @@ def test_real_fleet_configs_load_with_all_19_cells():
     assert "fa_v151_ridge_ensemble" in ids and "silly_target_lag_mean" in ids
     search = next(c for c in cells if c.benchmark_id == "fa_v151_ridge_ensemble")
     assert search.params["mode"] == "search"
+
+
+def test_runner_parser_fleet_defaults():
+    args = _parse_args_with([])
+    assert args.fleet_configs == Path("configs") / "benchmarks" / "fleet"
+    assert args.fleet_output == (
+        Path("artifacts") / "reports" / "benchmark_fleet_scorecard.csv"
+    )
+    assert args.no_fleet is False
+
+
+def test_runner_parser_no_fleet_flag():
+    args = _parse_args_with(["--no-fleet"])
+    assert args.no_fleet is True
