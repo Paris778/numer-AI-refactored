@@ -10,6 +10,7 @@ import pytest
 
 from nmr.benchmark import generate_canonical_predictions
 from nmr.benchmark_fleet import (
+    _era_sharpe,
     _select_riskiest_features,
     _stack_partitions,
     generate_fleet_lightgbm_predictions,
@@ -443,3 +444,122 @@ def test_ridge_stack_rejects_unknown_mode():
             train, val, main_target="main", specialists=["aux1"],
             feature_cols=["f1"], params={"mode": "bogus", "alpha": 1.0}, seed=42,
         )
+
+
+def test_era_sharpe_matches_manual_mean_over_std():
+    eras = ["0001", "0001", "0002", "0002"]
+    preds = np.array([0.1, 0.2, 0.9, 0.4])
+    target = np.array([0.2, 0.4, 0.8, 0.3])
+    corr1 = float(np.corrcoef([0.1, 0.2], [0.2, 0.4])[0, 1])
+    corr2 = float(np.corrcoef([0.9, 0.4], [0.8, 0.3])[0, 1])
+    manual = (corr1 + corr2) / 2.0 / (np.std([corr1, corr2], ddof=0) + 1e-12)
+    assert abs(_era_sharpe(preds, eras, target) - manual) < 1e-9
+
+
+def _search_train_val():
+    rng = np.random.default_rng(31)
+    train_rows = []
+    for era in range(1, 61):
+        signal = float(era % 5)
+        for row in range(8):
+            train_rows.append({
+                "era": f"{era:04d}", "id": f"t{era}_{row}",
+                "f1": rng.normal(0, 1), "f2": rng.normal(0, 1),
+                "main": signal + rng.normal(0, 0.5),
+                "aux1": signal + rng.normal(0, 0.5),
+                "aux2": rng.normal(0, 1),  # useless specialist
+            })
+    val_rows = [
+        {"era": f"{era:04d}", "id": f"v{era}_{row}",
+         "f1": rng.normal(0, 1), "f2": rng.normal(0, 1),
+         "main": float(era % 5) + rng.normal(0, 0.5)}
+        for era in (61, 62) for row in range(8)
+    ]
+    bench_rows = [
+        {"era": f"{era:04d}", "id": f"v{era}_{row}", "v53_lgbm_ender20": rng.normal(0, 1)}
+        for era in (61, 62) for row in range(8)
+    ]
+    return pl.DataFrame(train_rows), pl.DataFrame(val_rows), pl.DataFrame(bench_rows)
+
+
+_SEARCH_PARAMS = {
+    "mode": "search",
+    "meta_tail_pct": 0.10,
+    "snnr_weights": {"aux1": 0.9, "aux2": 0.1},
+    "top_k": 2,
+    "min_coverage": 0.5,
+    "min_abs_main_corr": 0.01,
+    "priority_hints": [],
+    "specialist_alpha_grid": [0.01, 1.0, 100.0],
+    "specialist_sharpe_floor": -10.0,   # permissive on synthetic noise
+    "min_specialists": 1,
+    "meta_alpha_grid": [0.01, 1.0],
+    "meta_lgbm_params": {
+        "max_depth": 2, "n_estimators": 10, "learning_rate": 0.1,
+        "colsample_bytree": 0.8, "subsample": 0.8, "reg_lambda": 1.0,
+        "early_stopping_rounds": 5, "valid_tail_pct": 0.2, "min_valid_eras": 1,
+    },
+    "decorr_grid": [0.0],
+    "neutralization_grid": [0.0],
+    "benchmark_col": "v53_lgbm_ender20",
+    "nan_fill": True,
+}
+
+
+def test_ridge_stack_search_runs_and_ranks():
+    train, val, bench = _search_train_val()
+    out = generate_ridge_stack_predictions(
+        train, val, main_target="main", specialists=["aux1", "aux2"],
+        feature_cols=["f1", "f2"], params=_SEARCH_PARAMS, seed=42,
+        val_targets=val.select(["era", "id", "main"]),
+        benchmarks=bench,
+    )
+    assert out.columns == ["era", "id", "prediction"]
+    assert out.height == 16
+    for era in out.get_column("era").unique().to_list():
+        vals = out.filter(pl.col("era") == era).get_column("prediction").to_numpy()
+        assert abs(float(vals.mean())) < 1e-6
+
+
+def test_ridge_stack_search_requires_val_targets_and_benchmarks():
+    train, val, bench = _search_train_val()
+    with pytest.raises(ValueError, match="val_targets"):
+        generate_ridge_stack_predictions(
+            train, val, main_target="main", specialists=["aux1"],
+            feature_cols=["f1"], params=_SEARCH_PARAMS, seed=42,
+            benchmarks=bench,
+        )
+    with pytest.raises(ValueError, match="benchmarks"):
+        generate_ridge_stack_predictions(
+            train, val, main_target="main", specialists=["aux1"],
+            feature_cols=["f1"], params=_SEARCH_PARAMS, seed=42,
+            val_targets=val.select(["era", "id", "main"]),
+        )
+
+
+def test_ridge_stack_search_pruning_floor_raises():
+    train, val, bench = _search_train_val()
+    params = dict(_SEARCH_PARAMS)
+    params["specialist_sharpe_floor"] = 1000.0
+    with pytest.raises(ValueError, match="min_specialists"):
+        generate_ridge_stack_predictions(
+            train, val, main_target="main", specialists=["aux1", "aux2"],
+            feature_cols=["f1", "f2"], params=params, seed=42,
+            val_targets=val.select(["era", "id", "main"]),
+            benchmarks=bench,
+        )
+
+
+def test_ridge_stack_search_is_seed_deterministic():
+    train, val, bench = _search_train_val()
+    a = generate_ridge_stack_predictions(
+        train, val, main_target="main", specialists=["aux1", "aux2"],
+        feature_cols=["f1", "f2"], params=_SEARCH_PARAMS, seed=42,
+        val_targets=val.select(["era", "id", "main"]), benchmarks=bench,
+    )
+    b = generate_ridge_stack_predictions(
+        train, val, main_target="main", specialists=["aux1", "aux2"],
+        feature_cols=["f1", "f2"], params=_SEARCH_PARAMS, seed=42,
+        val_targets=val.select(["era", "id", "main"]), benchmarks=bench,
+    )
+    assert a.equals(b)

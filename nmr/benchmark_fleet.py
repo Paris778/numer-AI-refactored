@@ -18,6 +18,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 import yaml
+from lightgbm import early_stopping
 from sklearn.linear_model import Ridge
 from sklearn.neural_network import MLPRegressor
 
@@ -687,6 +688,243 @@ def generate_ridge_stack_predictions(
     return out
 
 
-def _ridge_stack_search(*args: object, **kwargs: object) -> pl.DataFrame:
-    """Transitional stub — the search-mode implementation arrives in Task 8."""
-    raise NotImplementedError("ridge_stack search mode is implemented in the next task")
+def _era_sharpe(preds: np.ndarray, eras: Sequence[str], target: np.ndarray) -> float:
+    """Mean/std(ddof=0) of per-era Pearson CORR (notebook `_compute_era_sharpe`)."""
+    frame = pl.DataFrame(
+        {"prediction": preds, "era": list(eras), "target": target}
+    ).drop_nulls()
+    era_corrs: list[float] = []
+    for _, era_frame in frame.group_by("era", maintain_order=True):
+        if era_frame["prediction"].n_unique() < 2 or era_frame["target"].n_unique() < 2:
+            continue
+        p = era_frame.get_column("prediction").to_numpy()
+        t = era_frame.get_column("target").to_numpy()
+        era_corrs.append(float(np.corrcoef(p, t)[0, 1]))
+    if not era_corrs:
+        return -np.inf
+    arr = np.asarray(era_corrs, dtype=float)
+    return float(arr.mean() / (arr.std(ddof=0) + 1.0e-12))
+
+
+def _pearson(a: np.ndarray, b: np.ndarray) -> float:
+    mask = np.isfinite(a) & np.isfinite(b)
+    if mask.sum() < 2:
+        return 0.0
+    return float(np.corrcoef(a[mask], b[mask])[0, 1])
+
+
+def _rank_values_per_era(values: np.ndarray, eras: Sequence[str]) -> np.ndarray:
+    """Per-era rank-gaussianize a raw vector (Ensembler semantics)."""
+    frame = pl.DataFrame({"__v": values, "era": list(eras)})
+    ranked = Ensembler.rank_normalize(frame, pred_cols=["__v"], era_col="era")
+    return ranked.get_column("__v").to_numpy()
+
+
+def _per_era_corrs(values: np.ndarray, eras: Sequence[str], target: np.ndarray) -> np.ndarray:
+    frame = pl.DataFrame(
+        {"__v": values, "era": list(eras), "target": target}
+    ).drop_nulls()
+    out: list[float] = []
+    for _, era_frame in frame.group_by("era", maintain_order=True):
+        if era_frame["__v"].n_unique() < 2 or era_frame["target"].n_unique() < 2:
+            continue
+        out.append(float(np.corrcoef(
+            era_frame.get_column("__v").to_numpy(),
+            era_frame.get_column("target").to_numpy(),
+        )[0, 1]))
+    return np.asarray(out, dtype=float)
+
+
+def _ridge_stack_search(
+    train_rows: pl.DataFrame,
+    val_rows: pl.DataFrame,
+    *,
+    main_target: str,
+    specialists: list[str],
+    feature_cols: list[str],
+    params: Mapping[str, Any],
+    seed: int,
+    neutralization: float,
+    val_targets: pl.DataFrame | None,
+    benchmarks: pl.DataFrame | None,
+    era_col: str,
+    id_col: str,
+    pred_col: str,
+) -> pl.DataFrame:
+    """v1.5.1-style config-driven specialist/meta search (selection-biased).
+
+    Candidate selection uses validation (as the notebook did) — the runner
+    flags the resulting scorecard with ``selection_bias: true``.
+    """
+    if val_targets is None:
+        raise ValueError("search mode requires val_targets (selection uses validation)")
+    if benchmarks is None:
+        raise ValueError("search mode requires benchmarks (decorr sweep)")
+    benchmark_col = str(params["benchmark_col"])
+    if benchmark_col not in benchmarks.columns:
+        raise ValueError(f"benchmarks missing column: {benchmark_col!r}")
+
+    # 1. Target quality filter (coverage, corr to main, priority hints, top-k).
+    weights = dict(params["snnr_weights"])
+    quality: list[tuple[float, float, float, str]] = []
+    for target in specialists:
+        if target not in train_rows.columns:
+            continue
+        series = train_rows.get_column(target)
+        coverage = float(series.drop_nulls().len() / max(1, series.len()))
+        if coverage < float(params["min_coverage"]):
+            continue
+        aligned = train_rows.select([main_target, target]).drop_nulls()
+        corr = _pearson(
+            aligned.get_column(main_target).to_numpy(),
+            aligned.get_column(target).to_numpy(),
+        )
+        if abs(corr) < float(params["min_abs_main_corr"]):
+            continue
+        hint_bonus = 1.0 if target in list(params.get("priority_hints", [])) else 0.0
+        quality.append((hint_bonus, float(weights.get(target, 0.0)), corr, target))
+    quality.sort(key=lambda row: (-row[0], -row[1], -row[2], row[3]))
+    selected = [row[3] for row in quality[: int(params["top_k"])]]
+    if not selected:
+        raise ValueError("no auxiliary targets survive the quality filter")
+
+    spec_eras, meta_eras = _stack_partitions(
+        sorted(train_rows.get_column(era_col).unique().to_list()),
+        meta_tail_pct=float(params["meta_tail_pct"]),
+        specialists=selected,
+    )
+    spec_rows = train_rows.filter(pl.col(era_col).is_in(spec_eras))
+    meta_rows = train_rows.filter(pl.col(era_col).is_in(meta_eras))
+    x_spec = spec_rows.select(feature_cols).cast(pl.Float32).to_numpy()
+    x_meta = meta_rows.select(feature_cols).cast(pl.Float32).to_numpy()
+    x_val = val_rows.select(feature_cols).cast(pl.Float32).to_numpy()
+
+    # 2. Specialist alpha search: Sharpe on the meta tail.
+    meta_main = meta_rows.get_column(main_target).cast(pl.Float64).to_numpy()
+    meta_era_list = meta_rows.get_column(era_col).to_list()
+    kept: list[tuple[str, float, object]] = []  # (target, alpha, model)
+    for target in selected:
+        y = spec_rows.get_column(target).cast(pl.Float64).to_numpy()
+        mask = np.isfinite(y)
+        if mask.sum() < 2:
+            continue
+        best: tuple[float, float, object] | None = None
+        for alpha in params["specialist_alpha_grid"]:
+            model = Ridge(alpha=float(alpha), fit_intercept=True, random_state=seed)
+            model.fit(x_spec[mask], y[mask])
+            meta_raw = np.asarray(model.predict(x_meta), dtype=float)
+            meta_ranked = _rank_values_per_era(meta_raw, meta_era_list)
+            sharpe = _era_sharpe(meta_ranked, meta_era_list, meta_main)
+            if best is None or sharpe > best[0]:
+                best = (sharpe, float(alpha), model)
+        if best is not None and best[0] >= float(params["specialist_sharpe_floor"]):
+            kept.append((target, best[1], best[2]))
+    if len(kept) < int(params["min_specialists"]):
+        raise ValueError(
+            f"only {len(kept)} specialists survive the Sharpe floor, "
+            f"need >= min_specialists={params['min_specialists']}"
+        )
+
+    # 3. Meta features: per-era-ranked specialist predictions on meta tail + val.
+    meta_X = meta_rows.select([era_col, id_col])
+    val_X = val_rows.select([era_col, id_col])
+    for target, _, model in kept:
+        meta_X = meta_X.with_columns(
+            pl.Series(target, np.asarray(model.predict(x_meta), dtype=float))
+        )
+        val_X = val_X.with_columns(
+            pl.Series(target, np.asarray(model.predict(x_val), dtype=float))
+        )
+    kept_cols = [t for t, _, _ in kept]
+    meta_X = Ensembler.rank_normalize(meta_X, pred_cols=kept_cols, era_col=era_col)
+    val_X = Ensembler.rank_normalize(val_X, pred_cols=kept_cols, era_col=era_col)
+    meta_y = meta_rows.select([era_col, id_col, main_target]).drop_nulls()
+    meta_fit = meta_X.join(meta_y, on=[era_col, id_col], how="inner")
+    if meta_fit.height < 2:
+        raise ValueError("fewer than 2 aligned meta-train rows")
+    meta_fit_X = meta_fit.select(kept_cols).cast(pl.Float32).to_numpy()
+    meta_fit_y = meta_fit.get_column(main_target).cast(pl.Float64).to_numpy()
+    val_meta_X = val_X.select(kept_cols).cast(pl.Float32).to_numpy()
+
+    # 4. Meta candidates: non-negative ridge grid + shallow LGBM (internal es split).
+    candidates: dict[str, np.ndarray] = {}
+    for alpha in params["meta_alpha_grid"]:
+        try:
+            model = Ridge(alpha=float(alpha), positive=True, random_state=seed)
+            model.fit(meta_fit_X, meta_fit_y)
+        except TypeError:
+            model = Ridge(alpha=float(alpha), fit_intercept=True, random_state=seed)
+            model.fit(meta_fit_X, meta_fit_y)
+        candidates[f"ridge|alpha={float(alpha):.4g}"] = np.asarray(
+            model.predict(val_meta_X), dtype=float
+        )
+    lgbm_params = dict(params["meta_lgbm_params"])
+    es_rounds = int(lgbm_params.pop("early_stopping_rounds", 50))
+    valid_tail_pct = float(lgbm_params.pop("valid_tail_pct", 0.2))
+    min_valid_eras = int(lgbm_params.pop("min_valid_eras", 5))
+    meta_era_sorted = meta_fit.get_column(era_col).unique().sort().to_list()
+    if len(meta_era_sorted) > 1:
+        n_valid = max(min_valid_eras, int(round(len(meta_era_sorted) * valid_tail_pct)))
+        n_valid = min(n_valid, max(1, len(meta_era_sorted) - 1))
+        valid_eras = set(meta_era_sorted[-n_valid:])
+        is_valid = meta_fit.get_column(era_col).is_in(list(valid_eras)).to_numpy()
+    else:
+        is_valid = np.zeros(meta_fit.height, dtype=bool)
+    lgbm_model = construct_tree_model(
+        "lightgbm", lgbm_params, seed=seed,
+        n_features=len(kept_cols), device="cpu",
+    )
+    if is_valid.any():
+        lgbm_model.fit(
+            meta_fit_X[~is_valid], meta_fit_y[~is_valid],
+            eval_set=[(meta_fit_X[is_valid], meta_fit_y[is_valid])],
+            callbacks=[early_stopping(es_rounds, verbose=False)],
+        )
+    else:
+        lgbm_model.fit(meta_fit_X, meta_fit_y)
+    candidates["lgbm"] = np.asarray(lgbm_model.predict(val_meta_X), dtype=float)
+
+    # 5. Post-processing sweeps: benchmark decorr x neutralization; selection on
+    #    validation mean CORR vs the main target (documented selection bias).
+    val_main = val_targets.join(
+        val_rows.select([era_col, id_col]), on=[era_col, id_col], how="inner"
+    ).sort([era_col, id_col])
+    val_main_y = val_main.get_column(main_target).cast(pl.Float64).to_numpy()
+    val_era_list = val_main.get_column(era_col).to_list()
+    bench_sorted = benchmarks.sort([era_col, id_col])
+    bench_ranked = _rank_values_per_era(
+        bench_sorted.get_column(benchmark_col).to_numpy(),
+        bench_sorted.get_column(era_col).to_list(),
+    )
+    best: tuple[float, str, float, float, np.ndarray] | None = None
+    for key in sorted(candidates):  # deterministic iteration order
+        base = candidates[key]
+        for decorr in params["decorr_grid"]:
+            decorrelated = base - float(decorr) * bench_ranked
+            for neu in params["neutralization_grid"]:
+                ranked = _rank_values_per_era(decorrelated, val_era_list)
+                era_corrs = _per_era_corrs(ranked, val_era_list, val_main_y)
+                score = float(np.mean(era_corrs)) if era_corrs.size else -np.inf
+                if best is None or score > best[0]:
+                    best = (score, key, float(decorr), float(neu), decorrelated)
+    if best is None:
+        raise ValueError("no post-processing candidate survived")
+    selected_raw = best[4]
+
+    frame = val_main.select([era_col, id_col]).with_columns(
+        pl.Series(pred_col, selected_raw)
+    )
+    if best[3] > 0.0:
+        with_features = frame.join(
+            val_rows.select([era_col, id_col, *feature_cols]),
+            on=[era_col, id_col], how="inner",
+        )
+        frame = NeutralizationEngine().neutralize(
+            with_features, pred_col=pred_col, feature_cols=feature_cols,
+            era_col=era_col, proportion=best[3],
+        ).select([era_col, id_col, pred_col])
+    out = Ensembler().blend(
+        Ensembler.rank_normalize(frame, pred_cols=[pred_col], era_col=era_col),
+        pred_cols=[pred_col], weights=[1.0], era_col=era_col, out_col=pred_col,
+    )
+    return out.select([era_col, id_col, pred_col]).sort([era_col, id_col])
