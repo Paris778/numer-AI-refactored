@@ -1,0 +1,60 @@
+name: mutation-gate
+
+# NON-GOAL: this job NEVER runs on the push path. Mutation runs take 1-2 h;
+# a weekly cadence + manual dispatch only. Do not promote it onto commits.
+#
+# Flow: a manual `measure` run (or the first-ever run) writes the receipt and
+# pushes it to the ci/mutation-receipt branch as a PR diff; a human reviews
+# the numbers and merges the receipt into main — that merge IS the act of
+# setting the floors. Weekly `gate` runs then compare fresh survivors against
+# the committed receipt and fail on any increase (ratchet down only).
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "measure (write receipt, exit 0) or gate (fail on survivor increase)"
+        type: choice
+        options: [measure, gate]
+        default: measure
+  schedule:
+    # Weekly, off the :00 mark (anti-herd).
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: write  # the measure run commits the receipt back to ci/mutation-receipt
+
+jobs:
+  mutation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt
+      - name: Mutation gate (measure|gate)
+        # schedule => gate; manual dispatch => the chosen mode (default measure)
+        env:
+          GATE_MODE: "${{ github.event_name == 'schedule' && 'gate' || (github.event.inputs.mode || 'measure') }}"
+        run: python scripts/mutation_gate.py --mode "${GATE_MODE}"
+      - name: Upload receipt artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-receipt
+          path: artifacts/reports/mutation_receipt.json
+      - name: Commit receipt back for review (measure mode only)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'measure'
+        run: |
+          git config user.name "ci-mutation-gate"
+          git config user.email "ci-mutation-gate@users.noreply.github.com"
+          git checkout -b ci/mutation-receipt
+          git add artifacts/reports/mutation_receipt.json
+          git commit -m "ci: mutation receipt (measure run)" || echo "no receipt change"
+          git push origin ci/mutation-receipt --force
