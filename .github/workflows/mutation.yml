@@ -48,13 +48,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: mutation-receipt
-          path: artifacts/reports/mutation_receipt.json
+          path: configs/mutation_receipt.json
       - name: Commit receipt back for review (measure mode only)
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'measure'
         run: |
           git config user.name "ci-mutation-gate"
           git config user.email "ci-mutation-gate@users.noreply.github.com"
           git checkout -b ci/mutation-receipt
-          git add artifacts/reports/mutation_receipt.json
+          git add configs/mutation_receipt.json
           git commit -m "ci: mutation receipt (measure run)" || echo "no receipt change"
           git push origin ci/mutation-receipt --force

@@ -261,10 +261,10 @@ Local `load_predict` fidelity is tested, but CatBoost availability in Numerai's 
 `ruff check .` (config `ruff.toml`: E/F/I/UP, line-length 120) is the CI lint gate; ruff is pinned in `requirements-dev.txt` and installed via `./.venv/Scripts/python -m pip` (never the `Scripts/pip` shim). pytest remains the sole *functional* gate. `ruff format` is NOT adopted — deferred to a dedicated Phase-2 reformat commit.
 
 ### Coverage specs must be package-level (2026-08-19)
-Coverage commands must use package-level `--cov` specs only (`--cov=nmr --cov=dashboard_ui`) — dotted submodule specs crash at conftest import on py3.12 + coverage 7.x (detail: `CONTRIBUTING.md` footgun). CI coverage gate: `scripts/coverage_gate.py` (per-module floors for promote/models + global, ratchet-up-only).
+Coverage commands must use package-level `--cov` specs only (`--cov=nmr --cov=dashboard_ui`) — dotted submodule specs crash at conftest import on py3.12 + coverage 7.x (detail: `CONTRIBUTING.md` footgun). CI coverage gate: `scripts/coverage_gate.py` (per-module + global floors, ratchet-up-only).
 
 ### Mutation gate is CI-only (mutmut refuses native Windows)
-mutmut is fork-based (`os.fork`); on Windows it exits with "use WSL" (issue #397). The gate runs only on Linux CI (`.github/workflows/mutation.yml`: weekly + manual, measurement-first, survivor floors ratchet down only, receipt commits back to `ci/mutation-receipt`). Never on the push path.
+mutmut is fork-based; on Windows it exits with "use WSL" (issue #397). The gate runs only on Linux CI (`.github/workflows/mutation.yml`: weekly + manual, measurement-first, survivor floors ratchet down only, receipt commits back to `ci/mutation-receipt`). Never on the push path. mutmut 3.x is config-driven (`[tool.mutmut]`): the gate writes a scratch config per module and RAISES on unparseable/zero-mutant runs — never mint floors from a failed measurement (SEV-1, 2026-08-20). Receipt: `configs/mutation_receipt.json` (committed, not under `artifacts/`).
 
 ### `../numer-AI/` is read-only legacy
 The V1 repo is mined for logic only. Never import from it, never modify it, never add it to any path.

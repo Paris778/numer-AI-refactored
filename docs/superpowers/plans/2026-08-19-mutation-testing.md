@@ -4,7 +4,7 @@
 
 **Goal:** Introduce mutation testing with the mature tool instead of a bespoke harness: pin `mutmut` in `requirements-dev.txt` (dev-tool precedent: `ruff`, `pytest-cov`, `coverage` are already pinned there — the §3 dependency prohibition governs *runtime* `requirements.txt`), measure a baseline survivor count on the four correctness-core modules, and gate on it — a mutation gate that **can fail a build**, on a schedule, not an opt-in ornament.
 
-**Architecture:** `mutmut` does the mutation; a thin `scripts/mutation_gate.py` (precedent: `scripts/real_data_gate.py`) orchestrates per-module runs with per-module test subsets (so each mutant runs a bounded subset, not the full 865-test suite), aggregates `mutmut results` into `artifacts/reports/mutation_receipt.json`, and enforces the survivor floor. CI: a weekly cron + `workflow_dispatch` job runs the gate. The floor ratchets DOWN only: after the baseline is measured, any change that increases survivors fails. No logic lives in `nmr/` — mutation testing is infrastructure, not part of the tested product boundary (corrected from the earlier bespoke-harness draft).
+**Architecture:** `mutmut` does the mutation; a thin `scripts/mutation_gate.py` (precedent: `scripts/real_data_gate.py`) orchestrates per-module runs with per-module test subsets (so each mutant runs a bounded subset, not the full 865-test suite), aggregates `mutmut results` into `configs/mutation_receipt.json`, and enforces the survivor floor. CI: a weekly cron + `workflow_dispatch` job runs the gate. The floor ratchets DOWN only: after the baseline is measured, any change that increases survivors fails. No logic lives in `nmr/` — mutation testing is infrastructure, not part of the tested product boundary (corrected from the earlier bespoke-harness draft).
 
 **Tech Stack:** Python 3.12, `mutmut` (exact-pinned in `requirements-dev.txt`), pytest as mutmut's test runner, GitHub Actions.
 
@@ -58,7 +58,7 @@ git commit -m "build: pin mutmut for the mutation gate"
 
 **Files:**
 - Create: `scripts/mutation_gate.py`
-- Run-only: `artifacts/reports/mutation_receipt.json` (machine-generated)
+- Run-only: `configs/mutation_receipt.json` (machine-generated)
 
 **Interfaces:**
 - Consumes: `mutmut run` + `mutmut results` (via subprocess), the module/test-file map from Global Constraints.
@@ -72,7 +72,7 @@ git commit -m "build: pin mutmut for the mutation gate"
 Thin control plane (precedent: scripts/real_data_gate.py). Each module is
 mutated against its own bounded test subset; `mutmut results` provides the
 per-module killed/survived/timeout counts, aggregated into
-artifacts/reports/mutation_receipt.json.
+configs/mutation_receipt.json.
 
 Modes:
   --baseline   measure and write the receipt (exit 0 regardless of survivors)
@@ -96,7 +96,7 @@ MODULE_TESTS = {
     "nmr/_transforms.py": "tests/test_transforms.py tests/test_parity.py",
     "nmr/splitter.py": "tests/test_splitter.py",
 }
-RECEIPT = Path("artifacts/reports/mutation_receipt.json")
+RECEIPT = Path("configs/mutation_receipt.json")
 TIMEOUT_SECONDS = 15
 
 
@@ -176,7 +176,7 @@ Expected: 4 module runs (each a few minutes at this scale), then a receipt with 
 
 ```bash
 ./.venv/Scripts/python -m ruff check scripts/mutation_gate.py
-git add scripts/mutation_gate.py artifacts/reports/mutation_receipt.json
+git add scripts/mutation_gate.py configs/mutation_receipt.json
 git commit -m "feat: mutation gate baseline (killed X, survived Y across 4 modules)"
 ```
 
@@ -246,12 +246,12 @@ git commit -m "ci: weekly mutation gate on the correctness core"
 After the real-data gate paragraph in the testing section:
 
 ```markdown
-**Mutation gate** (do the tests catch bugs, not just visit lines): `.\.venv\Scripts\python scripts\mutation_gate.py --baseline` measures, the plain run gates. mutmut mutates `nmr/evaluation.py`, `nmr/risk.py`, `nmr/_transforms.py`, `nmr/splitter.py` against their bounded test subsets; `artifacts/reports/mutation_receipt.json` holds the floors. The floor ratchets down only — a PR that raises a survivor floor needs written justification. CI runs the gate weekly + on manual dispatch (`mutation.yml`).
+**Mutation gate** (do the tests catch bugs, not just visit lines): `.\.venv\Scripts\python scripts\mutation_gate.py --baseline` measures, the plain run gates. mutmut mutates `nmr/evaluation.py`, `nmr/risk.py`, `nmr/_transforms.py`, `nmr/splitter.py` against their bounded test subsets; `configs/mutation_receipt.json` holds the floors. The floor ratchets down only — a PR that raises a survivor floor needs written justification. CI runs the gate weekly + on manual dispatch (`mutation.yml`).
 ```
 
 - [ ] **Step 2: AGENTS.md**
 
-Toolkit row: `| Run the mutation gate / audit survivors | `scripts/mutation_gate.py` + pinned `mutmut` (receipt: `artifacts/reports/mutation_receipt.json`) |`
+Toolkit row: `| Run the mutation gate / audit survivors | `scripts/mutation_gate.py` + pinned `mutmut` (receipt: `configs/mutation_receipt.json`) |`
 
 §8 hazard line:
 
@@ -272,7 +272,7 @@ One paragraph in the tooling/gates section:
 `scripts/mutation_gate.py` runs pinned `mutmut` over the correctness core
 (`evaluation.py`, `risk.py`, `_transforms.py`, `splitter.py`) with per-module
 bounded test subsets; survivor counts are floor-ed by
-`artifacts/reports/mutation_receipt.json` (ratchet down only). Weekly +
+`configs/mutation_receipt.json` (ratchet down only). Weekly +
 manual-dispatch CI (`mutation.yml`). Dev dependency only — nothing in
 `requirements.txt` or the deploy closure.
 ```
