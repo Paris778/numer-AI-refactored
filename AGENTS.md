@@ -30,7 +30,7 @@ These four files obey a strict **Single Source of Truth (SSOT) hierarchy**. One 
 
 ## 1. Agent Identity & Mission
 
-You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (988 tests, sole functional gate) + `ruff check` (lint gate, `ruff.toml` E/F/I/UP @120, pinned in `requirements-dev.txt`). Both enforced by CI (`.github/workflows/ci.yml`).
+You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (990 tests, sole functional gate) + `ruff check` (lint gate, `ruff.toml` E/F/I/UP @120, pinned in `requirements-dev.txt`). Both enforced by CI (`.github/workflows/ci.yml`).
 
 Your mission:
 
@@ -197,7 +197,7 @@ Four gates, in order of rigor — **exact commands live only in [`CONTRIBUTING.m
 
 1. **Fast gate** — `ruff check .` + full `pytest -q` after every meaningful change.
 2. **Targeted subsets** while iterating — oracle parity (`tests/test_parity.py` + `tests/test_risk_parity.py`) and determinism hashes (`tests/test_benchmark_hierarchy.py`).
-3. **Pre-sign-off gate** (mandatory before delivering work) — full 988-test suite plus the real-data benchmark smoke (`benchmark_runner.py --fast-mode` → `artifacts/reports/benchmark_hierarchy_scorecard_smoke.csv` + `benchmark_gate_report_smoke.csv`).
+3. **Pre-sign-off gate** (mandatory before delivering work) — full 990-test suite plus the real-data benchmark smoke (`benchmark_runner.py --fast-mode` → `artifacts/reports/benchmark_hierarchy_scorecard_smoke.csv` + `benchmark_gate_report_smoke.csv`).
 4. **End-of-session gate (mandatory)** — after finishing a coding session (before stopping or handing off for review), run the linter and functional gate on the final state: `ruff check .` + `pytest -q`. Never end a session with unverified changes; report the actual results, including any skips or pre-existing failures.
 
 Real-data tests require the `data/v5.3/` parquet assets (see [`README.md`](README.md#data-assets)). If they are missing, report which tests were skipped — never claim full verification. CI (`.github/workflows/ci.yml`) enforces the fast gate on every push/PR (see [`CONTRIBUTING.md`](CONTRIBUTING.md#testing--verification)).
@@ -261,10 +261,10 @@ Local `load_predict` fidelity is tested, but CatBoost availability in Numerai's 
 `ruff check .` (config `ruff.toml`: E/F/I/UP, line-length 120) is the CI lint gate; ruff is pinned in `requirements-dev.txt` and installed via `./.venv/Scripts/python -m pip` (never the `Scripts/pip` shim). pytest remains the sole *functional* gate. `ruff format` is NOT adopted — deferred to a dedicated Phase-2 reformat commit.
 
 ### Coverage specs must be package-level (2026-08-19)
-Coverage commands must use package-level `--cov` specs only (`--cov=nmr --cov=dashboard_ui`) — dotted submodule specs crash at conftest import on py3.12 + coverage 7.x (detail: `CONTRIBUTING.md` footgun). CI coverage gate: `scripts/coverage_gate.py` (per-module + global floors, ratchet-up-only).
+Coverage commands must use package-level `--cov` specs only (`--cov=nmr --cov=dashboard_ui`) — dotted submodule specs crash at conftest import on py3.12 + coverage 7.x (detail: `CONTRIBUTING.md` footgun). CI coverage gate: `scripts/coverage_gate.py`.
 
 ### Mutation gate is CI-only (mutmut refuses native Windows)
-mutmut is fork-based; on Windows it exits with "use WSL" (issue #397). The gate runs only on Linux CI (`.github/workflows/mutation.yml`: weekly + manual, measurement-first, survivor floors ratchet down only, receipt commits back to `ci/mutation-receipt`). Never on the push path. mutmut 3.x is config-driven (`[tool.mutmut]`): the gate writes a scratch config per module and RAISES on unparseable/zero-mutant runs — never mint floors from a failed measurement (SEV-1, 2026-08-20). Receipt: `configs/mutation_receipt.json` (committed, not under `artifacts/`).
+mutmut is fork-based; Windows refused ("use WSL", #397). Linux CI only (`.github/workflows/mutation.yml`: weekly + manual; never on push; measurement-first; floors ratchet down only on survived+timeout). mutmut 3.x is config-driven (`[tool.mutmut]`); the gate writes a scratch config per module and RAISES on unparseable stats, zero mutants, or >10% timeouts — never mint floors from failed or clock-dominated runs (SEV-1, 2026-08-20). Receipt: `configs/mutation_receipt.json`, uploaded as an artifact; a human commits it via a normal PR to set floors (GITHUB_TOKEN cannot push workflow files).
 
 ### `../numer-AI/` is read-only legacy
 The V1 repo is mined for logic only. Never import from it, never modify it, never add it to any path.

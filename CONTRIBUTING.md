@@ -27,7 +27,7 @@ All code must follow the eight non-negotiable principles in [`AGENTS.md`](AGENTS
 ### Dependency pinning policy
 
 All direct dependencies in `requirements.txt` are exact-pinned (`==x.y.z`) to the
-versions in the verified venv (green full suite as of 2026-08-16; 988 tests
+versions in the verified venv (green full suite as of 2026-08-16; 990 tests
 after the 2026-08-19/20 coverage-hardening + parity-depth + mutation-gate work). Upgrading a pin is a deliberate act, never a casual `pip install -U`:
 
 1. Edit the pin in `requirements.txt`.
@@ -99,7 +99,7 @@ git archive HEAD | docker run -i --rm ci-repro bash -c "mkdir -p /work && tar x 
 
 Expect 964+ passed, ~15 skipped, and zero failures. This also yields CI-faithful coverage totals (dataless) — the numbers the coverage gate's floors must bind to.
 
-**Mutation gate** (do the tests catch bugs, not just visit lines): CI-only by design — mutmut's runner is fork-based and refuses native Windows ("use WSL", issue #397). `.github/workflows/mutation.yml` runs `scripts/mutation_gate.py` weekly + on manual dispatch: mutmut mutates `nmr/evaluation.py`, `nmr/risk.py`, `nmr/_transforms.py`, `nmr/splitter.py` against their bounded test subsets. The first `measure` run writes `configs/mutation_receipt.json` and pushes it to `ci/mutation-receipt` for review; merging the receipt into main sets the floors. `gate` runs fail when any module's survivors increase (ratchet down only). Scope caveat, embedded in the receipt: CI skips the 12 data-gated tests, so the floors mean "survivors under the CI-runnable suite" — never comparable to a local number.
+**Mutation gate** (do the tests catch bugs, not just visit lines): CI-only by design — mutmut's runner is fork-based and refuses native Windows ("use WSL", issue #397). `.github/workflows/mutation.yml` runs `scripts/mutation_gate.py` weekly + on manual dispatch: mutmut mutates `nmr/evaluation.py`, `nmr/risk.py`, `nmr/_transforms.py`, `nmr/splitter.py` against their bounded test subsets, with measured per-module timeout constants and a refusal to record any receipt whose timeout ratio exceeds 10% (a receipt full of timeouts measures the clock, not the tests). The `measure` run writes `configs/mutation_receipt.json`, uploads it as a workflow artifact, and prints per-module counts in the job summary; a human reviews the numbers and commits the receipt to main via a normal PR — that merge sets the floors. `gate` runs fail when any module's survived+timeout increases (ratchet down only, and runner-speed-invariant: survivors cannot silently convert into timeouts to erode the floor). Scope caveat, embedded in the receipt: CI skips the data-gated tests, so the floors mean "survivors under the CI-runnable suite" — never comparable to a local number.
 
 ---
 

@@ -52,6 +52,22 @@ MODULE_TESTS: dict[str, list[str]] = {
 RECEIPT = Path("configs/mutation_receipt.json")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 STATS_KEYS = ("killed", "survived", "total", "timeout")
+# A receipt whose mutants mostly never got a verdict is a measurement of the
+# clock, not of the tests — refuse to record it (same discipline as the
+# zero-mutant raise).
+MAX_TIMEOUT_RATIO = 0.10
+# Per-module timeout constants, from MEASURED subset durations (dataless
+# Linux container, 2026-08-20): evaluation 5.1s, risk 2.7s, transforms 2.9s,
+# splitter 2.2s. Constant = 10x subset duration + margin — the 15s guess
+# produced 74-92% timeouts on the slow subsets and a vacuous risk.py
+# survived=0. If the timeout-ratio refusal fires, re-measure on the CI runner
+# and adjust; never raise the ratio threshold to make a bad run pass.
+MODULE_TIMEOUTS: dict[str, float] = {
+    "nmr/evaluation.py": 60.0,
+    "nmr/risk.py": 40.0,
+    "nmr/_transforms.py": 40.0,
+    "nmr/splitter.py": 40.0,
+}
 SCOPE_NOTE = (
     "floors mean 'survivors under the CI-runnable suite' (data-gated tests "
     "skip in CI); NOT comparable to any local measurement"
@@ -85,7 +101,7 @@ def _run_module(module_path: str, test_paths: list[str]) -> dict[str, int]:
         + ", ".join(json.dumps(t) for t in test_paths)
         + "]",
         "timeout_multiplier = 1.0",
-        "timeout_constant = 15.0",
+        f"timeout_constant = {MODULE_TIMEOUTS[module_path]}",
         # The repo's pytest.ini `pythonpath = .` re-inserts the checkout root
         # after mutmut removes it, so the stats phase imports the ORIGINAL
         # module and attributes zero tests ("Stopping early"). Override it to
@@ -141,10 +157,20 @@ def _run_module(module_path: str, test_paths: list[str]) -> dict[str, int]:
                 f"mutmut found ZERO mutants in {module_path} — vacuous "
                 "measurement; refusing to record it"
             )
+        timeout_ratio = stats["timeout"] / stats["total"]
+        if timeout_ratio > MAX_TIMEOUT_RATIO:
+            raise RuntimeError(
+                f"mutmut timed out {stats['timeout']}/{stats['total']} mutants "
+                f"({timeout_ratio:.0%}) in {module_path} — above the "
+                f"{MAX_TIMEOUT_RATIO:.0%} refusal threshold; the numbers would "
+                "measure the clock, not the tests. Re-measure the subset "
+                "duration and raise MODULE_TIMEOUTS (never the ratio)."
+            )
         return {
             "killed": int(stats["killed"]),
             "survived": int(stats["survived"]),
             "timeout": int(stats["timeout"]),
+            "total": int(stats["total"]),
         }
     finally:
         config_path.unlink(missing_ok=True)
@@ -152,14 +178,19 @@ def _run_module(module_path: str, test_paths: list[str]) -> dict[str, int]:
 
 
 def _compare(previous: dict[str, dict], fresh: dict[str, dict]) -> list[str]:
+    """Ratchet on survived + timeout: a slower runner must not convert
+    survivors into timeouts and silently erode the floor (or vice versa)."""
     failures: list[str] = []
     for module_path, counts in fresh.items():
-        floor = previous.get(module_path, {}).get("survived")
-        if floor is None:
+        prev_counts = previous.get(module_path)
+        if prev_counts is None:
             failures.append(f"{module_path}: no committed floor (measure first)")
-        elif counts["survived"] > floor:
+            continue
+        floor = prev_counts.get("survived", 0) + prev_counts.get("timeout", 0)
+        fresh_sum = counts.get("survived", 0) + counts.get("timeout", 0)
+        if fresh_sum > floor:
             failures.append(
-                f"{module_path}: survivors {counts['survived']} > floor {floor} "
+                f"{module_path}: survived+timeout {fresh_sum} > floor {floor} "
                 "(ratchet down only — raising needs written justification)"
             )
     return failures

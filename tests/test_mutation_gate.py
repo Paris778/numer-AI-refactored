@@ -98,10 +98,32 @@ def test_run_module_success_returns_counts(
 ) -> None:
     _stub_subprocess(monkeypatch, tmp_path, stats_payload=_GOOD_STATS)
     counts = gate._run_module("nmr/splitter.py", ["tests/test_splitter.py"])
-    assert counts == {"killed": 115, "survived": 31, "timeout": 0}
+    assert counts == {"killed": 115, "survived": 31, "timeout": 0, "total": 146}
     # The scratch config is cleaned up afterwards.
     assert not (tmp_path / "pyproject.toml").exists()
     assert not (tmp_path / "mutants").exists()
+
+
+def test_run_module_timeout_ratio_refuses_to_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A receipt full of timeouts measures the clock, not the tests."""
+    _stub_subprocess(
+        monkeypatch,
+        tmp_path,
+        stats_payload={"killed": 1, "survived": 0, "total": 10, "timeout": 9},
+    )
+    with pytest.raises(RuntimeError, match="refusal threshold"):
+        gate._run_module("nmr/splitter.py", ["tests/test_splitter.py"])
+
+
+def test_run_module_timeout_constant_from_measured_table(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every target module has a measured timeout constant, never a guess."""
+    for module_path in gate.MODULE_TESTS:
+        assert module_path in gate.MODULE_TIMEOUTS
+        assert gate.MODULE_TIMEOUTS[module_path] > 15.0
 
 
 def test_run_module_refuses_to_overwrite_existing_pyproject(
@@ -114,17 +136,18 @@ def test_run_module_refuses_to_overwrite_existing_pyproject(
 
 
 def test_compare_no_committed_floor_fails() -> None:
-    fresh = {"nmr/splitter.py": {"killed": 10, "survived": 2, "timeout": 0}}
+    fresh = {"nmr/splitter.py": {"killed": 10, "survived": 2, "timeout": 0, "total": 12}}
     failures = gate._compare({}, fresh)
     assert len(failures) == 1
     assert "no committed floor" in failures[0]
 
 
-def test_compare_survivor_increase_fails_and_equality_passes() -> None:
-    previous = {"nmr/splitter.py": {"killed": 10, "survived": 3, "timeout": 0}}
-    fresh_ok = {"nmr/splitter.py": {"killed": 10, "survived": 3, "timeout": 0}}
-    fresh_bad = {"nmr/splitter.py": {"killed": 10, "survived": 4, "timeout": 0}}
+def test_compare_ratchets_on_survived_plus_timeout() -> None:
+    previous = {"nmr/splitter.py": {"killed": 10, "survived": 3, "timeout": 1, "total": 14}}
+    # Same sum (3+1 == 2+2): a runner-speed shift must not move the floor.
+    fresh_ok = {"nmr/splitter.py": {"killed": 10, "survived": 2, "timeout": 2, "total": 14}}
     assert gate._compare(previous, fresh_ok) == []
+    fresh_bad = {"nmr/splitter.py": {"killed": 10, "survived": 4, "timeout": 1, "total": 14}}
     failures = gate._compare(previous, fresh_bad)
     assert len(failures) == 1
-    assert "survivors 4 > floor 3" in failures[0]
+    assert "survived+timeout 5 > floor 4" in failures[0]
