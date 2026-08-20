@@ -102,6 +102,16 @@ def _stub_run(tmp_path, monkeypatch) -> None:
         "compute_run_id",
         staticmethod(lambda config: "a" * 64),
     )
+    # run_id is computed inside ExperimentRunner.__init__ via the PRIVATE
+    # accessor (runner.py:109 → _compute_run_id); the public compute_run_id
+    # above only serves run_campaign's dedupe lookup. Stub both, or a
+    # data-absent checkout (CI, containers) fails fingerprinting in __init__
+    # and these tests pass locally only because data/v5.3 exists on disk.
+    monkeypatch.setattr(
+        ExperimentRunner,
+        "_compute_run_id",
+        staticmethod(lambda config: "a" * 64),
+    )
 
 
 def test_run_campaign_main_records_and_writes_log(tmp_path, monkeypatch) -> None:
@@ -231,6 +241,11 @@ def test_run_campaign_same_config_twice_dedupes_in_single_invocation(tmp_path, m
     monkeypatch.setattr(
         ExperimentRunner,
         "compute_run_id",
+        staticmethod(lambda config: "a" * 64),
+    )
+    monkeypatch.setattr(
+        ExperimentRunner,
+        "_compute_run_id",
         staticmethod(lambda config: "a" * 64),
     )
     registry_dir = tmp_path / "registry"

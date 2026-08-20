@@ -90,6 +90,15 @@ Before delivering completed work:
 
 The **real-data gate replaces the bare smoke run** (E2, 2026-08-18): CI cannot run the v5.3-gated suites (no data on `ubuntu-latest` — they skip there by design, surfaced via `pytest -q -rs`), so CI green is the FAST gate only. The authoritative real-data verification is the local receipt gate: it runs oracle parity (`test_parity.py` + `test_risk_parity.py`), real-data determinism (`test_benchmark_hierarchy.py`), and the benchmark fast-mode smoke, and writes a machine-checkable receipt (`artifacts/reports/real_data_gate_receipt.json` — commands, exit codes, per-suite pass/fail). A green unit run without a fresh receipt is not sufficient evidence for changes touching data loading, evaluation, scorecards, or the benchmark harness. Surface any pre-existing failures explicitly — never silently exclude them.
 
+**Dataless container gate** (pre-sign-off, 2026-08-20): a local green run cannot see the failure class where tests pass *only because `data/v5.3` exists on disk* — four campaign tests shipped that way and held CI red for days. Before signing off changes that touch data loading, campaign orchestration, or test fixtures, run the suite in the dataless Linux image (Docker Desktop required; build once, ~13.5 GB, reusable):
+
+```bash
+docker build -f scripts/ci_repro.Dockerfile -t ci-repro .
+git archive HEAD | docker run -i --rm ci-repro bash -c "mkdir -p /work && tar x -C /work && cd /work && python -m pytest -q -rs --cov=nmr --cov=dashboard_ui --cov-branch --cov-report=term-missing --cov-report=json"
+```
+
+Expect 964+ passed, ~15 skipped, and zero failures. This also yields CI-faithful coverage totals (dataless) — the numbers the coverage gate's floors must bind to.
+
 **Mutation gate** (do the tests catch bugs, not just visit lines): CI-only by design — mutmut's runner is fork-based and refuses native Windows ("use WSL", issue #397). `.github/workflows/mutation.yml` runs `scripts/mutation_gate.py` weekly + on manual dispatch: mutmut mutates `nmr/evaluation.py`, `nmr/risk.py`, `nmr/_transforms.py`, `nmr/splitter.py` against their bounded test subsets. The first `measure` run writes `artifacts/reports/mutation_receipt.json` and pushes it to `ci/mutation-receipt` for review; merging the receipt into main sets the floors. `gate` runs fail when any module's survivors increase (ratchet down only). Scope caveat, embedded in the receipt: CI skips the 12 data-gated tests, so the floors mean "survivors under the CI-runnable suite" — never comparable to a local number.
 
 ---
