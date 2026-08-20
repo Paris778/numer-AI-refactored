@@ -6,8 +6,9 @@ issue #397) — this gate therefore runs ONLY on Linux CI (mutation.yml, weekly
 
 mutmut 3.x is CONFIG-DRIVEN: `mutmut run` reads a ``[tool.mutmut]`` section
 from ``pyproject.toml`` in the CWD (there is no repo pyproject.toml, so the
-gate writes a scratch one per module with absolute ``source_paths`` and
-absolute test-selection args). Counts come from the machine-readable
+gate writes a scratch one per run with RELATIVE ``source_paths`` and RELATIVE
+test-selection args — absolute paths make mutmut derive the wrong import key
+and abort). Counts come from the machine-readable
 ``mutmut export-cicd-stats`` JSON — never from scraping progress output.
 
 Failure discipline (SEV-1 lesson, 2026-08-20): a mutmut invocation that dies,

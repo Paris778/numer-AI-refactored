@@ -3,11 +3,12 @@ name: mutation-gate
 # NON-GOAL: this job NEVER runs on the push path. Mutation runs take 1-2 h;
 # a weekly cadence + manual dispatch only. Do not promote it onto commits.
 #
-# Flow: a manual `measure` run (or the first-ever run) writes the receipt and
-# pushes it to the ci/mutation-receipt branch as a PR diff; a human reviews
-# the numbers and merges the receipt into main — that merge IS the act of
-# setting the floors. Weekly `gate` runs then compare fresh survivors against
-# the committed receipt and fail on any increase (ratchet down only).
+# Flow: a manual `measure` run (or the first-ever run) writes the receipt,
+# pushes it to the ci/mutation-receipt branch, and opens a PR from that
+# branch; a human reviews the numbers and merges the PR into main — that
+# merge IS the act of setting the floors. Weekly `gate` runs then compare
+# fresh survivors against the committed receipt and fail on any increase
+# (ratchet down only).
 
 on:
   workflow_dispatch:
@@ -23,6 +24,7 @@ on:
 
 permissions:
   contents: write  # the measure run commits the receipt back to ci/mutation-receipt
+  pull-requests: write  # the measure run opens the receipt PR from that branch
 
 jobs:
   mutation:
@@ -58,3 +60,12 @@ jobs:
           git add configs/mutation_receipt.json
           git commit -m "ci: mutation receipt (measure run)" || echo "no receipt change"
           git push origin ci/mutation-receipt --force
+      - name: Open receipt PR for review (measure mode only)
+        if: github.event_name == 'workflow_dispatch' && github.event.inputs.mode == 'measure'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr create --base main --head ci/mutation-receipt \
+            --title "ci: mutation receipt (measure run)" \
+            --body "Mutation gate baseline measured by CI. Review the per-module survivor counts; merging this PR into main sets the floors (ratchet down only). Scope note is embedded in the receipt itself." \
+            || echo "PR already open or unchanged receipt"
