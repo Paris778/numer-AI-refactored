@@ -373,13 +373,19 @@ def generate_fleet_xgb_predictions(
     feature_cols: Sequence[str],
     params: Mapping[str, Any],
     seed: int,
+    neutralization: float = 0.0,
     target_weights: Mapping[str, float] | None = None,
     purge_eras: int = DEFAULT_BENCHMARK_PURGE_ERAS,
     era_col: str = "era",
     id_col: str = "id",
     pred_col: str = "prediction",
 ) -> pl.DataFrame:
-    """Fleet XGBoost: per-target fits, optional early stopping, weighted blend."""
+    """Fleet XGBoost: per-target fits, optional early stopping, weighted blend.
+
+    Optional ``neutralization`` (proportion in (0, 1]) applies the framework
+    ``NeutralizationEngine`` to the final rank-gaussianized blend over all
+    ``feature_cols``.
+    """
     if not targets or not feature_cols:
         raise ValueError("targets and feature_cols must be non-empty")
     weights = dict(target_weights) if target_weights else {}
@@ -468,7 +474,18 @@ def generate_fleet_xgb_predictions(
     gaussianized = Ensembler.rank_normalize(
         blended, pred_cols=[pred_col], era_col=era_col
     )
-    return gaussianized.select([era_col, id_col, pred_col]).sort([era_col, id_col])
+    out = gaussianized.select([era_col, id_col, pred_col]).sort([era_col, id_col])
+    if float(neutralization) > 0.0:
+        neutralizer_cols = list(feature_cols)
+        with_features = out.join(
+            val.select([era_col, id_col, *neutralizer_cols]),
+            on=[era_col, id_col], how="inner",
+        )
+        out = NeutralizationEngine().neutralize(
+            with_features, pred_col=pred_col, feature_cols=neutralizer_cols,
+            era_col=era_col, proportion=float(neutralization),
+        ).select([era_col, id_col, pred_col]).sort([era_col, id_col])
+    return out
 
 
 _VALID_MLP_PARAM_KEYS: tuple[str, ...] = (
@@ -486,12 +503,18 @@ def generate_mlp_predictions(
     feature_cols: Sequence[str],
     params: Mapping[str, Any],
     seed: int,
+    neutralization: float = 0.0,
     purge_eras: int = DEFAULT_BENCHMARK_PURGE_ERAS,
     era_col: str = "era",
     id_col: str = "id",
     pred_col: str = "prediction",
 ) -> pl.DataFrame:
-    """Fleet MLP (sklearn MLPRegressor): standardized features, fixed seed."""
+    """Fleet MLP (sklearn MLPRegressor): standardized features, fixed seed.
+
+    Optional ``neutralization`` (proportion in (0, 1]) applies the framework
+    ``NeutralizationEngine`` to the final rank-gaussianized output over all
+    ``feature_cols``.
+    """
     if not feature_cols:
         raise ValueError("feature_cols must be non-empty")
     unknown = sorted(set(params) - set(_VALID_MLP_PARAM_KEYS))
@@ -529,7 +552,18 @@ def generate_mlp_predictions(
         Ensembler.rank_normalize(frame, pred_cols=[pred_col], era_col=era_col),
         pred_cols=[pred_col], weights=[1.0], era_col=era_col, out_col=pred_col,
     )
-    return blended.select([era_col, id_col, pred_col]).sort([era_col, id_col])
+    out = blended.select([era_col, id_col, pred_col]).sort([era_col, id_col])
+    if float(neutralization) > 0.0:
+        neutralizer_cols = list(feature_cols)
+        with_features = out.join(
+            val.select([era_col, id_col, *neutralizer_cols]),
+            on=[era_col, id_col], how="inner",
+        )
+        out = NeutralizationEngine().neutralize(
+            with_features, pred_col=pred_col, feature_cols=neutralizer_cols,
+            era_col=era_col, proportion=float(neutralization),
+        ).select([era_col, id_col, pred_col]).sort([era_col, id_col])
+    return out
 
 
 def _stack_partitions(
@@ -1088,6 +1122,7 @@ class BenchmarkFleet:
             preds = generate_fleet_xgb_predictions(
                 train, val, targets=list(cell.targets), feature_cols=feature_cols,
                 params=params, seed=cell.seed,
+                neutralization=float(cell.neutralization or 0.0),
                 target_weights=(
                     dict(cell.target_weights) if cell.target_weights else None
                 ),
@@ -1096,6 +1131,7 @@ class BenchmarkFleet:
             preds = generate_mlp_predictions(
                 train, val, target=cell.targets[0], feature_cols=feature_cols,
                 params=params, seed=cell.seed,
+                neutralization=float(cell.neutralization or 0.0),
             )
         else:
             raise ValueError(f"Unsupported fleet model kind: {cell.model_kind!r}")

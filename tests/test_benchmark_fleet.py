@@ -722,3 +722,68 @@ def test_runner_parser_fleet_defaults():
 def test_runner_parser_no_fleet_flag():
     args = _parse_args_with(["--no-fleet"])
     assert args.no_fleet is True
+
+
+def test_fleet_xgb_neutralization_matches_manual_pipeline():
+    train, val = _tiny_train_val()
+    params = {"n_estimators": 10, "max_depth": 2, "learning_rate": 0.1}
+    fleet_out = generate_fleet_xgb_predictions(
+        train, val, targets=["target"], feature_cols=["f1", "f2", "f3"],
+        params=params, seed=42, neutralization=0.5,
+    )
+    raw = generate_fleet_xgb_predictions(
+        train, val, targets=["target"], feature_cols=["f1", "f2", "f3"],
+        params=params, seed=42, neutralization=0.0,
+    )
+    with_features = raw.join(
+        val.select(["era", "id", "f1", "f2", "f3"]), on=["era", "id"], how="inner"
+    )
+    manual = NeutralizationEngine().neutralize(
+        with_features, pred_col="prediction",
+        feature_cols=["f1", "f2", "f3"], era_col="era", proportion=0.5,
+    ).select(["era", "id", "prediction"]).sort(["era", "id"])
+    assert fleet_out.equals(manual)
+
+
+def test_fleet_mlp_neutralization_matches_manual_pipeline():
+    train, val = _tiny_train_val()
+    params = {"hidden_layer_sizes": (8, 4), "max_iter": 30, "batch_size": 4}
+    fleet_out = generate_mlp_predictions(
+        train, val, target="target", feature_cols=["f1", "f2", "f3"],
+        params=params, seed=42, neutralization=0.5,
+    )
+    raw = generate_mlp_predictions(
+        train, val, target="target", feature_cols=["f1", "f2", "f3"],
+        params=params, seed=42, neutralization=0.0,
+    )
+    with_features = raw.join(
+        val.select(["era", "id", "f1", "f2", "f3"]), on=["era", "id"], how="inner"
+    )
+    manual = NeutralizationEngine().neutralize(
+        with_features, pred_col="prediction",
+        feature_cols=["f1", "f2", "f3"], era_col="era", proportion=0.5,
+    ).select(["era", "id", "prediction"]).sort(["era", "id"])
+    assert fleet_out.equals(manual)
+
+
+def test_fleet_xgb_mlp_neutralization_changes_output():
+    train, val = _tiny_train_val()
+    xgb_params = {"n_estimators": 10, "max_depth": 2, "learning_rate": 0.1}
+    mlp_params = {"hidden_layer_sizes": (8, 4), "max_iter": 30, "batch_size": 4}
+    xgb_raw = generate_fleet_xgb_predictions(
+        train, val, targets=["target"], feature_cols=["f1", "f2", "f3"],
+        params=xgb_params, seed=42, neutralization=0.0,
+    )
+    xgb_neu = generate_fleet_xgb_predictions(
+        train, val, targets=["target"], feature_cols=["f1", "f2", "f3"],
+        params=xgb_params, seed=42, neutralization=0.5,
+    )
+    mlp_raw = generate_mlp_predictions(
+        train, val, target="target", feature_cols=["f1", "f2", "f3"],
+        params=mlp_params, seed=42, neutralization=0.0,
+    )
+    mlp_neu = generate_mlp_predictions(
+        train, val, target="target", feature_cols=["f1", "f2", "f3"],
+        params=mlp_params, seed=42, neutralization=0.5,
+    )
+    assert not xgb_raw.equals(xgb_neu) or not mlp_raw.equals(mlp_neu)
