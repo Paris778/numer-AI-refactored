@@ -1,21 +1,21 @@
-from lightgbm import LGBMRegressor
 import gc
 import json
 from pathlib import Path
-import pandas as pd
-import numpy as np
-from tqdm import tqdm
 
+import numpy as np
+import pandas as pd
+from lightgbm import LGBMRegressor
 from numerapi import NumerAPI
+from tqdm import tqdm
 from utils import (
-    save_model,
+    DATA_TYPE_COL,
+    ERA_COL,
+    EXAMPLE_PREDS_COL,
+    TARGET_COL,
     load_model,
     neutralize,
+    save_model,
     validation_metrics,
-    ERA_COL,
-    DATA_TYPE_COL,
-    TARGET_COL,
-    EXAMPLE_PREDS_COL,
 )
 
 # download all the things
@@ -55,7 +55,7 @@ print("Reading minimal training data")
 # read the feature metadata and get a feature set (or all the features)
 
 
-with open(f"{dataset_name}/features.json", "r") as f:
+with open(f"{dataset_name}/features.json") as f:
     feature_metadata = json.load(f)
 
 # features = list(feature_metadata["feature_stats"].keys()) # get all the features
@@ -126,7 +126,8 @@ params = {"n_estimators": 2000,
 #     "colsample_bytree": 0.1,
 # }
 
-# loop through all of our favorite targets and build models on each of them - one over training data, one over all available data
+# loop through all of our favorite targets and build models on each of them -
+# one over training data, one over all available data
 # for the train_data models, we'll then predict on validation data
 # for the all_data models, we'll predict on live
 targets = [
@@ -144,7 +145,7 @@ for target in tqdm(targets):
     print(f"Checking for existing model '{train_data_model_name}'")
     train_model = load_model(train_data_model_name)
     if not train_model:
-        print(f"model not found, creating new one")
+        print("model not found, creating new one")
         train_model = LGBMRegressor(**params)
         # train on all of train and save the model so we don't have to train next time
         target_train_index = (
@@ -168,7 +169,7 @@ for target in tqdm(targets):
     print(f"Checking for existing model '{all_data_model_name}'")
     all_data_model = load_model(all_data_model_name)
     if not all_data_model:
-        print(f"model not found, creating new one")
+        print("model not found, creating new one")
         all_data_model = LGBMRegressor(**params)
         all_data_target_index = (
             all_data.loc[all_index, target].dropna().index
@@ -198,7 +199,7 @@ prediction_cols.append("equal_weight")
 # make a 50% feature neutral variation of the ensemble model
 all_data["half_neutral_equal_weight"] = neutralize(
     df=all_data.loc[validation_index, :],
-    columns=[f"equal_weight"],
+    columns=["equal_weight"],
     neutralizers=features,
     proportion=0.5,
     normalize=True,
@@ -208,7 +209,7 @@ all_data["half_neutral_equal_weight"] = neutralize(
 # do the same for live data
 live_data["half_neutral_equal_weight"] = neutralize(
     df=live_data,
-    columns=[f"equal_weight"],
+    columns=["equal_weight"],
     neutralizers=features,
     proportion=0.5,
     normalize=True,
@@ -218,7 +219,7 @@ live_data["half_neutral_equal_weight"] = neutralize(
 
 prediction_cols.append("half_neutral_equal_weight")
 
-model_to_submit = f"half_neutral_equal_weight"
+model_to_submit = "half_neutral_equal_weight"
 
 # rename best model to "prediction" and rank from 0 to 1 to meet upload requirements
 all_data.loc[validation_index, "prediction"] = all_data.loc[

@@ -1,21 +1,21 @@
+import gc
+from pathlib import Path
+
 import pandas as pd
 from lightgbm import LGBMRegressor
-import gc
 from numerapi import NumerAPI
-from pathlib import Path
 from utils import (
-    save_model,
-    load_model,
-    neutralize,
+    TARGET_COL,
     get_biggest_change_features,
     get_time_series_cross_val_splits,
-    validation_metrics,
+    load_model,
     load_model_config,
+    neutralize,
+    save_model,
     save_model_config,
     save_prediction,
-    TARGET_COL,
+    validation_metrics,
 )
-
 
 EXAMPLE_PREDS_COL = "example_preds"
 ERA_COL = "era"
@@ -214,7 +214,7 @@ if live_data.loc[:, feature_cols].isna().sum().sum():
     total_rows = len(live_data)
     print(f"Number of nans per column this week: {cols_w_nan[cols_w_nan > 0]}")
     print(f"out of {total_rows} total rows")
-    print(f"filling nans with 0.5")
+    print("filling nans with 0.5")
     live_data.loc[:, feature_cols] = live_data.loc[:, feature_cols].fillna(0.5)
 
 else:
@@ -285,8 +285,13 @@ ensemble_cols.add("ensemble_all")
 gc.collect()
 print("getting final validation stats")
 # get our final validation stats for our chosen model
-validation_stats = validation_metrics(validation_data, list(pred_cols)+list(ensemble_cols), example_col=EXAMPLE_PREDS_COL,
-                                      fast_mode=False, target_col=TARGET_COL)
+validation_stats = validation_metrics(
+    validation_data,
+    list(pred_cols) + list(ensemble_cols),
+    example_col=EXAMPLE_PREDS_COL,
+    fast_mode=False,
+    target_col=TARGET_COL,
+)
 print(validation_stats.to_markdown())
 
 # rename best model to prediction and rank from 0 to 1 to meet diagnostic/submission file requirements

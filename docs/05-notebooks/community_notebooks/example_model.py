@@ -1,22 +1,21 @@
-import pandas as pd
-from lightgbm import LGBMRegressor
 import gc
 import json
 from pathlib import Path
 
+import pandas as pd
+from lightgbm import LGBMRegressor
 from numerapi import NumerAPI
 from utils import (
-    save_model,
+    DATA_TYPE_COL,
+    ERA_COL,
+    EXAMPLE_PREDS_COL,
+    TARGET_COL,
+    get_biggest_change_features,
     load_model,
     neutralize,
-    get_biggest_change_features,
+    save_model,
     validation_metrics,
-    ERA_COL,
-    DATA_TYPE_COL,
-    TARGET_COL,
-    EXAMPLE_PREDS_COL
 )
-
 
 # download all the things
 
@@ -37,7 +36,7 @@ napi.download_dataset("v4/features.json")
 
 print('Reading minimal training data')
 # read the feature metadata and get a feature set (or all the features)
-with open("v4/features.json", "r") as f:
+with open("v4/features.json") as f:
     feature_metadata = json.load(f)
 # features = list(feature_metadata["feature_stats"].keys()) # get all the features
 # features = feature_metadata["feature_sets"]["small"] # get the small feature set
@@ -71,11 +70,11 @@ riskiest_features = get_biggest_change_features(all_feature_corrs, 50)
 # "garbage collection" (gc) gets rid of unused data and frees up memory
 gc.collect()
 
-model_name = f"model_target"
+model_name = "model_target"
 print(f"Checking for existing model '{model_name}'")
 model = load_model(model_name)
 if not model:
-    print(f"model not found, creating new one")
+    print("model not found, creating new one")
     params = {"n_estimators": 2000,
               "learning_rate": 0.01,
               "max_depth": 5,
@@ -99,7 +98,7 @@ if nans_per_col.any():
     total_rows = len(live_data[live_data["data_type"] == "live"])
     print(f"Number of nans per column this week: {nans_per_col[nans_per_col > 0]}")
     print(f"out of {total_rows} total rows")
-    print(f"filling nans with 0.5")
+    print("filling nans with 0.5")
     live_data.loc[:, features] = live_data.loc[:, features].fillna(0.5)
 
 else:
@@ -150,7 +149,13 @@ validation_data[EXAMPLE_PREDS_COL] = validation_preds["prediction"]
 
 # get some stats about each of our models to compare...
 # fast_mode=True so that we skip some of the stats that are slower to calculate
-validation_stats = validation_metrics(validation_data, [model_to_submit, f"preds_{model_name}"], example_col=EXAMPLE_PREDS_COL, fast_mode=True, target_col=TARGET_COL)
+validation_stats = validation_metrics(
+    validation_data,
+    [model_to_submit, f"preds_{model_name}"],
+    example_col=EXAMPLE_PREDS_COL,
+    fast_mode=True,
+    target_col=TARGET_COL,
+)
 print(validation_stats[["mean", "sharpe"]].to_markdown())
 
 print(f'''

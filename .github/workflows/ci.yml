@@ -34,11 +34,9 @@ jobs:
         # CONTRIBUTING.md (coverage footgun).
         run: python -m pytest -q -rs --cov=nmr --cov=dashboard_ui --cov-branch --cov-report=term-missing --cov-report=json
       - name: Coverage gate
-        # PROVISIONAL floors (2026-08-19): local full-suite measurement was
-        # global 92.0% / promote.py 99.4% / models.py 97.7%, minus a 0.5pt
-        # calibration margin AND a 2pt provisional CI delta (12 data-gated
-        # tests skip in CI; Linux ctypes branches differ). First CI run on
-        # these floors CONFIRMS or adjusts them by the same arithmetic.
+        # MEASURED floors (2026-08-20, dataless Linux container = CI-equivalent:
+        # global 90.9% / promote.py 98.8% / models.py 93.7% statement), minus
+        # the documented calibration margin (0.5pt global, 1pt per-module).
         # RATCHET: floors only move up — lowering one requires written
         # justification.
-        run: python scripts/coverage_gate.py --global-min 89.5 --module-min "nmr/promote.py:96" --module-min "nmr/models.py:95"
+        run: python scripts/coverage_gate.py --global-min 90.3 --module-min "nmr/promote.py:97.8" --module-min "nmr/models.py:92.6"
