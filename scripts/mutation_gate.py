@@ -17,8 +17,28 @@ measurement that cannot be parsed must never be silently minted into a floor.
 
 The receipt is SOURCE-OF-TRUTH evidence, not a machine artifact: it lives at
 ``configs/mutation_receipt.json`` (committed; NOT under gitignored
-``artifacts/``). CI's measure mode pushes it to ``ci/mutation-receipt`` for
-review; merging that into main is the act of setting the floors.
+``artifacts/``). CI uploads it as an artifact and summarises it in the job
+summary; a HUMAN commits it to main via a normal PR — merging is the act of
+setting the floors (GITHUB_TOKEN cannot push workflow files, so there is no
+bot commit-back).
+
+The receipt records ALL NINE categories mutmut 3.7.0 serializes in
+``export-cicd-stats`` (killed, survived, timeout, total, no_tests, skipped,
+suspicious, check_was_interrupted_by_user, segfault) — never a silent
+four-key subset. ``caught_by_type_check`` and ``not_checked`` exist in
+mutmut's internal model but are NOT written to the JSON, so the gate cannot
+record them.
+
+Timeout semantics (proven 2026-08-21): a wedged child parks in ``pipe_write``
+with zero CPU, so its own RLIMIT_CPU never fires and only the parent's
+wall-clock SIGXCPU reaps it — timeouts are KILLS misclassified by a harness
+defect (fork-after-polars-engine-init), not test-quality signals. Therefore:
+  - the timeout ratio is computed against ADJUDICATED mutants only
+    (killed + survived + timeout); no_tests/skipped/suspicious never produced
+    a verdict and must not dilute it;
+  - the refusal threshold is a HARNESS ALARM, not a quality gate;
+  - the floor ratchets on SURVIVORS ONLY — counting timeouts in the floor
+    yields an unfailable gate (evaluation 6+490=496).
 
 SCOPE (read this before comparing numbers): CI skips the data-gated tests, so
 a mutant that only the real-data parity tests would kill registers as a
@@ -51,10 +71,23 @@ MODULE_TESTS: dict[str, list[str]] = {
 }
 RECEIPT = Path("configs/mutation_receipt.json")
 REPO_ROOT = Path(__file__).resolve().parent.parent
-STATS_KEYS = ("killed", "survived", "total", "timeout")
-# A receipt whose mutants mostly never got a verdict is a measurement of the
-# clock, not of the tests — refuse to record it (same discipline as the
-# zero-mutant raise).
+STATS_KEYS = (
+    "killed",
+    "survived",
+    "timeout",
+    "total",
+    "no_tests",
+    "skipped",
+    "suspicious",
+    "check_was_interrupted_by_user",
+    "segfault",
+)
+# mutmut 3.7.0 serializes exactly these NINE keys in save_cicd_stats. The
+# internal Stat model also carries not_checked and caught_by_type_check, but
+# they are NOT written to the JSON — so the gate cannot see them and must not
+# claim to record them (a documented boundary, not a silent drop).
+# A receipt that cannot see a category can mint a wrong floor, so every
+# serialized key is validated as present (SEV-1 lesson applied to the table).
 MAX_TIMEOUT_RATIO = 0.10
 # Per-module timeout constants, from MEASURED subset durations (dataless
 # Linux container, 2026-08-20): evaluation 5.1s, risk 2.7s, transforms 2.9s,
@@ -157,40 +190,42 @@ def _run_module(module_path: str, test_paths: list[str]) -> dict[str, int]:
                 f"mutmut found ZERO mutants in {module_path} — vacuous "
                 "measurement; refusing to record it"
             )
-        timeout_ratio = stats["timeout"] / stats["total"]
+        # Ratio against ADJUDICATED mutants only (killed + survived + timeout).
+        # no_tests/skipped/suspicious/segfault/interrupted never produced a
+        # verdict — including them dilutes the ratio and lets a wedged harness
+        # hide behind a large unkillable population (the 38-vs-696 gap).
+        adjudicated = stats["killed"] + stats["survived"] + stats["timeout"]
+        timeout_ratio = stats["timeout"] / adjudicated if adjudicated else 0.0
         if timeout_ratio > MAX_TIMEOUT_RATIO:
             raise RuntimeError(
-                f"mutmut timed out {stats['timeout']}/{stats['total']} mutants "
-                f"({timeout_ratio:.0%}) in {module_path} — above the "
+                f"mutmut timed out {stats['timeout']}/{adjudicated} adjudicated "
+                f"mutants ({timeout_ratio:.0%}) in {module_path} — above the "
                 f"{MAX_TIMEOUT_RATIO:.0%} refusal threshold; the numbers would "
                 "measure the clock, not the tests. Re-measure the subset "
                 "duration and raise MODULE_TIMEOUTS (never the ratio)."
             )
-        return {
-            "killed": int(stats["killed"]),
-            "survived": int(stats["survived"]),
-            "timeout": int(stats["timeout"]),
-            "total": int(stats["total"]),
-        }
+        return {key: int(stats[key]) for key in STATS_KEYS}
     finally:
         config_path.unlink(missing_ok=True)
         shutil.rmtree(REPO_ROOT / "mutants", ignore_errors=True)
 
 
 def _compare(previous: dict[str, dict], fresh: dict[str, dict]) -> list[str]:
-    """Ratchet on survived + timeout: a slower runner must not convert
-    survivors into timeouts and silently erode the floor (or vice versa)."""
+    """Ratchet on SURVIVORS only. Timeouts are kills (harness wedge: a wedged
+    child is classified timeout at any budget), so counting them in the floor
+    yields an unfailable gate (6+490=496) — the defect this session proved.
+    The timeout-ratio refusal, not the ratchet, is the harness alarm."""
     failures: list[str] = []
     for module_path, counts in fresh.items():
         prev_counts = previous.get(module_path)
         if prev_counts is None:
             failures.append(f"{module_path}: no committed floor (measure first)")
             continue
-        floor = prev_counts.get("survived", 0) + prev_counts.get("timeout", 0)
-        fresh_sum = counts.get("survived", 0) + counts.get("timeout", 0)
-        if fresh_sum > floor:
+        floor = prev_counts.get("survived", 0)
+        fresh_survived = counts.get("survived", 0)
+        if fresh_survived > floor:
             failures.append(
-                f"{module_path}: survived+timeout {fresh_sum} > floor {floor} "
+                f"{module_path}: survived {fresh_survived} > floor {floor} "
                 "(ratchet down only — raising needs written justification)"
             )
     return failures
@@ -210,18 +245,32 @@ def main(argv: list[str] | None = None) -> int:
         "--targets",
         nargs="*",
         default=None,
-        help="module paths to run (default: all of MODULE_TESTS)",
+        help="module paths to run (default: measure=all, gate=floored modules)",
     )
     args = parser.parse_args(argv)
-
-    targets = args.targets if args.targets is not None else list(MODULE_TESTS)
-    for target in targets:
-        if target not in MODULE_TESTS:
-            raise ValueError(f"unknown target {target!r}; known: {sorted(MODULE_TESTS)}")
 
     previous: dict[str, dict] = {}
     if args.mode == "gate" and RECEIPT.is_file():
         previous = json.loads(RECEIPT.read_text(encoding="utf-8")).get("modules", {})
+
+    if args.targets is not None:
+        targets = list(args.targets)
+    elif args.mode == "gate":
+        # Scope the scheduled gate run to modules that have a committed floor.
+        # Running every module here fails on the unfloored ones ("no committed
+        # floor") and on evaluation.py's wedged timeouts every single week —
+        # a permanently red gate trains people to ignore it. Gate exactly what
+        # is measured; new floors join automatically when their receipt lands.
+        targets = sorted(previous)
+    else:
+        targets = list(MODULE_TESTS)
+    for target in targets:
+        if target not in MODULE_TESTS:
+            raise ValueError(f"unknown target {target!r}; known: {sorted(MODULE_TESTS)}")
+
+    if args.mode == "gate" and not targets:
+        print("mutation gate FAILED: no committed floors to gate (measure first)")
+        return 1
 
     fresh: dict[str, dict] = {}
     for module_path in targets:
@@ -230,15 +279,6 @@ def main(argv: list[str] | None = None) -> int:
         fresh[module_path] = counts
         print(f"  killed={counts['killed']} survived={counts['survived']} "
               f"timeout={counts['timeout']}")
-
-    payload = {
-        "scope_note": SCOPE_NOTE,
-        "mode": args.mode,
-        "modules": fresh,
-    }
-    RECEIPT.parent.mkdir(parents=True, exist_ok=True)
-    RECEIPT.write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
-    print(f"[mutation] receipt written to {RECEIPT}")
 
     summary_lines = [
         f"## mutation gate ({args.mode})",
@@ -252,6 +292,18 @@ def main(argv: list[str] | None = None) -> int:
     _job_summary(summary_lines)
 
     if args.mode == "measure":
+        # Measure mode alone writes the receipt. Gate mode must NEVER rewrite
+        # it: a failing local gate run that overwrites the committed file would
+        # ratchet the floor up silently, manufacturing the exact false-alarm
+        # situation the ratchet rule exists to prevent.
+        payload = {
+            "scope_note": SCOPE_NOTE,
+            "mode": args.mode,
+            "modules": fresh,
+        }
+        RECEIPT.parent.mkdir(parents=True, exist_ok=True)
+        RECEIPT.write_text(json.dumps(payload, sort_keys=True, indent=2), encoding="utf-8")
+        print(f"[mutation] receipt written to {RECEIPT}")
         print("[mutation] measure mode: exit 0; report the numbers before setting floors")
         return 0
 

@@ -1,0 +1,17 @@
+{
+  "mode": "measure",
+  "modules": {
+    "nmr/splitter.py": {
+      "check_was_interrupted_by_user": 0,
+      "killed": 115,
+      "no_tests": 0,
+      "segfault": 0,
+      "skipped": 0,
+      "survived": 31,
+      "suspicious": 0,
+      "timeout": 0,
+      "total": 146
+    }
+  },
+  "scope_note": "floors mean 'survivors under the CI-runnable suite' (data-gated tests skip in CI); NOT comparable to any local measurement"
+}

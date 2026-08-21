@@ -7,9 +7,12 @@ name: mutation-gate
 # artifact, and prints the per-module counts in the job summary. A human
 # downloads the artifact, reviews the numbers, and commits
 # configs/mutation_receipt.json to main via a normal PR — that merge IS the
-# act of setting the floors. Weekly `gate` runs then compare fresh
-# survived+timeout against the committed receipt and fail on any increase
-# (ratchet down only). There is deliberately NO bot commit-back: GITHUB_TOKEN
+# act of setting the floors. Weekly `gate` runs then gate exactly the modules
+# that have a committed floor (gate mode auto-scopes to the receipt; new
+# floors join automatically) and fail on any survivor increase (ratchet down
+# only). Timeouts are kills (fork-after-polars-engine-init harness wedge), so
+# the 10% timeout-ratio refusal is a HARNESS ALARM and the ratchet is
+# survivors-only. There is deliberately NO bot commit-back: GITHUB_TOKEN
 # cannot create branches containing workflow files, and the human review
 # step is mandatory anyway.
 
