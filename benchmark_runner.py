@@ -22,6 +22,8 @@ from nmr.benchmark import (
 from nmr.benchmark_fleet import (
     BenchmarkFleet,
     load_fleet_suite_config,
+    load_tier_rungs_from_csv,
+    select_fleet_cells,
     write_fleet_csv,
 )
 
@@ -64,6 +66,21 @@ def _build_parser() -> argparse.ArgumentParser:
         default=Path("artifacts") / "reports" / "benchmark_fleet_scorecard.csv",
     )
     parser.add_argument("--no-fleet", action="store_true")
+    parser.add_argument(
+        "--only-fleet", action="store_true",
+        help="skip the tiered hierarchy entirely; fleet placement rungs are "
+             "loaded from the last hierarchy scorecard CSV (--rungs-csv). "
+             "Hard gates are skipped in this mode.",
+    )
+    parser.add_argument(
+        "--rungs-csv", type=Path, default=None,
+        help="hierarchy scorecard CSV to source placement rungs from "
+             "(default: --output). Used by --only-fleet.",
+    )
+    parser.add_argument(
+        "--fleet-ids", default="",
+        help="comma-separated fleet benchmark_ids to run (default: all).",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--n-boot", type=_min_one_int, default=1000)
     parser.add_argument("--min-overlap-eras", type=int, default=20)
@@ -93,6 +110,52 @@ def main() -> int:
         datefmt="%H:%M:%S",
     )
     log = logging.getLogger("benchmark_runner")
+
+    if args.no_fleet and args.only_fleet:
+        log.error("--no-fleet and --only-fleet are mutually exclusive")
+        return 1
+    fleet_ids = tuple(
+        part.strip() for part in args.fleet_ids.split(",") if part.strip()
+    )
+
+    if args.only_fleet:
+        try:
+            spec = load_benchmark_suite_config(args.configs)  # gate config only
+            data = load_benchmark_data(args.data_dir)
+            fleet_cells = load_fleet_suite_config(args.fleet_configs)
+            fleet_cells = select_fleet_cells(fleet_cells, fleet_ids)
+            rungs_path = args.rungs_csv or args.output
+            rungs = load_tier_rungs_from_csv(rungs_path)
+            fleet = BenchmarkFleet(
+                spec=fleet_cells,
+                data=data,
+                seed=args.seed,
+                horizon=args.horizon,
+                n_boot=1 if args.fast_mode else args.n_boot,
+                min_overlap_eras=args.min_overlap_eras,
+                fast_mode=args.fast_mode,
+            )
+        except (ValueError, FileNotFoundError) as exc:
+            log.error("FLEET FAILURE: %s", exc)
+            return 1
+        t0 = time.perf_counter()
+        log.info(
+            "Running %d fleet cells (only-fleet; rungs from %s)%s",
+            len(fleet_cells), rungs_path,
+            " (fast mode)" if args.fast_mode else "",
+        )
+        fleet_result = fleet.run(tier_rungs=rungs, gate=spec.gate)
+        log.info("Fleet scored in %.1fs", time.perf_counter() - t0)
+        write_fleet_csv(fleet_result, args.fleet_output)
+        log.info("Fleet scorecard written to %s", args.fleet_output)
+        for mid in fleet_result.scorecards:
+            log.info(
+                "fleet %s: placement=%s selection_bias=%s",
+                mid, fleet_result.placements[mid],
+                fleet_result.selection_bias[mid],
+            )
+        log.info("Hard gates skipped in --only-fleet mode (no live hierarchy).")
+        return 0
 
     log.info("Loading benchmark suite config from %s", args.configs)
     spec = load_benchmark_suite_config(args.configs)
@@ -135,7 +198,9 @@ def main() -> int:
 
     if not args.no_fleet:
         try:
-            fleet_cells = load_fleet_suite_config(args.fleet_configs)
+            fleet_cells = select_fleet_cells(
+                load_fleet_suite_config(args.fleet_configs), fleet_ids
+            )
         except ValueError as exc:
             log.error("FLEET CONFIG FAILURE: %s", exc)
             return 1

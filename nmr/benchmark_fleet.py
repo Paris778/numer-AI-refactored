@@ -63,6 +63,8 @@ __all__ = [
     "generate_ridge_stack_predictions",
     "load_fleet_config",
     "load_fleet_suite_config",
+    "load_tier_rungs_from_csv",
+    "select_fleet_cells",
     "write_fleet_csv",
 ]
 
@@ -1199,6 +1201,38 @@ class BenchmarkFleet:
             gate_verdicts=gate_verdicts,
             selection_bias=selection_bias,
         )
+
+
+def load_tier_rungs_from_csv(path: str | Path) -> dict[int, float]:
+    """Per-tier max mean-CORR rungs from a hierarchy scorecard CSV.
+
+    ``benchmark_runner.py --only-fleet`` sources placement rungs from the
+    last completed hierarchy run instead of a live one.
+    """
+    frame = pl.read_csv(Path(path))
+    for col in ("tier", "corr"):
+        if col not in frame.columns:
+            raise ValueError(f"hierarchy scorecard CSV missing column: {col!r}")
+    rungs: dict[int, float] = {}
+    tiers = sorted(frame.get_column("tier").unique().to_list())
+    for tier in tiers:
+        rungs[int(tier)] = float(
+            frame.filter(pl.col("tier") == tier).get_column("corr").max()
+        )
+    return rungs
+
+
+def select_fleet_cells(
+    cells: tuple[FleetCellConfig, ...], requested: tuple[str, ...]
+) -> tuple[FleetCellConfig, ...]:
+    """Filter fleet cells by benchmark_id; unknown ids raise (fail loud)."""
+    if not requested:
+        return cells
+    by_id = {cell.benchmark_id: cell for cell in cells}
+    unknown = sorted(set(requested) - set(by_id))
+    if unknown:
+        raise ValueError(f"unknown fleet ids: {unknown}")
+    return tuple(by_id[cell_id] for cell_id in requested)
 
 
 def fleet_frame(result: FleetResult) -> pl.DataFrame:

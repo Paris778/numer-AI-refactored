@@ -30,6 +30,8 @@ from nmr.benchmark_fleet import (
     generate_ridge_stack_predictions,
     load_fleet_config,
     load_fleet_suite_config,
+    load_tier_rungs_from_csv,
+    select_fleet_cells,
     write_fleet_csv,
 )
 from nmr.risk import NeutralizationEngine
@@ -787,3 +789,49 @@ def test_fleet_xgb_mlp_neutralization_changes_output():
         params=mlp_params, seed=42, neutralization=0.5,
     )
     assert not xgb_raw.equals(xgb_neu) or not mlp_raw.equals(mlp_neu)
+
+
+# --- Runner composability: rungs-from-CSV + cell selection ---
+
+
+def test_load_tier_rungs_from_csv_takes_per_tier_max(tmp_path):
+    csv = tmp_path / "h.csv"
+    pl.DataFrame({
+        "model_id": ["a", "b", "c", "d"],
+        "tier": [0, 0, 1, 3],
+        "corr": [0.001, 0.003, 0.005, 0.009],
+        "strategy_group": ["tier0", "tier0", "tier1", "tier3"],
+    }).write_csv(csv)
+    rungs = load_tier_rungs_from_csv(csv)
+    assert rungs == {0: 0.003, 1: 0.005, 3: 0.009}
+
+
+def test_load_tier_rungs_from_csv_rejects_missing_columns(tmp_path):
+    csv = tmp_path / "h.csv"
+    pl.DataFrame({"model_id": ["a"], "corr": [0.1]}).write_csv(csv)
+    with pytest.raises(ValueError, match="tier"):
+        load_tier_rungs_from_csv(csv)
+
+
+def test_select_fleet_cells_filters_and_rejects_unknown():
+    a = FleetCellConfig(
+        benchmark_id="a", source="s", input_space="none",
+        model_kind="target_lag_mean", targets=("target",), params={"window": 1},
+    )
+    b = FleetCellConfig(
+        benchmark_id="b", source="s", input_space="none",
+        model_kind="target_lag_mean", targets=("target",), params={"window": 1},
+    )
+    out = select_fleet_cells((a, b), ("b",))
+    assert [c.benchmark_id for c in out] == ["b"]
+    assert select_fleet_cells((a, b), ()) == (a, b)
+    with pytest.raises(ValueError, match="unknown fleet ids"):
+        select_fleet_cells((a, b), ("b", "zzz"))
+
+
+def test_runner_parser_only_fleet_and_ids():
+    args = _parse_args_with(["--only-fleet", "--fleet-ids", "a,b"])
+    assert args.only_fleet is True
+    assert args.fleet_ids == "a,b"
+    assert args.rungs_csv is None  # resolved to --output in main()
+    assert args.no_fleet is False

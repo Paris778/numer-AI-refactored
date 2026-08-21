@@ -76,6 +76,8 @@ from .benchmark_fleet import (
     generate_ridge_stack_predictions,
     load_fleet_config,
     load_fleet_suite_config,
+    load_tier_rungs_from_csv,
+    select_fleet_cells,
     write_fleet_csv,
 )
 from .campaign import (
@@ -332,6 +334,8 @@ __all__ = [
     "generate_ridge_stack_predictions",
     "load_fleet_config",
     "load_fleet_suite_config",
+    "load_tier_rungs_from_csv",
+    "select_fleet_cells",
     "write_fleet_csv",
     "CampaignConfig",
     "CampaignRun",
