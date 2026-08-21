@@ -1,8 +1,8 @@
 # AGENTS.md — numer-AI-refactored (`nmr`)
 
-> **Purpose:** Defines AI agent identity, engineering principles, architectural invariants, verification gates, and operational hazards for the `nmr` Numerai quantitative research framework. Detailed component reference (formulas, schemas, artifact layouts) lives in [`ARCHITECTURE.md`](ARCHITECTURE.md). Setup instructions live in [`README.md`](README.md). Contribution workflow lives in [`CONTRIBUTING.md`](CONTRIBUTING.md).
+> **Purpose:** Defines AI agent identity, engineering principles, architectural invariants, verification gates, and operational hazards for the `nmr` Numerai quantitative research framework. Detailed component reference (formulas, schemas, artifact layouts) lives in [`ARCHITECTURE.md`](ARCHITECTURE.md). Setup instructions in [`README.md`](README.md); contribution workflow in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
-> 🚨 **Self-Update Directive (Mandatory):** When you modify any module, function signature, constant, artifact schema, or convention described in this document or its siblings, update the corresponding section **in the same commit**. Drift between these documents and the codebase is a critical bug — treat it like a failing test.
+> 🚨 **Self-Update Directive (Mandatory):** When you modify any module, function signature, constant, artifact schema, or convention described in this document or its siblings, update the corresponding section **in the same commit**. Doc/code drift is a critical bug — treat it like a failing test.
 
 ---
 
@@ -30,7 +30,7 @@ These four files obey a strict **Single Source of Truth (SSOT) hierarchy**. One 
 
 ## 1. Agent Identity & Mission
 
-You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (994 tests, sole functional gate) + `ruff check` (lint gate, `ruff.toml` E/F/I/UP @120, pinned in `requirements-dev.txt`). Both enforced by CI (`.github/workflows/ci.yml`).
+You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (1007 tests, sole functional gate) + `ruff check` (lint gate, `ruff.toml` E/F/I/UP @120, pinned in `requirements-dev.txt`). Both enforced by CI (`.github/workflows/ci.yml`).
 
 Your mission:
 
@@ -79,7 +79,7 @@ If a request violates any of these, **decline the violating component** and offe
 - 🚫 **Never** include wall-clock timings, absolute paths, or environment-variable state in canonical hashes.
 - 🚫 **Never** import from or modify `../numer-AI/` (read-only legacy — mine it for logic, never import it).
 - 🚫 **Never** introduce unrelated refactoring, cosmetic tweaks, or scope creep.
-- 🚫 **Never** add third-party dependencies when the stdlib, NumPy/SciPy, or Polars can do the job. **User-granted exceptions (all pinned in `requirements.txt`):** Optuna (HPO — imported only in `nmr/opt.py`; parallel trial execution forbidden, `n_jobs=1`); CatBoost (model backend — imported only in `nmr/models.py`; CPU-only, §G); Streamlit (interactive dashboard — imported only in `dashboard_ui/app.py` and its thin entry wrapper `dashboard_app.py`; never in `nmr/`; the static executive report is a zero-dependency vanilla HTML/CSS/SVG compiler in `dashboard_ui/` (`report.py` + `static/`), no charting library); cupy + NVIDIA runtime wheels (analysis rankdata — imported only in `nmr/_gpu.py`; optional at runtime, automatic scipy fallback; §8). All direct dependencies are exact-pinned in `requirements.txt`; upgrading a pin is a deliberate act (see `CONTRIBUTING.md`).
+- 🚫 **Never** add third-party dependencies when the stdlib, NumPy/SciPy, or Polars can do the job. **User-granted exceptions (all pinned in `requirements.txt`):** Optuna (HPO — only in `nmr/opt.py`; parallel trials forbidden, `n_jobs=1`); CatBoost (model backend — only in `nmr/models.py`; CPU-only, §G); Streamlit (interactive dashboard — only in `dashboard_ui/app.py` + thin wrapper `dashboard_app.py`; never in `nmr/`; the static executive report is a zero-dependency vanilla HTML/CSS/SVG compiler in `dashboard_ui/` (`report.py` + `static/`), no charting library); cupy + NVIDIA runtime wheels (analysis rankdata — only in `nmr/_gpu.py`; optional at runtime, automatic scipy fallback; §8). All direct dependencies are exact-pinned in `requirements.txt`; upgrading a pin is a deliberate act (see `CONTRIBUTING.md`).
 - 🚫 **Never** suppress or silently swallow exceptions.
 
 ---
@@ -118,69 +118,69 @@ When modifying or generating code, enforce these seven invariants:
 
 `nmr/runner.py` is the **hub** — start there to understand end-to-end flow; see [`ARCHITECTURE.md`](ARCHITECTURE.md) §3 for the full dependency graph.
 
-| If you need to... | Look in... |
+| Task | Look in... |
 |---|---|
-| Change config schema / valid values | `nmr/config.py` — frozen dataclasses, `load_config`, `VALID_*` tuples |
-| Change data loading / feature sets | `nmr/data.py` — `IngestionAgent` (lazy Polars, `features.json`) |
-| Change feature-set resolution / stability screening | `nmr/features.py` — `resolve_feature_sets`, `feature_stability_screen`, `select_stable_features` (spec: `ARCHITECTURE.md` §P) |
-| Change fold construction / purge math | `nmr/splitter.py` — `PurgedEraSplitter` |
-| Change a metric formula | `nmr/evaluation.py` + `nmr/_transforms.py`; update parity test in `tests/test_parity.py` |
-| Change neutralization / its cache | `nmr/risk.py` — `NeutralizationEngine` |
-| Change model backends / presets | `nmr/models.py` — `ModelOrchestrator`, `_CANONICAL_PRESETS` |
-| Change ensembling / weight learning | `nmr/ensemble.py` — `Ensembler` |
-| Change the end-to-end pipeline | `nmr/runner.py` — `ExperimentRunner.run()` stage order |
-| Change run storage / promotion | `nmr/registry.py` — `RunRegistry`, `champion.json` |
-| Change submission build/validation | `nmr/submission.py` |
-| Change deployment artifact format | `nmr/deployment.py` — `serialize_predict` / `load_predict` |
-| Change statistical machinery (bootstrap, DSR) | `nmr/inference.py` |
-| Change cross-run meta-analysis / promotion verdicts | `nmr/meta.py` — `paired_era_comparison`, `promotion_verdict`, `fleet_summary`, `campaign_evidence` (spec: `ARCHITECTURE.md` §Q) |
-| Change payout proxy / downside metrics | `nmr/payout.py` |
-| Change scorecard fields / evaluation flow | `nmr/scorecard.py` — `MetricScorecard`, `evaluate_model` |
-| Change HPO sweeps / neutralization frontier | `nmr/research.py` |
-| Change HPO search strategy | `nmr/opt.py` — `bayesian_sweep` (Optuna, user-granted dep) |
-| Run the mutation gate | `scripts/mutation_gate.py` (CI-only; mutmut refuses Windows) |
-| Change perturbation/horizon/regime diagnostics | `nmr/robustness.py` |
-| Change the benchmark hierarchy (cells, gates, thresholds) | `nmr/benchmark.py` + `configs/benchmarks/` + `benchmark_runner.py` |
-| Change the untiered benchmark fleet (configs, generators, runner) | `nmr/benchmark_fleet.py` + `configs/benchmarks/fleet/` (spec: `docs/superpowers/specs/2026-08-19-benchmark-fleet-design.md`) |
-| Change the executive dashboard data engine (leaderboard, gate projection, capital recompute, payout timeseries) | `nmr/dashboard.py` + the `dashboard_ui/` package (`charts.py`, `report.py`, `app.py`; thin wrappers `generate_dashboard.py` / `dashboard_app.py`) (spec: `docs/superpowers/specs/2026-08-18-vanilla-dashboard-design.md`) |
-| Change model-family / full-version discovery | `nmr/families.py` — read-only scan of `artifacts/models/<family>/full/<run_id>/manifest.json` + atomic `current.json` pointer (spec: `ARCHITECTURE.md` Model Families section) |
+| config schema / valid values | `nmr/config.py` — frozen dataclasses, `load_config`, `VALID_*` tuples |
+| data loading / feature sets | `nmr/data.py` — `IngestionAgent` (lazy Polars, `features.json`) |
+| feature-set resolution / stability screening | `nmr/features.py` — `resolve_feature_sets`, `feature_stability_screen`, `select_stable_features` (spec: `ARCHITECTURE.md` §P) |
+| fold construction / purge math | `nmr/splitter.py` — `PurgedEraSplitter` |
+| Metric formula | `nmr/evaluation.py` + `nmr/_transforms.py`; update parity test in `tests/test_parity.py` |
+| neutralization / its cache | `nmr/risk.py` — `NeutralizationEngine` |
+| model backends / presets | `nmr/models.py` — `ModelOrchestrator`, `_CANONICAL_PRESETS` |
+| ensembling / weight learning | `nmr/ensemble.py` — `Ensembler` |
+| End-to-end pipeline | `nmr/runner.py` — `ExperimentRunner.run()` stage order |
+| run storage / promotion | `nmr/registry.py` — `RunRegistry`, `champion.json` |
+| submission build/validation | `nmr/submission.py` |
+| deployment artifact format | `nmr/deployment.py` — `serialize_predict` / `load_predict` |
+| statistical machinery (bootstrap, DSR) | `nmr/inference.py` |
+| cross-run meta-analysis / promotion verdicts | `nmr/meta.py` — `paired_era_comparison`, `promotion_verdict`, `fleet_summary`, `campaign_evidence` (spec: `ARCHITECTURE.md` §Q) |
+| payout proxy / downside metrics | `nmr/payout.py` |
+| scorecard fields / evaluation flow | `nmr/scorecard.py` — `MetricScorecard`, `evaluate_model` |
+| HPO sweeps / neutralization frontier | `nmr/research.py` |
+| HPO search strategy | `nmr/opt.py` — `bayesian_sweep` (Optuna, user-granted dep) |
+| Mutation gate | `scripts/mutation_gate.py` (CI-only; mutmut refuses Windows) |
+| perturbation/horizon/regime diagnostics | `nmr/robustness.py` |
+| Benchmark hierarchy (cells, gates, thresholds) | `nmr/benchmark.py` + `configs/benchmarks/` + `benchmark_runner.py` |
+| Untiered benchmark fleet (configs, generators, runner) | `nmr/benchmark_fleet.py` + `configs/benchmarks/fleet/` (spec: `docs/superpowers/specs/2026-08-19-benchmark-fleet-design.md`) |
+| Executive dashboard data engine (leaderboard, gate projection, capital recompute, payout timeseries) | `nmr/dashboard.py` + the `dashboard_ui/` package (`charts.py`, `report.py`, `app.py`; thin wrappers `generate_dashboard.py` / `dashboard_app.py`) (spec: `docs/superpowers/specs/2026-08-18-vanilla-dashboard-design.md`) |
+| model-family / full-version discovery | `nmr/families.py` — read-only scan of `artifacts/models/<family>/full/<run_id>/manifest.json` + atomic `current.json` pointer (spec: `ARCHITECTURE.md` Model Families section) |
 | Promote a run to a full version (train+validation, Model Uploads `predict.pkl`) | `nmr/promote.py` (`promote_full_version`, `rehearse_promotion`) + `promote_model.py` / `rehearse_promotion.py` CLIs; acceptance gate `nmr/submission.py::accept_promoted_artifact` (raw output vs the official validator) |
-| Change campaign orchestration | `nmr/campaign.py` + `run_campaign.py` (spec: `ARCHITECTURE.md` §R) |
+| campaign orchestration | `nmr/campaign.py` + `run_campaign.py` (spec: `ARCHITECTURE.md` §R) |
 | Inspect runs / campaigns interactively | `dashboard_ui/app.py` (thin wrapper `dashboard_app.py`) — `streamlit run` (read-only) |
 | Analyze the dataset / run one analysis stage | `analyze_dataset.py` — modular stages, `--only`/`--skip` (deps auto-included), progress markers (stage registry: `ARCHITECTURE.md` §O) |
 | Discover hardware / check live resource status | `nmr/hardware.py` + `hardware_status.py` (stdlib only: nvidia-smi + ctypes) |
-| Run a research protocol (feature campaign / HPO / meta-analysis / QA gate) | `.kimi-code/skills/` — `feature-campaign`, `hpo-narrowing`, `run-meta-analysis`, `verification-before-claim` (map: `ARCHITECTURE.md` §T) |
+| Research protocol (feature campaign / HPO / meta-analysis / QA gate) | `.kimi-code/skills/` — `feature-campaign`, `hpo-narrowing`, `run-meta-analysis`, `verification-before-claim` (map: `ARCHITECTURE.md` §T) |
 | Add/remove a public API symbol | `nmr/__init__.py` — imports **and** `__all__` |
 | Understand tournament rules & scoring | `docs/DOCS_README.md` → `docs/01-canon/` (canonical laws) |
 | Understand how models are judged | `docs/06-evaluation/evaluation-suite-bible.md` (evaluation spec of record) |
 
 ### Knowledge base map (docs/)
 
-The `docs/` tree is a curated Numerai domain library; `docs/DOCS_README.md` is its master map (importance tiers, per-file table, reading recipes). Task-oriented pointers into it:
+The `docs/` tree is a curated Numerai domain library; `docs/DOCS_README.md` is its master map (importance tiers, per-file table, reading recipes). Task-oriented pointers:
 
-| When you... | Read first |
+| Task | Read first |
 |---|---|
-| Touch CORR / MMC / FNC / BMC metric formulas | `docs/01-canon/scoring/00-definitions.md` → `docs/01-canon/scoring/01-correlation.md` / `02-mmc-bmc.md` / `03-fnc.md` |
-| Change neutralization | `docs/01-canon/models.md` (official `neutralize()` code) + `docs/05-notebooks/2_feature_neutralization.ipynb` |
-| Change ensembling | `docs/02-strategy/target-ensembling-math.md` + `docs/05-notebooks/3_target_ensemble.ipynb` |
-| Change the payout proxy | `docs/01-canon/staking.md` (0.75/2.25 weights, ±5% clip, stake thresholds) |
-| Change model presets / params | `docs/01-canon/models.md` (benchmark walk-forward conventions; standard/deep params) |
-| Touch submission or deployment | `docs/01-canon/submissions.md` + `docs/02-strategy/strategy-bible.md` §8 (deployment contract) |
-| Change benchmark gates | `docs/06-evaluation/benchmark-line-in-the-sand.md` (5-tier hierarchy: tiers 0–4, hard gates) |
-| Change evaluation semantics | `docs/06-evaluation/evaluation-suite-bible.md` (evaluation spec of record) |
-| Use `numerapi` / `numerai_tools` | `docs/03-reference/numerapi.md` + `docs/03-reference/numerai-tools.md`; the installed source is the ultimate oracle (see below) |
-| Refresh the Numerai datasets / era ledger | `nmr/refresh.py` + `refresh_data.py` |
-| Plan research work | `docs/04-research/research-program.md` (E0–E8 grid), `docs/04-research/advanced-ideas.md` (ideas incl. NN directions), `docs/04-research/State-of-the-Art Deep Learning for Obfuscated, Non-Stationary Tabular Regression.md` (tabular-DL survey) |
-| Seek domain intuition | `docs/02-strategy/strategy-bible.md` + `docs/02-strategy/why-it-works.md` |
-| Design/train a model — start here | `docs/04-research/pre-modelling-dataset-feature-study-2026-08.md` — the **golden pre-modelling document (single source of truth)**: dataset diagnostics (§1–6), feature-campaign evidence (§7: 12 cells × 2 backends, full 649-era validation window, CIs + FNE), decision log + hardware ceilings (§8), methodology & reproduction (§9), file/artifact map with pointers to every result number (§10) |
+| CORR / MMC / FNC / BMC metric formulas | `docs/01-canon/scoring/00-definitions.md` → `docs/01-canon/scoring/01-correlation.md` / `02-mmc-bmc.md` / `03-fnc.md` |
+| neutralization | `docs/01-canon/models.md` (official `neutralize()` code) + `docs/05-notebooks/2_feature_neutralization.ipynb` |
+| ensembling | `docs/02-strategy/target-ensembling-math.md` + `docs/05-notebooks/3_target_ensemble.ipynb` |
+| Payout proxy | `docs/01-canon/staking.md` (0.75/2.25 weights, ±5% clip, stake thresholds) |
+| model presets / params | `docs/01-canon/models.md` (benchmark walk-forward conventions; standard/deep params) |
+| submission or deployment | `docs/01-canon/submissions.md` + `docs/02-strategy/strategy-bible.md` §8 (deployment contract) |
+| benchmark gates | `docs/06-evaluation/benchmark-line-in-the-sand.md` (5-tier hierarchy: tiers 0–4, hard gates) |
+| evaluation semantics | `docs/06-evaluation/evaluation-suite-bible.md` (evaluation spec of record) |
+| `numerapi` / `numerai_tools` | `docs/03-reference/numerapi.md` + `docs/03-reference/numerai-tools.md`; the installed source is the ultimate oracle (see below) |
+| Numerai datasets / era ledger | `nmr/refresh.py` + `refresh_data.py` |
+| Research planning | `docs/04-research/research-program.md` (E0–E8 grid), `docs/04-research/advanced-ideas.md` (ideas incl. NN directions), `docs/04-research/State-of-the-Art Deep Learning for Obfuscated, Non-Stationary Tabular Regression.md` (tabular-DL survey) |
+| Domain intuition | `docs/02-strategy/strategy-bible.md` + `docs/02-strategy/why-it-works.md` |
+| Model design/training — start here | `docs/04-research/pre-modelling-dataset-feature-study-2026-08.md` — the **golden pre-modelling document (single source of truth)**: dataset diagnostics (§1–6), feature-campaign evidence (§7: 12 cells × 2 backends, full 649-era validation window, CIs + FNE), decision log + hardware ceilings (§8), methodology & reproduction (§9), file/artifact map with pointers to every result number (§10) |
 
-Start with the agent reading order in `docs/DOCS_README.md` §1; the 15-minute version is §2–§3.
+Start with the agent reading order in `docs/DOCS_README.md` §1 (15-minute version: §2–§3).
 
 Never invent a `numerai_tools` / `numerapi` signature — open the installed source: `.venv/Lib/site-packages/numerai_tools/scoring.py` (the parity oracle), `numerai_tools/submissions.py` (submission contract), `numerapi/base_api.py` (live API). Versions pinned in `requirements.txt` (numerai-tools 0.5.3, numerapi 2.22.0).
 
 **First-session orientation (10 minutes):**
 
-1. Run the fast gate ([Verification Gates](#7-verification-gates)) — establish the green baseline (the test count is CI-enforced against this file's claims).
+1. Run the fast gate ([Verification Gates](#7-verification-gates)) — establish the green baseline (test count is CI-enforced against this file's claims).
 2. `nmr/__init__.py` — the public API surface (imports + `__all__`); nothing outside it is public.
 3. `configs/first_model.yaml` — the current competitive config; `configs/example.yaml` — annotated schema.
 4. `ARCHITECTURE.md` §1 (pipeline diagram) and §3 (module dependency graph) — the system map.
@@ -197,8 +197,8 @@ Four gates, in order of rigor — **exact commands live only in [`CONTRIBUTING.m
 
 1. **Fast gate** — `ruff check .` + full `pytest -q` after every meaningful change.
 2. **Targeted subsets** while iterating — oracle parity (`tests/test_parity.py` + `tests/test_risk_parity.py`) and determinism hashes (`tests/test_benchmark_hierarchy.py`).
-3. **Pre-sign-off gate** (mandatory before delivering work) — full 994-test suite plus the real-data benchmark smoke (`benchmark_runner.py --fast-mode` → `artifacts/reports/benchmark_hierarchy_scorecard_smoke.csv` + `benchmark_gate_report_smoke.csv`).
-4. **End-of-session gate (mandatory)** — after finishing a coding session (before stopping or handing off for review), run the linter and functional gate on the final state: `ruff check .` + `pytest -q`. Never end a session with unverified changes; report the actual results, including any skips or pre-existing failures.
+3. **Pre-sign-off gate** (mandatory before delivering work) — full 1007-test suite plus the real-data benchmark smoke (`benchmark_runner.py --fast-mode` → `artifacts/reports/benchmark_hierarchy_scorecard_smoke.csv` + `benchmark_gate_report_smoke.csv`).
+4. **End-of-session gate (mandatory)** — before stopping or handing off for review, run the linter and functional gate on the final state: `ruff check .` + `pytest -q`. Never end a session with unverified changes; report actual results, including skips or pre-existing failures.
 
 Real-data tests require the `data/v5.3/` parquet assets (see [`README.md`](README.md#data-assets)). If they are missing, report which tests were skipped — never claim full verification. CI (`.github/workflows/ci.yml`) enforces the fast gate on every push/PR (see [`CONTRIBUTING.md`](CONTRIBUTING.md#testing--verification)).
 </verification_gates>
@@ -214,29 +214,29 @@ These are real, verified issues — do not "fix" them silently as a side effect.
 `MetricScorecard.metric_timing_seconds` and `timing_*` / `quality_metric_*_seconds` columns capture wall-clock durations that differ across processes. `canonical_scorecards_bytes()` deliberately strips them. Any new instrumentation field must also be excluded from canonical serialization, or cross-process determinism tests (`tests/test_benchmark_hierarchy.py`, `tests/test_scorecard.py`) will fail non-deterministically.
 
 ### Benchmark parquet gap in early train eras
-`train_benchmark_models.parquet` has **no rows for the first ~30 train eras** — early-era BMC/benchmark-corr checks produce empty joins. The hierarchy reads `validation_benchmark_models.parquet` only (tier-4); tiers 1–3 fit their own models (detail: `ARCHITECTURE.md` Known Gaps).
+`train_benchmark_models.parquet` has **no rows for the first ~30 train eras** — early-era BMC/benchmark-corr checks produce empty joins. The hierarchy reads `validation_benchmark_models.parquet` only (tier-4); tiers 1–3 fit their own models (`ARCHITECTURE.md` Known Gaps).
 
 ### Benchmark hierarchy runtime
 Full hierarchy runs are multi-hour (medium tree fits on ~2.1M train rows). Use `--fast-mode` for smoke; the FNE gate is FNC@medium per the feature-universe policy.
 
 ### Fleet deep-cell runtime & selection bias (2026-08-19)
-Fleet deep cells (20k/30k-tree LightGBM fits on ~2.1M train rows) are multi-hour CPU jobs; a full 19-cell fleet run is tens of CPU-hours across waves — use `nohup` + log polling; fast-mode overrides keep the smoke gate minutes-scale. `fa_v151_ridge_ensemble` is **selection-biased by design** (candidate selection uses validation, as the notebook did) — its scorecard row carries `selection_bias: true`; never compare it naively against unbiased cells. Fleet results never participate in the hard gates.
+Fleet deep cells (20k/30k-tree LightGBM fits on ~2.1M train rows) are multi-hour CPU jobs; a full 19-cell fleet run is tens of CPU-hours across waves — use `nohup` + log polling; fast-mode keeps the smoke gate minutes-scale. `fa_v151_ridge_ensemble` is **selection-biased by design** (candidate selection uses validation, as the notebook did) — its scorecard row carries `selection_bias: true`; never compare it naively against unbiased cells. Fleet results never participate in the hard gates.
 
 ### Era-overlap-before-limit rule for real-data fixtures
 Build real v5.3 scorecard payloads from **overlap eras first** (join/filter by shared eras across validation/meta/benchmarks), then limit/window — limiting first produces flaky fixtures. `NonVacuityError` fires when overlap < `MIN_OVERLAP_ERAS` (20).
 
 ### GPU & runtime state (updated 2026-08-09)
-`ModelOrchestrator` is GPU-first with CPU fallback for CV (device params: `ARCHITECTURE.md` §G). A failed device attempt is logged; the run manifest records the config device as `pipeline_device` and the actual fit device as `oof_device`. `model.device` (`auto|gpu|cpu`, default `auto`) is the knob for CV/experimentation: `gpu` forces the GPU candidate (a failure raises — no silent fallback), `cpu` never attempts it. `train_full_history` is always CPU (deploy artifact invariant). Determinism holds per-device, not across devices — numeric results may differ slightly between GPU and CPU runs.
-- **xgboost ≥ 3.0 (fixed 2026-08-09):** the old GPU-first params were silently falling back to CPU on every fit; CUDA now actually engages (measured: `ARCHITECTURE.md` §U).
+`ModelOrchestrator` is GPU-first with CPU fallback for CV (device params: `ARCHITECTURE.md` §G). A failed device attempt is logged; the run manifest records the config device as `pipeline_device` and the actual fit device as `oof_device`. `model.device` (`auto|gpu|cpu`, default `auto`) is the knob for CV/experimentation: `gpu` forces the GPU candidate (a failure raises — no silent fallback), `cpu` never attempts it. `train_full_history` is always CPU (deploy artifact invariant). Determinism holds per-device, not across devices — GPU and CPU results may differ slightly.
+- **xgboost ≥ 3.0 (fixed 2026-08-09):** the old GPU-first params silently fell back to CPU on every fit; CUDA now actually engages (measured: `ARCHITECTURE.md` §U).
 - **cupy (user-granted, pinned in `requirements.txt`):** `nmr/_gpu.py` provides `rankdata` — lazy load, bit-identical to scipy on finite data, automatic fallback (measurements: `ARCHITECTURE.md` §U). Rules: never import cupy into `nmr/_transforms` (embedded by value in deploy artifacts — must stay numpy/scipy-only); `_gpu.rankdata` isolates NaN instead of scipy's all-NaN propagation (`nan_policy='propagate'`) — v5.3 features have zero NaN so both paths agree.
-- **Windows pip pitfall:** `./.venv/Scripts/pip` is a shim into the legacy `../numer-AI/.venv` — always `./.venv/Scripts/python -m pip`. The venv is shared with the legacy repo; never install there via the shim (see CONTRIBUTING.md).
-- **Long jobs:** background tasks die when the session closes — for multi-hour runs use `nohup ./.venv/Scripts/python <script> > <log> 2>&1 &` and poll the log (stage markers + era ticks make progress visible). **This laptop enters Modern Standby overnight (2026-08-21: ender fold 3 lost ~9.4 h)** — `powercfg /change standby-timeout-ac 0` + `hibernate-timeout-ac 0` applied; if wall ≫ fit time, check Kernel-Power 506/507 events first.
-- **Analysis runtime:** full-universe (`--features all`) analysis is ~4–5 h, dominated by the three 3,555-feature streaming passes (ic_by_era + 2 screens, each re-streaming the parquet); cupy accelerates the per-era rankdata (measured: `ARCHITECTURE.md` §U). The screen passes could be derived from the persisted long-form — deferred.
+- **Windows pip pitfall:** `./.venv/Scripts/pip` is a shim into the legacy `../numer-AI/.venv` — always `./.venv/Scripts/python -m pip`. The venv is shared with the legacy repo; never install via the shim (see CONTRIBUTING.md).
+- **Long jobs:** background tasks die when the session closes — use `nohup ./.venv/Scripts/python <script> > <log> 2>&1 &` and poll the log (stage markers + era ticks show progress). **This laptop enters Modern Standby overnight (2026-08-21: ender fold 3 lost ~9.4 h)** — `powercfg /change standby-timeout-ac 0` + `hibernate-timeout-ac 0` applied; if wall ≫ fit time, check Kernel-Power 506/507 events first.
+- **Analysis runtime:** full-universe (`--features all`) analysis is ~4–5 h, dominated by three 3,555-feature streaming passes (ic_by_era + 2 screens, each re-streaming the parquet); cupy accelerates per-era rankdata (measured: `ARCHITECTURE.md` §U). The screen passes could be derived from the persisted long-form — deferred.
 
 ### Full-version training is RAM-bound on this box (measured 2026-08-18)
-- **Machine:** 63.7 GiB RAM, 148.8 GiB commit limit. The **full version** (train+validation, 6.85M rows, medium/780 features) extrapolates to **commit ≈ 61–65 GiB / working set 86–90% of physical** — marginal-to-infeasible here. `promote_full_version`'s RAM guard refuses with the measured numbers in the error (dual-metric: commit vs commit limit, WS vs physical). **Stage 2 (full-history promotion at medium) is deferred, not attempted; the D7 Stage-1 truncated artifact is the accepted deliverable.** Fitted curve constants and the open memory-slope hypothesis live in `ARCHITECTURE.md` §5 (`measure_ram_curve.py`).
+- **Machine:** 63.7 GiB RAM, 148.8 GiB commit limit. The **full version** (train+validation, 6.85M rows, medium/780 features) extrapolates to **commit ≈ 61–65 GiB / working set 86–90% of physical** — marginal-to-infeasible here. `promote_full_version`'s RAM guard refuses with the measured numbers in the error (dual-metric: commit vs commit limit, WS vs physical). **Stage 2 (full-history promotion at medium) is deferred, not attempted; the D7 Stage-1 truncated artifact is the accepted deliverable.** Curve constants and the open memory-slope hypothesis live in `ARCHITECTURE.md` §5 (`measure_ram_curve.py`).
 - **Full-universe training** (3,555 features): **run only when the machine is otherwise idle** (a concurrent analysis/benchmark job caused the `lgbm_v1` campaign OOM: `_ArrayMemoryError: 28.1 GiB, shape (3555, 2123070)`).
-- **Memory guards live in code** (`coerce_float32_features`, zero-copy numpy views, era-batched predicts, the spawned full-history worker + dual-metric RAM guard — full spec: `ARCHITECTURE.md` §G). OOF neutralization at 3,555 features is compute-bound (per-era pinv, ~3.5 h) — not memory, do not "optimize" (oracle parity).
+- **Memory guards live in code** (`coerce_float32_features`, zero-copy numpy views, era-batched predicts, spawned full-history worker + dual-metric RAM guard — full spec: `ARCHITECTURE.md` §G). OOF neutralization at 3,555 features is compute-bound (per-era pinv, ~3.5 h) — not memory, do not "optimize" (oracle parity).
 
 ### Feature-universe policy (director directive, 2026-08-14)
 All routine research, screening, HPO, and model iteration uses `medium` (780), `small` (42), or screen-derived subsets (`derived_feature_sets.json`). The full `all` universe (3,555) is **prohibited** for routine iteration (RAM ceiling above; ~3.5 h per-era neutralization; empirically weaker OOF IC). Approved exceptions: feature-bagged sub-ensembles, or single-shot offline deploy fits. Analysis dumps and the pre-modelling study are generated with `--features medium`.
@@ -258,10 +258,10 @@ The deploy closure's final rank step changed the exposure definition: post-fix r
 Local `load_predict` fidelity is tested, but CatBoost availability in Numerai's hosted predict runtime is **UNVERIFIED** — validate a catboost deploy against the hosted runtime before staking on it.
 
 ### Ruff lint gate (adopted 2026-08-16)
-`ruff check .` (config `ruff.toml`: E/F/I/UP, line-length 120) is the CI lint gate; ruff is pinned in `requirements-dev.txt` and installed via `./.venv/Scripts/python -m pip` (never the `Scripts/pip` shim). pytest remains the sole *functional* gate. `ruff format` is NOT adopted — deferred to a dedicated Phase-2 reformat commit.
+`ruff check .` (config `ruff.toml`: E/F/I/UP, line-length 120) is the CI lint gate (ruff pinned in `requirements-dev.txt`; install via `./.venv/Scripts/python -m pip`, never the `Scripts/pip` shim). pytest is the sole *functional* gate; `ruff format` is NOT adopted — deferred to a dedicated Phase-2 reformat commit.
 
 ### Coverage specs must be package-level (2026-08-19)
-Coverage commands must use package-level `--cov` specs only (`--cov=nmr --cov=dashboard_ui`) — dotted submodule specs crash at conftest import on py3.12 + coverage 7.x (detail: `CONTRIBUTING.md` footgun). CI coverage gate: `scripts/coverage_gate.py`.
+Coverage commands must use package-level `--cov` specs only (`--cov=nmr --cov=dashboard_ui`); dotted submodule specs crash at conftest import on py3.12 + coverage 7.x (see `CONTRIBUTING.md`); CI coverage gate: `scripts/coverage_gate.py`.
 
 ### Mutation gate is CI-only (mutmut refuses native Windows)
 mutmut is fork-based; Windows refused ("use WSL", #397). Linux CI only (`.github/workflows/mutation.yml`: weekly + manual; never on push; measurement-first; floors ratchet down only on survived+timeout). mutmut 3.x is config-driven (`[tool.mutmut]`); the gate writes a scratch config per module and RAISES on unparseable stats, zero mutants, or >10% timeouts — never mint floors from failed or clock-dominated runs (SEV-1, 2026-08-20). Receipt: `configs/mutation_receipt.json`, uploaded as an artifact; a human commits it via a normal PR to set floors (GITHUB_TOKEN cannot push workflow files).
@@ -270,10 +270,13 @@ mutmut is fork-based; Windows refused ("use WSL", #397). Linux CI only (`.github
 The V1 repo is mined for logic only. Never import from it, never modify it, never add it to any path.
 
 ### Stale era-range manifest fields in pre-rebuild registry rows (2026-08-14)
-ALL 29 current registry rows predate the rebuild: their `manifest.scoring_eras` (`0461..0574`) and `manifest.weight_learning_eras` (`0119..0460`) are the old window while their `validation_preds.parquet` covers the refreshed one — zero overlap between manifest lists and parquet eras is the tell (detail: `ARCHITECTURE.md` §N). Never use those fields as "what this run was scored on" — trust the scorecard `*_n_eras` cells and the stored parquet. Registry files stay immutable: document, never backfill.
+ALL 29 current registry rows predate the rebuild: their `manifest.scoring_eras` (`0461..0574`) and `manifest.weight_learning_eras` (`0119..0460`) are the old window while their `validation_preds.parquet` covers the refreshed one — zero overlap between manifest lists and parquet eras is the tell (`ARCHITECTURE.md` §N). Never use those fields as "what this run was scored on" — trust the scorecard `*_n_eras` cells and the stored parquet. Registry files stay immutable: document, never backfill.
 
 ### Dashboard window drifts on data refresh
-The standardized comparison window = meta overlap; refresh shifts it — regenerate `artifacts/dashboard.html` after every `refresh_data.py` run (window definition + regeneration rule: `ARCHITECTURE.md` §W).
+The standardized comparison window = meta overlap; refresh shifts it — regenerate `artifacts/dashboard.html` after every `refresh_data.py` run (definition + regeneration rule: `ARCHITECTURE.md` §W).
+
+### OOF fold checkpoints (2026-08-20)
+`ExperimentRunner` persists per-fold OOF parts under `artifacts/runs/<run_id>/oof_checkpoints/<target>/fold_NN.parquet` + a `manifest.json` recording code identity (SHA-256 of `nmr/models.py` + `nmr/splitter.py`) and fit device. Resume loads existing folds; any code/device mismatch raises — delete the directory to force a full refit (never silently reuse stale OOF). Checkpoints are deleted with their run dir; clearing `artifacts/runs/` remains ask-first.
 </operational_hazards>
 
 ---
