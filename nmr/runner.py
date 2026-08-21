@@ -154,6 +154,12 @@ class ExperimentRunner:
             feature_cols=feature_cols,
             splitter=splitter,
             model_orchestrator=model_orchestrator,
+            checkpoint_dir=(
+                self._config.run.artifacts_dir
+                / "runs"
+                / self._run_id
+                / "oof_checkpoints"
+            ),
         )
 
         joined = train_df.select(["id", "era", main_target, *feature_cols]).join(
@@ -327,13 +333,16 @@ class ExperimentRunner:
         feature_cols: Sequence[str],
         splitter: PurgedEraSplitter,
         model_orchestrator: ModelOrchestrator,
+        checkpoint_dir: Path | None = None,
     ) -> pl.DataFrame:
         """Delegate to the shared OOF implementation (C10, audit SEV-2 #5).
 
         The runner and research.py once each carried a copy of the
         leakage-critical OOF construction; the single source now lives in
         ``nmr._oof.train_multi_target_oof`` and this method only adds
-        run-scoped logging.
+        run-scoped logging. The run-scoped ``checkpoint_dir`` routes the
+        shared helper to its checkpoint-aware path (fold parts persisted and
+        replayed on resume — spec 2026-08-20-oof-checkpoint-resume).
         """
         targets = self._config.data.targets
         logger.info(
@@ -346,6 +355,7 @@ class ExperimentRunner:
             feature_cols=feature_cols,
             splitter=splitter,
             targets=targets,
+            checkpoint_dir=checkpoint_dir,
         )
         logger.info(
             "[train_multi_target_oof] stacked OOF complete in %.1fs (shape: %s)",

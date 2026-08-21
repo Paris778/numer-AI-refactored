@@ -815,3 +815,19 @@ def test_runner_and_research_share_oof_implementation(tmp_path) -> None:
     )
     assert shared.equals(via_runner)
     assert shared.equals(via_research)
+
+
+def test_runner_writes_and_reuses_oof_checkpoints(tmp_path, caplog) -> None:
+    """Runner wiring: OOF folds are checkpointed under the run dir and a
+    second run over the same config+data (same run_id) resumes them
+    bit-for-bit instead of refitting (spec 2026-08-20-oof-checkpoint-resume)."""
+    result1 = ExperimentRunner(_config(tmp_path)).run(deploy=False)
+    ckpt_root = tmp_path / "artifacts" / "runs" / result1.run_id / "oof_checkpoints"
+    assert (ckpt_root / "manifest.json").exists()
+    assert sorted(p.name for p in (ckpt_root / "target").glob("fold_*.parquet"))
+    caplog.clear()
+    with caplog.at_level("INFO", logger="nmr.models"):
+        result2 = ExperimentRunner(_config(tmp_path)).run(deploy=False)
+    assert result2.run_id == result1.run_id
+    assert result2.oof.equals(result1.oof)
+    assert "loaded from checkpoint" in caplog.text
