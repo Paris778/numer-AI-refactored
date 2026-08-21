@@ -13,11 +13,13 @@ folds directly and refuses to widen scope into ranking, ensembling, or scoring.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import catboost
@@ -26,6 +28,7 @@ import numpy as np
 import polars as pl
 import xgboost as xgb
 
+from nmr._atomicio import atomic_write_bytes
 from nmr.config import DataConfig, ModelConfig
 from nmr.splitter import Fold, PurgedEraSplitter
 
@@ -229,6 +232,165 @@ class ModelOrchestrator:
             purge_eras=splitter.purge_eras,
         )
 
+    def _cv_fold_parts(
+        self,
+        df: pl.DataFrame,
+        *,
+        feature_cols: Sequence[str],
+        target_col: str,
+        splitter: PurgedEraSplitter,
+        era_col: str = "era",
+        checkpoint_dir: Path | None = None,
+    ) -> tuple[list[object | None], list[pl.DataFrame]]:
+        """Shared fold loop: fit or load each fold; (models, oof_parts).
+
+        ``checkpoint_dir=None`` = the legacy fit-everything path (models has no
+        None entries). With a checkpoint dir, existing fold parquets are loaded
+        (models entry None — the OOF-only caller discards models) and new folds
+        are fitted then atomically persisted. The checkpoint root carries a
+        manifest.json with code+device identity; a mismatch raises.
+        """
+        # Local import: nmr._oof imports nmr.models at module top, so a
+        # module-level import here would be circular.
+        from nmr._oof import (
+            _KNOWN_RESOLVED_DEVICES,
+            _fitting_code_sha256,
+            _write_frame_atomic,
+        )
+
+        folds = splitter.split(df.get_column(era_col).to_list())
+        logger.info("[train_cross_validation] %s: %d folds", target_col, len(folds))
+        models: list[object | None] = []
+        oof_parts: list[pl.DataFrame] = []
+        seen_val_eras: set[str] = set()
+
+        manifest_path = checkpoint_dir / "manifest.json" if checkpoint_dir else None
+        manifest_written = False
+        if manifest_path is not None:
+            if manifest_path.exists():
+                stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if stored.get("code_sha256") != _fitting_code_sha256():
+                    raise ValueError(
+                        "OOF checkpoint code_sha256 mismatch: fitting code changed "
+                        f"since the checkpoints were written ({manifest_path}). "
+                        "Delete the oof_checkpoints directory to force a full refit."
+                    )
+                stored_device = stored.get("device")
+                if self.resolved_device is not None:
+                    # Same-process reuse: the device is known — exact compare.
+                    if stored_device != str(self.resolved_device):
+                        raise ValueError(
+                            "OOF checkpoint device mismatch: checkpoints were "
+                            f"fitted on device {stored_device!r}, current device "
+                            f"is {str(self.resolved_device)!r}. Delete the "
+                            "oof_checkpoints directory to force a full refit."
+                        )
+                elif stored_device not in _KNOWN_RESOLVED_DEVICES:
+                    # Fresh orchestrator (device unknown pre-fit): the
+                    # authoritative check runs at the first fitted fold; here
+                    # a manifest recording anything but a real fit device is
+                    # rejected loudly instead of accepted vacuously.
+                    raise ValueError(
+                        "OOF checkpoint device mismatch: manifest records "
+                        f"unknown device {stored_device!r} ({manifest_path}). "
+                        "Delete the oof_checkpoints directory to force a full refit."
+                    )
+            else:
+                # PINNED DECISION (review): the manifest is written at the FIRST
+                # fitted fold, never here — resolved_device is None until a fit
+                # completes, and an early write would record "None", making the
+                # device guard pass vacuously on resume.
+                existing_parts = any(
+                    manifest_path.parent.rglob("fold_*.parquet")
+                ) if manifest_path.parent.exists() else False
+                if existing_parts:
+                    raise ValueError(
+                        "OOF checkpoint tree has fold parts but no manifest.json "
+                        f"({manifest_path}) — inconsistent state. Delete the "
+                        "oof_checkpoints directory to force a full refit."
+                    )
+
+        for fold in folds:
+            overlap = seen_val_eras & set(fold.val_eras)
+            if overlap:
+                raise ValueError(
+                    f"Validation eras must be disjoint across folds, got {sorted(overlap)}"
+                )
+            part_path = (
+                checkpoint_dir / target_col / f"fold_{fold.index + 1:02d}.parquet"
+                if checkpoint_dir is not None else None
+            )
+            if part_path is not None and part_path.exists():
+                try:
+                    fold_predictions = pl.read_parquet(part_path)
+                except Exception as exc:
+                    raise ValueError(
+                        f"corrupt OOF checkpoint {part_path}: {exc}"
+                    ) from exc
+                models.append(None)
+                logger.info(
+                    "[train_cross_validation] %s: fold %d/%d loaded from checkpoint %s",
+                    target_col, fold.index + 1, len(folds), part_path,
+                )
+            else:
+                logger.info(
+                    "[train_cross_validation] %s: fold %d/%d train_eras=%d val_eras=%d",
+                    target_col, fold.index + 1, len(folds),
+                    len(fold.train_eras), len(fold.val_eras),
+                )
+                t0 = time.time()
+                model, fold_predictions = self._fit_predict_fold(
+                    df, fold=fold, feature_cols=feature_cols,
+                    target_col=target_col, era_col=era_col,
+                    purge_eras=splitter.purge_eras,
+                )
+                logger.info(
+                    "[train_cross_validation] %s: fold %d/%d trained in %.1fs",
+                    target_col, fold.index + 1, len(folds), time.time() - t0,
+                )
+                models.append(model)
+                if part_path is not None:
+                    # PINNED DECISION: manifest is written at the first fitted
+                    # fold (device is only known post-fit) and BEFORE the first
+                    # fold part, so a crash between the two writes is safe. On
+                    # resume, the first fitted fold is where the authoritative
+                    # device check runs — the device is only known post-fit.
+                    if manifest_path is not None and not manifest_written:
+                        resolved_device = str(self.resolved_device)
+                        if manifest_path.exists():
+                            stored = json.loads(
+                                manifest_path.read_text(encoding="utf-8")
+                            )
+                            if stored.get("device") != resolved_device:
+                                raise ValueError(
+                                    "OOF checkpoint device mismatch: checkpoints "
+                                    f"were fitted on device {stored.get('device')!r}, "
+                                    f"current device is {resolved_device!r}. "
+                                    "Delete the oof_checkpoints directory to "
+                                    "force a full refit."
+                                )
+                        else:
+                            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+                            atomic_write_bytes(
+                                manifest_path,
+                                json.dumps(
+                                    {
+                                        "code_sha256": _fitting_code_sha256(),
+                                        "device": resolved_device,
+                                    },
+                                    sort_keys=True,
+                                ).encode("utf-8"),
+                            )
+                        manifest_written = True
+                    part_path.parent.mkdir(parents=True, exist_ok=True)
+                    _write_frame_atomic(fold_predictions, part_path)
+            oof_parts.append(fold_predictions)
+            seen_val_eras.update(fold.val_eras)
+
+        if not oof_parts:
+            raise ValueError("No folds produced OOF predictions")
+        return models, oof_parts
+
     def train_cross_validation(
         self,
         df: pl.DataFrame,
@@ -238,55 +400,42 @@ class ModelOrchestrator:
         splitter: PurgedEraSplitter,
         era_col: str = "era",
     ) -> CVResult:
-        folds = splitter.split(df.get_column(era_col).to_list())
-        logger.info("[train_cross_validation] %s: %d folds", target_col, len(folds))
-        models: list[object] = []
-        oof_parts: list[pl.DataFrame] = []
-        seen_val_eras: set[str] = set()
-
-        for fold in folds:
-            overlap = seen_val_eras & set(fold.val_eras)
-            if overlap:
-                raise ValueError(
-                    f"Validation eras must be disjoint across folds, got {sorted(overlap)}"
-                )
-
-            logger.info(
-                "[train_cross_validation] %s: fold %d/%d train_eras=%d val_eras=%d",
-                target_col,
-                fold.index + 1,
-                len(folds),
-                len(fold.train_eras),
-                len(fold.val_eras),
-            )
-            t0 = time.time()
-            model, fold_predictions = self._fit_predict_fold(
-                df,
-                fold=fold,
-                feature_cols=feature_cols,
-                target_col=target_col,
-                era_col=era_col,
-                purge_eras=splitter.purge_eras,
-            )
-            logger.info(
-                "[train_cross_validation] %s: fold %d/%d trained in %.1fs",
-                target_col,
-                fold.index + 1,
-                len(folds),
-                time.time() - t0,
-            )
-            models.append(model)
-            oof_parts.append(fold_predictions)
-            seen_val_eras.update(fold.val_eras)
-
-        if not oof_parts:
-            raise ValueError("No folds produced OOF predictions")
-
+        models, oof_parts = self._cv_fold_parts(
+            df, feature_cols=feature_cols, target_col=target_col,
+            splitter=splitter, era_col=era_col, checkpoint_dir=None,
+        )
+        if any(m is None for m in models):  # unreachable defensive guard
+            raise ValueError("checkpoint-less CV produced a None model entry")
         oof = pl.concat(oof_parts, how="vertical")
         logger.info(
             "[train_cross_validation] %s: OOF complete rows=%d", target_col, oof.height
         )
         return CVResult(oof=oof, models=tuple(models))
+
+    def train_oof_with_checkpoints(
+        self,
+        df: pl.DataFrame,
+        *,
+        feature_cols: Sequence[str],
+        target_col: str,
+        splitter: PurgedEraSplitter,
+        era_col: str = "era",
+        checkpoint_dir: Path,
+    ) -> pl.DataFrame:
+        """Checkpoint-aware OOF training; returns OOF only (models discarded).
+
+        See the checkpoint spec (2026-08-20-oof-checkpoint-resume) for the
+        resume contract and code/device identity rules.
+        """
+        _, oof_parts = self._cv_fold_parts(
+            df, feature_cols=feature_cols, target_col=target_col,
+            splitter=splitter, era_col=era_col, checkpoint_dir=checkpoint_dir,
+        )
+        oof = pl.concat(oof_parts, how="vertical")
+        logger.info(
+            "[train_oof_with_checkpoints] %s: OOF complete rows=%d", target_col, oof.height
+        )
+        return oof
 
     def train_full_history(
         self,
