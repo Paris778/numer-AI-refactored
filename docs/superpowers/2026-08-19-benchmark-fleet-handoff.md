@@ -52,7 +52,7 @@ Task → deliverable → commit:
 
 **Final review verdict**: one Critical found and fixed (`b584791`), scoped re-review clean; residuals parked with rulings in the ledger. Fleet code ends at `b584791`.
 
-**Commits after the fleet work (NOT part of this plan — made outside this session, presumably the user's other work)**: `804f08a` (dataless-CI campaign test stub + coverage gate doc), `0bded5c` (lint fixes for the community example scripts + coverage floors re-pinned to measured dataless numbers). HEAD = `0bded5c`.
+**Commits after the fleet work (NOT part of this plan — made outside this session, presumably the user's other work)**: `804f08a` (dataless-CI campaign test stub + `scripts/ci_repro.Dockerfile` + CONTRIBUTING gate note), `0bded5c` (lint fixes for the community example scripts + CI coverage floors re-pinned to measured dataless numbers 90.3/97.8/92.6). HEAD at the time of writing this doc = `59a893e` (this doc's own commit). Note: `AGENTS.md`'s claimed suite count is **988** (from earlier mutation-gate work, commit `cb4ea6d` lineage) — newer than this plan's measured 979; reconcile by re-running the suite before relying on either number.
 
 ## 4. Current Verified State (as of handoff)
 
@@ -84,13 +84,13 @@ Do NOT re-implement tasks 1–12: they are complete and reviewed (ledger + git l
 
 1. **Git Bash `ps` does NOT show Windows python processes.** A "lost" kimi background task can mean the tracker lost it while the process lives on. Always use `wmic process where "name='python.exe'" get ProcessId,CommandLine` (or `tasklist`) to determine whether a runner is actually alive. This mistake once caused TWO concurrent runners on the same log/outputs (and likely contributed to the OOM in §6.3); kill duplicates with `taskkill //PID <pid> //F`.
 2. **Use `nohup ... -u` for long jobs** (`-u` = unbuffered log lines). The kimi background-task tracker can drop tasks; nohup keeps the process independent of the session. Give each attempt a NEW log file (`run2.log`, `run3.log`, ...) — `>` truncation from a second process destroys the first's log view (interleaved offsets made a finished-looking log that wasn't).
-3. **Memory ceiling is real on this box** (63.7 GiB physical / ~112–149 GiB commit). `canon_sunshine_ensemble` (4× medium LightGBM fits) does `to_pandas()` allocations of ~12.8 GB and died once with `pyarrow.lib.ArrowMemoryError: malloc of size 12813964800 failed` when the box was under external memory pressure. Check headroom first:
+3. **Memory ceiling is real on this box** (63.7 GiB physical; commit limit measured at 111.7 GiB at one point, 148.8 GiB per AGENTS.md's hazard — page-file growth makes it variable, so measure live before launching). `canon_sunshine_ensemble` (4× medium LightGBM fits) does `to_pandas()` allocations of ~12.8 GB and died once with `pyarrow.lib.ArrowMemoryError: malloc of size 12813964800 failed` when the box was under external memory pressure. Check headroom first:
    `powershell -NoProfile -Command 'Get-CimInstance Win32_OperatingSystem | Select-Object FreePhysicalMemory,TotalVirtualMemorySize,FreeVirtualMemory | Format-List'`
    (quote with single quotes in Git Bash — `$_` gets mangled otherwise). If free physical is well above ~25 GB and commit headroom above ~30 GB, launch; otherwise wait for an idle machine. Run ONE benchmark job at a time, ever.
 4. **The exact 8-era purge gap**: `train_validation_purged_split` requires `min(val_eras) - max(trimmed_train) - 1 == 8` exactly. Synthetic fixtures must derive val eras as `max(train_eras) + 1, +2` (for 8-era purge) — hardcoding caused three fixture bugs during the run.
 5. **polars ≥ 1.41 removed `Expr.nulls_last()`/`Expr.desc()`** — use `df.sort(by=[...], descending=[...], nulls_last=[...])` kwargs.
 6. **"Config knob that lies" is a Critical bug class in this repo** (see the `embargo_eras` SEV-3 precedent in AGENTS.md): every `FleetCellConfig.neutralization` value MUST be wired through its generator (xgb/mlp were fixed in `b584791` — keep that invariant when adding new kinds).
-7. **AGENTS.md has ~251 B of size-budget headroom** (32,517/32,768 B) — any new AGENTS.md content needs a trim elsewhere first.
+7. **AGENTS.md size budget**: 32,719 B / 32,768 B as of HEAD `59a893e` → **49 B headroom** — any new AGENTS.md content needs a trim elsewhere first. (An earlier session measured 32,517 B; the file grew via unrelated mutation-gate commits — do not trust stale size figures.)
 
 ## 7. Parked Findings (All Ruled Defer — Do Not Block)
 
@@ -100,7 +100,15 @@ From the final review (full list with rulings in the ledger):
 - `priority_hints` contains `target_teager_20` which is not among the specialists — verbatim from the legacy notebook (faithful-to-source).
 - Ledger minors per task (error-message cosmetics, `fleet_frame` KeyError corner when placements are empty, zero-weights ZeroDivisionError, broad `except TypeError` on `Ridge(positive=True)`, scaler stats include non-finite-target rows, etc.) — triage again only if a future change touches those lines.
 
-## 8. Key Files
+## 8. Post-Handoff Developments (2026-08-20, second session)
+
+A parallel session reviewed this state and added the following verified findings + queued work. Treat this section as more recent than everything above:
+
+- **Runner coupling (confirmed)**: `benchmark_runner.py::main()` always runs the full tier hierarchy before the fleet, and the fleet's placement rungs come only from that live run (`rungs = tier_max_corrs(result.scorecards, result.tier_of)`). There is `--no-fleet` but no inverse, and `--fleet-configs` takes a directory only — no cell-level selection. Running even the zero-fit `silly_target_lag_mean` today forces a full hierarchy first.
+- **Thread caps (absent)**: `nmr/models.py::_resolved_params` sets `n_jobs: 1` for LightGBM/XGBoost fits, but NOTHING in `nmr/` caps polars' thread pool or OpenMP/BLAS (`POLARS_MAX_THREADS`/`OMP_NUM_THREADS` appear nowhere). Polars reads/joins and scipy linear algebra run across all cores — that is the real CPU contention when the campaign runs. A thread-cap change needs a deliberate design point (env-at-process-start vs config knob).
+- **Queued work** (in priority order): (1) checkpointing/resume inside a run — the campaign is one run of 4 targets × 4 folds, persisted only at the end; fold-granularity incremental persistence + skip-on-resume, with a resumed-run-equals-uninterrupted-run determinism test (the OOF feeds run_id and scorecard hashes — high review bar); (2) runner composability (`--only-fleet`, rungs sourced from the last hierarchy scorecard CSV, `--fleet-ids` cell selection); (3) thread caps; (4) the mutmut upstream issue. Fleet cell EXECUTION stays deferred until the campaign frees the CPU.
+
+## 9. Key Files
 
 - Spec: `docs/superpowers/specs/2026-08-19-benchmark-fleet-design.md` (roster tables, decisions log, risks)
 - Plan: `docs/superpowers/plans/2026-08-19-benchmark-fleet.md` (13 tasks, code-verbatim)
@@ -111,7 +119,7 @@ From the final review (full list with rulings in the ledger):
 - Smoke logs so far: `artifacts/reports/fleet_smoke_run.log` (interleaved, ignore), `fleet_smoke_run2.log` (OOM evidence), `fleet_smoke_run3.log` (killed mid-tier-1)
 - Legacy sources (read-only, never modify): `C:/dev/numer-AI/models/version_0/v0.*/finance_arena_v0*.ipynb`, `.../version_1/v1.5/fa_v1.5.*.ipynb`, `C:/dev/numer-AI/exploratory_notebooks/outputs/snnr_weights_vs_correlation_v5.2.csv`
 
-## 9. Environment Quick Facts
+## 10. Environment Quick Facts
 
 - Windows, Git Bash at `C:\Program Files\Git\bin\bash.exe`; repo root `C:/dev/numer-AI-refactored`; branch `main`.
 - Python: `./.venv/Scripts/python` (NEVER `./.venv/Scripts/pip` — the shim points into the legacy repo).
