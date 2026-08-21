@@ -1,5 +1,7 @@
 """Live progress monitor for a running experiment campaign (display only).
 
+# TODO : This is a one-off script and should be removed later potentially if it is not needed
+
 Thin control plane: parses the campaign's log/status files and the config's
 n_estimators, renders a live per-fold progress view. No business logic — all
 model semantics live in nmr/. Stdlib only, read-only, safe to run alongside
@@ -65,7 +67,7 @@ def _load(args: argparse.Namespace) -> dict[str, object]:
     non-trivial snapshot is obtained (the live loop also keeps the last
     good state, so the display never regresses).
     """
-    for _ in range(30):
+    for _ in range(60):
         state = _load_once(args)
         if state["completed"] or state["last_fold"] or state["iterations"]:
             return state
@@ -78,7 +80,11 @@ def _load_once(args: argparse.Namespace) -> dict[str, object]:
     log_path = base / f"{args.name}.log"
     status_path = base / f"{args.name}.status"
 
-    log = log_path.read_text(encoding="utf-8", errors="replace") if log_path.exists() else ""
+    log = (
+        log_path.read_text(encoding="utf-8", errors="replace")
+        if log_path.exists()
+        else ""
+    )
 
     completed: dict[tuple[str, int], float] = {}
     for source in (status_path, None):
@@ -103,10 +109,17 @@ def _load_once(args: argparse.Namespace) -> dict[str, object]:
         if found:
             total_trees = int(found.group(1))
 
-    last_fold: tuple[str, int, int, int] | None = None  # (target, fold_1based, total, start_secs)
+    last_fold: tuple[str, int, int, int] | None = (
+        None  # (target, fold_1based, total, start_secs)
+    )
     for match in _FOLD_MARKER.finditer(log):
         start_secs = _hhmm_to_seconds(match.group(1))
-        last_fold = (match.group(2), int(match.group(3)), int(match.group(4)), start_secs)
+        last_fold = (
+            match.group(2),
+            int(match.group(3)),
+            int(match.group(4)),
+            start_secs,
+        )
 
     iterations = [int(v) for v in _ITER_MARKER.findall(log)]
     return {
@@ -115,6 +128,8 @@ def _load_once(args: argparse.Namespace) -> dict[str, object]:
         "iterations": iterations,
         "total_trees": total_trees,
         "log_mtime": log_path.stat().st_mtime if log_path.exists() else None,
+        "_base": str(base),
+        "_name": args.name,
     }
 
 
@@ -127,20 +142,27 @@ def _render(state: dict[str, object]) -> str:
         done_by_target.setdefault(target, set()).add(fold)
         times_by_target.setdefault(target, []).append(secs)
 
-    targets = ["target_cyrusd_20", "target_ender_20", "target_jasper_20", "target_teager2b_20"]
+    targets = [
+        "target_cyrusd_20",
+        "target_ender_20",
+        "target_jasper_20",
+        "target_teager2b_20",
+    ]
     last_fold = state["last_fold"]
     current_target = last_fold[0] if last_fold else None
     current_fold = (last_fold[1] - 1) if last_fold else None  # 0-based
 
     lines = ["=== campaign live status ===", ""]
     if not completed and not last_fold and not iterations:
+        lines.append("  no readable snapshot right now.")
         lines.append(
-            "  no data yet - the campaign's log/status files are being"
+            "  watching: "
+            + str(Path(state["_base"]) / f"{state['_name']}.log")
         )
         lines.append(
-            "  rewritten by an external watcher; keep this running and the"
+            "  check that this terminal's working directory is the repo root"
         )
-        lines.append("  view fills in on the next readable snapshot.")
+        lines.append("  (C:/dev/numer-AI-refactored) and restart the monitor.")
         return "\n".join(lines)
     for target in targets:
         done = done_by_target.get(target, set())
@@ -174,7 +196,9 @@ def _render(state: dict[str, object]) -> str:
             f"eta {_fmt_duration(eta)}"
         )
     elif last_fold:
-        lines.append(f"  fitting: {last_fold[0]} fold {last_fold[1]}/{last_fold[2]} (no iteration ticks yet)")
+        lines.append(
+            f"  fitting: {last_fold[0]} fold {last_fold[1]}/{last_fold[2]} (no iteration ticks yet)"
+        )
     else:
         lines.append("  no folds started yet")
 
@@ -185,12 +209,16 @@ def _render(state: dict[str, object]) -> str:
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Live campaign progress monitor (read-only).")
+    parser = argparse.ArgumentParser(
+        description="Live campaign progress monitor (read-only)."
+    )
     parser.add_argument("--name", default="mt-std-v1")
     parser.add_argument("--artifacts", default="artifacts")
     parser.add_argument("--config", default="configs/mt-std-v1.yaml")
     parser.add_argument("--interval", type=float, default=3.0)
-    parser.add_argument("--once", action="store_true", help="print one snapshot and exit")
+    parser.add_argument(
+        "--once", action="store_true", help="print one snapshot and exit"
+    )
     return parser
 
 
