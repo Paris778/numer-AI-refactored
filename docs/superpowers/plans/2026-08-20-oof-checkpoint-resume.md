@@ -129,6 +129,15 @@ def test_device_mismatch_raises(tmp_path):
         _run(ckpt, train)
 
 
+def test_parts_without_manifest_raise(tmp_path):
+    train = _synthetic_train()
+    ckpt = tmp_path / "ckpt"
+    _run(ckpt, train)
+    (ckpt / "manifest.json").unlink()  # simulate a torn tree
+    with pytest.raises(ValueError, match="no manifest.json"):
+        _run(ckpt, train)
+
+
 def test_corrupt_checkpoint_raises(tmp_path):
     train = _synthetic_train()
     ckpt = tmp_path / "ckpt"
@@ -183,8 +192,13 @@ Expected: FAIL — `TypeError: train_multi_target_oof() got an unexpected keywor
         seen_val_eras: set[str] = set()
 
         manifest_path = checkpoint_dir / "manifest.json" if checkpoint_dir else None
+        expected_manifest: dict[str, str] | None = None
+        manifest_written = False
         if manifest_path is not None:
-            expected_manifest = _checkpoint_manifest()
+            expected_manifest = {
+                "code_sha256": _fitting_code_sha256(),
+                "device": str(self.resolved_device),
+            }
             if manifest_path.exists():
                 stored = json.loads(manifest_path.read_text(encoding="utf-8"))
                 if stored.get("code_sha256") != expected_manifest["code_sha256"]:
@@ -201,11 +215,19 @@ Expected: FAIL — `TypeError: train_multi_target_oof() got an unexpected keywor
                         "oof_checkpoints directory to force a full refit."
                     )
             else:
-                manifest_path.parent.mkdir(parents=True, exist_ok=True)
-                atomic_write_bytes(
-                    manifest_path,
-                    json.dumps(expected_manifest, sort_keys=True).encode("utf-8"),
-                )
+                # PINNED DECISION (review): the manifest is written at the FIRST
+                # fitted fold, never here — resolved_device is None until a fit
+                # completes, and an early write would record "None", making the
+                # device guard pass vacuously on resume.
+                existing_parts = any(
+                    manifest_path.parent.rglob("fold_*.parquet")
+                ) if manifest_path.parent.exists() else False
+                if existing_parts:
+                    raise ValueError(
+                        "OOF checkpoint tree has fold parts but no manifest.json "
+                        f"({manifest_path}) — inconsistent state. Delete the "
+                        "oof_checkpoints directory to force a full refit."
+                    )
 
         for fold in folds:
             overlap = seen_val_eras & set(fold.val_eras)
@@ -247,6 +269,18 @@ Expected: FAIL — `TypeError: train_multi_target_oof() got an unexpected keywor
                 )
                 models.append(model)
                 if part_path is not None:
+                    # PINNED DECISION: manifest is written at the first fitted
+                    # fold (device is only known post-fit) and BEFORE the first
+                    # fold part, so a crash between the two writes is safe.
+                    if manifest_path is not None and not manifest_written:
+                        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+                        atomic_write_bytes(
+                            manifest_path,
+                            json.dumps(
+                                expected_manifest or {}, sort_keys=True
+                            ).encode("utf-8"),
+                        )
+                        manifest_written = True
                     part_path.parent.mkdir(parents=True, exist_ok=True)
                     _write_frame_atomic(fold_predictions, part_path)
             oof_parts.append(fold_predictions)
