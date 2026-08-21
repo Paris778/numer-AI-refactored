@@ -1,182 +1,164 @@
-# OOF Checkpointing & Resume — Implementation Plan
+# OOF Checkpointing & Resume — Implementation Plan (v2)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> v2 fixes the v1 review: `CVResult.models` can no longer be corrupted (public API untouched), checkpoints carry a code+device identity manifest, the mixed load+fit determinism case is tested, the defective tests are corrected, AGENTS.md is updated (with a trim, not skipped), and CI is named as the merge gate.
 
-**Goal:** Fold-granularity OOF checkpointing + skip-on-resume inside `ExperimentRunner` runs, with a bit-for-bit resumed-equals-fresh determinism guarantee.
+**Goal:** Fold-granularity OOF checkpointing + skip-on-resume inside `ExperimentRunner` runs, with a bit-for-bit resumed-equals-fresh guarantee proven in the mixed load+fit case, and code/device identity so checkpoints can never silently survive a code or device change.
 
-**Architecture:** Thread a keyword-only `checkpoint_dir: Path | None = None` through `ModelOrchestrator.train_cross_validation` → `nmr/_oof.py::train_multi_target_oof` → `ExperimentRunner._train_multi_target_oof` (runner passes `artifacts/runs/<run_id>/oof_checkpoints`). Each fold part is atomically written (existing `nmr/_atomicio.py` pattern) immediately after its fit; on entry a fold whose parquet exists is loaded instead of fitted. Default `None` preserves today's behavior for research/HPO callers.
+**Architecture:** New `ModelOrchestrator.train_oof_with_checkpoints(...) -> pl.DataFrame` (OOF-only, checkpoint-aware) shares a private fold loop with the untouched `train_cross_validation`. `nmr/_oof.py::train_multi_target_oof(..., checkpoint_dir=None)` routes to it when set. Each fold part is written atomically (existing `atomic_write_bytes`) under `artifacts/runs/<run_id>/oof_checkpoints/<target>/fold_NN.parquet`; a root `manifest.json` records `code_sha256` (SHA-256 of `nmr/models.py` + `nmr/splitter.py` source bytes) and `device` (the orchestrator's resolved device); any mismatch on resume raises.
 
-**Spec:** `docs/superpowers/specs/2026-08-20-oof-checkpoint-resume-design.md`
+**Spec:** `docs/superpowers/specs/2026-08-20-oof-checkpoint-resume-design.md` (v2 — authority).
 
 **Tech Stack:** Python 3.11+, Polars, pytest + ruff (E/F/I/UP @120).
 
 ## Global Constraints
 
-- All business logic in `nmr/`; tests in `tests/`; no logic in scripts.
-- Determinism is sacred: same run_id + data + seeds ⇒ same OOF bit-for-bit, resumed or fresh. Checkpoint keying = run_id only (config + data fingerprint already inside it).
-- Atomic writes: temp-file + fsync + `os.replace` via `nmr/_atomicio.py` (read it first — reuse its exact API, do not hand-roll).
-- Fail loudly: corrupt checkpoint → ValueError; no silent refit.
-- Default-off: `checkpoint_dir=None` = today's exact behavior; existing tests must stay green unchanged.
+- All business logic in `nmr/`; tests in `tests/`.
+- Determinism: same run_id + code_sha256 + device ⇒ resumed OOF equals fresh OOF bit-for-bit; the MIXED case (one fold loaded + one refit in the same target) is the required proof.
+- Atomic writes: `nmr/_atomicio.py::atomic_write_bytes` ONLY (serialize the frame to bytes first — see Task A). Never `write_parquet` directly to the final path.
+- Fail loudly: corrupt checkpoint, code mismatch, or device mismatch ⇒ `ValueError`; no silent refit.
+- Public API safety: `train_cross_validation` signature and `CVResult` semantics unchanged; `CVResult.models` always one model per fold.
 - Test commands: `./.venv/Scripts/python -m pytest ...`; lint `./.venv/Scripts/python -m ruff check ...`.
-- **CPU discipline (campaign is running)**: run ONLY the targeted test files listed per task. Do NOT run the full suite; do NOT run real-data tests. Report this honestly.
-- No AGENTS.md edits (49 B headroom).
+- **CPU discipline (campaign running)**: run ONLY the targeted files per task. The FULL suite and CI are the merge gate — this work must not be considered done until CI is green; state this honestly in every report.
+- **AGENTS.md**: update required by §2.8 — add the hazard AND trim an existing verbose bullet to stay under 32 KB (see Task C).
 
 ---
 
-### Task A: Checkpoint core in `train_cross_validation` + `train_multi_target_oof`
+### Task A: Checkpoint core — `train_oof_with_checkpoints` + manifest + tests
 
 **Files:**
-- Modify: `nmr/models.py` (`train_cross_validation`, ~line 232)
+- Modify: `nmr/models.py`
 - Modify: `nmr/_oof.py`
 - Test: `tests/test_checkpointing.py` (new)
 
 **Interfaces:**
-- Consumes: `nmr/_atomicio.py` (read it first — use its write helper verbatim), `PurgedEraSplitter`, existing `CVResult`
+- Consumes: `nmr/_atomicio.py` (`atomic_write_bytes` — read first), `CVResult`, `PurgedEraSplitter`, `ModelOrchestrator.resolved_device` (read `nmr/models.py` for the exact attribute)
 - Produces:
-  - `ModelOrchestrator.train_cross_validation(df, *, feature_cols, target_col, splitter, era_col="era", checkpoint_dir: Path | None = None) -> CVResult` — inside the fold loop: `part_path = checkpoint_dir / target_col / f"fold_{fold.index + 1:02d}.parquet"`; if exists → `pl.read_parquet(part_path)` + log `"fold %d/%d loaded from checkpoint %s"`; else fit via `_fit_predict_fold`, then atomic-write the fold parquet (create parent dirs first) and log `"fold %d/%d trained in %.1fs"` (keep the existing log line). Fold-disjointness check runs for every fold before the load/skip decision. Corrupt/unreadable checkpoint: let the read error surface, or wrap in `ValueError(f"corrupt OOF checkpoint {part_path}: {exc}")` — fail loud.
-  - `nmr/_oof.py::train_multi_target_oof(modeler, df, *, feature_cols, splitter, targets, checkpoint_dir: Path | None = None)` — pass `checkpoint_dir` through to `train_cross_validation` (per-target subdirs come from inside).
+  - `ModelOrchestrator._cv_fold_parts(df, *, feature_cols, target_col, splitter, era_col="era", checkpoint_dir: Path | None = None) -> tuple[list[object | None], list[pl.DataFrame]]` — private shared fold loop (see code). `None` models for loaded folds.
+  - `ModelOrchestrator.train_cross_validation(df, *, feature_cols, target_col, splitter, era_col="era") -> CVResult` — refactored to delegate to `_cv_fold_parts(checkpoint_dir=None)`; asserts no `None` in models (defensive; unreachable today); behavior byte-identical to today.
+  - `ModelOrchestrator.train_oof_with_checkpoints(df, *, feature_cols, target_col, splitter, era_col="era", checkpoint_dir: Path) -> pl.DataFrame` — checkpoint-aware OOF-only path; returns the concatenated OOF; never exposes models.
+  - `nmr/_oof.py::train_multi_target_oof(modeler, df, *, feature_cols, splitter, targets, checkpoint_dir: Path | None = None) -> pl.DataFrame` — routes per target to `train_oof_with_checkpoints` when `checkpoint_dir` is set, else `train_cross_validation` (legacy path untouched).
 
-- [ ] **Step 1: Write failing tests** — create `tests/test_checkpointing.py` (synthetic fixtures; reuse the synthetic train-frame pattern from `tests/test_models.py` if one exists — read that file first):
+- [ ] **Step 1: Write failing tests** — create `tests/test_checkpointing.py`. READ `tests/test_models.py` FIRST and reuse its existing synthetic config/splitter/modeler helpers verbatim (do NOT invent APIs). Adapt the helper names below to whatever that file actually provides.
 
 ```python
-"""OOF fold-checkpointing & resume contracts (spec 2026-08-20-oof-checkpoint-resume)."""
+"""OOF fold-checkpointing & resume contracts (spec 2026-08-20-oof-checkpoint-resume v2)."""
 
 from __future__ import annotations
 
+import json
+import shutil
 from pathlib import Path
 
-import numpy as np
 import polars as pl
 import pytest
 
 from nmr._oof import train_multi_target_oof
-from nmr.config import ExperimentConfig, load_config
-from nmr.models import ModelOrchestrator
-from nmr.splitter import PurgedEraSplitter
 
 
-def _synthetic_train(n_eras: int = 30, rows: int = 6, seed: int = 3) -> pl.DataFrame:
-    rng = np.random.default_rng(seed)
-    rows_out = []
-    for era in range(1, n_eras + 1):
-        signal = float(era % 5)
-        for i in range(rows):
-            rows_out.append({
-                "era": f"{era:04d}", "id": f"t{era}_{i}",
-                "f1": signal + rng.normal(0, 0.5),
-                "f2": rng.normal(0, 1),
-                "target": signal + rng.normal(0, 0.5),
-                "target_ender_20": signal * 0.5 + rng.normal(0, 0.5),
-            })
-    return pl.DataFrame(rows_out)
+# _synthetic_train / _modeler / _splitter: reuse the construction helpers from
+# tests/test_models.py verbatim (read that file; adapt names below).
 
 
-def _modeler() -> ModelOrchestrator:
-    # small fast LGBM config; adapt to the repo's ModelConfig construction
-    # pattern used by tests/test_models.py (read that file first).
-    ...  # implementer: build ModelOrchestrator with preset="fast",
-    ...  # params={"n_estimators": 10, "learning_rate": 0.1, "max_depth": 2, "num_leaves": 4}
-    ...  # via the same helper the existing model tests use.
+def _run(ckpt: Path | None, train: pl.DataFrame) -> pl.DataFrame:
+    return train_multi_target_oof(
+        _modeler(), train, feature_cols=["f1", "f2"],
+        splitter=_splitter(), targets=["target", "target_ender_20"],
+        checkpoint_dir=ckpt,
+    )
 
 
-def _splitter() -> PurgedEraSplitter:
-    # mirrors the repo's synthetic splitter helper from tests/test_models.py
-    ...
-
-
-def test_resume_equals_fresh_bit_for_bit(tmp_path):
-    df = _synthetic_train()
+def test_all_loaded_resume_equals_fresh_and_fits_nothing(tmp_path, caplog):
+    train = _synthetic_train()
     ckpt = tmp_path / "ckpt"
-    fresh = train_multi_target_oof(
-        _modeler(), df, feature_cols=["f1", "f2"],
-        splitter=_splitter(), targets=["target", "target_ender_20"],
-        checkpoint_dir=ckpt,
-    )
-    resumed = train_multi_target_oof(
-        _modeler(), df, feature_cols=["f1", "f2"],
-        splitter=_splitter(), targets=["target", "target_ender_20"],
-        checkpoint_dir=ckpt,
-    )
-    assert fresh.equals(resumed)
-
-
-def test_partial_resume_refits_only_missing(tmp_path):
-    df = _synthetic_train()
-    ckpt = tmp_path / "ckpt"
-    fresh = train_multi_target_oof(
-        _modeler(), df, feature_cols=["f1", "f2"],
-        splitter=_splitter(), targets=["target", "target_ender_20"],
-        checkpoint_dir=ckpt,
-    )
-    (ckpt / "target_ender_20").unlink(missing_ok=True)  # force refit of one target
-    resumed = train_multi_target_oof(
-        _modeler(), df, feature_cols=["f1", "f2"],
-        splitter=_splitter(), targets=["target", "target_ender_20"],
-        checkpoint_dir=ckpt,
-    )
-    assert fresh.equals(resumed)
-
-
-def test_resume_loads_without_fitting(tmp_path, caplog):
-    df = _synthetic_train()
-    ckpt = tmp_path / "ckpt"
-    train_multi_target_oof(
-        _modeler(), df, feature_cols=["f1", "f2"],
-        splitter=_splitter(), targets=["target"], checkpoint_dir=ckpt,
-    )
+    fresh = _run(ckpt, train)
     caplog.clear()
     with caplog.at_level("INFO", logger="nmr.models"):
-        train_multi_target_oof(
-            _modeler(), df, feature_cols=["f1", "f2"],
-            splitter=_splitter(), targets=["target"], checkpoint_dir=ckpt,
-        )
-    text = caplog.text
-    assert "loaded from checkpoint" in text
-    assert "trained in" not in text
+        resumed = _run(ckpt, train)
+    assert fresh.equals(resumed)
+    assert "loaded from checkpoint" in caplog.text
+    assert "trained in" not in caplog.text
+
+
+def test_mixed_resume_within_target_is_bit_for_bit(tmp_path, caplog):
+    """The only case that can break determinism: fold loaded + fold refit."""
+    train = _synthetic_train()
+    ckpt = tmp_path / "ckpt"
+    fresh = _run(ckpt, train)
+    parts = sorted((ckpt / "target").glob("fold_*.parquet"))
+    assert len(parts) >= 2
+    parts[0].unlink()  # delete exactly ONE fold within one target
+    caplog.clear()
+    with caplog.at_level("INFO", logger="nmr.models"):
+        resumed = _run(ckpt, train)
+    assert fresh.equals(resumed)
+    assert "loaded from checkpoint" in caplog.text
+    assert "trained in" in caplog.text  # the refit actually happened
+
+
+def test_partial_target_resume_refits_only_missing_target(tmp_path):
+    train = _synthetic_train()
+    ckpt = tmp_path / "ckpt"
+    fresh = _run(ckpt, train)
+    shutil.rmtree(ckpt / "target_ender_20")  # rmtree, NOT unlink (directory)
+    resumed = _run(ckpt, train)
+    assert fresh.equals(resumed)
+
+
+def test_code_mismatch_raises(tmp_path):
+    train = _synthetic_train()
+    ckpt = tmp_path / "ckpt"
+    _run(ckpt, train)
+    manifest_path = ckpt / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["code_sha256"] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="code_sha256"):
+        _run(ckpt, train)
+
+
+def test_device_mismatch_raises(tmp_path):
+    train = _synthetic_train()
+    ckpt = tmp_path / "ckpt"
+    _run(ckpt, train)
+    manifest_path = ckpt / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["device"] = "totally_different_device"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="device"):
+        _run(ckpt, train)
 
 
 def test_corrupt_checkpoint_raises(tmp_path):
-    df = _synthetic_train()
+    train = _synthetic_train()
     ckpt = tmp_path / "ckpt"
-    train_multi_target_oof(
-        _modeler(), df, feature_cols=["f1", "f2"],
-        splitter=_splitter(), targets=["target"], checkpoint_dir=ckpt,
-    )
-    parts = list((ckpt / "target").glob("fold_*.parquet"))
-    assert parts
+    _run(ckpt, train)
+    parts = sorted((ckpt / "target").glob("fold_*.parquet"))
     parts[0].write_bytes(b"garbage")
     with pytest.raises(ValueError, match="corrupt OOF checkpoint"):
-        train_multi_target_oof(
-            _modeler(), df, feature_cols=["f1", "f2"],
-            splitter=_splitter(), targets=["target"], checkpoint_dir=ckpt,
-        )
+        _run(ckpt, train)
 
 
-def test_default_none_preserves_legacy(tmp_path):
-    df = _synthetic_train()
-    a = train_multi_target_oof(
-        _modeler(), df, feature_cols=["f1", "f2"],
-        splitter=_splitter(), targets=["target"],
-    )
-    b = train_multi_target_oof(
-        _modeler(), df, feature_cols=["f1", "f2"],
-        splitter=_splitter(), targets=["target"],
-    )
-    assert a.equals(b)
-    assert not (tmp_path / "ckpt").exists()
+def test_checkpoint_tree_contains_no_temp_files(tmp_path):
+    train = _synthetic_train()
+    ckpt = tmp_path / "ckpt"
+    _run(ckpt, train)
+    all_files = sorted(p.name for p in ckpt.rglob("*") if p.is_file())
+    for name in all_files:
+        assert name == "manifest.json" or (
+            name.startswith("fold_") and name.endswith(".parquet")
+        ), f"unexpected file in checkpoint tree: {name}"
 ```
-
-Note: the `_modeler`/`_splitter` helpers marked `...` must be filled by reading `tests/test_models.py` and reusing the exact construction helpers it already has (no invented config APIs).
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `./.venv/Scripts/python -m pytest tests/test_checkpointing.py -q`
 Expected: FAIL — `TypeError: train_multi_target_oof() got an unexpected keyword argument 'checkpoint_dir'`.
 
-- [ ] **Step 3: Implement** — in `nmr/models.py`, change the signature and fold loop of `train_cross_validation`:
+- [ ] **Step 3: Implement** — in `nmr/models.py`:
 
 ```python
-    def train_cross_validation(
+    def _cv_fold_parts(
         self,
         df: pl.DataFrame,
         *,
@@ -185,12 +167,45 @@ Expected: FAIL — `TypeError: train_multi_target_oof() got an unexpected keywor
         splitter: PurgedEraSplitter,
         era_col: str = "era",
         checkpoint_dir: Path | None = None,
-    ) -> CVResult:
+    ) -> tuple[list[object | None], list[pl.DataFrame]]:
+        """Shared fold loop: fit or load each fold; (models, oof_parts).
+
+        ``checkpoint_dir=None`` = the legacy fit-everything path (models has no
+        None entries). With a checkpoint dir, existing fold parquets are loaded
+        (models entry None — the OOF-only caller discards models) and new folds
+        are fitted then atomically persisted. The checkpoint root carries a
+        manifest.json with code+device identity; a mismatch raises.
+        """
         folds = splitter.split(df.get_column(era_col).to_list())
         logger.info("[train_cross_validation] %s: %d folds", target_col, len(folds))
-        models: list[object] = []
+        models: list[object | None] = []
         oof_parts: list[pl.DataFrame] = []
         seen_val_eras: set[str] = set()
+
+        manifest_path = checkpoint_dir / "manifest.json" if checkpoint_dir else None
+        if manifest_path is not None:
+            expected_manifest = _checkpoint_manifest()
+            if manifest_path.exists():
+                stored = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if stored.get("code_sha256") != expected_manifest["code_sha256"]:
+                    raise ValueError(
+                        "OOF checkpoint code mismatch: fitting code changed since "
+                        f"the checkpoints were written ({manifest_path}). "
+                        "Delete the oof_checkpoints directory to force a full refit."
+                    )
+                if stored.get("device") != expected_manifest["device"]:
+                    raise ValueError(
+                        "OOF checkpoint device mismatch: checkpoints were fitted "
+                        f"on device {stored.get('device')!r}, current device is "
+                        f"{expected_manifest['device']!r}. Delete the "
+                        "oof_checkpoints directory to force a full refit."
+                    )
+            else:
+                manifest_path.parent.mkdir(parents=True, exist_ok=True)
+                atomic_write_bytes(
+                    manifest_path,
+                    json.dumps(expected_manifest, sort_keys=True).encode("utf-8"),
+                )
 
         for fold in folds:
             overlap = seen_val_eras & set(fold.val_eras)
@@ -198,17 +213,18 @@ Expected: FAIL — `TypeError: train_multi_target_oof() got an unexpected keywor
                 raise ValueError(
                     f"Validation eras must be disjoint across folds, got {sorted(overlap)}"
                 )
-
-            part_path = None
-            if checkpoint_dir is not None:
-                part_path = checkpoint_dir / target_col / f"fold_{fold.index + 1:02d}.parquet"
+            part_path = (
+                checkpoint_dir / target_col / f"fold_{fold.index + 1:02d}.parquet"
+                if checkpoint_dir is not None else None
+            )
             if part_path is not None and part_path.exists():
                 try:
                     fold_predictions = pl.read_parquet(part_path)
-                except Exception as exc:  # fail loud, no silent refit
+                except Exception as exc:
                     raise ValueError(
                         f"corrupt OOF checkpoint {part_path}: {exc}"
                     ) from exc
+                models.append(None)
                 logger.info(
                     "[train_cross_validation] %s: fold %d/%d loaded from checkpoint %s",
                     target_col, fold.index + 1, len(folds), part_path,
@@ -232,28 +248,168 @@ Expected: FAIL — `TypeError: train_multi_target_oof() got an unexpected keywor
                 models.append(model)
                 if part_path is not None:
                     part_path.parent.mkdir(parents=True, exist_ok=True)
-                    atomic_write_parquet(fold_predictions, part_path)
+                    _write_frame_atomic(fold_predictions, part_path)
             oof_parts.append(fold_predictions)
             seen_val_eras.update(fold.val_eras)
-        ...
+
+        if not oof_parts:
+            raise ValueError("No folds produced OOF predictions")
+        return models, oof_parts
 ```
 
-`atomic_write_parquet` is the `nmr/_atomicio.py` helper (read that file — if it exposes a generic atomic-write function, use it; if it exposes only JSON helpers, add a sibling `atomic_write_parquet(frame, path)` in `nmr/_atomicio.py` using the same temp+fsync+replace pattern, with a test in `tests/test_checkpointing.py`).
+With two module-level helpers in `nmr/models.py` (or better: the manifest + frame-write helpers live in `nmr/_oof.py` — the OOF module owns OOF persistence; `nmr/models.py` imports them. Choose `nmr/_oof.py` to keep models.py lean):
 
-In `nmr/_oof.py`: add `checkpoint_dir: Path | None = None` and pass it through to `modeler.train_cross_validation(...)` (import `Path` from pathlib).
+In `nmr/_oof.py`:
+
+```python
+import hashlib
+import io
+import json
+from pathlib import Path
+
+from nmr._atomicio import atomic_write_bytes
+
+_CODE_IDENTITY_FILES = ("nmr/models.py", "nmr/splitter.py")
+
+
+def checkpoint_manifest() -> dict[str, str]:
+    """Current code+device identity for OOF checkpoint manifests."""
+    digest = hashlib.sha256()
+    for relative in _CODE_IDENTITY_FILES:
+        path = Path(__file__).resolve().parents[1] / relative
+        digest.update(path.read_bytes())
+    return {
+        "code_sha256": digest.hexdigest(),
+        "device": _current_device(),
+    }
+
+
+def _current_device() -> str:
+    from nmr.models import ModelOrchestrator  # local import: avoid cycles
+    return str(getattr(ModelOrchestrator, "resolved_device", "cpu"))
+```
+
+Hmm — device must be the ACTUAL orchestrator instance's resolved device, not a class attribute. Correct wiring: the fold loop needs the device from `self`. `ModelOrchestrator` has `resolved_device` as an instance property (runner.py:300 reads `model_orchestrator.resolved_device`). So `_cv_fold_parts` builds the manifest itself using `self.resolved_device`:
+
+```python
+        if manifest_path is not None:
+            expected_manifest = {
+                "code_sha256": _fitting_code_sha256(),
+                "device": str(self.resolved_device),
+            }
+```
+
+with `_fitting_code_sha256()` in `nmr/_oof.py` hashing the two module files. The implementer adapts the exact attribute (`resolved_device` — verify by reading `nmr/models.py`; if it is computed lazily after a fit, the manifest must be written only when the first fold is fitted — the manifest write block above runs before the loop, so if the device is only known after the first fit, move manifest creation to the first fitted-fold write; if `resolved_device` is available up front (runner reads it right after orchestrator construction), keep it as written).
+
+Then:
+
+```python
+    def train_cross_validation(
+        self,
+        df: pl.DataFrame,
+        *,
+        feature_cols: Sequence[str],
+        target_col: str,
+        splitter: PurgedEraSplitter,
+        era_col: str = "era",
+    ) -> CVResult:
+        models, oof_parts = self._cv_fold_parts(
+            df, feature_cols=feature_cols, target_col=target_col,
+            splitter=splitter, era_col=era_col, checkpoint_dir=None,
+        )
+        if any(m is None for m in models):  # unreachable defensive guard
+            raise ValueError("checkpoint-less CV produced a None model entry")
+        oof = pl.concat(oof_parts, how="vertical")
+        logger.info(
+            "[train_cross_validation] %s: OOF complete rows=%d", target_col, oof.height
+        )
+        return CVResult(oof=oof, models=tuple(models))
+
+    def train_oof_with_checkpoints(
+        self,
+        df: pl.DataFrame,
+        *,
+        feature_cols: Sequence[str],
+        target_col: str,
+        splitter: PurgedEraSplitter,
+        era_col: str = "era",
+        checkpoint_dir: Path,
+    ) -> pl.DataFrame:
+        """Checkpoint-aware OOF training; returns OOF only (models discarded).
+
+        See the checkpoint spec (2026-08-20-oof-checkpoint-resume) for the
+        resume contract and code/device identity rules.
+        """
+        _, oof_parts = self._cv_fold_parts(
+            df, feature_cols=feature_cols, target_col=target_col,
+            splitter=splitter, era_col=era_col, checkpoint_dir=checkpoint_dir,
+        )
+        oof = pl.concat(oof_parts, how="vertical")
+        logger.info(
+            "[train_oof_with_checkpoints] %s: OOF complete rows=%d", target_col, oof.height
+        )
+        return oof
+```
+
+In `nmr/_oof.py::train_multi_target_oof` — new parameter + routing:
+
+```python
+def train_multi_target_oof(
+    modeler: ModelOrchestrator,
+    df: pl.DataFrame,
+    *,
+    feature_cols: Sequence[str],
+    splitter: PurgedEraSplitter,
+    targets: Sequence[str],
+    checkpoint_dir: Path | None = None,
+) -> pl.DataFrame:
+    """... existing docstring ... + checkpoint_dir routes to the
+    checkpoint-aware OOF-only path (spec 2026-08-20-oof-checkpoint-resume)."""
+    stacked: pl.DataFrame | None = None
+    for target in targets:
+        if checkpoint_dir is not None:
+            part = modeler.train_oof_with_checkpoints(
+                df, feature_cols=feature_cols, target_col=target,
+                splitter=splitter, era_col="era", checkpoint_dir=checkpoint_dir,
+            )
+        else:
+            result = modeler.train_cross_validation(
+                df, feature_cols=feature_cols, target_col=target,
+                splitter=splitter, era_col="era",
+            )
+            part = result.oof
+        part = part.rename({"prediction": f"pred_{target}"})
+        if stacked is None:
+            stacked = part
+        else:
+            stacked = stacked.join(part, on=["id", "era"], how="inner")
+    assert stacked is not None
+    return stacked
+```
+
+`_write_frame_atomic(frame, path)`: serialize to bytes then reuse the existing helper:
+
+```python
+def _write_frame_atomic(frame: pl.DataFrame, path: Path) -> None:
+    buffer = io.BytesIO()
+    frame.write_parquet(buffer)
+    atomic_write_bytes(path, buffer.getvalue())
+```
+
+(The implementer places this in `nmr/_oof.py` and imports it in models.py, or inlines the BytesIO pattern — either way `atomic_write_bytes` is the only writer.)
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `./.venv/Scripts/python -m pytest tests/test_checkpointing.py tests/test_models.py -q`
-Expected: PASS — new contract tests AND the untouched legacy model tests.
+Expected: PASS — new contract tests AND the untouched legacy model tests (proves the public API refactor is behavior-identical).
 
 - [ ] **Step 5: Lint + commit**
 
-Run: `./.venv/Scripts/python -m ruff check nmr/models.py nmr/_oof.py nmr/_atomicio.py tests/test_checkpointing.py` → clean, then:
+Run: `./.venv/Scripts/python -m ruff check nmr/models.py nmr/_oof.py tests/test_checkpointing.py` → clean, then:
 
 ```bash
-git add nmr/models.py nmr/_oof.py nmr/_atomicio.py tests/test_checkpointing.py
-git commit -m "feat(runner): fold-granularity OOF checkpointing with skip-on-resume"
+git add nmr/models.py nmr/_oof.py tests/test_checkpointing.py
+git commit -m "feat(runner): fold-granularity OOF checkpointing with code/device identity and skip-on-resume"
 ```
 
 ---
@@ -261,24 +417,27 @@ git commit -m "feat(runner): fold-granularity OOF checkpointing with skip-on-res
 ### Task B: Runner wiring
 
 **Files:**
-- Modify: `nmr/runner.py` (`run()` — pass the run-scoped checkpoint dir into `_train_multi_target_oof`)
+- Modify: `nmr/runner.py`
 - Test: `tests/test_runner.py`
 
 **Interfaces:**
-- Consumes: Task A's `checkpoint_dir` parameters; `self._run_id`, `self._config.run.artifacts_dir` (both already exist in `ExperimentRunner`).
+- Consumes: Task A's `train_multi_target_oof(..., checkpoint_dir=...)`; `self._run_id` and `self._config.run.artifacts_dir` (both already exist).
 
 - [ ] **Step 1: Write failing test** — append to `tests/test_runner.py` (read the file first; reuse its synthetic config/run helpers):
 
 ```python
-def test_runner_writes_and_reuses_oof_checkpoints(tmp_path):
-    # reuse the file's existing minimal synthetic ExperimentConfig helper;
-    # point artifacts_dir at tmp_path / "artifacts"
-    result1 = run_synthetic_experiment(tmp_path)   # existing helper, adapted
-    ckpt_root = tmp_path / "artifacts" / "runs" / result1.run_id / "oof_checkpoints"
-    assert ckpt_root.exists()
-    assert (ckpt_root / "target").glob("fold_*.parquet")  # non-empty
-    result2 = run_synthetic_experiment(tmp_path)   # same config+data -> same run_id
+def test_runner_writes_and_reuses_oof_checkpoints(tmp_path, caplog):
+    result1 = run_synthetic_experiment(tmp_path)  # existing helper, adapted for caplog
+    ckpt_root = (
+        tmp_path / "artifacts" / "runs" / result1.run_id / "oof_checkpoints"
+    )
+    assert (ckpt_root / "manifest.json").exists()
+    assert sorted(p.name for p in (ckpt_root / "target").glob("fold_*.parquet"))
+    caplog.clear()
+    with caplog.at_level("INFO", logger="nmr.models"):
+        result2 = run_synthetic_experiment(tmp_path)  # same config+data -> same run_id
     assert result2.oof.equals(result1.oof)
+    assert "loaded from checkpoint" in caplog.text
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -286,7 +445,7 @@ def test_runner_writes_and_reuses_oof_checkpoints(tmp_path):
 Run: `./.venv/Scripts/python -m pytest tests/test_runner.py -k oof_checkpoints -q`
 Expected: FAIL — no checkpoint dir created.
 
-- [ ] **Step 3: Implement** — in `nmr/runner.py::run()`, change the OOF call:
+- [ ] **Step 3: Implement** — in `nmr/runner.py::run()`:
 
 ```python
         cv_oof = self._train_multi_target_oof(
@@ -321,22 +480,33 @@ git commit -m "feat(runner): wire run-scoped OOF checkpoint directory"
 
 ---
 
-### Task C: Docs + targeted verification
+### Task C: Docs + merge gate
 
 **Files:**
-- Modify: `ARCHITECTURE.md` (OOF path section: checkpoint layout `artifacts/runs/<run_id>/oof_checkpoints/<target>/fold_NN.parquet`, resume semantics, determinism invariant, atomic-write rule, "concurrent duplicate run_ids unsupported")
-- Modify: `docs/superpowers/2026-08-19-benchmark-fleet-handoff.md` (§8 queued-work item 1: mark DONE with commit refs)
+- Modify: `ARCHITECTURE.md` (OOF path section: checkpoint layout, manifest identity rules, resume semantics, atomic-write rule, retention = deleted with the run dir, "concurrent duplicate run_ids unsupported")
+- Modify: `AGENTS.md` — §8 hazard addition (required by §2.8), with a compensating trim to stay under the 32,768 B budget. Suggested trim: condense the verbose "Coverage specs must be package-level" bullet to one sentence. Hazard text:
 
-- [ ] **Step 1: Docs edits as above** (no AGENTS.md changes — no headroom).
+```markdown
+### OOF fold checkpoints (2026-08-20)
+`ExperimentRunner` persists per-fold OOF parts under `artifacts/runs/<run_id>/oof_checkpoints/<target>/fold_NN.parquet` + a `manifest.json` recording code identity (SHA-256 of `nmr/models.py` + `nmr/splitter.py`) and fit device. Resume loads existing folds; any code/device mismatch raises — delete the directory to force a full refit (never silently reuse stale OOF). Checkpoints are deleted with their run dir; clearing `artifacts/runs/` remains ask-first.
+```
+
+- Modify: `docs/superpowers/2026-08-19-benchmark-fleet-handoff.md` (§8 queued-work item 1: mark DONE with the commit refs)
+
+- [ ] **Step 1: Docs edits as above.** Verify AGENTS.md size: `stat -c %s AGENTS.md` must stay ≤ 32,768.
 
 - [ ] **Step 2: Targeted verification**
 
 Run: `./.venv/Scripts/python -m pytest tests/test_checkpointing.py tests/test_models.py tests/test_runner.py tests/test_campaign.py -q`
-Expected: PASS. (Full suite deliberately deferred — the `mt_std_v1` campaign owns the CPU; note this in the commit message.)
+Expected: PASS.
 
-- [ ] **Step 3: Commit**
+- [ ] **Step 3: Merge gate — the full suite and CI**
+
+The campaign owns the CPU, so the FULL suite run is deferred to CI. This work is NOT done until `ruff check .` and the full `pytest -q` are green in CI (`.github/workflows/ci.yml`). State this explicitly in the final report. If the campaign finishes first, run the full suite locally before merging.
+
+- [ ] **Step 4: Commit**
 
 ```bash
-git add ARCHITECTURE.md docs/superpowers/2026-08-19-benchmark-fleet-handoff.md
-git commit -m "docs: OOF checkpoint/resume spec + plan references; handoff update (full suite deferred: campaign CPU-bound)"
+git add ARCHITECTURE.md AGENTS.md docs/superpowers/2026-08-19-benchmark-fleet-handoff.md
+git commit -m "docs: OOF checkpoint/resume SSOT updates (architecture, agents hazard, handoff)"
 ```

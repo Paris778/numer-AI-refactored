@@ -1,53 +1,59 @@
-# Design Spec: OOF Fold-Checkpointing & Resume (Campaign Crash Insurance)
+# Design Spec: OOF Fold-Checkpointing & Resume (Campaign Crash Insurance) — v2
 
-> Status: APPROVED (director disposition 2026-08-20). Scope: fold-granularity incremental persistence of cross-validation OOF predictions with skip-on-resume, inside `ExperimentRunner` runs. Nothing else in the run lifecycle changes.
+> Status: APPROVED (director disposition 2026-08-20). v2 supersedes v1 after review: the public `train_cross_validation` API stays untouched (no `models` corruption possible), checkpoints carry a code+device identity manifest, and the determinism guarantee is tested in the only case that can break it (mixed load+fit within one target).
 
 ## 1. Mission
 
-A campaign run is one `ExperimentRunner.run()` call containing 4 targets × 4 folds = 16 fits (measured: the running `mt_std_v1` campaign at 2026-08-20 is ~21+ hours in with zero artifacts persisted — the registry row is written only when the whole run finishes). A crash at fit 15 loses all 16. This change persists each fold's OOF predictions to parquet **as the fold completes**, and on restart skips folds whose checkpoint already exists. Determinism is preserved by construction: fits are seeded, and the checkpoint roundtrip is lossless float32 parquet — a resumed run must reproduce the uninterrupted run bit-for-bit, which makes the resume logic self-testing.
+A campaign run is one `ExperimentRunner.run()` call containing 4 targets × 4 folds = 16 fits (measured: the `mt_std_v1` campaign was 21+ hours in with zero artifacts persisted — the registry row is written only when the whole run finishes). A crash at fit 15 loses all 16. This change persists each fold's OOF predictions to parquet **as the fold completes**, and on restart loads folds whose checkpoint exists instead of refitting. Determinism is preserved by construction — fits are seeded and the parquet roundtrip is lossless — and is **proven** by tests covering the mixed load+fit resume case.
 
-## 2. Decisions
+## 2. Decisions (v2)
 
 | # | Question | Decision |
 |---|---|---|
-| 1 | Granularity | **Per fold.** `ModelOrchestrator.train_cross_validation` already collects per-fold `oof_parts`; each part is persisted immediately after its fold completes. Max lost work on a crash = the fold in flight. |
-| 2 | Storage layout | `artifacts/runs/<run_id>/oof_checkpoints/<target_col>/fold_<NN>.parquet` (zero-padded 2-digit fold index). Keyed by `run_id` (which already binds config + data fingerprint) → stale-reuse is impossible by construction; different inputs never share a checkpoint dir. |
-| 3 | Skip semantics | A fold part whose parquet exists is **loaded instead of fitted**. Fold-disjointness validation (`seen_val_eras`) still runs over every fold, loaded or fitted. A corrupt/unreadable checkpoint raises (fail loud, no silent fallback to refit). |
-| 4 | What is NOT checkpointed | Fold models (the CV `models` tuple is unused downstream in the runner — the deploy pipeline re-fits full history independently), the deploy fit, blending/neutralization/evaluation (cheap, re-runnable). |
-| 5 | API shape | `train_cross_validation(..., checkpoint_dir: Path \| None = None)` and `train_multi_target_oof(..., checkpoint_dir: Path \| None = None)`. Default `None` = exactly today's behavior; research/HPO callers unchanged. `ExperimentRunner` passes `self._config.run.artifacts_dir / "runs" / self._run_id / "oof_checkpoints"`. |
-| 6 | Atomicity | Every checkpoint write goes through the existing `nmr/_atomicio.py` temp-file + fsync + `os.replace` pattern (same discipline as registry writes). |
-| 7 | Determinism invariant (hard) | For the same run_id, OOF assembled from checkpoints must equal the freshly fitted OOF **bit-for-bit** (`pl.DataFrame.equals`). Enforced by tests; a violation is a correctness bug, not a tuning detail. |
+| 1 | Granularity | **Per fold.** Max lost work on a crash = the fold in flight. |
+| 2 | Storage layout | `artifacts/runs/<run_id>/oof_checkpoints/<target_col>/fold_<NN>.parquet` + one `manifest.json` at the checkpoint root. Keyed by `run_id` (config + data fingerprint). |
+| 3 | API shape | **New method** `ModelOrchestrator.train_oof_with_checkpoints(df, *, feature_cols, target_col, splitter, era_col="era", checkpoint_dir: Path) -> pl.DataFrame` (OOF only, checkpoint-aware). The public `train_cross_validation` is **unchanged** — no new parameter, `CVResult.models` stays "one model per fold" and can never be silently truncated by resume. `nmr/_oof.py::train_multi_target_oof(..., checkpoint_dir: Path \| None = None)` routes to the new method when set, to `train_cross_validation` otherwise. `ExperimentRunner` passes `artifacts/runs/<run_id>/oof_checkpoints`. |
+| 4 | Skip semantics | A fold part whose parquet exists is **loaded instead of fitted**. Fold-disjointness validation runs over every fold, loaded or fitted. Corrupt checkpoint → `ValueError` (fail loud, no silent refit). |
+| 5 | Code identity (review blocker #3) | `manifest.json` records `code_sha256` = SHA-256 over the concatenated source bytes of `nmr/models.py` + `nmr/splitter.py` (the two modules that define fold geometry and fit behavior). On resume, a mismatch raises `ValueError` telling the operator to delete the checkpoint dir to force a full refit. Rationale: `run_id` binds config+data, not code — checkpoints must never silently survive a fitting-code change. Git SHA is rejected (meaningless on dirty trees). |
+| 6 | Device identity (review blocker #7) | `manifest.json` also records `device` = `ModelOrchestrator.resolved_device` at fit time. Cross-device resume raises (determinism holds per-device only). |
+| 7 | Atomicity | Every checkpoint write serializes the frame to bytes and goes through the existing `nmr/_atomicio.py::atomic_write_bytes` (temp-file + fsync + `os.replace`). No hand-rolled writes. |
+| 8 | Determinism invariant (hard) | Same run_id + same code_sha256 + same device ⇒ OOF assembled from checkpoints equals the freshly fitted OOF **bit-for-bit** (`pl.DataFrame.equals`). Tested in the mixed case (one fold loaded, one refit within the same target). |
+| 9 | Retention | Checkpoints live inside the run's own artifact dir and are deleted with it. Clearing `artifacts/runs/` remains the existing ask-first operation; no separate retention machinery. |
+| 10 | Docs law | `ARCHITECTURE.md` gets the module-level detail; `AGENTS.md` gets a short §8 hazard (trim an existing verbose bullet to stay within the 32 KB budget — "trim before you grow", not "skip the update"). |
+| 11 | CI gate | Local runs during the campaign are targeted-only (CPU-bound box). The FULL suite + CI must be green before merge; stated explicitly in the plan. |
 
 ## 3. Behavior Contract
 
-- First run: fits every fold, writing `fold_NN.parquet` after each. OOF = concat of fitted parts (unchanged output).
-- Resume run (same run_id): loads existing parts, fits only missing ones, writes them. OOF byte-identical to the first run.
-- Idempotency: running the same run_id repeatedly is safe — all parts exist → zero fits.
-- Campaign interplay: unchanged (`campaign.py` still skips configs whose run_id is recorded; a crashed campaign config now resumes its remaining folds instead of refitting from zero).
-- Logging: `[train_cross_validation] <target>: fold N/M loaded from checkpoint <path>` vs `... trained in X.Xs`.
+- First run: fits every fold, writing `fold_NN.parquet` after each; `manifest.json` is written with the current `code_sha256` + `device` before the first fold write.
+- Resume run (same run_id): manifest must match current code + device, else `ValueError`. Matching manifest → load existing parts, fit missing ones only. OOF byte-identical to the first run.
+- Idempotency: repeated runs with all parts present perform zero fits.
+- Concurrent duplicate run_ids are unsupported (operational anti-pattern; unchanged).
 
-## 4. Tests (synthetic fixtures only — no real-data dependency)
+## 4. Tests (synthetic fixtures only)
 
 New `tests/test_checkpointing.py`:
 
-1. **Resume equals fresh**: fit with `checkpoint_dir` set → capture OOF A. New orchestrator instance, same dir → all folds load → OOF B. Assert `A.equals(B)` (bit-for-bit) and that zero fits happened (caplog: no "trained in" lines, all "loaded from checkpoint").
-2. **Partial resume**: delete one target's fold parts → that target refits, the other loads → assembled OOF still equals A; log shows the mix.
-3. **Disjointness still enforced**: a synthetic splitter with overlapping val eras raises even when parts are loaded (validation runs before the load/skip decision).
-4. **Atomic write**: checkpoint files appear only after each fold completes (no partial file); a second concurrent writer cannot corrupt (reuse the `_atomicio` helper's own tests as evidence; assert the helper is the only write path).
-5. **Corrupt checkpoint raises**: write garbage to a fold parquet → resume raises `ValueError` (no silent refit).
-6. **Default None = legacy**: `train_cross_validation` without `checkpoint_dir` behaves exactly as before (existing `tests/test_models.py` CV tests stay green, unchanged).
-7. **Runner wiring**: `tests/test_runner.py` synthetic run with `artifacts_dir` → checkpoint dir created under `runs/<run_id>/oof_checkpoints/`; a second synthetic run with the same config+data (same run_id) loads instead of fits (log assertion).
+1. **Mixed resume is bit-for-bit** (the v1 gap): fit all → delete exactly ONE fold parquet within one target → resume. Assert `fresh.equals(resumed)` AND the log shows both `"loaded from checkpoint"` and `"trained in"` for that target. This is the only scenario that can break determinism; it must pass.
+2. **All-loaded resume equals fresh** (roundtrip proof) + zero fits on second pass (caplog).
+3. **Partial target resume**: delete one target's directory via `shutil.rmtree` → refit that target only → equals fresh.
+4. **Code mismatch raises**: tamper `manifest.json`'s `code_sha256` → resume raises `ValueError` (message names the manifest path and says to delete the dir to refit).
+5. **Device mismatch raises**: tamper `device` → same.
+6. **Corrupt checkpoint raises**: overwrite a fold parquet with garbage → `ValueError`, no silent refit.
+7. **Atomic writes**: after a run, the checkpoint tree contains only `manifest.json` + `fold_NN.parquet` files (no temp files).
+8. **Legacy path untouched**: `train_cross_validation` without checkpoints behaves exactly as before; `CVResult.models` still contains one model per fold (existing `tests/test_models.py` covers this — must stay green unchanged).
+
+Runner wiring test in `tests/test_runner.py`: synthetic run creates `runs/<run_id>/oof_checkpoints/`; a second synthetic run with the same config+data (same run_id) loads instead of fits (caplog).
 
 ## 5. Files
 
-- Modify: `nmr/models.py` (`train_cross_validation` + `train_multi_target_oof` wrapper signature — `_oof.py` passes it through), `nmr/_oof.py` (thread `checkpoint_dir`), `nmr/runner.py` (pass the run-scoped checkpoint dir)
-- Create: `tests/test_checkpointing.py`
-- Modify: `tests/test_runner.py` (runner wiring test)
-- Docs (same commit): `ARCHITECTURE.md` (OOF path + checkpoint layout + resume semantics). No AGENTS.md changes (49 B headroom — none available).
+- Modify: `nmr/models.py` (new `train_oof_with_checkpoints` + shared private fold-loop helper; `train_cross_validation` refactored to delegate internally with checkpoint_dir=None so the OOF path stays single-sourced)
+- Modify: `nmr/_oof.py` (thread `checkpoint_dir`)
+- Modify: `nmr/runner.py` (pass the run-scoped checkpoint dir)
+- Create: `tests/test_checkpointing.py`; Modify: `tests/test_runner.py`
+- Docs (same commit): `ARCHITECTURE.md` + `AGENTS.md` (§8 hazard, with a compensating trim) + handoff doc §8 item 1 marked done
 
 ## 6. Out of Scope (explicit)
 
-- Checkpointing the deploy/full-history fit, ensemble weights, neutralization, or evaluation stages.
-- Campaign-level restarts (already covered by run-id skipping).
-- Cross-process locking for two concurrent identical run_ids (an operational anti-pattern already; documented in the spec that concurrent duplicate runs are unsupported).
+- Deploy/full-history fit, ensemble weights, neutralization, evaluation stages.
+- Cross-process locking; concurrent duplicate run_ids.
 - Thread caps (separate work item).
