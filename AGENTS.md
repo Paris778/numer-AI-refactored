@@ -67,6 +67,12 @@ Write or update tests before implementing. Cover success, failure, edge cases, d
 ### 8. No Loose Ends
 Every change is complete and self-contained: deleted code loses its tests; renamed symbols get all call sites updated (including `nmr/__init__.py` exports and `__all__`); changed behavior gets its docs updated in the same commit (this file, `ARCHITECTURE.md`, `docs/06-evaluation/evaluation-suite-bible.md` if metrics change); no stale docstrings, no dead compat code.
 
+### 9. Long Runs Checkpoint
+Multi-hour, multi-stage work (CV folds, campaigns, full-history fits, sweeps) persists each completed unit as it finishes — atomic write, resumable on restart, identity-guarded (code + device) so a resume never silently reuses stale state. Never stake hours of compute on one uninterrupted process.
+
+### 10. Long Runs Report Progress
+Every long job writes durable progress: stage markers, completed/total counts, and elapsed time per unit — enough to answer "how far along?" and "how much longer?" from the log alone (markers: `ARCHITECTURE.md` §V). Silent long jobs are a defect.
+
 ---
 
 ## 3. Absolute Prohibitions
@@ -156,25 +162,7 @@ When modifying or generating code, enforce these seven invariants:
 
 ### Knowledge base map (docs/)
 
-The `docs/` tree is a curated Numerai domain library; `docs/DOCS_README.md` is its master map (importance tiers, per-file table, reading recipes). Task-oriented pointers:
-
-| Task | Read first |
-|---|---|
-| CORR / MMC / FNC / BMC metric formulas | `docs/01-canon/scoring/00-definitions.md` → `docs/01-canon/scoring/01-correlation.md` / `02-mmc-bmc.md` / `03-fnc.md` |
-| neutralization | `docs/01-canon/models.md` (official `neutralize()` code) + `docs/05-notebooks/2_feature_neutralization.ipynb` |
-| ensembling | `docs/02-strategy/target-ensembling-math.md` + `docs/05-notebooks/3_target_ensemble.ipynb` |
-| Payout proxy | `docs/01-canon/staking.md` (0.75/2.25 weights, ±5% clip, stake thresholds) |
-| model presets / params | `docs/01-canon/models.md` (benchmark walk-forward conventions; standard/deep params) |
-| submission or deployment | `docs/01-canon/submissions.md` + `docs/02-strategy/strategy-bible.md` §8 (deployment contract) |
-| benchmark gates | `docs/06-evaluation/benchmark-line-in-the-sand.md` (5-tier hierarchy: tiers 0–4, hard gates) |
-| evaluation semantics | `docs/06-evaluation/evaluation-suite-bible.md` (evaluation spec of record) |
-| `numerapi` / `numerai_tools` | `docs/03-reference/numerapi.md` + `docs/03-reference/numerai-tools.md`; the installed source is the ultimate oracle (see below) |
-| Numerai datasets / era ledger | `nmr/refresh.py` + `refresh_data.py` |
-| Research planning | `docs/04-research/research-program.md` (E0–E8 grid), `docs/04-research/advanced-ideas.md` (ideas incl. NN directions), `docs/04-research/State-of-the-Art Deep Learning for Obfuscated, Non-Stationary Tabular Regression.md` (tabular-DL survey) |
-| Domain intuition | `docs/02-strategy/strategy-bible.md` + `docs/02-strategy/why-it-works.md` |
-| Model design/training — start here | `docs/04-research/pre-modelling-dataset-feature-study-2026-08.md` — the **golden pre-modelling document (single source of truth)**: dataset diagnostics (§1–6), feature-campaign evidence (§7: 12 cells × 2 backends, full 649-era validation window, CIs + FNE), decision log + hardware ceilings (§8), methodology & reproduction (§9), file/artifact map with pointers to every result number (§10) |
-
-Start with the agent reading order in `docs/DOCS_README.md` §1 (15-minute version: §2–§3).
+The `docs/` tree is a curated Numerai domain library. **`docs/DOCS_README.md` is its master map** — importance tiers, the full per-file table, and task-oriented reading recipes. Never duplicate that map here; go there. Start with the agent reading order (§1; 15-minute version §2–§3). Two entry points carry the most weight: `docs/06-evaluation/evaluation-suite-bible.md` (how this repo judges a model) and `docs/04-research/pre-modelling-dataset-feature-study-2026-08.md` (the golden pre-modelling document).
 
 Never invent a `numerai_tools` / `numerapi` signature — open the installed source: `.venv/Lib/site-packages/numerai_tools/scoring.py` (the parity oracle), `numerai_tools/submissions.py` (submission contract), `numerapi/base_api.py` (live API). Versions pinned in `requirements.txt` (numerai-tools 0.5.3, numerapi 2.22.0).
 
@@ -229,9 +217,9 @@ Build real v5.3 scorecard payloads from **overlap eras first** (join/filter by s
 `ModelOrchestrator` is GPU-first with CPU fallback for CV (device params: `ARCHITECTURE.md` §G). A failed device attempt is logged; the run manifest records the config device as `pipeline_device` and the actual fit device as `oof_device`. `model.device` (`auto|gpu|cpu`, default `auto`) is the knob for CV/experimentation: `gpu` forces the GPU candidate (a failure raises — no silent fallback), `cpu` never attempts it. `train_full_history` is always CPU (deploy artifact invariant). Determinism holds per-device, not across devices — GPU and CPU results may differ slightly.
 - **xgboost ≥ 3.0 (fixed 2026-08-09):** the old GPU-first params silently fell back to CPU on every fit; CUDA now actually engages (measured: `ARCHITECTURE.md` §U).
 - **cupy (user-granted, pinned in `requirements.txt`):** `nmr/_gpu.py` provides `rankdata` — lazy load, bit-identical to scipy on finite data, automatic fallback (measurements: `ARCHITECTURE.md` §U). Rules: never import cupy into `nmr/_transforms` (embedded by value in deploy artifacts — must stay numpy/scipy-only); `_gpu.rankdata` isolates NaN instead of scipy's all-NaN propagation (`nan_policy='propagate'`) — v5.3 features have zero NaN so both paths agree.
-- **Windows pip pitfall:** `./.venv/Scripts/pip` is a shim into the legacy `../numer-AI/.venv` — always `./.venv/Scripts/python -m pip`. The venv is shared with the legacy repo; never install via the shim (see CONTRIBUTING.md).
+- **Windows pip pitfall:** `./.venv/Scripts/pip` is a shim into the legacy `../numer-AI/.venv` — always `./.venv/Scripts/python -m pip` (see CONTRIBUTING.md).
 - **Long jobs:** background tasks die when the session closes — use `nohup ./.venv/Scripts/python <script> > <log> 2>&1 &` and poll the log (stage markers + era ticks show progress). **This laptop enters Modern Standby overnight (2026-08-21: ender fold 3 lost ~9.4 h)** — `powercfg /change standby-timeout-ac 0` + `hibernate-timeout-ac 0` applied; if wall ≫ fit time, check Kernel-Power 506/507 events first.
-- **Analysis runtime:** full-universe (`--features all`) analysis is ~4–5 h, dominated by three 3,555-feature streaming passes (ic_by_era + 2 screens, each re-streaming the parquet); cupy accelerates per-era rankdata (measured: `ARCHITECTURE.md` §U). The screen passes could be derived from the persisted long-form — deferred.
+- **Analysis runtime:** full-universe (`--features all`) analysis is ~4–5 h, dominated by three 3,555-feature streaming passes (measured: the pre-modelling study §8).
 
 ### Full-version training is RAM-bound on this box (measured 2026-08-18)
 - **Machine:** 63.7 GiB RAM, 148.8 GiB commit limit. The **full version** (train+validation, 6.85M rows, medium/780 features) extrapolates to **commit ≈ 61–65 GiB / working set 86–90% of physical** — marginal-to-infeasible here. `promote_full_version`'s RAM guard refuses with the measured numbers in the error (dual-metric: commit vs commit limit, WS vs physical). **Stage 2 (full-history promotion at medium) is deferred, not attempted; the D7 Stage-1 truncated artifact is the accepted deliverable.** Curve constants and the open memory-slope hypothesis live in `ARCHITECTURE.md` §5 (`measure_ram_curve.py`).
@@ -258,13 +246,13 @@ The deploy closure's final rank step changed the exposure definition: post-fix r
 Local `load_predict` fidelity is tested, but CatBoost availability in Numerai's hosted predict runtime is **UNVERIFIED** — validate a catboost deploy against the hosted runtime before staking on it.
 
 ### Ruff lint gate (adopted 2026-08-16)
-`ruff check .` (config `ruff.toml`: E/F/I/UP, line-length 120) is the CI lint gate (ruff pinned in `requirements-dev.txt`; install via `./.venv/Scripts/python -m pip`, never the `Scripts/pip` shim). pytest is the sole *functional* gate; `ruff format` is NOT adopted — deferred to a dedicated Phase-2 reformat commit.
+`ruff check .` (config `ruff.toml`: E/F/I/UP, line-length 120) is the CI lint gate; ruff is pinned in `requirements-dev.txt`. pytest is the sole *functional* gate; `ruff format` is NOT adopted — deferred to a dedicated Phase-2 reformat commit.
 
 ### Coverage specs must be package-level (2026-08-19)
-Coverage commands must use package-level `--cov` specs only (`--cov=nmr --cov=dashboard_ui`); dotted submodule specs crash at conftest import on py3.12 + coverage 7.x (see `CONTRIBUTING.md`); CI coverage gate: `scripts/coverage_gate.py`.
+Use package-level `--cov` specs only (`--cov=nmr --cov=dashboard_ui`); dotted submodule specs crash at conftest import (see `CONTRIBUTING.md`); CI gate: `scripts/coverage_gate.py`.
 
 ### Mutation gate is CI-only (mutmut refuses native Windows)
-mutmut is fork-based; Windows refused ("use WSL", #397). Linux CI only (`.github/workflows/mutation.yml`: weekly + manual; never on push; measurement-first; floors ratchet down only on survived+timeout). mutmut 3.x is config-driven (`[tool.mutmut]`); the gate writes a scratch config per module and RAISES on unparseable stats, zero mutants, or >10% timeouts — never mint floors from failed or clock-dominated runs (SEV-1, 2026-08-20). Receipt: `configs/mutation_receipt.json`, uploaded as an artifact; a human commits it via a normal PR to set floors (GITHUB_TOKEN cannot push workflow files).
+mutmut is fork-based; Windows refused (#397). Linux CI only (`.github/workflows/mutation.yml`: weekly + manual, never on push). mutmut 3.x is config-driven; the gate writes a scratch `[tool.mutmut]` per module and RAISES on unparseable stats, zero mutants, or >10% timeouts (SEV-1, 2026-08-20). Floors ratchet on SURVIVORS only (timeouts are harness wedges, not quality signals); gate mode scopes to floored modules and never rewrites `configs/mutation_receipt.json` — a human commits it via PR to set floors.
 
 ### `../numer-AI/` is read-only legacy
 The V1 repo is mined for logic only. Never import from it, never modify it, never add it to any path.
