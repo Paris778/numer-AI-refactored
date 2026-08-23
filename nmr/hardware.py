@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass
 
 __all__ = [
+    "apply_thread_limits",
     "GpuDevice",
     "HardwareSpec",
     "HardwareStatus",
@@ -35,6 +36,43 @@ __all__ = [
 
 _MIB = 1024**2
 _GIB = 1024**3
+
+_THREAD_LIMIT_ENV = "NMR_MAX_THREADS"
+_DEFAULT_THREAD_LIMIT = 8
+_THREAD_POOL_ENV_VARS = (
+    "POLARS_MAX_THREADS",
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+)
+
+
+def apply_thread_limits(max_threads: int | None = None) -> int:
+    """Cap polars/OpenMP/BLAS thread pools; returns the applied limit.
+
+    Resolution order: explicit ``max_threads`` > ``NMR_MAX_THREADS`` env >
+    default ``min(os.cpu_count() or 1, 8)``. An invalid ``NMR_MAX_THREADS``
+    (non-int or < 1) raises ValueError (fail loud). Each pool variable is set
+    ONLY when not already present in ``os.environ`` — user-set values win.
+    Call this at process start, before importing polars/numpy transitively.
+    """
+    if max_threads is None:
+        raw = os.environ.get(_THREAD_LIMIT_ENV)
+        if raw is not None:
+            try:
+                max_threads = int(raw)
+            except ValueError as exc:
+                raise ValueError(
+                    f"{_THREAD_LIMIT_ENV} must be an integer >= 1, got {raw!r}"
+                ) from exc
+    if max_threads is None:
+        max_threads = min(os.cpu_count() or 1, _DEFAULT_THREAD_LIMIT)
+    if isinstance(max_threads, bool) or not isinstance(max_threads, int) or max_threads < 1:
+        raise ValueError(f"max_threads must be an integer >= 1, got {max_threads!r}")
+    for name in _THREAD_POOL_ENV_VARS:
+        if name not in os.environ:
+            os.environ[name] = str(max_threads)
+    return max_threads
 
 
 @dataclass(frozen=True)

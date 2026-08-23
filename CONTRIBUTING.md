@@ -120,7 +120,7 @@ Reviewers will check:
 - Determinism: no timing/path contamination in hashed payloads; seeds threaded through config
 - Leakage safety: purge invariants intact, no row-level CV, fold assertions untouched
 - Boundary discipline: no business logic in scripts or notebooks
-- **Long-run durability:** any multi-hour path checkpoints resumably and emits progress (AGENTS.md §2.9–2.10)
+- **Long-run durability:** any multi-hour path checkpoints resumably and emits progress (AGENTS.md §2.9–2.10); heavy CLIs apply thread-pool limits at process start via `nmr.hardware.apply_thread_limits` (env `NMR_MAX_THREADS`, default min(8, cores))
 - **No loose ends:** `nmr/__init__.py` exports in sync, orphaned tests removed, docs updated in the same commit
 - `AGENTS.md` / `ARCHITECTURE.md` accuracy (doc drift is a bug)
 

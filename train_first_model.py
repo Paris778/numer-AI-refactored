@@ -1,6 +1,12 @@
 """Train the first competitive model and produce a deployable artifact."""
 
+# ruff: noqa: E402 — apply_thread_limits() must run before the imports below:
+# polars/OpenMP/BLAS read their pool sizes at first use, not at import.
 from __future__ import annotations
+
+from nmr.hardware import apply_thread_limits
+
+apply_thread_limits()
 
 import json
 import logging

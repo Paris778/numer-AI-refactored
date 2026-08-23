@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict
 
 import pytest
@@ -10,6 +11,7 @@ import pytest
 from nmr.hardware import (
     GpuDevice,
     HardwareSpec,
+    apply_thread_limits,
     discover_hardware,
     gpu_devices,
     hardware_status,
@@ -31,6 +33,13 @@ _MEMINFO = """MemTotal:       33554432 kB
 MemFree:         8388608 kB
 MemAvailable:   12582912 kB
 """
+
+_POOL_VARS = (
+    "POLARS_MAX_THREADS",
+    "OMP_NUM_THREADS",
+    "OPENBLAS_NUM_THREADS",
+    "MKL_NUM_THREADS",
+)
 
 
 def test_parse_gpu_devices() -> None:
@@ -136,6 +145,7 @@ def test_hardware_symbols_exported() -> None:
         "GpuDevice",
         "HardwareSpec",
         "HardwareStatus",
+        "apply_thread_limits",
         "discover_hardware",
         "gpu_devices",
         "gpu_status",
@@ -143,3 +153,51 @@ def test_hardware_symbols_exported() -> None:
     ]:
         assert name in nmr.__all__, name
         assert hasattr(nmr, name), name
+
+
+def test_apply_thread_limits_default_caps_at_eight(monkeypatch) -> None:
+    monkeypatch.setattr(os, "cpu_count", lambda: 20)
+    monkeypatch.delenv("NMR_MAX_THREADS", raising=False)
+    for name in _POOL_VARS:
+        monkeypatch.delenv(name, raising=False)
+    assert apply_thread_limits() == 8
+    for name in _POOL_VARS:
+        assert os.environ[name] == "8"
+
+
+def test_apply_thread_limits_env_override(monkeypatch) -> None:
+    monkeypatch.setenv("NMR_MAX_THREADS", "3")
+    for name in _POOL_VARS:
+        monkeypatch.delenv(name, raising=False)
+    assert apply_thread_limits() == 3
+    for name in _POOL_VARS:
+        assert os.environ[name] == "3"
+
+
+def test_apply_thread_limits_explicit_wins_over_env(monkeypatch) -> None:
+    monkeypatch.setenv("NMR_MAX_THREADS", "3")
+    for name in _POOL_VARS:
+        monkeypatch.delenv(name, raising=False)
+    assert apply_thread_limits(5) == 5
+    for name in _POOL_VARS:
+        assert os.environ[name] == "5"
+
+
+def test_apply_thread_limits_preserves_user_set_vars(monkeypatch) -> None:
+    monkeypatch.setenv("OMP_NUM_THREADS", "2")
+    monkeypatch.delenv("NMR_MAX_THREADS", raising=False)
+    for name in ("POLARS_MAX_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+        monkeypatch.delenv(name, raising=False)
+    limit = apply_thread_limits()
+    assert os.environ["OMP_NUM_THREADS"] == "2"
+    for name in ("POLARS_MAX_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+        assert os.environ[name] == str(limit)
+
+
+def test_apply_thread_limits_invalid_env_raises(monkeypatch) -> None:
+    monkeypatch.setenv("NMR_MAX_THREADS", "banana")
+    with pytest.raises(ValueError, match="NMR_MAX_THREADS"):
+        apply_thread_limits()
+    monkeypatch.setenv("NMR_MAX_THREADS", "0")
+    with pytest.raises(ValueError):
+        apply_thread_limits()

@@ -9,7 +9,13 @@ Usage:
         [--campaigns-dir artifacts/campaigns] [--deploy] [--dry-run]
 """
 
+# ruff: noqa: E402 — apply_thread_limits() must run before the imports below:
+# polars/OpenMP/BLAS read their pool sizes at first use, not at import.
 from __future__ import annotations
+
+from nmr.hardware import apply_thread_limits
+
+apply_thread_limits()
 
 import argparse
 import logging
