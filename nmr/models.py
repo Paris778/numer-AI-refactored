@@ -28,7 +28,6 @@ import numpy as np
 import polars as pl
 import xgboost as xgb
 
-from nmr._atomicio import atomic_write_bytes
 from nmr.config import DataConfig, ModelConfig
 from nmr.splitter import Fold, PurgedEraSplitter
 
@@ -253,9 +252,11 @@ class ModelOrchestrator:
         # Local import: nmr._oof imports nmr.models at module top, so a
         # module-level import here would be circular.
         from nmr._oof import (
-            _KNOWN_RESOLVED_DEVICES,
-            _fitting_code_sha256,
-            _write_frame_atomic,
+            checkpoint_manifest,
+            ensure_no_torn_tree,
+            verify_checkpoint_manifest,
+            write_bytes_atomic,
+            write_frame_atomic,
         )
 
         folds = splitter.split(df.get_column(era_col).to_list())
@@ -268,47 +269,13 @@ class ModelOrchestrator:
         manifest_written = False
         if manifest_path is not None:
             if manifest_path.exists():
-                stored = json.loads(manifest_path.read_text(encoding="utf-8"))
-                if stored.get("code_sha256") != _fitting_code_sha256():
-                    raise ValueError(
-                        "OOF checkpoint code_sha256 mismatch: fitting code changed "
-                        f"since the checkpoints were written ({manifest_path}). "
-                        "Delete the oof_checkpoints directory to force a full refit."
-                    )
-                stored_device = stored.get("device")
-                if self.resolved_device is not None:
-                    # Same-process reuse: the device is known — exact compare.
-                    if stored_device != str(self.resolved_device):
-                        raise ValueError(
-                            "OOF checkpoint device mismatch: checkpoints were "
-                            f"fitted on device {stored_device!r}, current device "
-                            f"is {str(self.resolved_device)!r}. Delete the "
-                            "oof_checkpoints directory to force a full refit."
-                        )
-                elif stored_device not in _KNOWN_RESOLVED_DEVICES:
-                    # Fresh orchestrator (device unknown pre-fit): the
-                    # authoritative check runs at the first fitted fold; here
-                    # a manifest recording anything but a real fit device is
-                    # rejected loudly instead of accepted vacuously.
-                    raise ValueError(
-                        "OOF checkpoint device mismatch: manifest records "
-                        f"unknown device {stored_device!r} ({manifest_path}). "
-                        "Delete the oof_checkpoints directory to force a full refit."
-                    )
+                verify_checkpoint_manifest(manifest_path, self.resolved_device)
             else:
                 # PINNED DECISION (review): the manifest is written at the FIRST
                 # fitted fold, never here — resolved_device is None until a fit
                 # completes, and an early write would record "None", making the
                 # device guard pass vacuously on resume.
-                existing_parts = any(
-                    manifest_path.parent.rglob("fold_*.parquet")
-                ) if manifest_path.parent.exists() else False
-                if existing_parts:
-                    raise ValueError(
-                        "OOF checkpoint tree has fold parts but no manifest.json "
-                        f"({manifest_path}) — inconsistent state. Delete the "
-                        "oof_checkpoints directory to force a full refit."
-                    )
+                ensure_no_torn_tree(manifest_path)
 
         for fold in folds:
             overlap = seen_val_eras & set(fold.val_eras)
@@ -358,32 +325,19 @@ class ModelOrchestrator:
                     if manifest_path is not None and not manifest_written:
                         resolved_device = str(self.resolved_device)
                         if manifest_path.exists():
-                            stored = json.loads(
-                                manifest_path.read_text(encoding="utf-8")
+                            verify_checkpoint_manifest(
+                                manifest_path, resolved_device
                             )
-                            if stored.get("device") != resolved_device:
-                                raise ValueError(
-                                    "OOF checkpoint device mismatch: checkpoints "
-                                    f"were fitted on device {stored.get('device')!r}, "
-                                    f"current device is {resolved_device!r}. "
-                                    "Delete the oof_checkpoints directory to "
-                                    "force a full refit."
-                                )
                         else:
-                            manifest_path.parent.mkdir(parents=True, exist_ok=True)
-                            atomic_write_bytes(
-                                manifest_path,
+                            write_bytes_atomic(
                                 json.dumps(
-                                    {
-                                        "code_sha256": _fitting_code_sha256(),
-                                        "device": resolved_device,
-                                    },
+                                    checkpoint_manifest(resolved_device),
                                     sort_keys=True,
                                 ).encode("utf-8"),
+                                manifest_path,
                             )
                         manifest_written = True
-                    part_path.parent.mkdir(parents=True, exist_ok=True)
-                    _write_frame_atomic(fold_predictions, part_path)
+                    write_frame_atomic(fold_predictions, part_path)
             oof_parts.append(fold_predictions)
             seen_val_eras.update(fold.val_eras)
 

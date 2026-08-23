@@ -1,4 +1,6 @@
-"""OOF fold-checkpointing & resume contracts (spec 2026-08-20-oof-checkpoint-resume v2)."""
+"""OOF fold-checkpointing & resume contracts (spec 2026-08-20-oof-checkpoint-resume v2),
+plus direct unit tests for the shared checkpoint helpers extracted in Task A
+(spec 2026-08-23-checkpoint-coverage-extension-design)."""
 
 from __future__ import annotations
 
@@ -10,7 +12,15 @@ from typing import Any
 import polars as pl
 import pytest
 
-from nmr._oof import train_multi_target_oof
+from nmr._oof import (
+    checkpoint_manifest,
+    ensure_no_torn_tree,
+    fitting_code_sha256,
+    train_multi_target_oof,
+    verify_checkpoint_manifest,
+    write_bytes_atomic,
+    write_frame_atomic,
+)
 from nmr.config import ModelConfig, SplitConfig
 from nmr.models import ModelOrchestrator
 from nmr.splitter import PurgedEraSplitter
@@ -159,3 +169,82 @@ def test_checkpoint_tree_contains_no_temp_files(tmp_path):
         assert name == "manifest.json" or (
             name.startswith("fold_") and name.endswith(".parquet")
         ), f"unexpected file in checkpoint tree: {name}"
+
+
+# --- Direct unit tests for the extracted shared helpers (Task A) ---
+
+
+def test_fitting_code_sha256_is_stable_and_feeds_manifest():
+    digest = fitting_code_sha256()
+    assert isinstance(digest, str)
+    assert len(digest) == 64
+    assert digest == fitting_code_sha256()  # deterministic across calls
+    assert digest == checkpoint_manifest("cpu")["code_sha256"]
+
+
+def test_checkpoint_manifest_roundtrip():
+    assert checkpoint_manifest("cpu") == {
+        "code_sha256": fitting_code_sha256(),
+        "device": "cpu",
+    }
+
+
+def test_verify_checkpoint_manifest_accepts_matching_manifest(tmp_path):
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(checkpoint_manifest("cpu")), encoding="utf-8"
+    )
+    verify_checkpoint_manifest(manifest_path, "cpu")  # known device, exact match
+    verify_checkpoint_manifest(manifest_path, None)  # unresolved device, valid schema
+
+
+def test_verify_checkpoint_manifest_code_mismatch_raises(tmp_path):
+    manifest_path = tmp_path / "manifest.json"
+    manifest = checkpoint_manifest("cpu")
+    manifest["code_sha256"] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="code_sha256"):
+        verify_checkpoint_manifest(manifest_path, "cpu")
+
+
+def test_verify_checkpoint_manifest_device_mismatch_raises(tmp_path):
+    manifest_path = tmp_path / "manifest.json"
+    manifest = checkpoint_manifest("cpu")
+    manifest["device"] = "gpu"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="device"):
+        verify_checkpoint_manifest(manifest_path, "cpu")
+
+
+def test_verify_checkpoint_manifest_rejects_unknown_device_when_unresolved(tmp_path):
+    manifest_path = tmp_path / "manifest.json"
+    manifest = checkpoint_manifest("not_a_real_device")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="device"):
+        verify_checkpoint_manifest(manifest_path, None)
+
+
+def test_ensure_no_torn_tree_raises_with_parts(tmp_path):
+    root = tmp_path / "ckpt"
+    (root / "target").mkdir(parents=True)
+    (root / "target" / "fold_01.parquet").write_bytes(b"not really parquet")
+    with pytest.raises(ValueError, match="no manifest.json"):
+        ensure_no_torn_tree(root / "manifest.json")
+    ensure_no_torn_tree(tmp_path / "nonexistent" / "manifest.json")  # empty is fine
+
+
+def test_write_frame_and_bytes_atomic_leave_no_temp_files(tmp_path):
+    frame = pl.DataFrame({"x": [1, 2, 3]})
+    frame_path = tmp_path / "frame.parquet"
+    write_frame_atomic(frame, frame_path)
+    assert pl.read_parquet(frame_path).equals(frame)
+
+    payload = b"\x00\x01\x02checkpoint-payload"
+    bytes_path = tmp_path / "payload.bin"
+    write_bytes_atomic(payload, bytes_path)
+    assert bytes_path.read_bytes() == payload
+
+    leftovers = [
+        p.name for p in tmp_path.iterdir() if ".tmp." in p.name or p.name.endswith(".part")
+    ]
+    assert not leftovers, f"atomic write left temp files behind: {leftovers}"
