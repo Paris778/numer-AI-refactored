@@ -263,8 +263,8 @@ ALL 29 current registry rows predate the rebuild: their `manifest.scoring_eras` 
 ### Dashboard window drifts on data refresh
 The standardized comparison window = meta overlap; refresh shifts it — regenerate `artifacts/dashboard.html` after every `refresh_data.py` run (definition + regeneration rule: `ARCHITECTURE.md` §W).
 
-### OOF fold checkpoints (2026-08-20)
-`ExperimentRunner` persists per-fold OOF parts under `artifacts/runs/<run_id>/oof_checkpoints/<target>/fold_NN.parquet` + a `manifest.json` recording code identity (SHA-256 of `nmr/models.py` + `nmr/splitter.py`) and fit device. Resume loads existing folds; any code/device mismatch raises — delete the directory to force a full refit (never silently reuse stale OOF). Checkpoints are deleted with their run dir; clearing `artifacts/runs/` remains ask-first.
+### OOF fold checkpoints (2026-08-20); deploy + validation checkpoints (2026-08-23)
+`ExperimentRunner` persists per-fold OOF parts under `artifacts/runs/<run_id>/oof_checkpoints/<target>/fold_NN.parquet` + a `manifest.json` recording code identity (SHA-256 of `nmr/models.py` + `nmr/splitter.py` + `nmr/runner.py`) and fit device. Resume loads existing folds; any code/device mismatch raises — delete the directory to force a full refit (never silently reuse stale OOF). The same identity-manifest discipline now covers the deploy fits (`deploy_checkpoints/<target>.pkl`) and the validation era-batch predicts (`validation_checkpoints/preds_batch_NN.parquet`); the final `evaluate_model` scorecard call stays uncheckpointed. Checkpoints are deleted with their run dir; clearing `artifacts/runs/` remains ask-first.
 
 ### Thread-pool caps must run at process start (2026-08-23)
 Heavy CLIs (`benchmark_runner.py`, `run_campaign.py`, `analyze_dataset.py`, `train_first_model.py`, `promote_model.py`, `rehearse_promotion.py`) call `nmr.hardware.apply_thread_limits()` as their first executable statement: it sets `POLARS_MAX_THREADS` / `OMP_NUM_THREADS` / `OPENBLAS_NUM_THREADS` / `MKL_NUM_THREADS` (env `NMR_MAX_THREADS`, default min(8, cores); user-set values win; invalid env raises). Never add imports before that call.

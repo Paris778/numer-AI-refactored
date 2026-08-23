@@ -26,6 +26,7 @@ from nmr._oof import (
     train_multi_target_oof,
     verify_checkpoint_manifest,
     write_bytes_atomic,
+    write_frame_atomic,
 )
 from nmr._transforms import (
     neutralize_array,
@@ -53,6 +54,53 @@ logger = logging.getLogger("nmr.runner")
 _VAL_PREDICT_ERA_BATCH = 40  # eras per validation predict chunk (bounds peak RAM)
 
 
+def _era_batch_frames(val_df: pl.DataFrame, batch_eras: int) -> list[pl.DataFrame]:
+    """Split ``val_df`` into era-batches in the frame's era appearance order.
+
+    The single boundary computation for the batched validation predict paths
+    (spec 2026-08-23-checkpoint-coverage-extension): eras chunk in their
+    appearance order and each batch is the filter of ``val_df`` to that era
+    slice, so concatenating per-batch results in batch order reproduces
+    ``val_df``'s row order. Both ``_predict_in_era_batches`` and the
+    checkpoint-aware ``_predict_validation_era_batches`` derive their batches
+    here — the two paths can never drift apart.
+    """
+    eras = list(dict.fromkeys(val_df.get_column("era").to_list()))
+    batches: list[pl.DataFrame] = []
+    for start in range(0, len(eras), batch_eras):
+        batch_era_set = set(eras[start : start + batch_eras])
+        batches.append(val_df.filter(pl.col("era").is_in(batch_era_set)))
+    return batches
+
+
+def _predict_era_batch(
+    batch: pl.DataFrame,
+    feature_cols: Sequence[str],
+    predict_fn: Callable[[pd.DataFrame], pd.DataFrame],
+) -> pl.DataFrame:
+    """Predict one era-batch; return its ``(era, id, prediction)`` frame.
+
+    Shared per-batch computation for the batched validation predict paths:
+    feature columns are coerced to a single Float32 block first (``nmr.models.
+    coerce_float32_features``) so the backend's float32 conversion is a
+    zero-copy view; the deploy closure is stateless across calls and the
+    era-partitioned neutralization inside it is order-independent (cache keyed
+    per era), so batching is bit-identical to a single full-frame predict.
+    """
+    from nmr.models import coerce_float32_features
+
+    feats = coerce_float32_features(batch, feature_cols)
+    features_pd = (
+        pl.concat([batch.select(["id", "era"]), feats], how="horizontal")
+        .to_pandas()
+        .set_index("id")
+    )
+    prediction_frame = predict_fn(features_pd)
+    return batch.select(["era", "id"]).with_columns(
+        pl.Series("prediction", prediction_frame["prediction"].to_numpy())
+    )
+
+
 def _predict_in_era_batches(
     val_df: pl.DataFrame,
     feature_cols: Sequence[str],
@@ -61,38 +109,127 @@ def _predict_in_era_batches(
 ) -> pl.DataFrame:
     """Predict validation eras in era-batches to bound peak memory.
 
-    The deploy closure is stateless across calls and the era-partitioned
-    neutralization inside it is order-independent (cache keyed per era), so
-    batching is bit-identical to a single full-frame predict. Feature columns
-    are coerced to a single Float32 block first (``nmr.models.
-    coerce_float32_features``) so the backend's float32 conversion is a
-    zero-copy view — at 3,555 features a full-frame pandas materialization is
-    ~28 GiB. Batches follow the frame's era appearance order, so the output
-    row order equals ``val_df``'s.
+    Batches follow the frame's era appearance order, so the output row order
+    equals ``val_df``'s (see ``_era_batch_frames``). Batching is bit-identical
+    to a single full-frame predict (see ``_predict_era_batch``).
     """
-    from nmr.models import coerce_float32_features
-
     if val_df.is_empty():
         return val_df.select(["era", "id"]).with_columns(
             pl.Series("prediction", [], dtype=pl.Float64)
         )
-    eras = list(dict.fromkeys(val_df.get_column("era").to_list()))
     chunks: list[pl.DataFrame] = []
-    for start in range(0, len(eras), batch_eras):
-        batch_era_set = set(eras[start : start + batch_eras])
-        batch = val_df.filter(pl.col("era").is_in(batch_era_set))
-        feats = coerce_float32_features(batch, feature_cols)
-        features_pd = (
-            pl.concat([batch.select(["id", "era"]), feats], how="horizontal")
-            .to_pandas()
-            .set_index("id")
+    for batch in _era_batch_frames(val_df, batch_eras):
+        chunks.append(_predict_era_batch(batch, feature_cols, predict_fn))
+    return pl.concat(chunks)
+
+
+def _predict_validation_era_batches(
+    val_df: pl.DataFrame,
+    feature_cols: Sequence[str],
+    predict_fn: Callable[[pd.DataFrame], pd.DataFrame],
+    batch_eras: int,
+    *,
+    validation_checkpoint_dir: Path | None = None,
+    checkpoint_device: str | None = None,
+) -> pl.DataFrame:
+    """Checkpoint-aware variant of ``_predict_in_era_batches``.
+
+    Batch boundaries are identical (shared ``_era_batch_frames``), so with
+    ``validation_checkpoint_dir=None`` the output is bit-identical to
+    ``_predict_in_era_batches``. With a directory, each batch persists to
+    ``validation_checkpoints/preds_batch_NN.parquet`` (atomic write) and a
+    resume loads present batches instead of predicting (spec 2026-08-23-
+    checkpoint-coverage-extension). The root ``manifest.json`` follows the
+    OOF/deploy identity discipline: verified at entry (code exact-compare
+    always; device exact-compare when ``checkpoint_device`` is known, schema
+    check otherwise) and verified/initialized again at the first computed
+    batch — initializing requires a known device (a predict never resolves
+    one), so a None device there raises loudly; ``run()`` passes the
+    orchestrator's post-fit ``resolved_device``. The final ``evaluate_model``
+    scorecard call is NOT checkpointed (single call, no clean granularity).
+    """
+    if val_df.is_empty():
+        return val_df.select(["era", "id"]).with_columns(
+            pl.Series("prediction", [], dtype=pl.Float64)
         )
-        prediction_frame = predict_fn(features_pd)
-        chunks.append(
-            batch.select(["era", "id"]).with_columns(
-                pl.Series("prediction", prediction_frame["prediction"].to_numpy())
+    manifest_path = (
+        validation_checkpoint_dir / "manifest.json"
+        if validation_checkpoint_dir is not None
+        else None
+    )
+    if manifest_path is not None:
+        if manifest_path.exists():
+            verify_checkpoint_manifest(
+                manifest_path,
+                checkpoint_device,
+                checkpoint_kind="validation_checkpoints",
             )
+        else:
+            ensure_no_torn_tree(
+                manifest_path,
+                checkpoint_kind="validation_checkpoints",
+                part_glob="preds_batch_*.parquet",
+            )
+    manifest_checked = False
+    chunks: list[pl.DataFrame] = []
+    for batch_index, batch in enumerate(_era_batch_frames(val_df, batch_eras)):
+        batch_path = (
+            validation_checkpoint_dir / f"preds_batch_{batch_index:02d}.parquet"
+            if validation_checkpoint_dir is not None
+            else None
         )
+        if batch_path is not None and batch_path.exists():
+            try:
+                chunk = pl.read_parquet(batch_path)
+            except Exception as exc:
+                raise ValueError(
+                    f"corrupt validation checkpoint {batch_path}: {exc}"
+                ) from exc
+            logger.info(
+                "[validation] batch %02d: loaded validation checkpoint %s",
+                batch_index,
+                batch_path,
+            )
+            chunks.append(chunk)
+            continue
+        if manifest_path is not None and not manifest_checked:
+            # PINNED DECISION (mirrors the OOF/deploy paths): the manifest is
+            # verified / written at the first computed batch — an earlier
+            # write would record a vacuous device, and a predict never
+            # resolves one, so a None checkpoint_device here raises loudly
+            # (the deploy fits that precede the stage resolve it normally).
+            if manifest_path.exists():
+                verify_checkpoint_manifest(
+                    manifest_path,
+                    checkpoint_device,
+                    checkpoint_kind="validation_checkpoints",
+                )
+            else:
+                if checkpoint_device is None:
+                    raise ValueError(
+                        "validation_checkpoints requires a resolved fit device "
+                        "to initialize its manifest, but checkpoint_device is "
+                        "None (the deploy fits resolve it before the "
+                        "validation stage). Delete the validation_checkpoints "
+                        "directory to force a full repredict."
+                    )
+                write_bytes_atomic(
+                    json.dumps(
+                        checkpoint_manifest(checkpoint_device), sort_keys=True
+                    ).encode("utf-8"),
+                    manifest_path,
+                )
+            manifest_checked = True
+        chunk = _predict_era_batch(batch, feature_cols, predict_fn)
+        if batch_path is not None:
+            write_frame_atomic(chunk, batch_path)
+            logger.info(
+                "[validation] batch %02d: predicted and wrote validation "
+                "checkpoint %s",
+                batch_index,
+                batch_path,
+            )
+        chunks.append(chunk)
     return pl.concat(chunks)
 
 __all__ = ["RunResult", "ExperimentRunner"]
@@ -284,7 +421,19 @@ class ExperimentRunner:
         if self._config.evaluation.validation_scorecard:
             scorecard, validation_predictions, validation_purge = (
                 self._run_validation_stage(
-                    predict_fn=pipeline[0], feature_cols=feature_cols
+                    predict_fn=pipeline[0],
+                    feature_cols=feature_cols,
+                    validation_checkpoint_dir=(
+                        self._config.run.artifacts_dir
+                        / "runs"
+                        / self._run_id
+                        / "validation_checkpoints"
+                    ),
+                    checkpoint_device=(
+                        str(model_orchestrator.resolved_device)
+                        if model_orchestrator.resolved_device is not None
+                        else None
+                    ),
                 )
             )
             logger.info("[run] validation scorecard ready: corr_sharpe_ac=%.5f",
@@ -377,7 +526,12 @@ class ExperimentRunner:
         return stacked
 
     def _run_validation_stage(
-        self, *, predict_fn, feature_cols: Sequence[str]
+        self,
+        *,
+        predict_fn,
+        feature_cols: Sequence[str],
+        validation_checkpoint_dir: Path | None = None,
+        checkpoint_device: str | None = None,
     ) -> tuple[MetricScorecard, pl.DataFrame, int]:
         data = self._config.data
         agent = IngestionAgent(data)
@@ -428,8 +582,13 @@ class ExperimentRunner:
             "%d eras scored", purge, val_df.select(pl.col("era").n_unique()).item()
         )
 
-        preds = _predict_in_era_batches(
-            val_df, feature_cols, predict_fn, _VAL_PREDICT_ERA_BATCH
+        preds = _predict_validation_era_batches(
+            val_df,
+            feature_cols,
+            predict_fn,
+            _VAL_PREDICT_ERA_BATCH,
+            validation_checkpoint_dir=validation_checkpoint_dir,
+            checkpoint_device=checkpoint_device,
         )
         scorecard = evaluate_model(
             preds,

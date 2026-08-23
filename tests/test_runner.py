@@ -934,3 +934,184 @@ def test_deploy_checkpoint_dir_only_created_when_pipeline_built(tmp_path) -> Non
     run_dir = tmp_path / "artifacts" / "runs" / result.run_id
     assert (run_dir / "oof_checkpoints").exists()
     assert not (run_dir / "deploy_checkpoints").exists()
+
+
+def _write_synthetic_data_multi_batch(root, n_val_eras: int = 42) -> None:
+    """Synthetic data whose scored validation window spans two era-batches
+    (_VAL_PREDICT_ERA_BATCH=40): 42 validation eras -> 41 scored -> 40+1."""
+    version_dir = root / "vtest"
+    version_dir.mkdir(parents=True, exist_ok=True)
+    features = {
+        "feature_sets": {
+            "small": ["f1", "f2"],
+            "medium": ["f1", "f2"],
+            "all": ["f1", "f2"],
+        },
+        "targets": ["target", "target_alt"],
+    }
+    (version_dir / "features.json").write_text(json.dumps(features), encoding="utf-8")
+    _build_train_frame().write_parquet(version_dir / "train.parquet")
+
+    val_rows = []
+    for era in range(13, 13 + n_val_eras):
+        for idx in range(6):
+            f1 = idx * 0.02
+            f2 = (idx % 3) * 0.01
+            val_rows.append(
+                {
+                    "era": str(era),
+                    "id": f"{era}_{idx}",
+                    "f1": f1,
+                    "f2": f2,
+                    "target": (0.6 + 0.03 * era) * f1 - (0.3 + 0.01 * era) * f2 + 0.3 * f1 * f1 + 0.05 * era,
+                    "target_alt": (0.2 + 0.02 * era) * f1 + (0.7 - 0.01 * era) * f2 - 0.2 * f2 * f2 - 0.04 * era,
+                }
+            )
+    val = pl.DataFrame(val_rows)
+    val.write_parquet(version_dir / "validation.parquet")
+    val.select(["era", "id"]).with_columns(
+        pl.lit(0.35).alias("numerai_meta_model")
+    ).write_parquet(version_dir / "meta_model.parquet")
+    val.select(["era", "id"]).with_columns(
+        pl.lit(0.2).alias("bench_cyrusd_20")
+    ).write_parquet(version_dir / "validation_benchmark_models.parquet")
+
+
+def _validation_checkpoint_config(tmp_path, *, device: str = "cpu") -> ExperimentConfig:
+    """Validation config with the CV device pinned — the resume refit device
+    must be box-independent so the device exact-compare tests are deterministic."""
+    cfg = _validation_config(tmp_path)
+    return ExperimentConfig(
+        data=cfg.data,
+        split=cfg.split,
+        model=ModelConfig(
+            backend=cfg.model.backend,
+            preset=cfg.model.preset,
+            params=cfg.model.params,
+            device=device,
+        ),
+        evaluation=cfg.evaluation,
+        run=cfg.run,
+    )
+
+
+def test_validation_checkpoints_mixed_resume_bit_for_bit(tmp_path, caplog) -> None:
+    """Validation mixed resume (spec 2026-08-23-checkpoint-coverage-extension):
+    per-era-batch prediction frames persist under validation_checkpoints/;
+    deleting one batch and resuming predicts only that batch, and the stage's
+    predictions are byte-identical to the uninterrupted run's."""
+    data_root = tmp_path / "data"
+    _write_synthetic_data_multi_batch(data_root)
+    cfg = ExperimentConfig(
+        data=DataConfig(
+            version="vtest", feature_set="small",
+            targets=("target", "target_alt"), data_dir=data_root,
+        ),
+        split=SplitConfig(scheme="walk_forward", purge_eras=1, embargo_eras=0, n_folds=2),
+        model=ModelConfig(
+            backend="lightgbm", preset="fast", device="cpu",
+            params={"n_estimators": 10, "learning_rate": 0.05, "min_data_in_leaf": 2},
+        ),
+        evaluation=EvalConfig(
+            backend="custom", main_target="target", validation_scorecard=True
+        ),
+        run=RunConfig(seed=17, artifacts_dir=tmp_path / "artifacts", name="val-ckpt-test"),
+    )
+
+    first = ExperimentRunner(cfg).run(deploy=False)
+    ckpt_root = tmp_path / "artifacts" / "runs" / first.run_id / "validation_checkpoints"
+    assert (ckpt_root / "manifest.json").exists()
+    assert sorted(p.name for p in ckpt_root.glob("preds_batch_*.parquet")) == [
+        "preds_batch_00.parquet",
+        "preds_batch_01.parquet",
+    ]
+    manifest = json.loads((ckpt_root / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["device"] == "cpu"  # full-history deploy fits are CPU-only
+    assert len(manifest["code_sha256"]) == 64
+    expected = first.validation_predictions
+
+    (ckpt_root / "preds_batch_00.parquet").unlink()  # delete exactly ONE batch
+    caplog.clear()
+    with caplog.at_level("INFO", logger="nmr.runner"):
+        resumed = ExperimentRunner(cfg).run(deploy=False)
+    assert resumed.run_id == first.run_id
+    assert resumed.validation_predictions is not None
+    assert resumed.validation_predictions.equals(expected)
+    assert caplog.text.count("loaded validation checkpoint") == 1
+    assert caplog.text.count("predicted and wrote validation checkpoint") == 1
+
+
+def test_validation_checkpoint_code_mismatch_raises(tmp_path) -> None:
+    """Validation manifest identity: a changed fitting-code sha must fail loudly."""
+    cfg = _validation_checkpoint_config(tmp_path)
+    first = ExperimentRunner(cfg).run(deploy=False)
+    ckpt_root = tmp_path / "artifacts" / "runs" / first.run_id / "validation_checkpoints"
+    manifest_path = ckpt_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["code_sha256"] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="code_sha256"):
+        ExperimentRunner(cfg).run(deploy=False)
+
+
+def test_validation_checkpoint_unknown_device_raises(tmp_path) -> None:
+    """Validation manifest identity: a device outside the known fit devices is
+    rejected loudly even while the device is unresolved at resume entry."""
+    cfg = _validation_checkpoint_config(tmp_path)
+    first = ExperimentRunner(cfg).run(deploy=False)
+    ckpt_root = tmp_path / "artifacts" / "runs" / first.run_id / "validation_checkpoints"
+    manifest_path = ckpt_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["device"] = "totally_different_device"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="device"):
+        ExperimentRunner(cfg).run(deploy=False)
+
+
+def test_validation_checkpoint_device_exact_mismatch_on_resume_raises(tmp_path) -> None:
+    """The authoritative device compare runs when a resume knows the current
+    device (a CV refit resolves it): a stored 'gpu' device against a 'cpu'
+    resume must fail the exact compare instead of passing vacuously."""
+    cfg = _validation_checkpoint_config(tmp_path)  # device pinned to "cpu"
+    first = ExperimentRunner(cfg).run(deploy=False)
+    run_dir = tmp_path / "artifacts" / "runs" / first.run_id
+    manifest_path = run_dir / "validation_checkpoints" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["device"] = "gpu"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    # Force a CV refit so the resume's resolved device is known ("cpu");
+    # the deploy fits and validation batches stay checkpointed.
+    fold_path = next((run_dir / "oof_checkpoints" / "target").glob("fold_*.parquet"))
+    fold_path.unlink()
+    with pytest.raises(ValueError, match="device"):
+        ExperimentRunner(cfg).run(deploy=False)
+
+
+def test_validation_checkpoint_torn_tree_raises(tmp_path) -> None:
+    """Prediction batches without a manifest.json are an inconsistent state."""
+    cfg = _validation_checkpoint_config(tmp_path)
+    first = ExperimentRunner(cfg).run(deploy=False)
+    ckpt_root = tmp_path / "artifacts" / "runs" / first.run_id / "validation_checkpoints"
+    (ckpt_root / "manifest.json").unlink()
+    with pytest.raises(ValueError, match="no manifest.json"):
+        ExperimentRunner(cfg).run(deploy=False)
+
+
+def test_validation_checkpoint_corrupt_batch_raises(tmp_path) -> None:
+    """A corrupted batch parquet must fail loudly with the path, never
+    silently repredict or produce garbage."""
+    cfg = _validation_checkpoint_config(tmp_path)
+    first = ExperimentRunner(cfg).run(deploy=False)
+    ckpt_root = tmp_path / "artifacts" / "runs" / first.run_id / "validation_checkpoints"
+    (ckpt_root / "preds_batch_00.parquet").write_bytes(b"garbage")
+    with pytest.raises(ValueError, match="corrupt validation checkpoint"):
+        ExperimentRunner(cfg).run(deploy=False)
+
+
+def test_validation_checkpoint_dir_only_created_when_stage_runs(tmp_path) -> None:
+    """The validation checkpoint dir is created only when the validation
+    scorecard stage runs (evaluation.validation_scorecard=true)."""
+    result = ExperimentRunner(_config(tmp_path)).run(deploy=False)
+    run_dir = tmp_path / "artifacts" / "runs" / result.run_id
+    assert (run_dir / "oof_checkpoints").exists()
+    assert not (run_dir / "validation_checkpoints").exists()

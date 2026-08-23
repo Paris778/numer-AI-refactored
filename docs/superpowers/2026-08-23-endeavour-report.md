@@ -160,7 +160,7 @@ Parallel-session commits interleaved throughout (mutation-gate work, dataless CI
 
 1. **Fleet real-data verification (Task 13) — NOT DONE.** The 19 fleet cells have never been scored on real v5.3 data; no placements/gate verdicts measured; anchors not re-pinned. Resumable from the handoff doc: smoke → full run (tens of CPU-hours for the deep cells) → end-of-session gate.
 2. **Thread caps** — nothing in `nmr/` caps polars/OpenMP (`n_jobs=1` covers tree fits only). Joint design decision deferred until after the campaign; the machine is now free to have it.
-3. **Checkpoint coverage** — CV folds only. Deploy fits and the validation stage remain uninsured; a future crash there still loses those stages (but the 16 CV folds resume).
+3. **Checkpoint coverage** — DONE (2026-08-23). All three uninsured stages now checkpoint under the code/device identity manifest: CV folds, deploy fits (`e5a038e`), and validation era-batch predicts (this commit, `feat(runner): validation predict-batch checkpoints + docs`), with the shared helpers extracted in `b8d635b`. The final `evaluate_model` scorecard call stays uncheckpointed (single call, no clean granularity).
 4. **Parked findings** — full list with rulings in the SDD ledger (error-message cosmetics, `fleet_frame` empty-placements corner, search-mode test hardening, the all-loaded-resume device-swap note, etc.). All ruled defer; triage before any future change touches those lines.
 5. **`e01fbb9` is a red ancestor** — docs-only CI failure (stale test-count claim) fixed by `1da1478`; harmless unless bisecting through that range.
 6. **Backlog from the parallel session**: `_transforms` re-measurement, mutmut harness patch, upstream mutmut issue, Monday's mutation-gate run review.
