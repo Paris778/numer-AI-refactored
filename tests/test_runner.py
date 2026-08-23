@@ -831,3 +831,106 @@ def test_runner_writes_and_reuses_oof_checkpoints(tmp_path, caplog) -> None:
     assert result2.run_id == result1.run_id
     assert result2.oof.equals(result1.oof)
     assert "loaded from checkpoint" in caplog.text
+
+
+def test_deploy_checkpoints_written_and_mixed_resume_bit_for_bit(tmp_path, caplog) -> None:
+    """Deploy mixed resume (spec 2026-08-23-checkpoint-coverage-extension):
+    per-target pickled models persist under deploy_checkpoints/; deleting one
+    .pkl and resuming refits only that target, and the deploy artifact's
+    predictions are byte-identical to the uninterrupted run's."""
+    live = pd.DataFrame(
+        {"f1": [0.0, 0.02, 0.04, 0.06, 0.08, 0.1],
+         "f2": [0.0, 0.01, 0.02, 0.0, 0.01, 0.02]},
+        index=[f"id_{i}" for i in range(6)],
+    )
+
+    first = ExperimentRunner(_config(tmp_path)).run(deploy=True)
+    ckpt_root = tmp_path / "artifacts" / "runs" / first.run_id / "deploy_checkpoints"
+    assert (ckpt_root / "manifest.json").exists()
+    assert sorted(p.name for p in ckpt_root.glob("*.pkl")) == [
+        "target.pkl",
+        "target_alt.pkl",
+    ]
+    manifest = json.loads((ckpt_root / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["device"] == "cpu"  # train_full_history is CPU-only by design
+    assert len(manifest["code_sha256"]) == 64
+    expected = load_predict(first.artifact.path)(live)
+
+    (ckpt_root / "target_alt.pkl").unlink()  # delete exactly ONE target
+    caplog.clear()
+    with caplog.at_level("INFO"):
+        resumed = ExperimentRunner(_config(tmp_path)).run(deploy=True)
+    assert resumed.run_id == first.run_id
+    actual = load_predict(resumed.artifact.path)(live)
+    pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+    assert caplog.text.count("train_full_history") == 1  # the refit happened
+    assert caplog.text.count("loaded deploy checkpoint") == 1  # the other loaded
+
+
+def test_deploy_checkpoint_code_mismatch_raises(tmp_path) -> None:
+    """Deploy manifest identity: a changed fitting-code sha must fail loudly."""
+    first = ExperimentRunner(_config(tmp_path)).run(deploy=True)
+    ckpt_root = tmp_path / "artifacts" / "runs" / first.run_id / "deploy_checkpoints"
+    manifest_path = ckpt_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["code_sha256"] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="code_sha256"):
+        ExperimentRunner(_config(tmp_path)).run(deploy=True)
+
+
+def test_deploy_checkpoint_unknown_device_raises(tmp_path) -> None:
+    """Deploy manifest identity: a device outside the known fit devices is
+    rejected loudly even while the device is unresolved at resume entry."""
+    first = ExperimentRunner(_config(tmp_path)).run(deploy=True)
+    ckpt_root = tmp_path / "artifacts" / "runs" / first.run_id / "deploy_checkpoints"
+    manifest_path = ckpt_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["device"] = "totally_different_device"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="device"):
+        ExperimentRunner(_config(tmp_path)).run(deploy=True)
+
+
+def test_deploy_checkpoint_device_exact_mismatch_on_refit_raises(tmp_path) -> None:
+    """The authoritative device compare runs at the first refitted target
+    (the device is only known post-fit): a stored 'gpu' device (deploy fits
+    are CPU-only) must fail the exact compare when a missing .pkl forces a
+    refit, instead of passing vacuously on the all-loaded path."""
+    first = ExperimentRunner(_config(tmp_path)).run(deploy=True)
+    ckpt_root = tmp_path / "artifacts" / "runs" / first.run_id / "deploy_checkpoints"
+    manifest_path = ckpt_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["device"] = "gpu"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    (ckpt_root / "target.pkl").unlink()
+    with pytest.raises(ValueError, match="device"):
+        ExperimentRunner(_config(tmp_path)).run(deploy=True)
+
+
+def test_deploy_checkpoint_torn_tree_raises(tmp_path) -> None:
+    """Pickled models without a manifest.json are an inconsistent state."""
+    first = ExperimentRunner(_config(tmp_path)).run(deploy=True)
+    ckpt_root = tmp_path / "artifacts" / "runs" / first.run_id / "deploy_checkpoints"
+    (ckpt_root / "manifest.json").unlink()
+    with pytest.raises(ValueError, match="no manifest.json"):
+        ExperimentRunner(_config(tmp_path)).run(deploy=True)
+
+
+def test_deploy_checkpoint_corrupt_pkl_raises(tmp_path) -> None:
+    """A corrupted pickled model must fail loudly with the path, never
+    silently refit or produce garbage predictions."""
+    first = ExperimentRunner(_config(tmp_path)).run(deploy=True)
+    ckpt_root = tmp_path / "artifacts" / "runs" / first.run_id / "deploy_checkpoints"
+    (ckpt_root / "target.pkl").write_bytes(b"garbage")
+    with pytest.raises(ValueError, match="corrupt deploy checkpoint"):
+        ExperimentRunner(_config(tmp_path)).run(deploy=True)
+
+
+def test_deploy_checkpoint_dir_only_created_when_pipeline_built(tmp_path) -> None:
+    """The deploy checkpoint dir is created only when the deploy pipeline is
+    built (deploy=True or validation_scorecard=True)."""
+    result = ExperimentRunner(_config(tmp_path)).run(deploy=False)
+    run_dir = tmp_path / "artifacts" / "runs" / result.run_id
+    assert (run_dir / "oof_checkpoints").exists()
+    assert not (run_dir / "deploy_checkpoints").exists()

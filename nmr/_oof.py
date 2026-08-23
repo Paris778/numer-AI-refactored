@@ -67,7 +67,10 @@ def checkpoint_manifest(device: str) -> dict[str, str]:
 
 
 def verify_checkpoint_manifest(
-    manifest_path: Path, current_device: str | None
+    manifest_path: Path,
+    current_device: str | None,
+    *,
+    checkpoint_kind: str = "oof_checkpoints",
 ) -> None:
     """Verify an existing manifest: code exact-compare, device three-way.
 
@@ -76,42 +79,54 @@ def verify_checkpoint_manifest(
     fresh orchestrator, device unknown pre-fit) the stored device must be a
     real fit device (``_KNOWN_RESOLVED_DEVICES``) — anything else is rejected
     loudly, never accepted vacuously. Mismatches raise ``ValueError`` with
-    delete-to-refit guidance.
+    delete-to-refit guidance. ``checkpoint_kind`` names the checkpoint stage
+    in the error text (``oof_checkpoints``, ``deploy_checkpoints``,
+    ``validation_checkpoints``).
     """
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
     if stored.get("code_sha256") != fitting_code_sha256():
         raise ValueError(
-            "OOF checkpoint code_sha256 mismatch: fitting code changed "
+            f"{checkpoint_kind} code_sha256 mismatch: fitting code changed "
             f"since the checkpoints were written ({manifest_path}). "
-            "Delete the oof_checkpoints directory to force a full refit."
+            f"Delete the {checkpoint_kind} directory to force a full refit."
         )
     stored_device = stored.get("device")
     if current_device is not None:
         if stored_device != str(current_device):
             raise ValueError(
-                "OOF checkpoint device mismatch: checkpoints were "
+                f"{checkpoint_kind} device mismatch: checkpoints were "
                 f"fitted on device {stored_device!r}, current device "
                 f"is {str(current_device)!r}. Delete the "
-                "oof_checkpoints directory to force a full refit."
+                f"{checkpoint_kind} directory to force a full refit."
             )
     elif stored_device not in _KNOWN_RESOLVED_DEVICES:
         raise ValueError(
-            "OOF checkpoint device mismatch: manifest records "
+            f"{checkpoint_kind} device mismatch: manifest records "
             f"unknown device {stored_device!r} ({manifest_path}). "
-            "Delete the oof_checkpoints directory to force a full refit."
+            f"Delete the {checkpoint_kind} directory to force a full refit."
         )
 
 
-def ensure_no_torn_tree(manifest_path: Path) -> None:
-    """Reject a checkpoint root with fold parts but no manifest (torn tree)."""
+def ensure_no_torn_tree(
+    manifest_path: Path,
+    *,
+    checkpoint_kind: str = "oof_checkpoints",
+    part_glob: str = "fold_*.parquet",
+) -> None:
+    """Reject a checkpoint root with parts but no manifest (torn tree).
+
+    ``part_glob`` is the checkpoint unit's file pattern (``fold_*.parquet``
+    for OOF folds, ``*.pkl`` for deploy models); ``checkpoint_kind`` names the
+    checkpoint stage in the error text.
+    """
     existing_parts = any(
-        manifest_path.parent.rglob("fold_*.parquet")
+        manifest_path.parent.rglob(part_glob)
     ) if manifest_path.parent.exists() else False
     if existing_parts:
         raise ValueError(
-            "OOF checkpoint tree has fold parts but no manifest.json "
+            f"{checkpoint_kind} tree has parts but no manifest.json "
             f"({manifest_path}) — inconsistent state. Delete the "
-            "oof_checkpoints directory to force a full refit."
+            f"{checkpoint_kind} directory to force a full refit."
         )
 
 

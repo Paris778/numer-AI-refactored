@@ -20,7 +20,13 @@ import pandas as pd
 import polars as pl
 
 from nmr import _transforms
-from nmr._oof import train_multi_target_oof
+from nmr._oof import (
+    checkpoint_manifest,
+    ensure_no_torn_tree,
+    train_multi_target_oof,
+    verify_checkpoint_manifest,
+    write_bytes_atomic,
+)
 from nmr._transforms import (
     neutralize_array,
     rank_gaussianize,
@@ -264,6 +270,12 @@ class ExperimentRunner:
                 weights=weights,
                 proportion=neutralization_proportion,
                 data=self._config.data,
+                deploy_checkpoint_dir=(
+                    self._config.run.artifacts_dir
+                    / "runs"
+                    / self._run_id
+                    / "deploy_checkpoints"
+                ),
             )
 
         scorecard = None
@@ -539,6 +551,7 @@ def _build_deploy_pipeline(
     weights: Sequence[float],
     proportion: float,
     data: DataConfig,
+    deploy_checkpoint_dir: Path | None = None,
 ) -> tuple[Callable[[pd.DataFrame], pd.DataFrame], dict[str, object]]:
     """Train per-target full-history models ONCE and return (predict, model_meta).
 
@@ -547,10 +560,65 @@ def _build_deploy_pipeline(
     code. The closure's code path references only numpy/pandas plus the shared
     transform helpers; cloudpickle.register_pickle_by_value(nmr._transforms)
     embeds those helpers by value so the artifact loads without `nmr`.
+
+    With ``deploy_checkpoint_dir`` set (runner only; the promotion writer
+    passes None), each fitted model is persisted with cloudpickle to
+    ``<deploy_checkpoint_dir>/<target>.pkl`` (atomic write) and replayed on
+    resume instead of refit — per-target deploy-fit checkpoints (spec
+    2026-08-23-checkpoint-coverage-extension). The checkpoint root carries a
+    ``manifest.json`` with the same code+device identity discipline as the
+    OOF checkpoints; the recorded device is the orchestrator's post-fit
+    ``resolved_device`` at the FIRST fitted target (deploy fits are CPU-only).
     """
     logger.info("[build_deploy_pipeline] training full-history models (CPU-only)")
     trained: dict[str, object] = {}
+    manifest_path = (
+        deploy_checkpoint_dir / "manifest.json"
+        if deploy_checkpoint_dir is not None
+        else None
+    )
+    manifest_written = False
+    if manifest_path is not None:
+        if manifest_path.exists():
+            # current_device=None: the orchestrator's resolved_device at this
+            # point belongs to the CV stage — a different identity. The deploy
+            # manifest records the deploy fit's device (CPU-only), which is
+            # exact-checked post-fit at the first fitted target below; the
+            # schema check here still rejects unknown stored devices.
+            verify_checkpoint_manifest(
+                manifest_path,
+                None,
+                checkpoint_kind="deploy_checkpoints",
+            )
+        else:
+            # PINNED DECISION (mirrors the OOF path): the manifest is written
+            # at the FIRST fitted target, never here — resolved_device is None
+            # until a fit completes, and an early write would record "None",
+            # making the device guard pass vacuously on resume.
+            ensure_no_torn_tree(
+                manifest_path,
+                checkpoint_kind="deploy_checkpoints",
+                part_glob="*.pkl",
+            )
     for target in target_cols:
+        pkl_path = (
+            deploy_checkpoint_dir / f"{target}.pkl"
+            if deploy_checkpoint_dir is not None
+            else None
+        )
+        if pkl_path is not None and pkl_path.exists():
+            try:
+                trained[target] = cloudpickle.loads(pkl_path.read_bytes())
+            except Exception as exc:
+                raise ValueError(
+                    f"corrupt deploy checkpoint {pkl_path}: {exc}"
+                ) from exc
+            logger.info(
+                "[build_deploy_pipeline] %s: loaded deploy checkpoint %s",
+                target,
+                pkl_path,
+            )
+            continue
         trained[target] = orchestrator.train_full_history(
             train_df,
             feature_cols=feature_cols,
@@ -558,6 +626,25 @@ def _build_deploy_pipeline(
             era_col="era",
             data=data,
         )
+        if pkl_path is not None:
+            if not manifest_written:
+                resolved_device = str(orchestrator.resolved_device)
+                if manifest_path is not None and manifest_path.exists():
+                    verify_checkpoint_manifest(
+                        manifest_path,
+                        resolved_device,
+                        checkpoint_kind="deploy_checkpoints",
+                    )
+                else:
+                    write_bytes_atomic(
+                        json.dumps(
+                            checkpoint_manifest(resolved_device),
+                            sort_keys=True,
+                        ).encode("utf-8"),
+                        manifest_path,
+                    )
+                manifest_written = True
+            write_bytes_atomic(cloudpickle.dumps(trained[target]), pkl_path)
     ordered_features = list(feature_cols)
     target_order = list(target_cols)
     weight_array = np.asarray(list(weights), dtype=float)
