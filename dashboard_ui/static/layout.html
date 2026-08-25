@@ -3,35 +3,136 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>NumerAI Executive Performance Report</title>
+<title>Numerai Model Tournament</title>
 <style>
 {{ INLINE_STYLE }}
 </style>
 </head>
 <body>
 <div id="dashboard-root">
-<h1>🏆 NumerAI Executive Performance Report</h1>
-<p>Evaluation window: {{ N_ERAS }} overlap eras · data version {{ DATA_VERSION }}</p>
-<div class="kpis">{{ KPI_CARDS }}</div>
+<div class="app-shell">
+	<aside class="sidebar" aria-label="Dashboard navigation">
+		<div class="brand">
+			<svg class="brand-mark" viewBox="0 0 30 30" fill="none" aria-hidden="true">
+				<circle cx="15" cy="15" r="13" fill="#202028"/>
+				<path d="M19 6a10 10 0 1 0 0 18 12 12 0 0 1 0-18Z" fill="#f5b921"/>
+			</svg>
+			<span class="brand-word">NMR<span>.AI</span></span>
+		</div>
+		<nav class="primary-nav">
+			<a class="nav-item active" href="#overview"><span class="nav-icon">01</span>Overview</a>
+			<a class="nav-item" href="#tournament"><span class="nav-icon">02</span>Tournament</a>
+			<a class="nav-item" href="#diagnostics"><span class="nav-icon">03</span>Diagnostics</a>
+			<div class="nav-group-label">Evidence</div>
+			<a class="nav-item" href="#secondary-evidence"><span class="nav-icon">04</span>Era performance</a>
+			<a class="nav-item" href="#audit"><span class="nav-icon">05</span>Audit trail</a>
+		</nav>
+		<div class="sidebar-foot">
+			<div class="offline-card">
+				<div class="offline-card-top"><span class="status-dot"></span><span>OFFLINE MODE</span></div>
+				<p>Validation evidence only. Production performance is intentionally out of scope.</p>
+				<span class="offline-card-meta">SUITE {{ SUITE_VERSION }} &middot; DATA {{ DATA_VERSION }}</span>
+			</div>
+			<div class="system-chip"><span class="system-mark">N</span><div><strong>Model research</strong><small>Read-only workspace</small></div></div>
+		</div>
+	</aside>
 
-<h2>1. ALPHA GENERATION &amp; MULTI-METRIC PERFORMANCE TRAJECTORY</h2>
-{{ METRIC_CONTROLS }}
-{{ TIMESERIES_SVG }}
+	<main class="main">
+		<header class="topbar" id="overview">
+			<div>
+				<p class="eyebrow">OFFLINE EVALUATION &middot; SUITE {{ SUITE_VERSION }}</p>
+				<h1>Model Tournament</h1>
+				<p class="subhead">Validation evidence across predictive systems &middot; {{ N_ERAS }} overlap eras</p>
+			</div>
+			<div class="top-actions">
+				<div class="snapshot-meta">
+					<span>DATA {{ DATA_VERSION }}</span>
+					<span>AS OF ERA {{ AS_OF_ERA }}</span>
+					<strong>No live / production performance included</strong>
+				</div>
+				<div class="signal-orb" title="Offline snapshot loaded"><span></span></div>
+			</div>
+		</header>
 
-<h2>2. RISK-ADJUSTED RETURN LEADERBOARD</h2>
-{{ LEADERBOARD_SVG }}
+<section class="toolbar" aria-label="Leaderboard controls">
+	<label class="search-wrap" for="model-search">
+		<span>Find a model</span>
+		<input id="model-search" type="search" placeholder="Search model or family" autocomplete="off">
+	</label>
+	<label class="rank-wrap" for="rank-by">
+		<span>Rank by</span>
+		<select id="rank-by"></select>
+	</label>
+	<span id="rank-direction" class="direction-note"></span>
+	<div class="cohort-filter" role="group" aria-label="Cohort">
+		<button type="button" class="cohort-button active" data-cohort="all">All</button>
+		<button type="button" class="cohort-button" data-cohort="trained">Trained</button>
+		<button type="button" class="cohort-button" data-cohort="heuristic">Heuristic</button>
+		<button type="button" class="cohort-button" data-cohort="benchmark">Benchmark</button>
+	</div>
+	<span class="toolbar-label">Quick views</span>
+	<div class="shortcut-group" role="group" aria-label="Shortcuts">
+		<button type="button" class="shortcut-button" data-shortcut="top10">Top 10</button>
+		<button type="button" class="shortcut-button" data-shortcut="beats">Beats benchmarks</button>
+		<button type="button" class="shortcut-button" data-shortcut="robust">Most robust</button>
+		<button type="button" class="shortcut-button disabled" data-shortcut="new" disabled title="No comparable prior snapshot">New since last run</button>
+	</div>
+</section>
 
-<h2>3. SIGNAL DIVERSIFICATION &amp; PAIRWISE SIMILARITY MATRIX</h2>
-{{ DIVERSIFICATION_SECTION }}
+<section id="advantage-strip" class="advantage-strip" aria-live="polite"></section>
 
-<h2>4. EXECUTIVE ALLOCATION &amp; RISK DECISION TABLE</h2>
-{{ DECISION_TABLE }}
+<section id="tournament" class="leaderboard-section" aria-labelledby="leaderboard-heading">
+	<div class="section-heading">
+		<div>
+			<p class="eyebrow">THE ARENA</p>
+			<h2 id="leaderboard-heading">Master leaderboard</h2>
+		</div>
+		<span id="row-count" class="row-count"></span>
+	</div>
+	<div id="leaderboard-table" class="table-wrap"></div>
+	<div id="leaderboard-empty" class="empty-state" hidden>No models match the current view.</div>
+</section>
 
-<h2>5. CAPITAL DRAWDOWN (UNDERWATER TRAJECTORY)</h2>
-{{ DRAWDOWN_SVG }}
+<section id="diagnostics" class="analysis-grid" aria-label="Model analysis">
+	<div class="analysis-panel">
+		<div class="panel-heading"><p class="eyebrow">LANDSCAPE</p><h2>Model landscape</h2><span>CORR &times; MMC</span></div>
+		<div class="chart-box"><svg id="landscape-svg" viewBox="0 0 760 360" role="img" aria-label="Model landscape scatter plot"></svg></div>
+	</div>
+	<div class="analysis-panel">
+		<div class="panel-heading"><p class="eyebrow">SELECTED MODEL</p><h2>Metric profile</h2><span id="profile-label">Select a row</span></div>
+		<div class="chart-box"><svg id="profile-svg" viewBox="0 0 760 360" role="img" aria-label="Selected model metric profile"></svg></div>
+	</div>
+</section>
 
-<h2>Technical &amp; Audit Metadata</h2>
-{{ AUDIT_ACCORDION }}
+<section id="secondary-evidence" class="secondary-evidence">
+	<h2>ALPHA GENERATION &amp; MULTI-METRIC PERFORMANCE TRAJECTORY</h2>
+	{{ METRIC_CONTROLS }}
+	{{ TIMESERIES_SVG }}
+
+	<h2>SIGNAL DIVERSIFICATION &amp; PAIRWISE SIMILARITY MATRIX</h2>
+	{{ DIVERSIFICATION_SECTION }}
+
+	<h2>CAPITAL DRAWDOWN (UNDERWATER TRAJECTORY)</h2>
+	{{ DRAWDOWN_SVG }}
+</section>
+
+<aside id="model-drawer" class="model-drawer" hidden aria-labelledby="drawer-title">
+	<div class="drawer-backdrop" data-drawer-close></div>
+	<div class="drawer-panel">
+		<button type="button" class="drawer-close" data-drawer-close aria-label="Close model dossier">Close</button>
+		<div id="model-dossier"></div>
+	</div>
+</aside>
+
+<section id="audit" class="audit-section">
+	<h2>Technical &amp; Audit Metadata</h2>
+	<details open>
+		<summary>Evidence boundary</summary>
+		<p class="audit-note">Each model dossier contains the immutable scorecard and manifest projection used here. Registry and deployment files remain read-only.</p>
+	</details>
+</section>
+</div>
+</main>
 </div>
 {{ INLINE_DATA_SCRIPT }}
 </body>

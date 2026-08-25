@@ -51,7 +51,7 @@ A **lean, deterministic research framework** for the [Numerai Classic tournament
 │   ├── _oof.py                # shared multi-target OOF construction (runner + research)
 │   ├── submission.py          # submission build / numerai_tools validation / promoted-artifact acceptance gate
 │   └── deployment.py          # cloudpickle predict artifact + integrity manifest
-├── dashboard_ui/              # front-end: charts, report compiler, streamlit app, static assets (presentation only — engine stays in nmr/)
+├── dashboard_ui/              # shared vanilla Model Tournament renderer + Streamlit host (presentation only)
 ├── configs/                   # experiment configs (YAML)
 │   ├── example.yaml           # annotated full schema
 │   └── first_model.yaml       # current competitive config (4×20D-target ensemble)
@@ -69,7 +69,7 @@ A **lean, deterministic research framework** for the [Numerai Classic tournament
 ├── promote_model.py           # CLI: promote a registry run to a full version (Model Uploads predict.pkl)
 ├── rehearse_promotion.py      # CLI: truncated-window promotion rehearsal (measures the RAM guard)
 ├── generate_dashboard.py      # thin wrapper — builds the executive HTML dashboard (logic in dashboard_ui.report)
-├── dashboard_app.py           # thin wrapper — interactive Streamlit dashboard (logic in dashboard_ui.app)
+├── dashboard_app.py           # thin wrapper — Streamlit host for the shared renderer
 ├── pytest.ini                 # pytest configuration
 ├── requirements.txt           # runtime + dev dependencies (all exact-pinned)
 ├── AGENTS.md                  # authoritative reference for AI coding agents
@@ -136,7 +136,7 @@ A prominent `[WARNING]` is printed when the API lists a newer data version than 
 .\.venv\Scripts\python generate_dashboard.py     # → artifacts/dashboard.html
 
 # 4. Browse runs and campaigns interactively (read-only)
-streamlit run dashboard_app.py   # interactive leaderboard + fleet + campaign views (read-only)
+streamlit run dashboard_app.py   # interactive Model Tournament (read-only; same renderer as HTML)
 
 # 5. Ship it: promote a run to a full version for Numerai Model Uploads
 .\.venv\Scripts\python rehearse_promotion.py --run-id <run_id> --family <family>   # truncated rehearsal first — proves the path, measures the RAM guard
@@ -145,7 +145,7 @@ streamlit run dashboard_app.py   # interactive leaderboard + fleet + campaign vi
 
 **The money path is Numerai Model Uploads.** `promote_model.py` trains a full version on train+validation and writes a cloudpickled `predict.pkl` that Numerai runs each round. Two gates protect it: the run must clear the tier-4 production thresholds (`--override-gate` records the failure in the artifact's own manifest), and the artifact's **raw** predictions must pass `numerai_tools` validation on real `live.parquet` — a promotion that fails contract validation is refused outright and cannot be overridden.
 
-The dashboard ranks trained runs and benchmarks on the same validation-scorecard definitions (CORR/Sharpe from the `scorecard` block in `run.json`); runs without a validation scorecard are shown separately in a legacy (train-OOF metrics) section.
+The Model Tournament ranks trained runs and benchmark tiers on the same validation scorecard. Its default rank metric is MMC; profitability is `cagr_1y`. Tiers 0–2 are shown as heuristic/simple baselines, tiers 3–4 as benchmark references, and full-version rows remain lineage-only. The report is explicitly offline evaluation and never includes live or production performance. RAPS and win-rate are not fields in the active scorecard, so they are omitted rather than recreated or inferred.
 
 Library usage:
 

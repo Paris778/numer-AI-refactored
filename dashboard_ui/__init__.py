@@ -7,6 +7,7 @@ package only consumes ``nmr.dashboard``.
 
 from dashboard_ui.charts import (
     build_dashboard_payload,
+    compact_timeseries_payload,
     cumulative_series,
     data_to_svg_path,
     drawdown_series,
@@ -16,6 +17,7 @@ from dashboard_ui.charts import (
 
 __all__ = [
     "build_dashboard_payload",
+    "compact_timeseries_payload",
     "cumulative_series",
     "data_to_svg_path",
     "drawdown_series",

@@ -213,6 +213,7 @@ class BenchmarkFileConfig:
     tier: int
     cells: tuple[BenchmarkCellConfig, ...] = ()
     reference_column: str | None = None
+    reference_columns: tuple[str, ...] = ()
     gate: Tier4GateConfig | None = None
 
     def __post_init__(self) -> None:
@@ -225,6 +226,11 @@ class BenchmarkFileConfig:
                 raise ValueError("tier 4 config requires a 'gate' section")
             if not self.reference_column:
                 raise ValueError("tier 4 config requires a non-empty reference_column")
+            if self.reference_column in self.reference_columns:
+                raise ValueError(
+                    f"reference_column {self.reference_column!r} must not repeat "
+                    f"in reference_columns"
+                )
         else:
             if not self.cells:
                 raise ValueError(
@@ -268,6 +274,12 @@ def load_benchmark_file(path: str | Path) -> BenchmarkFileConfig:
     if gate_raw is not None:
         _reject_unknown_keys(Tier4GateConfig, gate_raw)
         gate = Tier4GateConfig(**gate_raw)
+    ref_cols_raw = raw.get("reference_columns", [])
+    if not isinstance(ref_cols_raw, list):
+        raise ValueError("reference_columns must be a list")
+    reference_columns = tuple(ref_cols_raw)
+    if any(not isinstance(c, str) or not c for c in reference_columns):
+        raise ValueError("reference_columns entries must be non-empty strings")
     return BenchmarkFileConfig(
         tier=int(raw["tier"]),
         cells=tuple(
@@ -275,6 +287,7 @@ def load_benchmark_file(path: str | Path) -> BenchmarkFileConfig:
             for c in raw.get("cells", [])
         ),
         reference_column=raw.get("reference_column"),
+        reference_columns=reference_columns,
         gate=gate,
     )
 
@@ -284,6 +297,7 @@ class BenchmarkSuiteSpec:
     cells: tuple[BenchmarkCellConfig, ...]
     gate: Tier4GateConfig | None
     reference_column: str | None
+    reference_columns: tuple[str, ...] = ()
 
 
 def load_benchmark_suite_config(config_dir: str | Path) -> BenchmarkSuiteSpec:
@@ -295,6 +309,7 @@ def load_benchmark_suite_config(config_dir: str | Path) -> BenchmarkSuiteSpec:
     all_cells: list[BenchmarkCellConfig] = []
     gate: Tier4GateConfig | None = None
     reference_column: str | None = None
+    reference_columns: tuple[str, ...] = ()
     for path in files:
         file_cfg = load_benchmark_file(path)
         if file_cfg.gate is not None:
@@ -302,6 +317,7 @@ def load_benchmark_suite_config(config_dir: str | Path) -> BenchmarkSuiteSpec:
                 raise ValueError("multiple tier-4 gate configs found")
             gate = file_cfg.gate
             reference_column = file_cfg.reference_column
+            reference_columns = file_cfg.reference_columns
         all_cells.extend(file_cfg.cells)
     ids = [cell.benchmark_id for cell in all_cells]
     if len(set(ids)) != len(ids):
@@ -312,6 +328,7 @@ def load_benchmark_suite_config(config_dir: str | Path) -> BenchmarkSuiteSpec:
         cells=tuple(all_cells),
         gate=gate,
         reference_column=reference_column,
+        reference_columns=reference_columns,
     )
 
 
@@ -1247,6 +1264,12 @@ class BenchmarkHierarchy:
         reference_id = "v53_lgbm_ender60"
         if self._spec.reference_column:
             reference_id = self._spec.reference_column
+            # Tier-4 reference rows: the gated reference column first (it owns
+            # the capital-line gate), then any additional reference columns
+            # (e.g. the second official Numerai benchmark model) scored as
+            # informational tier-4 rows. Each is evaluated identically; only
+            # `reference_id` feeds assert_tier4_gate below.
+            reference_columns = [reference_id, *self._spec.reference_columns]
             medium_cols = resolve_benchmark_feature_cols(
                 self._data.features_json, "medium", self._schema_cols
             )
@@ -1254,25 +1277,26 @@ class BenchmarkHierarchy:
                 self._data.validation_path,
                 columns=["era", "id", *medium_cols],
             )
-            ref_preds = score_benchmark_column(
-                self._data.benchmarks, column=self._spec.reference_column
-            )
-            scorecards[reference_id] = evaluate_model(
-                ref_preds,
-                meta_model=self._data.meta_model,
-                benchmarks=self._data.benchmarks,
-                features=ref_features,
-                targets=val_targets,
-                n_trials=1,
-                seed=self._seed,
-                horizon=self._horizon,
-                main_target="target",
-                benchmark_col=self._spec.reference_column,
-                n_boot=self._n_boot,
-                min_overlap_eras=self._min_overlap_eras,
-                model_id=reference_id,
-            )
-            tier_of[reference_id] = 4
+            for index, ref_col in enumerate(reference_columns):
+                ref_preds = score_benchmark_column(
+                    self._data.benchmarks, column=ref_col
+                )
+                scorecards[ref_col] = evaluate_model(
+                    ref_preds,
+                    meta_model=self._data.meta_model,
+                    benchmarks=self._data.benchmarks,
+                    features=ref_features,
+                    targets=val_targets,
+                    n_trials=1,
+                    seed=self._seed + index,
+                    horizon=self._horizon,
+                    main_target="target",
+                    benchmark_col=self._spec.reference_column,
+                    n_boot=self._n_boot,
+                    min_overlap_eras=self._min_overlap_eras,
+                    model_id=ref_col,
+                )
+                tier_of[ref_col] = 4
 
         null_cards = {
             mid: scorecards[mid] for mid in NULL_KINDS if mid in scorecards
@@ -1333,6 +1357,9 @@ def gate_report_frame(result: BenchmarkHierarchyResult) -> pl.DataFrame:
             {"model_id": [], "field": [], "threshold": [], "measured": [], "pass": []}
         )
     reference_id = "v53_lgbm_ender60"
+    # The gated reference is inserted into `tier_of` before any additional
+    # reference columns (tier-4 scoring order), so the first tier-4 row is
+    # the capital-line reference the gate thresholds are evidence-pinned to.
     for mid in result.tier_of:
         if result.tier_of[mid] == 4:
             reference_id = mid

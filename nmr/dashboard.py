@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,15 +32,24 @@ from nmr.scorecard import MMC_DOWN_MIN_ERAS
 logger = logging.getLogger("nmr.dashboard")
 
 __all__ = [
+    "DASHBOARD_METRICS",
+    "DEFAULT_RANK_METRIC",
+    "DashboardMetricSpec",
     "EVALUABLE_ROWS",
     "UNIFIED_SCHEMA",
+    "compute_ml_advantage",
+    "dashboard_cohort",
+    "build_tournament_payload",
     "evaluate_gate_status",
     "extract_multimetric_timeseries",
     "extract_pairwise_similarity_matrix",
     "load_benchmark_frame",
     "load_unified_leaderboard",
+    "load_model_detail",
     "read_champion_pointer",
     "reconcile_capital_metrics",
+    "rank_leaderboard",
+    "rank_map_by_metric",
     "resolve_benchmark_path",
 ]
 
@@ -53,28 +62,55 @@ DEFAULT_GATE_PATH = REPO_ROOT / "configs" / "benchmarks" / "tier4_gate.yaml"
 # gate, and tier columns consumed by the executive report.
 UNIFIED_SCHEMA = pl.Schema(
     {
-        "model_id": pl.String, "source": pl.String, "run_name": pl.String,
-        "family": pl.String, "training_scope": pl.String, "has_full_version": pl.Boolean,
-        "backend": pl.String, "preset": pl.String, "feature_set": pl.String,
-        "feature_subset": pl.String, "n_targets": pl.Int64, "targets": pl.String,
-        "neutralization_proportion": pl.Float64, "oof_device": pl.String,
-        "corr": pl.Float64, "corr_ci_low": pl.Float64, "corr_ci_high": pl.Float64,
+        "model_id": pl.String,
+        "source": pl.String,
+        "run_name": pl.String,
+        "family": pl.String,
+        "training_scope": pl.String,
+        "has_full_version": pl.Boolean,
+        "backend": pl.String,
+        "preset": pl.String,
+        "feature_set": pl.String,
+        "feature_subset": pl.String,
+        "n_targets": pl.Int64,
+        "targets": pl.String,
+        "neutralization_proportion": pl.Float64,
+        "oof_device": pl.String,
+        "corr": pl.Float64,
+        "corr_ci_low": pl.Float64,
+        "corr_ci_high": pl.Float64,
         "corr_n_eras": pl.Int64,
-        "corr_sharpe_ac": pl.Float64, "corr_sharpe_ac_ci_low": pl.Float64,
-        "corr_sharpe_ac_ci_high": pl.Float64, "corr_sharpe_ac_n_eras": pl.Int64,
-        "std_corr": pl.Float64, "max_drawdown": pl.Float64,
-        "deflated_sharpe": pl.Float64, "fnc": pl.Float64, "mmc": pl.Float64,
-        "mmc_sharpe_ac": pl.Float64, "bmc": pl.Float64, "cwmm": pl.Float64,
+        "corr_sharpe_ac": pl.Float64,
+        "corr_sharpe_ac_ci_low": pl.Float64,
+        "corr_sharpe_ac_ci_high": pl.Float64,
+        "corr_sharpe_ac_n_eras": pl.Int64,
+        "std_corr": pl.Float64,
+        "max_drawdown": pl.Float64,
+        "deflated_sharpe": pl.Float64,
+        "fnc": pl.Float64,
+        "mmc": pl.Float64,
+        "mmc_sharpe_ac": pl.Float64,
+        "bmc": pl.Float64,
+        "cwmm": pl.Float64,
         "mean_payout": pl.Float64,
-        "cagr_1y": pl.Float64, "gain_to_pain_ratio": pl.Float64,
-        "kelly_fraction": pl.Float64, "mmc_down": pl.Float64,
-        "mmc_down_reason": pl.String, "turnover_mean": pl.Float64,
-        "n_eras": pl.Int64, "rank_scalar": pl.Float64, "cvar5": pl.Float64,
-        "burn_rate": pl.Float64, "max_feature_exposure": pl.Float64,
+        "cagr_1y": pl.Float64,
+        "gain_to_pain_ratio": pl.Float64,
+        "kelly_fraction": pl.Float64,
+        "mmc_down": pl.Float64,
+        "mmc_down_reason": pl.String,
+        "turnover_mean": pl.Float64,
+        "n_eras": pl.Int64,
+        "rank_scalar": pl.Float64,
+        "cvar5": pl.Float64,
+        "burn_rate": pl.Float64,
+        "max_feature_exposure": pl.Float64,
         "max_feature_exposure_reason": pl.String,
-        "has_bmc": pl.Boolean, "has_horizon": pl.Boolean,
-        "has_perturb": pl.Boolean, "has_regime": pl.Boolean,
-        "tier": pl.Int64, "run_dir": pl.String,
+        "has_bmc": pl.Boolean,
+        "has_horizon": pl.Boolean,
+        "has_perturb": pl.Boolean,
+        "has_regime": pl.Boolean,
+        "tier": pl.Int64,
+        "run_dir": pl.String,
     }
 )
 
@@ -83,6 +119,614 @@ UNIFIED_SCHEMA = pl.Schema(
 # training_scope) stay visible in charts; full rows (in-sample metrics) are
 # excluded everywhere.
 EVALUABLE_ROWS: pl.Expr = pl.col("source") != "full"
+
+
+@dataclass(frozen=True)
+class DashboardMetricSpec:
+    """Display and ranking contract for one unified leaderboard metric."""
+
+    name: str
+    label: str
+    higher_is_better: bool
+    window: str = "standardized meta-overlap"
+
+
+DASHBOARD_METRICS: tuple[DashboardMetricSpec, ...] = (
+    DashboardMetricSpec("cagr_1y", "Profitability (CAGR 1Y)", True),
+    DashboardMetricSpec("mmc", "MMC", True),
+    DashboardMetricSpec("corr", "CORR", True),
+    DashboardMetricSpec("corr_sharpe_ac", "CORR Sharpe (AC)", True),
+    DashboardMetricSpec("fnc", "FNC", True),
+    DashboardMetricSpec("bmc", "BMC", True),
+    DashboardMetricSpec("deflated_sharpe", "Deflated Sharpe", True),
+    DashboardMetricSpec("mmc_down", "Downside MMC", True),
+    DashboardMetricSpec("cwmm", "CWMM", True),
+    DashboardMetricSpec("gain_to_pain_ratio", "Gain-to-Pain Ratio", True),
+    DashboardMetricSpec("mean_payout", "Mean Payout", True),
+    DashboardMetricSpec("std_corr", "CORR Volatility", False),
+    DashboardMetricSpec("max_drawdown", "Max Drawdown", False),
+    DashboardMetricSpec("turnover_mean", "Mean Turnover", False),
+)
+DEFAULT_RANK_METRIC = "mmc"
+_DASHBOARD_METRIC_BY_NAME = {spec.name: spec for spec in DASHBOARD_METRICS}
+
+
+def _dashboard_metric_spec(metric: str) -> DashboardMetricSpec:
+    try:
+        return _DASHBOARD_METRIC_BY_NAME[metric]
+    except KeyError as exc:
+        raise ValueError(
+            f"metric={metric!r} not in {sorted(_DASHBOARD_METRIC_BY_NAME)}"
+        ) from exc
+
+
+def dashboard_cohort(row: Mapping[str, Any]) -> str:
+    """Derive a display cohort from the unified source and benchmark tier."""
+    source = row.get("source")
+    if source in ("trained", "trained_legacy"):
+        return "trained"
+    if source == "full":
+        return "full"
+    if source == "benchmark":
+        tier = row.get("tier")
+        try:
+            if tier is not None and int(tier) <= 2:
+                return "heuristic"
+        except (TypeError, ValueError):
+            pass
+        return "benchmark"
+    return "unknown"
+
+
+def _finite_metric_value(row: Mapping[str, Any], metric: str) -> float | None:
+    value = row.get(metric)
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if np.isfinite(numeric) else None
+
+
+def _dashboard_sort_key(
+    row: Mapping[str, Any], metric: str, higher_is_better: bool
+) -> tuple[bool, float, str]:
+    value = _finite_metric_value(row, metric)
+    if value is None:
+        return True, 0.0, str(row.get("model_id") or "")
+    return (
+        False,
+        (-value if higher_is_better else value),
+        str(row.get("model_id") or ""),
+    )
+
+
+def rank_leaderboard(
+    leaderboard: pl.DataFrame, metric: str = DEFAULT_RANK_METRIC
+) -> pl.DataFrame:
+    """Decorate and deterministically rank all non-full leaderboard rows."""
+    spec = _dashboard_metric_spec(metric)
+    rows = leaderboard.to_dicts()
+    evaluable = [row for row in rows if dashboard_cohort(row) != "full"]
+    ranked_rows = [
+        row for row in evaluable if _finite_metric_value(row, metric) is not None
+    ]
+    unranked_rows = [
+        row for row in evaluable if _finite_metric_value(row, metric) is None
+    ]
+    ranked_rows.sort(
+        key=lambda row: _dashboard_sort_key(row, metric, spec.higher_is_better)
+    )
+    unranked_rows.sort(key=lambda row: str(row.get("model_id") or ""))
+    ranks = {id(row): index for index, row in enumerate(ranked_rows, start=1)}
+    decorated: list[dict[str, Any]] = []
+    for row in [*ranked_rows, *unranked_rows]:
+        item = dict(row)
+        item["cohort"] = dashboard_cohort(row)
+        item["rank"] = ranks.get(id(row))
+        decorated.append(item)
+    for row in rows:
+        if dashboard_cohort(row) == "full":
+            item = dict(row)
+            item["cohort"] = "full"
+            item["rank"] = None
+            decorated.append(item)
+    if not decorated:
+        return leaderboard.with_columns(
+            pl.lit(None, dtype=pl.Int64).alias("rank"),
+            pl.lit(None, dtype=pl.String).alias("cohort"),
+        )
+    return pl.DataFrame(decorated, strict=False)
+
+
+def rank_map_by_metric(leaderboard: pl.DataFrame) -> dict[str, dict[str, int]]:
+    """Return deterministic ranks for every available metric and model."""
+    result: dict[str, dict[str, int]] = {}
+    for spec in DASHBOARD_METRICS:
+        ranked = rank_leaderboard(leaderboard, metric=spec.name)
+        metric_ranks: dict[str, int] = {}
+        for row in ranked.to_dicts():
+            model_id = row.get("model_id")
+            rank = row.get("rank")
+            if model_id is not None and rank is not None:
+                metric_ranks[str(model_id)] = int(rank)
+        for model_id in sorted(metric_ranks):
+            result.setdefault(model_id, {})[spec.name] = metric_ranks[model_id]
+    return result
+
+
+def _best_cohort_row(
+    rows: Sequence[Mapping[str, Any]], cohort: str, metric: str, higher_is_better: bool
+) -> dict[str, Any] | None:
+    candidates = [
+        row
+        for row in rows
+        if row.get("cohort") == cohort and _finite_metric_value(row, metric) is not None
+    ]
+    if not candidates:
+        return None
+    return dict(
+        sorted(
+            candidates,
+            key=lambda row: _dashboard_sort_key(row, metric, higher_is_better),
+        )[0]
+    )
+
+
+def _advantage_record(
+    trained: Mapping[str, Any] | None,
+    baseline: Mapping[str, Any] | None,
+    metric: str,
+    higher_is_better: bool,
+    baseline_name: str,
+) -> dict[str, Any]:
+    if trained is None:
+        return {
+            "absolute_edge": None,
+            "relative_percent": None,
+            "reason": "no_trained_model",
+        }
+    if baseline is None:
+        return {
+            "absolute_edge": None,
+            "relative_percent": None,
+            "reason": f"no_{baseline_name}_baseline",
+        }
+    trained_value = _finite_metric_value(trained, metric)
+    baseline_value = _finite_metric_value(baseline, metric)
+    if trained_value is None or baseline_value is None:
+        return {
+            "absolute_edge": None,
+            "relative_percent": None,
+            "reason": "metric_unavailable",
+        }
+    edge = (
+        trained_value - baseline_value
+        if higher_is_better
+        else baseline_value - trained_value
+    )
+    relative = None if baseline_value == 0.0 else edge / abs(baseline_value) * 100.0
+    return {
+        "absolute_edge": float(edge),
+        "relative_percent": None if relative is None else float(relative),
+        "reason": None if relative is not None else "baseline_zero",
+    }
+
+
+def compute_ml_advantage(
+    leaderboard: pl.DataFrame, metric: str = DEFAULT_RANK_METRIC
+) -> dict[str, Any]:
+    """Compare the strongest trained row with the strongest baseline cohorts."""
+    spec = _dashboard_metric_spec(metric)
+    ranked = rank_leaderboard(leaderboard, metric=metric)
+    rows = ranked.to_dicts()
+    best = {
+        cohort: _best_cohort_row(rows, cohort, metric, spec.higher_is_better)
+        for cohort in ("trained", "heuristic", "benchmark")
+    }
+
+    def summary(row: dict[str, Any] | None) -> dict[str, Any] | None:
+        if row is None:
+            return None
+        return {
+            "model_id": row.get("model_id"),
+            "value": _finite_metric_value(row, metric),
+            "cohort": row.get("cohort"),
+        }
+
+    return {
+        "metric": metric,
+        "trained": summary(best["trained"]),
+        "heuristic": summary(best["heuristic"]),
+        "benchmark": summary(best["benchmark"]),
+        "vs_heuristic": _advantage_record(
+            best["trained"],
+            best["heuristic"],
+            metric,
+            spec.higher_is_better,
+            "heuristic",
+        ),
+        "vs_benchmark": _advantage_record(
+            best["trained"],
+            best["benchmark"],
+            metric,
+            spec.higher_is_better,
+            "benchmark",
+        ),
+    }
+
+
+_CORE_DISPLAY_FIELDS = (
+    "corr",
+    "corr_ci_low",
+    "corr_ci_high",
+    "corr_n_eras",
+    "mmc",
+    "mmc_ci_low",
+    "mmc_ci_high",
+    "mmc_n_eras",
+    "corr_sharpe_ac",
+    "corr_sharpe_ac_ci_low",
+    "corr_sharpe_ac_ci_high",
+    "corr_sharpe_ac_n_eras",
+    "cagr_1y",
+    "gain_to_pain_ratio",
+    "max_drawdown",
+    "n_eras",
+)
+_ALL_SCORECARD_FIELDS = (
+    "mean_payout",
+    "mean_payout_ci_low",
+    "mean_payout_ci_high",
+    "mean_payout_n_eras",
+    "corr",
+    "corr_ci_low",
+    "corr_ci_high",
+    "corr_n_eras",
+    "mmc",
+    "mmc_ci_low",
+    "mmc_ci_high",
+    "mmc_n_eras",
+    "corr_sharpe_ac",
+    "corr_sharpe_ac_ci_low",
+    "corr_sharpe_ac_ci_high",
+    "corr_sharpe_ac_n_eras",
+    "fnc",
+    "fnc_ci_low",
+    "fnc_ci_high",
+    "fnc_n_eras",
+    "bmc",
+    "bmc_ci_low",
+    "bmc_ci_high",
+    "bmc_n_eras",
+    "cwmm",
+    "cwmm_ci_low",
+    "cwmm_ci_high",
+    "cwmm_n_eras",
+    "rank_scalar",
+    "deflated_sharpe",
+    "cvar5",
+    "burn_rate",
+    "max_drawdown",
+    "std_corr",
+    "max_feature_exposure",
+    "cagr_1y",
+    "gain_to_pain_ratio",
+    "kelly_fraction",
+    "mmc_down",
+    "mmc_down_n_eras",
+    "mmc_down_reason",
+    "turnover_mean",
+    "turnover_std",
+    "turnover_reason",
+    "sim_portfolio_cagr",
+    "sim_portfolio_mdd",
+    "sim_capital_utilization",
+    "horizon_target_name",
+    "horizon_n_eras",
+    "horizon_model_sharpe_20",
+    "horizon_model_sharpe_60",
+    "horizon_model_decay",
+    "horizon_benchmark_decay",
+    "horizon_relative_divergence",
+    "horizon_reason",
+    "perturb_alpha",
+    "perturb_n_eras",
+    "perturb_ceiling_stability",
+    "perturb_manifold_stability",
+    "perturb_gap",
+    "perturb_effective_perturb_frac",
+    "regime_count",
+    "regime_min_n_eras",
+    "regime_max_n_eras",
+    "regime_corr_json",
+    "regime_reason",
+    "bmc_reason",
+    "cwmm_reason",
+)
+_DETAIL_SCORECARD_FIELDS = tuple(
+    field
+    for field in _ALL_SCORECARD_FIELDS
+    if field not in {spec.name for spec in DASHBOARD_METRICS} and field != "n_eras"
+)
+_DETAIL_PROVENANCE_FIELDS = (
+    "seed",
+    "pipeline_device",
+    "oof_device",
+    "timestamp",
+)
+_ROW_FIELDS = (
+    "model_id",
+    "run_name",
+    "source",
+    "cohort",
+    "type_marker",
+    "family",
+    "backend",
+    "preset",
+    "feature_set",
+    "feature_subset",
+    "targets",
+    "n_targets",
+    "rank",
+    "neutralization_proportion",
+    "oof_device",
+    "benchmark_tier",
+    "status",
+    "champion",
+    "values",
+    "ci",
+    "robustness",
+)
+
+
+def _read_json_mapping(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _compact_json_value(value: Any, *, digits: int = 6) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): _compact_json_value(value[key], digits=digits)
+            for key in sorted(value)
+        }
+    if isinstance(value, list):
+        return [_compact_json_value(item, digits=digits) for item in value]
+    if isinstance(value, float):
+        return round(value, digits) if np.isfinite(value) else None
+    return value
+
+
+def _detail_provenance(manifest: Mapping[str, Any]) -> dict[str, Any]:
+    config = manifest.get("config") or {}
+    data = config.get("data") or {}
+    model = config.get("model") or {}
+    risk = config.get("risk") or {}
+    run = config.get("run") or {}
+    return {
+        "backend": model.get("backend"),
+        "preset": model.get("preset"),
+        "feature_set": data.get("feature_set"),
+        "feature_subset": data.get("feature_subset"),
+        "targets": data.get("targets"),
+        "neutralization_proportion": risk.get("neutralization_proportion"),
+        "seed": run.get("seed"),
+        "pipeline_device": manifest.get("pipeline_device"),
+        "oof_device": manifest.get("oof_device"),
+        "timestamp": next(
+            (
+                manifest.get(key)
+                for key in ("timestamp", "created_at", "completed_at", "promoted_at")
+                if manifest.get(key) is not None
+            ),
+            None,
+        ),
+    }
+
+
+def load_model_detail(row: Mapping[str, Any]) -> dict[str, Any]:
+    """Load compact immutable evidence for one leaderboard row."""
+    model_id = str(row.get("model_id") or "?")
+    source = str(row.get("source") or "unknown")
+    cohort = dashboard_cohort(row)
+    detail: dict[str, Any] = {
+        "model_id": model_id,
+        "source": source,
+        "cohort": cohort,
+        "scorecard": {},
+        "provenance": {},
+        "evidence_ref": None,
+        "reason": None,
+    }
+    run_dir = row.get("run_dir")
+    payload: dict[str, Any] | None = None
+    manifest: dict[str, Any] | None = None
+    if source in ("trained", "trained_legacy") and run_dir:
+        run_path = Path(str(run_dir)) / "run.json"
+        payload = _read_json_mapping(run_path)
+        detail["evidence_ref"] = f"registry/{model_id}/run.json"
+        if payload is None:
+            detail["reason"] = "run_metadata_unavailable"
+        else:
+            manifest = (
+                payload.get("manifest")
+                if isinstance(payload.get("manifest"), dict)
+                else {}
+            )
+            scorecard = payload.get("scorecard")
+            if isinstance(scorecard, dict):
+                detail["scorecard"] = _compact_json_value(
+                    {
+                        key: scorecard.get(key)
+                        for key in _ALL_SCORECARD_FIELDS
+                        if key in scorecard
+                    }
+                )
+            else:
+                detail["reason"] = "scorecard_unavailable"
+    elif source == "full" and run_dir:
+        manifest = _read_json_mapping(Path(str(run_dir)) / "manifest.json")
+        family = str(row.get("family") or row.get("run_name") or "unknown")
+        promoted_from = (manifest or {}).get("promoted_from_run_id")
+        if promoted_from:
+            detail["evidence_ref"] = (
+                f"models/{family}/full/{promoted_from}/manifest.json"
+            )
+        if manifest is None:
+            detail["reason"] = "full_manifest_unavailable"
+        else:
+            detail["scorecard"] = {}
+    else:
+        detail["scorecard"] = _compact_json_value(
+            {
+                key: row.get(key)
+                for key in _DETAIL_SCORECARD_FIELDS
+                if row.get(key) is not None
+            }
+        )
+        if source == "benchmark":
+            detail["reason"] = "benchmark_csv_projection"
+        elif source != "full":
+            detail["reason"] = "source_metadata_unavailable"
+    if manifest is not None:
+        detail["provenance"] = _compact_json_value(_detail_provenance(manifest))
+    return detail
+
+
+def build_tournament_payload(
+    leaderboard: pl.DataFrame,
+    *,
+    champion_id: str | None = None,
+    evaluation_eras: Sequence[str] = (),
+    suite_version: str = "v2",
+    data_version: str = "v5.3",
+) -> dict[str, Any]:
+    """Build the deterministic, renderer-neutral Model Tournament payload."""
+    ranked = rank_leaderboard(leaderboard, metric=DEFAULT_RANK_METRIC)
+    rank_map = rank_map_by_metric(leaderboard)
+    rows: list[dict[str, Any]] = []
+    details: list[Any] = []
+    rank_values: list[list[int | None]] = []
+    landscape: list[dict[str, Any]] = []
+    for row in ranked.to_dicts():
+        model_id = str(row.get("model_id") or "?")
+        cohort = str(row.get("cohort") or dashboard_cohort(row))
+        champion = model_id == champion_id and row.get("status") in (
+            "CHAMPION",
+            "CAPITAL READY",
+        )
+        item: dict[str, Any] = {
+            "model_id": model_id,
+            "run_name": row.get("run_name"),
+            "source": row.get("source"),
+            "cohort": cohort,
+            "type_marker": cohort,
+            "family": row.get("family"),
+            "backend": row.get("backend"),
+            "preset": row.get("preset"),
+            "feature_set": row.get("feature_set"),
+            "feature_subset": row.get("feature_subset"),
+            "targets": row.get("targets"),
+            "n_targets": row.get("n_targets"),
+            "neutralization_proportion": row.get("neutralization_proportion"),
+            "oof_device": row.get("oof_device"),
+            "benchmark_tier": row.get("tier"),
+            "status": row.get("status"),
+            "champion": champion,
+            "rank": row.get("rank"),
+            "values": [row.get(spec.name) for spec in DASHBOARD_METRICS],
+            "ci": [
+                row.get(key)
+                for key in ("corr_sharpe_ac_ci_low", "corr_sharpe_ac_ci_high", "n_eras")
+            ],
+            "robustness": {
+                "has_bmc": row.get("has_bmc"),
+                "has_horizon": row.get("has_horizon"),
+                "has_perturb": row.get("has_perturb"),
+                "has_regime": row.get("has_regime"),
+            },
+        }
+        item = _compact_json_value(item)
+        rows.append(item)
+        detail = load_model_detail(row)
+        details.append(
+            [
+                _compact_json_value(
+                    [detail["scorecard"].get(key) for key in _DETAIL_SCORECARD_FIELDS],
+                    digits=4,
+                ),
+                _compact_json_value(
+                    [
+                        detail["provenance"].get(key)
+                        for key in _DETAIL_PROVENANCE_FIELDS
+                    ],
+                    digits=4,
+                ),
+                detail["evidence_ref"] if row.get("source") == "full" else None,
+                detail["reason"],
+            ]
+        )
+        rank_values.append(
+            [rank_map.get(model_id, {}).get(spec.name) for spec in DASHBOARD_METRICS]
+        )
+        corr = _finite_metric_value(row, "corr")
+        mmc = _finite_metric_value(row, "mmc")
+        if corr is not None and mmc is not None and cohort != "full":
+            landscape.append(
+                {
+                    "model_id": model_id,
+                    "cohort": cohort,
+                    "corr": corr,
+                    "mmc": mmc,
+                    "champion": champion,
+                }
+            )
+
+    eras = sorted(
+        {str(era) for era in evaluation_eras},
+        key=lambda era: int(era) if era.isdigit() else era,
+    )
+    window = {
+        "start": eras[0] if eras else None,
+        "end": eras[-1] if eras else None,
+        "n_eras": len(eras),
+    }
+    return {
+        "meta": {
+            "suite_version": suite_version,
+            "data_version": data_version,
+            "evaluation_window": window,
+            "offline_only": True,
+            "default_rank_metric": DEFAULT_RANK_METRIC,
+            "metric_window": "standardized meta-overlap",
+        },
+        "metric_specs": [
+            {
+                "name": spec.name,
+                "label": spec.label,
+                "higher_is_better": spec.higher_is_better,
+                "direction": "higher" if spec.higher_is_better else "lower",
+            }
+            for spec in DASHBOARD_METRICS
+        ],
+        "cohorts": ["all", "trained", "heuristic", "benchmark"],
+        "row_fields": list(_ROW_FIELDS),
+        "rows": [[row.get(field) for field in _ROW_FIELDS] for row in rows],
+        "details": details,
+        "metric_fields": [spec.name for spec in DASHBOARD_METRICS],
+        "ci_fields": ["corr_sharpe_ac_ci_low", "corr_sharpe_ac_ci_high", "n_eras"],
+        "scorecard_fields": list(_DETAIL_SCORECARD_FIELDS),
+        "provenance_fields": list(_DETAIL_PROVENANCE_FIELDS),
+        "rank_values": rank_values,
+        "advantage": compute_ml_advantage(leaderboard),
+        "landscape": sorted(landscape, key=lambda point: point["model_id"]),
+        "rank_movement": {"available": False, "reason": "no_comparable_prior_snapshot"},
+    }
 
 
 def resolve_benchmark_path(
@@ -137,9 +781,7 @@ def load_benchmark_frame(benchmark_path: Path) -> pl.DataFrame:
                 "has_full_version": False,
                 "run_name": row.get("strategy_group")
                 or (
-                    f"tier{int(tier_value)}"
-                    if tier_value is not None
-                    else "benchmark"
+                    f"tier{int(tier_value)}" if tier_value is not None else "benchmark"
                 ),
                 "backend": "benchmark",
                 "preset": "benchmark",
@@ -248,7 +890,9 @@ def load_unified_leaderboard(
                 "targets": ", ".join(data_cfg.get("targets", [])),
                 "neutralization_proportion": risk_cfg.get("neutralization_proportion"),
                 "oof_device": manifest.get("oof_device"),
-                "corr": float(sc_corr if sc_corr is not None else metrics.get("mean", 0.0)),
+                "corr": float(
+                    sc_corr if sc_corr is not None else metrics.get("mean", 0.0)
+                ),
                 "corr_ci_low": scorecard.get("corr_ci_low"),
                 "corr_ci_high": scorecard.get("corr_ci_high"),
                 "corr_n_eras": scorecard.get("corr_n_eras"),
@@ -258,7 +902,9 @@ def load_unified_leaderboard(
                 "corr_sharpe_ac_ci_low": scorecard.get("corr_sharpe_ac_ci_low"),
                 "corr_sharpe_ac_ci_high": scorecard.get("corr_sharpe_ac_ci_high"),
                 "corr_sharpe_ac_n_eras": scorecard.get("corr_sharpe_ac_n_eras"),
-                "std_corr": float(sc_std if sc_std is not None else metrics.get("std", 0.0)),
+                "std_corr": float(
+                    sc_std if sc_std is not None else metrics.get("std", 0.0)
+                ),
                 "max_drawdown": float(
                     sc_dd if sc_dd is not None else metrics.get("max_drawdown", 0.0)
                 ),
@@ -309,7 +955,8 @@ def load_unified_leaderboard(
             logger.warning(
                 "nmr.dashboard: full version %s lineage dangling "
                 "(promoted_from_run_id %s not in registry)",
-                family, version.promoted_from_run_id,
+                family,
+                version.promoted_from_run_id,
             )
         full_row = dict.fromkeys(UNIFIED_SCHEMA.names())  # all metric cells null
         cfg_data = (version.config.get("data") or {}) if version.config else {}
@@ -354,11 +1001,20 @@ _GATE_THRESHOLD_ATTRS = {
 # exists at gate time to bind deflation to, so gating on it was false
 # assurance. The dashboard's CAPITAL READY badge must agree with the benchmark
 # gate, which no longer checks it.
-_GATE_FIELDS = ("corr", "corr_sharpe_ac", "fnc",
-                "gain_to_pain_ratio", "cagr_1y", "turnover_mean")
+_GATE_FIELDS = (
+    "corr",
+    "corr_sharpe_ac",
+    "fnc",
+    "gain_to_pain_ratio",
+    "cagr_1y",
+    "turnover_mean",
+)
 _STATUS_SCHEMA = pl.Schema(
-    {"model_id": pl.String, "status": pl.String,
-     **{f"gate_{f}": pl.Boolean for f in _GATE_FIELDS}}
+    {
+        "model_id": pl.String,
+        "status": pl.String,
+        **{f"gate_{f}": pl.Boolean for f in _GATE_FIELDS},
+    }
 )
 
 
@@ -418,8 +1074,6 @@ def evaluate_gate_status(
             status = "FULL"
         elif row["source"] == "benchmark":
             status = "GATE HURDLE" if model_id == reference_column else "BENCHMARK"
-        elif champion_id is not None and model_id == champion_id:
-            status = "CHAMPION"
         elif (
             all(
                 _gate_receipt(f, row, gate) is True
@@ -429,12 +1083,15 @@ def evaluate_gate_status(
             # turnover is exempt only when None; a measured violation blocks the gate
             and _gate_receipt("turnover_mean", row, gate) is not False
         ):
-            status = "CAPITAL READY"
+            status = "CHAMPION" if model_id == champion_id else "CAPITAL READY"
         else:
             status = "RESEARCH"
         rows.append(
-            {"model_id": model_id, "status": status,
-             **{f"gate_{f}": _gate_receipt(f, row, gate) for f in _GATE_FIELDS}}
+            {
+                "model_id": model_id,
+                "status": status,
+                **{f"gate_{f}": _gate_receipt(f, row, gate) for f in _GATE_FIELDS},
+            }
         )
     if not rows:
         return pl.DataFrame(schema=_STATUS_SCHEMA)
@@ -462,9 +1119,7 @@ def _load_shared_lookups(
     if not (targets_path.exists() and meta_path.exists()):
         return None
     targets = pl.read_parquet(targets_path, columns=["era", "id", "target"])
-    meta = pl.read_parquet(
-        meta_path, columns=["era", "id", "numerai_meta_model"]
-    )
+    meta = pl.read_parquet(meta_path, columns=["era", "id", "numerai_meta_model"])
     meta_eras = sorted(meta.get_column("era").unique().to_list(), key=int)
     targets_86 = targets.filter(pl.col("era").is_in(meta_eras))
     return targets_86, meta, meta_eras
@@ -481,15 +1136,16 @@ def _per_era_metrics(
     restricts to the standard 86-era overlap window.
     """
     preds = pl.read_parquet(preds_path, columns=["era", "id", "prediction"])
-    joined = (
-        preds.join(targets_86, on=["era", "id"], how="inner")
-        .join(meta, on=["era", "id"], how="inner")
+    joined = preds.join(targets_86, on=["era", "id"], how="inner").join(
+        meta, on=["era", "id"], how="inner"
     )
     engine = EvaluationEngine()
     corr = engine.per_era_corr(joined, pred_col="prediction", target_col="target")
     mmc = engine.per_era_mmc(
-        joined, pred_col="prediction",
-        meta_col="numerai_meta_model", target_col="target",
+        joined,
+        pred_col="prediction",
+        meta_col="numerai_meta_model",
+        target_col="target",
     )
     meta_corr = engine.per_era_corr(
         joined, pred_col="numerai_meta_model", target_col="target"
@@ -510,23 +1166,31 @@ class _V2Lookups:
 def _resolve_horizon_targets(schema_cols: Sequence[str]) -> tuple[str, str]:
     """Resolve the 20D/60D target columns with fallback chains (decision #10)."""
     target_20 = next(
-        (c for c in ("target_ender_20", "target_cyrusd_20", "target_20", "target")
-         if c in schema_cols),
+        (
+            c
+            for c in ("target_ender_20", "target_cyrusd_20", "target_20", "target")
+            if c in schema_cols
+        ),
         "target",
     )
     target_60 = next(
-        (c for c in ("target_ender_60", "target_cyrusd_60", "target_60", "target")
-         if c in schema_cols),
+        (
+            c
+            for c in ("target_ender_60", "target_cyrusd_60", "target_60", "target")
+            if c in schema_cols
+        ),
         target_20,
     )
     return target_20, target_60
 
 
-def _load_v2_lookups(data_dir: Path, tier4_column: str) -> _V2Lookups | None:
+def _load_v2_lookups(data_dir: Path, tier4_columns: Sequence[str]) -> _V2Lookups | None:
     """Single-pass v2 lookups: deduped targets, meta, benchmarks on meta eras.
 
     Returns None when validation.parquet or meta_model.parquet is missing;
-    benchmarks are optional (empty frame when the file is absent).
+    benchmarks are optional (empty frame when the file is absent). Reads the
+    tier-4 reference columns that exist in the benchmark parquet; a requested
+    column that the file lacks is skipped with a warning (schema drift).
     """
     data = Path(data_dir)
     targets_path = data / "validation.parquet"
@@ -542,21 +1206,29 @@ def _load_v2_lookups(data_dir: Path, tier4_column: str) -> _V2Lookups | None:
     meta = pl.read_parquet(meta_path, columns=["era", "id", "numerai_meta_model"])
     meta_eras = sorted_era_labels(meta.get_column("era").unique().to_list())
     targets_86 = targets.filter(pl.col("era").is_in(meta_eras))
-    benchmarks = pl.DataFrame(
-        schema={"era": pl.String, "id": pl.String, tier4_column: pl.Float64}
-    )
+    present_columns: list[str] = []
     if bench_path.exists():
-        try:
-            benchmarks = pl.read_parquet(
-                bench_path, columns=["era", "id", tier4_column]
-            ).filter(pl.col("era").is_in(meta_eras))
-        except pl.exceptions.ColumnNotFoundError:
-            # schema drift: the parquet exists but lacks the tier-4 column —
-            # degrade to the empty benchmark frame instead of raising
+        bench_schema = pl.read_parquet_schema(bench_path).names()
+        missing = [c for c in tier4_columns if c not in bench_schema]
+        if missing:
             logger.warning(
-                "nmr.dashboard: benchmark parquet %s lacks tier-4 column %s; "
-                "benchmarks empty", bench_path, tier4_column,
+                "nmr.dashboard: benchmark parquet %s lacks tier-4 columns %s; "
+                "those reference slices are skipped",
+                bench_path,
+                missing,
             )
+        present_columns = [c for c in tier4_columns if c in bench_schema]
+    benchmarks = pl.DataFrame(
+        schema={
+            "era": pl.String,
+            "id": pl.String,
+            **{c: pl.Float64 for c in present_columns},
+        }
+    )
+    if present_columns:
+        benchmarks = pl.read_parquet(
+            bench_path, columns=["era", "id", *present_columns]
+        ).filter(pl.col("era").is_in(meta_eras))
     return _V2Lookups(
         targets=targets_86,
         target_20_col=target_20,
@@ -580,7 +1252,8 @@ def reconcile_capital_metrics(
     """
     rows = leaderboard.to_dicts()
     needs_recompute = [
-        row for row in rows
+        row
+        for row in rows
         if row["source"] in ("trained", "trained_legacy")
         and not _has_stored_capital_block(row)
     ]
@@ -591,7 +1264,8 @@ def reconcile_capital_metrics(
     if lookups is None:
         logger.warning(
             "nmr.dashboard: v5.3 targets/meta_model missing at %s; "
-            "capital cells left None", data_dir,
+            "capital cells left None",
+            data_dir,
         )
         return leaderboard
     targets_86, meta, _ = lookups
@@ -606,7 +1280,8 @@ def reconcile_capital_metrics(
         if not preds_path.exists():
             logger.warning(
                 "nmr.dashboard: %s has no validation_preds.parquet; "
-                "capital cells left None", row["model_id"],
+                "capital cells left None",
+                row["model_id"],
             )
             continue
         corr, mmc, meta_corr = _per_era_metrics(preds_path, targets_86, meta)
@@ -654,7 +1329,7 @@ def extract_multimetric_timeseries(
     data_dir: Path,
     run_ids: Sequence[str],
     include_tier4_ref: bool = True,
-    tier4_column: str = "v53_lgbm_ender60",
+    tier4_columns: Sequence[str] = ("v53_lgbm_ender60", "v53_lgbm_ender20"),
 ) -> dict[str, Any]:
     """7-metric per-era trajectories over the standardized meta window.
 
@@ -662,10 +1337,12 @@ def extract_multimetric_timeseries(
     metrics use cumsum, payout uses cumprod (decision #9); the tier-4 BMC is
     short-circuited to zeros (decision #11); an absent benchmark frame or a
     model sharing no era with the meta window zero-fills its bmc/cwmm slices
-    and skips its payout slice with warnings (decision #23). Never raises on
-    missing assets — returns the empty payload.
+    and skips its payout slice with warnings (decision #23). Every tier-4
+    reference column (first = the gated capital line, the BMC benchmark for
+    other models) is rendered as a reference curve. Never raises on missing
+    assets — returns the empty payload.
     """
-    lookups = _load_v2_lookups(data_dir, tier4_column)
+    lookups = _load_v2_lookups(data_dir, tier4_columns)
     if lookups is None:
         logger.warning(
             "nmr.dashboard: data assets missing at %s; empty timeseries", data_dir
@@ -683,34 +1360,35 @@ def extract_multimetric_timeseries(
     metrics: dict[str, dict] = {name: {} for name in _METRIC_NAMES}
     drawdowns: dict[str, list[float]] = {}
 
-    ids = [mid for mid in sorted(set(run_ids)) if mid != tier4_column]
+    ref_set = set(tier4_columns)
+    primary_ref = tier4_columns[0] if tier4_columns else None
+    ids = [mid for mid in sorted(set(run_ids)) if mid not in ref_set]
     if include_tier4_ref and lookups.benchmarks.height > 0:
-        ids.append(tier4_column)
+        ids.extend([c for c in tier4_columns if c in lookups.benchmarks.columns])
 
     for model_id in ids:
-        if model_id == tier4_column:
+        if model_id in ref_set:
             preds = lookups.benchmarks.select(
-                ["era", "id", pl.col(tier4_column).alias("prediction")]
+                ["era", "id", pl.col(model_id).alias("prediction")]
             )
-            label = tier4_column
+            label = model_id
         else:
             preds_path = Path(registry_dir) / model_id / "validation_preds.parquet"
             if not preds_path.exists():
-                logger.warning(
-                    "nmr.dashboard: skipping missing preds %s", preds_path
-                )
+                logger.warning("nmr.dashboard: skipping missing preds %s", preds_path)
                 continue
             preds = pl.read_parquet(preds_path, columns=["era", "id", "prediction"])
             label = _series_label(registry_dir, model_id)
 
-        joined = (
-            preds.join(lookups.targets, on=["era", "id"], how="inner")
-            .join(lookups.meta, on=["era", "id"], how="inner")
+        joined = preds.join(lookups.targets, on=["era", "id"], how="inner").join(
+            lookups.meta, on=["era", "id"], how="inner"
         )
         corr_t = engine.per_era_corr(joined, pred_col="prediction", target_col="target")
         mmc_t = engine.per_era_mmc(
-            joined, pred_col="prediction",
-            meta_col="numerai_meta_model", target_col="target",
+            joined,
+            pred_col="prediction",
+            meta_col="numerai_meta_model",
+            target_col="target",
         )
         # decision #23: a stale run whose preds share no era with the meta
         # window must not abort the report — skip its payout slice (drawdowns
@@ -730,7 +1408,8 @@ def extract_multimetric_timeseries(
         else:
             logger.warning(
                 "nmr.dashboard: %s shares no eras with the meta window; "
-                "payout slice skipped", model_id,
+                "payout slice skipped",
+                model_id,
             )
 
         horizon_metrics = (
@@ -747,8 +1426,10 @@ def extract_multimetric_timeseries(
                 )
             else:
                 per = engine.per_era_mmc(
-                    joined, pred_col="prediction",
-                    meta_col="numerai_meta_model", target_col=target_col,
+                    joined,
+                    pred_col="prediction",
+                    meta_col="numerai_meta_model",
+                    target_col=target_col,
                 )
             aligned = [float(per.get(era, 0.0)) for era in axis]
             metrics[name][model_id] = {
@@ -757,19 +1438,23 @@ def extract_multimetric_timeseries(
                 "label": label,
             }
 
-        if model_id == tier4_column:
+        if model_id in ref_set:
             zeros = [0.0 for _ in axis]
             metrics["bmc"][model_id] = {
-                "standard": zeros, "cumulative": zeros, "label": label,
+                "standard": zeros,
+                "cumulative": zeros,
+                "label": label,
             }
-        else:
+        elif primary_ref is not None:
             joined_b = joined.join(lookups.benchmarks, on=["era", "id"], how="inner")
             if lookups.benchmarks.height > 0 and joined_b.height > 0:
                 # reporting path relaxes the evaluation vacuity gate (real meta
                 # window satisfies 20 anyway); alignment below zero-fills missing eras
                 per_bmc = engine.per_era_bmc(
-                    joined_b, pred_col="prediction",
-                    benchmark_col=tier4_column, target_col="target",
+                    joined_b,
+                    pred_col="prediction",
+                    benchmark_col=primary_ref,
+                    target_col="target",
                     min_overlap_eras=1,
                 )
                 aligned = [float(per_bmc.get(era, 0.0)) for era in axis]
@@ -779,8 +1464,6 @@ def extract_multimetric_timeseries(
                     "label": label,
                 }
             else:
-                # decision #23: an absent benchmark frame, or a model with no era
-                # overlap with it, zero-fills the BMC slice instead of raising
                 if lookups.benchmarks.height == 0:
                     logger.warning(
                         "nmr.dashboard: benchmark models absent at %s; bmc zeroed",
@@ -789,18 +1472,32 @@ def extract_multimetric_timeseries(
                 else:
                     logger.warning(
                         "nmr.dashboard: %s shares no eras with the benchmark "
-                        "window; bmc zeroed", model_id,
+                        "window; bmc zeroed",
+                        model_id,
                     )
                 zeros = [0.0 for _ in axis]
                 metrics["bmc"][model_id] = {
-                    "standard": zeros, "cumulative": zeros, "label": label,
+                    "standard": zeros,
+                    "cumulative": zeros,
+                    "label": label,
                 }
+        else:
+            # no primary reference configured — zero-fill BMC (nothing to
+            # benchmark against); the other metric slices still render
+            zeros = [0.0 for _ in axis]
+            metrics["bmc"][model_id] = {
+                "standard": zeros,
+                "cumulative": zeros,
+                "label": label,
+            }
 
         if joined.height > 0:
             # reporting path relaxes the evaluation vacuity gate (real meta window
             # satisfies 20 anyway); alignment below zero-fills missing eras
             per_cwmm = engine.per_era_cwmm(
-                joined, pred_col="prediction", meta_col="numerai_meta_model",
+                joined,
+                pred_col="prediction",
+                meta_col="numerai_meta_model",
                 min_overlap_eras=1,
             )
             aligned = [float(per_cwmm.get(era, 0.0)) for era in axis]
@@ -813,7 +1510,9 @@ def extract_multimetric_timeseries(
             # zero-overlap model: cwmm renders zero-filled (decision #23)
             zeros = [0.0 for _ in axis]
             metrics["cwmm"][model_id] = {
-                "standard": zeros, "cumulative": zeros, "label": label,
+                "standard": zeros,
+                "cumulative": zeros,
+                "label": label,
             }
 
     return {
@@ -841,7 +1540,7 @@ def extract_pairwise_similarity_matrix(
     {"mean_delta": mean off-diagonal (rho_stress - rho_normal) | None,
      "n_pairs": int} (decision #26).
     """
-    lookups = _load_v2_lookups(data_dir, tier4_column)
+    lookups = _load_v2_lookups(data_dir, (tier4_column,))
     if lookups is None:
         logger.warning(
             "nmr.dashboard: data assets missing at %s; empty similarity", data_dir
@@ -895,7 +1594,8 @@ def extract_pairwise_similarity_matrix(
 
     meta_corr = EvaluationEngine().per_era_corr(
         lookups.meta.join(lookups.targets, on=["era", "id"], how="inner"),
-        pred_col="numerai_meta_model", target_col="target",
+        pred_col="numerai_meta_model",
+        target_col="target",
     )
     stress_eras = {era for era in axis if meta_corr.get(era, 0.0) < 0.0}
     era_arr = gauss.get_column("era").to_list()
@@ -905,7 +1605,9 @@ def extract_pairwise_similarity_matrix(
         mat = np.atleast_2d(mat)
         if mat.shape[0] < 2:
             return None
-        upper = [mat[i, j] for i in range(mat.shape[0]) for j in range(i + 1, mat.shape[0])]
+        upper = [
+            mat[i, j] for i in range(mat.shape[0]) for j in range(i + 1, mat.shape[0])
+        ]
         return float(np.mean(upper)) if upper else None
 
     mean_delta = None
@@ -914,13 +1616,30 @@ def extract_pairwise_similarity_matrix(
         # correlations — neutralize them (0) before the off-diagonal mean so
         # mean_delta is always finite (0-d scalar corrcoef kept 2-d too)
         rho_stress = _mean_offdiag(
-            np.clip(np.nan_to_num(np.atleast_2d(np.corrcoef(stacked[:, stress_idx])), nan=0.0), -1.0, 1.0)
+            np.clip(
+                np.nan_to_num(
+                    np.atleast_2d(np.corrcoef(stacked[:, stress_idx])), nan=0.0
+                ),
+                -1.0,
+                1.0,
+            )
         )
         rho_normal = _mean_offdiag(
-            np.clip(np.nan_to_num(np.atleast_2d(np.corrcoef(stacked[:, ~stress_idx])), nan=0.0), -1.0, 1.0)
+            np.clip(
+                np.nan_to_num(
+                    np.atleast_2d(np.corrcoef(stacked[:, ~stress_idx])), nan=0.0
+                ),
+                -1.0,
+                1.0,
+            )
         )
         if rho_stress is not None and rho_normal is not None:
             mean_delta = rho_stress - rho_normal
 
     n_pairs = len(ids_used) * (len(ids_used) - 1) // 2
-    return labels, ids_used, matrix.tolist(), {"mean_delta": mean_delta, "n_pairs": n_pairs}
+    return (
+        labels,
+        ids_used,
+        matrix.tolist(),
+        {"mean_delta": mean_delta, "n_pairs": n_pairs},
+    )

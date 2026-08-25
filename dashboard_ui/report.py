@@ -26,6 +26,7 @@ from nmr.dashboard import (
     DEFAULT_GATE_PATH,
     DEFAULT_REGISTRY_DIR,
     EVALUABLE_ROWS,
+    build_tournament_payload,
     evaluate_gate_status,
     extract_multimetric_timeseries,
     extract_pairwise_similarity_matrix,
@@ -44,8 +45,8 @@ def _read_asset(name: str) -> str:
     return (_STATIC_DIR / name).read_text(encoding="utf-8")
 
 
-_STYLE_CSS = _read_asset("style.css")
-_APP_JS = _read_asset("app.js")
+_STYLE_CSS = _read_asset("style.min.css")
+_APP_JS = _read_asset("app.min.js")
 _LAYOUT_HTML = _read_asset("layout.html")
 
 _METRIC_CONTROLS_HTML = (
@@ -69,10 +70,10 @@ _TS_CHART_HTML = (
     '<div id="timeseries-tooltip" class="tooltip" hidden></div></div>'
 )
 _LB_CHART_HTML = '<div class="chart-box"><svg id="leaderboard-svg" viewBox="0 0 800 420"></svg></div>'
-_DD_CHART_HTML = '<div class="chart-box"><svg id="drawdown-svg" viewBox="0 0 800 240"></svg></div>'
-_EMPTY_TS_HTML = (
-    '<div class="chart-box"><p>Timeseries data unavailable without local v5.3 assets</p></div>'
+_DD_CHART_HTML = (
+    '<div class="chart-box"><svg id="drawdown-svg" viewBox="0 0 800 240"></svg></div>'
 )
+_EMPTY_TS_HTML = '<div class="chart-box"><p>Timeseries data unavailable without local v5.3 assets</p></div>'
 
 
 def _fmt(value, *, pct: bool = False) -> str:
@@ -118,14 +119,14 @@ def _bar_input(leaderboard: pl.DataFrame, champion: str | None) -> pl.DataFrame:
     )
 
 
-def _kpi_cards(leaderboard: pl.DataFrame, champion: str | None,
-               hurdle_sharpe: float) -> dict:
+def _kpi_cards(
+    leaderboard: pl.DataFrame, champion: str | None, hurdle_sharpe: float
+) -> dict:
     fleet = leaderboard.filter(pl.col("source").is_in(["trained", "trained_legacy"]))
     top = fleet.sort("corr_sharpe_ac", descending=True, nulls_last=True).head(1)
     top_row = top.row(0, named=True) if top.height else None
     cagr_values = [
-        row["cagr_1y"] for row in fleet.to_dicts()
-        if row["cagr_1y"] is not None
+        row["cagr_1y"] for row in fleet.to_dicts() if row["cagr_1y"] is not None
     ]
     champion_row = None
     if champion is not None:
@@ -135,52 +136,83 @@ def _kpi_cards(leaderboard: pl.DataFrame, champion: str | None,
         else:
             logger.warning(
                 "dashboard_ui.report: champion %s not found in leaderboard; "
-                "treating as none designated", champion,
+                "treating as none designated",
+                champion,
             )
     return {
-        "champion_label": "None Designated" if champion_row is None
-                          else _bar_label(champion_row),
+        "champion_label": (
+            "None Designated" if champion_row is None else _bar_label(champion_row)
+        ),
         "champion_detail": "(Unallocated)" if champion_row is None else "Active",
         "top_contender_label": _bar_label(top_row) if top_row else "—",
         "top_contender_sharpe": top_row["corr_sharpe_ac"] if top_row else None,
         "hurdle_sharpe": hurdle_sharpe,
-        "gap": (top_row["corr_sharpe_ac"] - hurdle_sharpe)
-               if top_row and top_row["corr_sharpe_ac"] is not None else None,
+        "gap": (
+            (top_row["corr_sharpe_ac"] - hurdle_sharpe)
+            if top_row and top_row["corr_sharpe_ac"] is not None
+            else None
+        ),
         "fleet_best_cagr": max(cagr_values) if cagr_values else None,
         "worst_drawdown": min(
-            [row["max_drawdown"] for row in fleet.to_dicts()
-             if row["max_drawdown"] is not None],
+            [
+                row["max_drawdown"]
+                for row in fleet.to_dicts()
+                if row["max_drawdown"] is not None
+            ],
             default=None,
         ),
         "capital_ready_count": fleet.join(
             leaderboard.select(["model_id", "status"]), on="model_id", how="left"
-        ).filter(pl.col("status") == "CAPITAL READY").height,
+        )
+        .filter(pl.col("status") == "CAPITAL READY")
+        .height,
         "fleet_count": fleet.height,
         "data_version": "v5.3",
-        "n_eras": leaderboard.get_column("n_eras").drop_nulls().max()
-                  if leaderboard.height else None,
+        "n_eras": (
+            leaderboard.get_column("n_eras").drop_nulls().max()
+            if leaderboard.height
+            else None
+        ),
     }
 
 
 def _table_rows(leaderboard: pl.DataFrame, champion: str | None) -> list[dict]:
     rows = leaderboard.to_dicts()
-    champion_rows = [r for r in rows if champion is not None and r["model_id"] == champion]
+    champion_rows = [
+        r for r in rows if champion is not None and r["model_id"] == champion
+    ]
     full_rows = sorted(
         [r for r in rows if r["source"] == "full"],
         key=lambda r: (str(r["run_name"] or ""), str(r["model_id"])),
     )
     fleet_rows = sorted(
-        [r for r in rows
-         if r["source"] in ("trained", "trained_legacy") and r["model_id"] != champion],
-        key=lambda r: (-(r["corr_sharpe_ac"] if r["corr_sharpe_ac"] is not None
-                        else float("-inf")), r["model_id"]),
+        [
+            r
+            for r in rows
+            if r["source"] in ("trained", "trained_legacy")
+            and r["model_id"] != champion
+        ],
+        key=lambda r: (
+            -(
+                r["corr_sharpe_ac"]
+                if r["corr_sharpe_ac"] is not None
+                else float("-inf")
+            ),
+            r["model_id"],
+        ),
     )
     bench_rows = sorted(
         [r for r in rows if r["source"] == "benchmark"],
         key=lambda r: ((r["tier"] if r["tier"] is not None else 99), r["model_id"]),
     )
     if full_rows:
-        return champion_rows + [{"_group_header": "Promoted Full Versions"}] + full_rows + fleet_rows + bench_rows
+        return (
+            champion_rows
+            + [{"_group_header": "Promoted Full Versions"}]
+            + full_rows
+            + fleet_rows
+            + bench_rows
+        )
     return champion_rows + fleet_rows + bench_rows
 
 
@@ -214,7 +246,10 @@ def _row_html(row: dict) -> str:
     status = _status_badge(row.get("status", "RESEARCH"))
     sharpe = _fmt(row.get("corr_sharpe_ac"))
     ci = "—"
-    if row.get("corr_sharpe_ac_ci_low") is not None and row.get("corr_sharpe_ac_ci_high") is not None:
+    if (
+        row.get("corr_sharpe_ac_ci_low") is not None
+        and row.get("corr_sharpe_ac_ci_high") is not None
+    ):
         ci = f"[{_fmt(row['corr_sharpe_ac_ci_low'])}–{_fmt(row['corr_sharpe_ac_ci_high'])}]"
     model_label = html.escape(_bar_label(row))
     if row.get("has_full_version"):
@@ -225,7 +260,7 @@ def _row_html(row: dict) -> str:
         f"<td>{model_label}</td>"
         f"{_td_gate(_fmt(row.get('cagr_1y'), pct=True), row.get('gate_cagr_1y'))}"
         f"{_td_gate(sharpe, row.get('gate_corr_sharpe_ac'))}"
-        f"<td class=\"num\">{ci}</td>"
+        f'<td class="num">{ci}</td>'
         f"<td class=\"num\">{_fmt(row.get('max_drawdown'), pct=True)}</td>"
         f"{_td_gate(_fmt(row.get('gain_to_pain_ratio')), row.get('gate_gain_to_pain_ratio'))}"
         f"<td class=\"num\">{_fmt(row.get('mmc_down'))}</td>"
@@ -267,7 +302,7 @@ def _technical_entries(registry_dir: Path) -> list[dict]:
         entries.append(
             {
                 "label": f"{run_cfg.get('name', 'unknown')} · "
-                         f"{str(payload.get('run_id') or run_file.parent.name)[:8]}",
+                f"{str(payload.get('run_id') or run_file.parent.name)[:8]}",
                 "summary": summary,
                 "json_text": json.dumps(summary, indent=2, sort_keys=True),
             }
@@ -330,7 +365,7 @@ def _ensemble_card_html(value: float | None) -> str:
     text = "—" if value is None else f"{value:.3f}"
     return (
         '<div class="kpi"><div class="label">Equal-Weight Ensemble Sharpe '
-        f"(top-3, heuristic)</div><div class=\"value\">{text}</div></div>"
+        f'(top-3, heuristic)</div><div class="value">{text}</div></div>'
     )
 
 
@@ -387,6 +422,8 @@ def _build_html(
     diversification_html: str,
     accordion_html: str,
     payload: dict[str, Any],
+    suite_version: str = "v2",
+    as_of_era: str | None = None,
 ) -> str:
     """Assemble the full HTML document from the layout template + payload.
 
@@ -400,6 +437,8 @@ def _build_html(
     ts_html = _TS_CHART_HTML if payload.get("eras") else _EMPTY_TS_HTML
     replacements = [
         ("{{ INLINE_STYLE }}", _STYLE_CSS),
+        ("{{ SUITE_VERSION }}", html.escape(suite_version)),
+        ("{{ AS_OF_ERA }}", html.escape(as_of_era or "—")),
         ("{{ N_ERAS }}", str(kpis["n_eras"]) if kpis["n_eras"] is not None else "—"),
         ("{{ DATA_VERSION }}", html.escape(kpis["data_version"])),
         ("{{ KPI_CARDS }}", _kpi_cards_html(kpis)),
@@ -410,9 +449,11 @@ def _build_html(
         ("{{ DECISION_TABLE }}", table_html),
         ("{{ DRAWDOWN_SVG }}", _DD_CHART_HTML),
         ("{{ AUDIT_ACCORDION }}", accordion_html),
-        ("{{ INLINE_DATA_SCRIPT }}",
-         '<script type="application/json" id="dashboard-data">'
-         f"{payload_json}</script>\n<script>\n{_APP_JS}</script>"),
+        (
+            "{{ INLINE_DATA_SCRIPT }}",
+            '<script type="application/json" id="dashboard-data">'
+            f"{payload_json}</script>\n<script>\n{_APP_JS}</script>",
+        ),
     ]
     html_text = _LAYOUT_HTML
     for key, value in replacements:
@@ -420,40 +461,58 @@ def _build_html(
     return html_text
 
 
-def generate_dashboard(
+def build_dashboard_html(
     *,
     registry_dir: Path | None = None,
     benchmark_path: Path | None | bool = None,
-    output_path: Path | None = None,
-    open_browser: bool = True,
-) -> Path:
-    """Build the executive HTML report and write it to disk."""
-    registry_dir = Path(registry_dir) if registry_dir is not None else DEFAULT_REGISTRY_DIR
-    output_path = Path(output_path) if output_path is not None else REPO_ROOT / "artifacts" / "dashboard.html"
+) -> str:
+    """Build the deterministic dashboard document without writing it."""
+    registry_dir = (
+        Path(registry_dir) if registry_dir is not None else DEFAULT_REGISTRY_DIR
+    )
 
     leaderboard = load_unified_leaderboard(registry_dir, benchmark_path=benchmark_path)
     leaderboard = reconcile_capital_metrics(leaderboard, DEFAULT_DATA_DIR)
-    statuses = evaluate_gate_status(leaderboard, DEFAULT_GATE_PATH, registry_dir / "champion.json")
+    statuses = evaluate_gate_status(
+        leaderboard, DEFAULT_GATE_PATH, registry_dir / "champion.json"
+    )
     leaderboard = leaderboard.join(statuses, on="model_id", how="left")
 
     gate_cfg = load_benchmark_file(DEFAULT_GATE_PATH)
     assert gate_cfg.reference_column is not None
+    # All official tier-4 reference columns render as curves; the gated
+    # capital line (reference_column) comes first and owns the BMC benchmark.
+    tier4_columns = [str(gate_cfg.reference_column), *gate_cfg.reference_columns]
     tier4_column = str(gate_cfg.reference_column)
     hurdle_sharpe = float(gate_cfg.gate.corr_sharpe_ac_min)
 
     champion = read_champion_pointer(registry_dir / "champion.json")
     fleet = leaderboard.filter(pl.col("source").is_in(["trained", "trained_legacy"]))
-    top3_ids = fleet.sort("corr_sharpe_ac", descending=True, nulls_last=True) \
-        .head(3).get_column("model_id").to_list()
-    engine_payload = extract_multimetric_timeseries(
-        registry_dir, DEFAULT_DATA_DIR, run_ids=top3_ids,
-        include_tier4_ref=True, tier4_column=tier4_column,
+    top3_ids = (
+        fleet.sort("corr_sharpe_ac", descending=True, nulls_last=True)
+        .head(3)
+        .get_column("model_id")
+        .to_list()
     )
-    top5_ids = fleet.sort("corr_sharpe_ac", descending=True, nulls_last=True) \
-        .head(5).get_column("model_id").to_list()
+    engine_payload = extract_multimetric_timeseries(
+        registry_dir,
+        DEFAULT_DATA_DIR,
+        run_ids=top3_ids,
+        include_tier4_ref=True,
+        tier4_columns=tier4_columns,
+    )
+    top5_ids = (
+        fleet.sort("corr_sharpe_ac", descending=True, nulls_last=True)
+        .head(5)
+        .get_column("model_id")
+        .to_list()
+    )
     labels, _sim_ids, matrix, stress = extract_pairwise_similarity_matrix(
-        registry_dir, DEFAULT_DATA_DIR, run_ids=top5_ids,
-        include_tier4_ref=True, tier4_column=tier4_column,
+        registry_dir,
+        DEFAULT_DATA_DIR,
+        run_ids=top5_ids,
+        include_tier4_ref=True,
+        tier4_column=tier4_column,
     )
     stats = _diversification_stats(matrix)
     payout_metric = (engine_payload.get("metrics") or {}).get("payout") or {}
@@ -470,8 +529,28 @@ def generate_dashboard(
         hurdle_sharpe=hurdle_sharpe,
         ensemble_sharpe=ensemble_value,
     )
+    payload.update(
+        build_tournament_payload(
+            leaderboard,
+            champion_id=champion,
+            evaluation_eras=engine_payload.get("eras") or [],
+        )
+    )
+    payload["metrics"] = charts.compact_timeseries_payload(payload.get("metrics") or {})
+    for key in (
+        "leaderboard",
+        "hurdle_sharpe",
+        "ensemble_sharpe",
+        "landscape",
+        "meta_downside_mask",
+        "ci_fields",
+        "cohorts",
+        "rank_movement",
+        "advantage",
+    ):
+        payload.pop(key, None)
 
-    html_text = _build_html(
+    return _build_html(
         kpis=_kpi_cards(leaderboard, champion, hurdle_sharpe),
         table_html=_table_html(leaderboard, champion),
         diversification_html=_diversification_html(
@@ -479,6 +558,27 @@ def generate_dashboard(
         ),
         accordion_html=_accordion_html(_technical_entries(registry_dir)),
         payload=payload,
+        suite_version=str(payload["meta"]["suite_version"]),
+        as_of_era=payload["meta"]["evaluation_window"]["end"],
+    )
+
+
+def generate_dashboard(
+    *,
+    registry_dir: Path | None = None,
+    benchmark_path: Path | None | bool = None,
+    output_path: Path | None = None,
+    open_browser: bool = True,
+) -> Path:
+    """Build the dashboard HTML report and write it to disk."""
+    output_path = (
+        Path(output_path)
+        if output_path is not None
+        else REPO_ROOT / "artifacts" / "dashboard.html"
+    )
+    html_text = build_dashboard_html(
+        registry_dir=registry_dir,
+        benchmark_path=benchmark_path,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(html_text, encoding="utf-8")

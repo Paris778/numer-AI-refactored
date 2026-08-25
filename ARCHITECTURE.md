@@ -43,7 +43,7 @@ generate_dashboard.py (thin wrapper) ─> dashboard_ui.report ─> artifacts/das
 
 Parallel harness:
 benchmark_runner.py ──> BenchmarkHierarchy (nmr/benchmark.py)
-   tiers 0-3 generator cells + tier-4 v53_lgbm_ender60 reference column
+   tiers 0-3 generator cells + tier-4 reference columns (v53_lgbm_ender60 gate + v53_lgbm_ender20)
    ──> evaluate_model() scorecards ──> artifacts/reports/benchmark_hierarchy_scorecard.csv
                                      + artifacts/reports/benchmark_gate_report.csv
 ```
@@ -235,7 +235,9 @@ The 5-tier escalating benchmark ladder ("the line in the sand"). Config-driven:
 `configs/benchmarks/*.yaml` → `load_benchmark_suite_config()` → frozen
 `BenchmarkCellConfig` / `Tier4GateConfig` dataclasses (unknown keys rejected,
 enum-validated). `BenchmarkHierarchy.run()` scores every cell plus the
-`v53_lgbm_ender60` reference column through `evaluate_model()` and evaluates
+`v53_lgbm_ender60` reference column (plus additional `reference_columns`,
+e.g. `v53_lgbm_ender20`, scored as informational tier-4 rows) through
+`evaluate_model()` and evaluates
 three hard gates: `assert_tier0_null_floor` (|CORR| ≤ 0.005, |AC-Sharpe| ≤ 0.15
 over the three structural nulls; no DSR check — null DSRs span 0.11–1.0),
 `assert_tier4_gate` (6 production thresholds in `configs/benchmarks/tier4_gate.yaml`;
@@ -309,11 +311,11 @@ def predict(live_features: pd.DataFrame, live_benchmark_models: pd.DataFrame | N
 |---|---|
 | [train_first_model.py](train_first_model.py) | `load_config("configs/first_model.yaml")` → `ExperimentRunner.run(deploy=True)` → `RunRegistry.record` + `promote_if_better` (prints promotion verdict) → prints summary, writes `summary.json` |
 | [benchmark_runner.py](benchmark_runner.py) | 5-tier hierarchy control plane: `--data-dir`, `--configs`, `--seed`, `--n-boot`, `--fast-mode`; writes `artifacts/reports/benchmark_hierarchy_scorecard.csv` + `benchmark_gate_report.csv`; exit 1 on hard-gate failure |
-| [generate_dashboard.py](generate_dashboard.py) | **Thin entry wrapper** — all logic in `dashboard_ui/report.py`; compiles the offline single-file vanilla HTML/CSS/SVG `artifacts/dashboard.html` (executive report, < 100 KB) on the `nmr/dashboard.py` engine; CLI surface unchanged (`python generate_dashboard.py`) |
-| [dashboard_app.py](dashboard_app.py) | **Thin entry wrapper** — all logic in `dashboard_ui/app.py`; native-Streamlit interactive dashboard (no Plotly) over registry scorecards, benchmark CSV, campaign logs, and `fleet_summary` (§Q); read-only; launch: `streamlit run dashboard_app.py` |
-| `dashboard_ui/charts.py` | pure SVG geometry reference + metric-first payload builder (`data_to_svg_path`, `svg_area_path`, `cumulative_series`, `drawdown_series`, `build_dashboard_payload`); tested in `tests/test_dashboard_ui.py`; `static/app.js` mirrors the geometry client-side |
-| `dashboard_ui/report.py` | HTML report compiler — `generate_dashboard` / `main`; inlines `static/{style.css, app.js, layout.html}`; consumes `nmr.dashboard` + `dashboard_ui.charts` |
-| `dashboard_ui/app.py` | Streamlit app — `main` + view/frame helpers; consumes `nmr.dashboard`; pure shaping helpers unit-tested (tests/test_scripts.py) |
+| [generate_dashboard.py](generate_dashboard.py) | **Thin entry wrapper** — all logic in `dashboard_ui/report.py`; compiles the deterministic offline Model Tournament `artifacts/dashboard.html` (100 KiB artifact gate) on the `nmr/dashboard.py` engine; CLI surface unchanged (`python generate_dashboard.py`) |
+| [dashboard_app.py](dashboard_app.py) | **Thin entry wrapper** — calls `dashboard_ui.app.main`; embeds the same vanilla Model Tournament renderer with `st.components.v1.html`; read-only; launch: `streamlit run dashboard_app.py` |
+| `dashboard_ui/charts.py` | pure SVG geometry and compact payload helpers (`data_to_svg_path`, `svg_area_path`, `cumulative_series`, `drawdown_series`, `build_dashboard_payload`, `compact_timeseries_payload`); tested in `tests/test_dashboard_ui.py`; static assets mirror the geometry client-side |
+| `dashboard_ui/report.py` | deterministic HTML compiler — `build_dashboard_html` / `generate_dashboard` / `main`; inlines generated `static/{style.min.css, app.min.js, layout.html}` from readable `style.css`/`app.js` renderer sources |
+| `dashboard_ui/app.py` | Streamlit app — calls `dashboard_ui.app.main`; the shared vanilla Model Tournament renderer is embedded with `st.components.v1.html`; read-only; launch: `streamlit run dashboard_app.py` |
 | [run_campaign.py](run_campaign.py) | Run a named batch of configs and record trial lineage (see §R) |
 | [analyze_dataset.py](analyze_dataset.py) | Modular dataset analysis: 17 named stages (`overview`, `targets`, `ic_by_era`, `screens`, `screens_train`, `summary`, `psi`, `drift`, `derived_sets`, `corr_medium`, `corr_all`, `set_membership`, `ic_by_split`, `regimes`, `benchmarks`, `meta_ortho`, `manifest`). Flags: `--only a,b` / `--skip a,b` run a subset (dependencies auto-included; `manifest` always runs), `--features small\|medium\|all`, `--max-eras N`, `--full-all-matrix`. `screens` writes the **descriptive full-span** screen (`feature_ic_screen.parquet`, eras 0001..1231 — never an input to subset derivation); `screens_train` writes the **train-only** screen (`feature_ic_screen_train.parquet`, eras 0001..0574); `derived_sets` reads **only** the train-only screen and writes `derived_feature_sets.json` (`screen_stable`, `screen_nonlinear`, `screen_linear_or_nonlinear`, `screen_drift_filtered` — pure functions of the train-only screen + drift dumps, sorted; see §P); `drift` writes the PSI + W1 + adversarial-AUC profile (`feature_drift_profile.parquet`, `w1_norm = w1 / σ_train`); `meta_ortho` writes per-feature meta-model orthogonality; the FNE profile uses an 11-point neutralization grid. Stage boundaries and per-era ticks print progress to stdout/stderr (never into artifacts); the manifest records `stages_run` + a machine-hardware summary (informational — never hashed). |
 | [hardware_status.py](hardware_status.py) | Print machine specs + live resource status (`--record` writes `artifacts/reports/hardware_specs.json`); all logic in `nmr/hardware.py` (stdlib only) |
@@ -426,7 +428,9 @@ Long-running paths print console progress that never enters artifacts: `analyze_
 
 ### W. Executive Dashboard Engine — `nmr/dashboard.py` + `dashboard_ui/`
 
-`nmr/dashboard.py` — executive report engine — unified leaderboard, tier-4 gate projection, stored-first capital recompute over the 86-era meta-overlap window, 7-metric multimetric timeseries (payout anchored to `target`; BMC self-guard; zeroed missing horizons), pairwise rank-gaussian similarity matrix with stress-regime delta; plotly/streamlit-free. `dashboard_ui/charts.py` provides the tested SVG geometry reference + metric-first payload builder; `static/app.js` mirrors the geometry client-side and renders all charts (timeseries + stress spans, Sharpe leaderboard + CI whiskers + hurdle, similarity matrix, underwater drawdown); `dashboard_ui/report.py` compiles the single-file HTML (< 100 KB, inlining `static/{style.css, app.js, layout.html}`); `dashboard_ui/app.py` renders the Streamlit views natively (no Plotly). Presentation tests live in `tests/test_dashboard_ui.py`.
+`nmr/dashboard.py` — Model Tournament engine — unified leaderboard, explicit metric directions with default `mmc` ranking, source/tier-derived cohorts, deterministic rank maps, ML ADVANTAGE comparisons, compact immutable model dossiers, tier-4 gate projection, stored-first capital recompute, 7-metric multimetric timeseries, and pairwise rank-gaussian similarity. `UNIFIED_SCHEMA` is unchanged. `dashboard_ui/charts.py` provides tested SVG geometry plus compact columnar payload encoding; `dashboard_ui/static/{layout.html,app.js,style.css}` is the single leaderboard-first renderer for search, rank switching, cohort filters, shortcuts, landscape/profile charts, and the model dossier drawer. `dashboard_ui/report.py` compiles the deterministic single-file HTML using generated `app.min.js` and `style.min.css`; `dashboard_ui/app.py` embeds the same HTML with `st.components.v1.html`. The report is explicitly offline evaluation and contains no live or production performance. Presentation tests live in `tests/test_dashboard_ui.py`.
+
+Dashboard cohorts are presentation-derived, not a new registry field: trained rows are `source in {trained, trained_legacy}`; heuristic rows are benchmark tiers 0–2 (null, Ridge, and shallow trees); benchmark rows are tiers 3–4 (canonical/community and official references); and `source == full` rows are lineage-only with null comparable metrics. Every rank metric declares whether higher or lower is better; nulls sort last and ties use `model_id`. The ML ADVANTAGE strip compares the best trained row with the best available heuristic and benchmark rows on the active metric. RAPS and win-rate are not active scorecard fields and are omitted rather than inferred.
 
 **Standardized window & regeneration rule:** all dashboard rows (trained runs and benchmark tiers) are compared on the **meta-overlap window** = `validation.parquet ∩ meta_model.parquet` — currently eras `1133..1218` (86 eras); it is meta coverage, not an arbitrary choice. `meta_model.parquet` (v5.3) only exists from era 1133 onward, and the window moves forward as the local data snapshot is refreshed (`refresh_data.py` + `nmr/refresh.py`; the live file expands weekly). **After every data refresh, regenerate the report** (`./.venv/Scripts/python generate_dashboard.py`) — a stale `artifacts/dashboard.html` would compare rows on a window that no longer matches the refreshed data. The capital-cell recompute derives its era axis from the same meta overlap at generation time.
 
@@ -518,6 +522,8 @@ meta.py      ──> analysis, config, data, evaluation, features, inference
 runner.py    ──> _oof, _transforms, config, data, deployment, ensemble, evaluation, models, risk, scorecard, splitter
 registry.py  ──> _atomicio, runner (RunResult)
 dashboard.py ──> benchmark, config, ensemble, evaluation, families, payout, scorecard
+explainers.py ──> dashboard_ui.service (read-only dynamic model labels)
+scenarios.py  ──> payout, evaluation (allocation scenario research helpers)
 promote.py   ──> _atomicio, benchmark, config, data, families, models, runner, submission
 
 nmr/__init__.py re-exports the public API of all modules (keep imports and __all__ in sync).

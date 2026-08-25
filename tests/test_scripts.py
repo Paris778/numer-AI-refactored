@@ -42,7 +42,9 @@ def test_real_data_gate_import_surface() -> None:
     assert callable(real_data_gate.main)
 
 
-from dashboard_ui import app as dashboard_app  # noqa: E402  (lazy: streamlit is heavy at module load)
+from dashboard_ui import (
+    app as dashboard_app,
+)  # noqa: E402  (lazy: streamlit is heavy at module load)
 
 
 def _registry_entry(run_id: str, *, scorecard: bool = True) -> dict:
@@ -57,13 +59,27 @@ def _registry_entry(run_id: str, *, scorecard: bool = True) -> dict:
                 "risk": {"neutralization_proportion": 1.0},
             },
         },
-        "scorecard": None if not scorecard else {
-            "corr": 0.12, "corr_ci_low": 0.05, "corr_ci_high": 0.19, "corr_n_eras": 30,
-            "corr_sharpe_ac": 0.8, "corr_sharpe_ac_ci_low": 0.6, "corr_sharpe_ac_ci_high": 1.0,
-            "max_drawdown": 0.1, "std_corr": 0.2, "deflated_sharpe": 0.97,
-            "max_feature_exposure": 0.3, "bmc": 0.02, "horizon_model_sharpe_20": 0.5,
-            "perturb_ceiling_stability": 0.9, "regime_count": 3,
-        },
+        "scorecard": (
+            None
+            if not scorecard
+            else {
+                "corr": 0.12,
+                "corr_ci_low": 0.05,
+                "corr_ci_high": 0.19,
+                "corr_n_eras": 30,
+                "corr_sharpe_ac": 0.8,
+                "corr_sharpe_ac_ci_low": 0.6,
+                "corr_sharpe_ac_ci_high": 1.0,
+                "max_drawdown": 0.1,
+                "std_corr": 0.2,
+                "deflated_sharpe": 0.97,
+                "max_feature_exposure": 0.3,
+                "bmc": 0.02,
+                "horizon_model_sharpe_20": 0.5,
+                "perturb_ceiling_stability": 0.9,
+                "regime_count": 3,
+            }
+        ),
     }
     return entry
 
@@ -76,29 +92,46 @@ def _write_registry(tmp_path, entries) -> None:
 
 
 def test_registry_frame_columns_and_source_tagging(tmp_path) -> None:
-    _write_registry(tmp_path, [_registry_entry("a" * 64), _registry_entry("b" * 64, scorecard=False)])
+    _write_registry(
+        tmp_path,
+        [_registry_entry("a" * 64), _registry_entry("b" * 64, scorecard=False)],
+    )
     # Isolated models dir: the real artifacts/models/ may legitimately hold a
     # promoted full version (the D7 rehearsal artifact) — tests must not scan it.
     frame = dashboard_app.load_registry_frame(tmp_path, models_dir=tmp_path / "models")
     assert frame.height == 2
     assert set(frame.columns) >= {
-        "model_id", "source", "backend", "preset", "feature_set", "feature_subset",
-        "oof_device", "neutralization_proportion", "corr", "corr_sharpe_ac",
-        "corr_sharpe_ac_ci_low", "corr_sharpe_ac_ci_high", "max_drawdown",
-        "deflated_sharpe", "has_bmc", "has_horizon", "has_perturb", "has_regime",
+        "model_id",
+        "source",
+        "backend",
+        "preset",
+        "feature_set",
+        "feature_subset",
+        "oof_device",
+        "neutralization_proportion",
+        "corr",
+        "corr_sharpe_ac",
+        "corr_sharpe_ac_ci_low",
+        "corr_sharpe_ac_ci_high",
+        "max_drawdown",
+        "deflated_sharpe",
+        "has_bmc",
+        "has_horizon",
+        "has_perturb",
+        "has_regime",
     }
     rows = {r["model_id"]: r for r in frame.to_dicts()}
     assert rows["a" * 64]["source"] == "trained"
     assert rows["a" * 64]["corr"] == 0.12
     assert rows["a" * 64]["has_bmc"] is True
     assert rows["b" * 64]["source"] == "trained_legacy"
-    assert rows["b" * 64]["corr"] == 0.1          # legacy falls back to metrics.mean
+    assert rows["b" * 64]["corr"] == 0.1  # legacy falls back to metrics.mean
     assert rows["b" * 64]["has_bmc"] is False
 
 
 def test_registry_frame_zero_value_not_treated_as_legacy(tmp_path) -> None:
     entry = _registry_entry("c" * 64)
-    entry["scorecard"]["corr"] = 0.0               # legitimate 0.0 must NOT fall through
+    entry["scorecard"]["corr"] = 0.0  # legitimate 0.0 must NOT fall through
     _write_registry(tmp_path, [entry])
     frame = dashboard_app.load_registry_frame(tmp_path)
     assert frame.row(0, named=True)["corr"] == 0.0
@@ -116,11 +149,11 @@ def test_leaderboard_bar_labels_unique_on_run_name_collision(tmp_path) -> None:
     _write_registry(tmp_path, [a, b])
     frame = dashboard_app.load_registry_frame(tmp_path, models_dir=tmp_path / "models")
     assert frame.height == 2
-    assert frame.get_column("run_name").n_unique() == 1   # collision is real
+    assert frame.get_column("run_name").n_unique() == 1  # collision is real
     pdf = dashboard_app._shaped_leaderboard_pdf(frame, champion=None)
     labels = pdf["label"].tolist()
     assert len(labels) == 2
-    assert len(set(labels)) == 2                          # unique bar keys
+    assert len(set(labels)) == 2  # unique bar keys
     assert all("same-config-name" in label for label in labels)  # readable name kept
 
 
@@ -150,7 +183,9 @@ def test_benchmarks_and_merge(tmp_path) -> None:
     assert dashboard_app.load_benchmarks(tmp_path / "missing.csv").height == 0
 
     _write_registry(tmp_path, [_registry_entry("d" * 64)])
-    registry = dashboard_app.load_registry_frame(tmp_path, models_dir=tmp_path / "models")
+    registry = dashboard_app.load_registry_frame(
+        tmp_path, models_dir=tmp_path / "models"
+    )
     merged = dashboard_app.merge_leaderboard(registry, benchmarks)
     assert merged.height == 2
     assert set(merged.get_column("source").to_list()) == {"trained", "benchmark"}
@@ -160,30 +195,60 @@ def test_campaigns_flatten(tmp_path) -> None:
     campaigns_dir = tmp_path / "campaigns"
     campaigns_dir.mkdir()
     (campaigns_dir / "abc.json").write_text(
-        json.dumps({
-            "campaign_id": "abc", "name": "camp",
-            "configs": [{"path": "a.yaml", "sha256": "x" * 64}],
-            "runs": [
-                {"config_path": "a.yaml", "run_id": "e" * 64, "status": "recorded", "error": None},
-                {"config_path": "a.yaml", "run_id": None, "status": "error", "error": "boom"},
-            ],
-        }),
+        json.dumps(
+            {
+                "campaign_id": "abc",
+                "name": "camp",
+                "configs": [{"path": "a.yaml", "sha256": "x" * 64}],
+                "runs": [
+                    {
+                        "config_path": "a.yaml",
+                        "run_id": "e" * 64,
+                        "status": "recorded",
+                        "error": None,
+                    },
+                    {
+                        "config_path": "a.yaml",
+                        "run_id": None,
+                        "status": "error",
+                        "error": "boom",
+                    },
+                ],
+            }
+        ),
         encoding="utf-8",
     )
     frame = dashboard_app.load_campaigns(campaigns_dir)
     assert frame.height == 2
-    assert set(frame.columns) == {"campaign_id", "name", "config_path", "run_id", "status", "error"}
+    assert set(frame.columns) == {
+        "campaign_id",
+        "name",
+        "config_path",
+        "run_id",
+        "status",
+        "error",
+    }
     assert frame.get_column("status").to_list() == ["recorded", "error"]
     assert dashboard_app.load_campaigns(tmp_path / "missing").height == 0
 
 
 def test_robustness_matrix_and_champion(tmp_path) -> None:
     _write_registry(tmp_path, [_registry_entry("f" * 64)])
-    matrix = dashboard_app.robustness_matrix(dashboard_app.load_registry_frame(tmp_path))
+    matrix = dashboard_app.robustness_matrix(
+        dashboard_app.load_registry_frame(tmp_path)
+    )
     assert matrix.height == 1
-    assert {"has_bmc", "has_horizon", "has_perturb", "has_regime", "max_feature_exposure"} <= set(matrix.columns)
-    assert dashboard_app.champion_run_id(tmp_path) is None      # no champion.json
-    (tmp_path / "champion.json").write_text(json.dumps({"run_id": "f" * 64}), encoding="utf-8")
+    assert {
+        "has_bmc",
+        "has_horizon",
+        "has_perturb",
+        "has_regime",
+        "max_feature_exposure",
+    } <= set(matrix.columns)
+    assert dashboard_app.champion_run_id(tmp_path) is None  # no champion.json
+    (tmp_path / "champion.json").write_text(
+        json.dumps({"run_id": "f" * 64}), encoding="utf-8"
+    )
     assert dashboard_app.champion_run_id(tmp_path) == "f" * 64
 
 
@@ -211,21 +276,12 @@ def test_campaigns_null_runs_returns_empty_frame(tmp_path) -> None:
 
 
 def test_dashboard_app_imports_without_launching() -> None:
-    # Module-level import must be side-effect free: streamlit imports
-    # headless, no server is launched, and every `st.*` call stays inside
-    # main()/view functions. `main` was already callable in the Task 2 stub,
-    # so the real contract is the five render views per the Task 3 brief.
+    # Module-level import must be side-effect free: Streamlit imports headless,
+    # no server is launched, and the host delegates to one shared renderer.
     from dashboard_ui import app as dashboard_app
 
     assert callable(dashboard_app.main)
-    for view in (
-        "render_leaderboard",
-        "render_run_detail",
-        "render_fleet",
-        "render_campaigns",
-        "render_robustness_matrix",
-    ):
-        assert callable(getattr(dashboard_app, view)), f"missing render view: {view}"
+    assert callable(dashboard_app.render_tournament)
 
 
 def test_benchmark_runner_cli_defaults() -> None:

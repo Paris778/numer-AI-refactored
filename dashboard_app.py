@@ -1,4 +1,4 @@
-"""Thin entry point — all logic lives in dashboard_ui.app."""
+"""Thin Streamlit entry point for the shared Model Tournament renderer."""
 
 from dashboard_ui.app import main
 

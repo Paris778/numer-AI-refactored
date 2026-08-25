@@ -17,6 +17,7 @@ import polars as pl
 
 __all__ = [
     "build_dashboard_payload",
+    "compact_timeseries_payload",
     "cumulative_series",
     "data_to_svg_path",
     "drawdown_series",
@@ -36,6 +37,42 @@ def _round6(value: Any) -> Any:
     return value
 
 
+def compact_timeseries_payload(
+    metrics: Mapping[str, Mapping[str, Mapping[str, Any]]],
+) -> dict[str, Any]:
+    """Encode metric-first series without repeating model IDs and labels."""
+    model_ids = sorted({model_id for series in metrics.values() for model_id in series})
+    labels = [
+        next(
+            (
+                series[model_id].get("label")
+                for series in metrics.values()
+                if model_id in series
+            ),
+            model_id,
+        )
+        for model_id in model_ids
+    ]
+    scale = 1_000_000
+    return {
+        "model_ids": model_ids,
+        "labels": labels,
+        "scale": scale,
+        "series": {
+            metric: [
+                [
+                    None if value is None else int(round(float(value) * scale))
+                    for value in (
+                        metrics[metric].get(model_id, {}).get("standard") or []
+                    )
+                ]
+                for model_id in model_ids
+            ]
+            for metric in sorted(metrics)
+        },
+    }
+
+
 def global_y_range(*series: Sequence[float]) -> tuple[float, float]:
     """Global min/max across all series (shared axis); (0.0, 1.0) when empty."""
     values = [v for s in series for v in s]
@@ -48,7 +85,9 @@ def _resolve_range(
     values: Sequence[float], y_min: float | None, y_max: float | None
 ) -> tuple[float, float]:
     """Resolve the y range, expanding a degenerate flat span so scaling never divides by zero."""
-    lo, hi = global_y_range(values) if y_min is None or y_max is None else (y_min, y_max)
+    lo, hi = (
+        global_y_range(values) if y_min is None or y_max is None else (y_min, y_max)
+    )
     if abs(hi - lo) < _ZERO_SPAN_EPS:
         lo -= 1.0
         hi += 1.0
@@ -99,7 +138,9 @@ def svg_area_path(
         return ""
     lo, hi = _resolve_range(values, y_min, y_max)
     span = hi - lo
-    line = data_to_svg_path(values, width=width, height=height, y_min=lo, y_max=hi, pad=pad)
+    line = data_to_svg_path(
+        values, width=width, height=height, y_min=lo, y_max=hi, pad=pad
+    )
     pad_top, pad_right, pad_bottom, pad_left = pad
     inner_h = height - pad_top - pad_bottom
     inner_w = width - pad_left - pad_right
@@ -149,8 +190,10 @@ def build_dashboard_payload(
     shaped_metrics: dict[str, Any] = {}
     for metric, models in metrics.items():
         shaped_metrics[metric] = {
-            model_id: {"standard": [_round6(v) for v in series["standard"]],
-                       "label": series["label"]}
+            model_id: {
+                "standard": [_round6(v) for v in series["standard"]],
+                "label": series["label"],
+            }
             for model_id, series in models.items()
         }
     rows = [

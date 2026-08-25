@@ -107,13 +107,22 @@ from .config import (
     set_global_seeds,
 )
 from .dashboard import (
+    DASHBOARD_METRICS,
+    DEFAULT_RANK_METRIC,
     EVALUABLE_ROWS,
     UNIFIED_SCHEMA,
+    DashboardMetricSpec,
+    build_tournament_payload,
+    compute_ml_advantage,
+    dashboard_cohort,
     evaluate_gate_status,
     extract_multimetric_timeseries,
     extract_pairwise_similarity_matrix,
     load_benchmark_frame,
+    load_model_detail,
     load_unified_leaderboard,
+    rank_leaderboard,
+    rank_map_by_metric,
     read_champion_pointer,
     reconcile_capital_metrics,
     resolve_benchmark_path,
@@ -130,6 +139,13 @@ from .evaluation import (
     downside_era_indices,
     per_era_turnover,
     sorted_era_labels,
+)
+from .explainers import (
+    ModelProfile,
+    get_all_profiles,
+    get_model_profile,
+    get_profiles_by_architecture,
+    get_profiles_by_tag,
 )
 from .families import (
     CURRENT_POINTER_NAME,
@@ -241,6 +257,12 @@ from .robustness import (
     time_horizon_stability,
 )
 from .runner import ExperimentRunner, RunResult
+from .scenarios import (
+    AllocationConstraints,
+    AllocationScenario,
+    ModelAllocation,
+    ScenarioEngine,
+)
 from .scorecard import MetricCell, MetricScorecard, evaluate_model
 from .splitter import Fold, PurgedEraSplitter
 from .submission import (
@@ -251,6 +273,15 @@ from .submission import (
 )
 
 __all__ = [
+    "ModelProfile",
+    "get_all_profiles",
+    "get_model_profile",
+    "get_profiles_by_architecture",
+    "get_profiles_by_tag",
+    "AllocationConstraints",
+    "AllocationScenario",
+    "ModelAllocation",
+    "ScenarioEngine",
     "FeatureCorrResult",
     "SplitStats",
     "benchmark_era_corr",
@@ -310,7 +341,16 @@ __all__ = [
     "load_benchmark_file",
     "load_benchmark_frame",
     "load_benchmark_suite_config",
+    "load_model_detail",
     "load_unified_leaderboard",
+    "DASHBOARD_METRICS",
+    "DEFAULT_RANK_METRIC",
+    "DashboardMetricSpec",
+    "build_tournament_payload",
+    "compute_ml_advantage",
+    "dashboard_cohort",
+    "rank_leaderboard",
+    "rank_map_by_metric",
     "resolve_benchmark_feature_cols",
     "score_benchmark_column",
     "scorecards_sha256",

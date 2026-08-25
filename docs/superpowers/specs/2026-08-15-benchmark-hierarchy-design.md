@@ -119,6 +119,8 @@ Replaces `BenchmarkSuite`. Responsibilities:
 
 **Tier 4**: `v53_lgbm_ender60` column from `validation_benchmark_models.parquet`, scored over the shared era-overlap window (era-overlap-before-limit rule; `MIN_OVERLAP_ERAS` = 20 non-vacuity).
 
+> **Deviation (2026-08-24):** tier 4 now scores *both* official Numerai benchmark columns — `v53_lgbm_ender60` (gated capital line) and `v53_lgbm_ender20` (informational, no gate) — via `reference_columns` in `configs/benchmarks/tier4_gate.yaml`. The gate thresholds remain evidence-pinned to `v53_lgbm_ender60` only. Dashboard tier-4 reference curves render both.
+
 ### 4.3 Gates (module-level functions, all tested)
 
 1. `assert_tier0_null_floor(scorecards, tolerances)` — per null model:

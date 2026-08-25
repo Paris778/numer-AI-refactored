@@ -146,6 +146,54 @@ def test_hierarchy_is_deterministic(tmp_path: Path) -> None:
     )
 
 
+def test_hierarchy_scores_additional_tier4_reference_columns(tmp_path: Path) -> None:
+    from nmr.benchmark import BenchmarkHierarchy, BenchmarkSuiteSpec, load_benchmark_data
+
+    data = _data_dir(tmp_path)
+    # add the second official benchmark column to the fixture parquet
+    bench = pl.read_parquet(data / "validation_benchmark_models.parquet")
+    bench = bench.with_columns(
+        (0.5 * pl.col("v53_lgbm_ender60") + 0.25).alias("v53_lgbm_ender20")
+    )
+    bench.write_parquet(data / "validation_benchmark_models.parquet")
+
+    spec = BenchmarkSuiteSpec(
+        cells=_spec().cells, gate=_spec().gate,
+        reference_column="v53_lgbm_ender60",
+        reference_columns=("v53_lgbm_ender20",),
+    )
+    loaded = load_benchmark_data(data)
+    result = BenchmarkHierarchy(
+        spec=spec, data=loaded, seed=42, n_boot=50,
+        min_overlap_eras=5, fast_mode=True,
+    ).run()
+
+    # both official benchmark columns are scored as tier-4 rows
+    assert set(result.scorecards) == {
+        "null_constant_05", "linear_ridge_small",
+        "tree_lgbm_shallow_small", "canon_hello_numerai",
+        "v53_lgbm_ender60", "v53_lgbm_ender20",
+    }
+    assert result.tier_of["v53_lgbm_ender60"] == 4
+    assert result.tier_of["v53_lgbm_ender20"] == 4
+    assert result.tier4_violations == ()  # gate applies to the primary only
+    frame = hierarchy_frame(result)
+    assert frame.height == 6
+    # the gate report stays keyed to the gated capital line
+    report = gate_report_frame(result)
+    assert set(report.get_column("model_id").unique().to_list()) == {
+        "v53_lgbm_ender60"
+    }
+    # determinism covers the additional reference row
+    result_b = BenchmarkHierarchy(
+        spec=spec, data=loaded, seed=42, n_boot=50,
+        min_overlap_eras=5, fast_mode=True,
+    ).run()
+    assert scorecards_sha256(result.scorecards) == scorecards_sha256(
+        result_b.scorecards
+    )
+
+
 def test_hierarchy_cross_process_determinism(tmp_path: Path) -> None:
     data_dir = _data_dir(tmp_path)
     script = (

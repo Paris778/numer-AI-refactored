@@ -30,7 +30,7 @@ These four files obey a strict **Single Source of Truth (SSOT) hierarchy**. One 
 
 ## 1. Agent Identity & Mission
 
-You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (1007 tests, sole functional gate) + `ruff check` (lint gate, `ruff.toml` E/F/I/UP @120, pinned in `requirements-dev.txt`). Both enforced by CI (`.github/workflows/ci.yml`).
+You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (1093 collected tests, sole functional gate) + `ruff check` (lint gate, `ruff.toml` E/F/I/UP @120, pinned in `requirements-dev.txt`). Both enforced by CI (`.github/workflows/ci.yml`).
 
 Your mission:
 
@@ -148,11 +148,11 @@ When modifying or generating code, enforce these seven invariants:
 | perturbation/horizon/regime diagnostics | `nmr/robustness.py` |
 | Benchmark hierarchy (cells, gates, thresholds) | `nmr/benchmark.py` + `configs/benchmarks/` + `benchmark_runner.py` |
 | Untiered benchmark fleet (configs, generators, runner) | `nmr/benchmark_fleet.py` + `configs/benchmarks/fleet/` (spec: `docs/superpowers/specs/2026-08-19-benchmark-fleet-design.md`) |
-| Executive dashboard data engine (leaderboard, gate projection, capital recompute, payout timeseries) | `nmr/dashboard.py` + the `dashboard_ui/` package (`charts.py`, `report.py`, `app.py`; thin wrappers `generate_dashboard.py` / `dashboard_app.py`) (spec: `docs/superpowers/specs/2026-08-18-vanilla-dashboard-design.md`) |
+| Model Tournament dashboard data engine and shared renderer | `nmr/dashboard.py` + `dashboard_ui/{charts.py,report.py,app.py,static/}`; `generate_dashboard.py` and `dashboard_app.py` are thin hosts. Ranking/cohorts/ML Advantage/detail payloads are deterministic and read-only; the static report and Streamlit host use the same vanilla renderer. |
 | model-family / full-version discovery | `nmr/families.py` — read-only scan of `artifacts/models/<family>/full/<run_id>/manifest.json` + atomic `current.json` pointer (spec: `ARCHITECTURE.md` Model Families section) |
 | Promote a run to a full version (train+validation, Model Uploads `predict.pkl`) | `nmr/promote.py` (`promote_full_version`, `rehearse_promotion`) + `promote_model.py` / `rehearse_promotion.py` CLIs; acceptance gate `nmr/submission.py::accept_promoted_artifact` (raw output vs the official validator) |
 | campaign orchestration | `nmr/campaign.py` + `run_campaign.py` (spec: `ARCHITECTURE.md` §R) |
-| Inspect runs / campaigns interactively | `dashboard_ui/app.py` (thin wrapper `dashboard_app.py`) — `streamlit run` (read-only) |
+| Inspect models / campaigns interactively | `dashboard_ui/app.py` (thin shared-renderer host; wrapper `dashboard_app.py`) — `streamlit run` (read-only) |
 | Analyze the dataset / run one analysis stage | `analyze_dataset.py` — modular stages, `--only`/`--skip` (deps auto-included), progress markers (stage registry: `ARCHITECTURE.md` §O) |
 | Discover hardware / check live resource status | `nmr/hardware.py` + `hardware_status.py` (stdlib only: nvidia-smi + ctypes) |
 | Research protocol (feature campaign / HPO / meta-analysis / QA gate) | `.kimi-code/skills/` — `feature-campaign`, `hpo-narrowing`, `run-meta-analysis`, `verification-before-claim` (map: `ARCHITECTURE.md` §T) |
@@ -185,7 +185,7 @@ Four gates, in order of rigor — **exact commands live only in [`CONTRIBUTING.m
 
 1. **Fast gate** — `ruff check .` + full `pytest -q` after every meaningful change.
 2. **Targeted subsets** while iterating — oracle parity (`tests/test_parity.py` + `tests/test_risk_parity.py`) and determinism hashes (`tests/test_benchmark_hierarchy.py`).
-3. **Pre-sign-off gate** (mandatory before delivering work) — full 1007-test suite plus the real-data benchmark smoke (`benchmark_runner.py --fast-mode` → `artifacts/reports/benchmark_hierarchy_scorecard_smoke.csv` + `benchmark_gate_report_smoke.csv`).
+3. **Pre-sign-off gate** (mandatory before delivering work) — full 1093-test collection plus the real-data benchmark smoke (`benchmark_runner.py --fast-mode` → `artifacts/reports/benchmark_hierarchy_scorecard_smoke.csv` + `benchmark_gate_report_smoke.csv`).
 4. **End-of-session gate (mandatory)** — before stopping or handing off for review, run the linter and functional gate on the final state: `ruff check .` + `pytest -q`. Never end a session with unverified changes; report actual results, including skips or pre-existing failures.
 
 Real-data tests require the `data/v5.3/` parquet assets (see [`README.md`](README.md#data-assets)). If they are missing, report which tests were skipped — never claim full verification. CI (`.github/workflows/ci.yml`) enforces the fast gate on every push/PR (see [`CONTRIBUTING.md`](CONTRIBUTING.md#testing--verification)).
@@ -202,7 +202,7 @@ These are real, verified issues — do not "fix" them silently as a side effect.
 `MetricScorecard.metric_timing_seconds` and `timing_*` / `quality_metric_*_seconds` columns capture wall-clock durations that differ across processes. `canonical_scorecards_bytes()` deliberately strips them. Any new instrumentation field must also be excluded from canonical serialization, or cross-process determinism tests (`tests/test_benchmark_hierarchy.py`, `tests/test_scorecard.py`) will fail non-deterministically.
 
 ### Benchmark parquet gap in early train eras
-`train_benchmark_models.parquet` has **no rows for the first ~30 train eras** — early-era BMC/benchmark-corr checks produce empty joins. The hierarchy reads `validation_benchmark_models.parquet` only (tier-4); tiers 1–3 fit their own models (`ARCHITECTURE.md` Known Gaps).
+`train_benchmark_models.parquet` has **no rows for the first ~30 train eras** — early-era BMC/benchmark-corr checks produce empty joins. The hierarchy scores both official `validation_benchmark_models.parquet` benchmark columns — `v53_lgbm_ender60` (tier-4 capital gate) and `v53_lgbm_ender20` (informational tier-4 row); tiers 1–3 fit their own models (`ARCHITECTURE.md` Known Gaps).
 
 ### Benchmark hierarchy runtime
 Full hierarchy runs are multi-hour (medium tree fits on ~2.1M train rows). Use `--fast-mode` for smoke; the FNE gate is FNC@medium per the feature-universe policy.

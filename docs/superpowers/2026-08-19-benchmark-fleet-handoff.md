@@ -125,3 +125,40 @@ A parallel session reviewed this state and added the following verified findings
 - Python: `./.venv/Scripts/python` (NEVER `./.venv/Scripts/pip` — the shim points into the legacy repo).
 - Data: `data/v5.3/` (train/validation/meta_model/benchmarks parquets + features.json). Real-data tests and the smoke need it.
 - Commands: `./.venv/Scripts/python -m pytest -q`, `./.venv/Scripts/python -m ruff check .`.
+
+## 11. 2026-08-24 Fleet Scoring Attempt — READ THIS BEFORE §4/§5
+
+> **This section supersedes §4 and §5.** The state they describe ("never scored
+> on real data", "multi-hour run") is stale and the timing is ~40× off.
+
+**Runner composability is now implemented** (item 2 of §8's queued work):
+`--only-fleet` with rungs sourced from the last hierarchy scorecard CSV, plus
+`--fleet-ids` cell selection (`ad74934` + the 08-21 runner commits). You do not
+need a live hierarchy run to score fleet cells.
+
+**What now exists (real v5.3 data, full params):**
+- Smoke: 19/19 cells, gates passed (fast-mode, 50-tree degraded values).
+- Stage 1 (5 cells), hierarchy full (14 rows, gates passed), Stage 3 (3 cells)
+  — see `docs/superpowers/2026-08-23-endeavour-report.md` §11 for the table.
+- **The 19-cell fleet still has NO complete full-param scorecard.** Stage 2
+  (8 cells) was aborted twice (throttle; then user kill at 9.3 h into cell 1
+  of 8, 0 cells done), Stage 4/5 never started.
+
+**The timing reality (measured, not estimated):** ~0.5 s/tree small (42 feat)
+and ~0.85 s/tree medium (780 feat), single-core fits (`n_jobs=1` by
+determinism). The deep cells are NOT "multi-hour": `fa_v03_lgbm_mt` alone ran
+9.3 h without completing; Stage 2 ≈ 2.5–3 days; Stage 2+4+5 ≈ **4 days** on
+this laptop. GPU is not a lever (fleet is CPU-only by spec; LightGBM GPU on
+Windows is OpenCL-flaky).
+
+**The fleet runner has no per-cell persistence** — the scorecard CSV is
+written once at stage end; a mid-stage stop loses the whole stage.
+
+**Abort state:** watcher cron deleted; nothing auto-resumes. Exact staged
+resume commands, health probes, and the decision the user must make (multi-day
+unattended vs off-spec tree trims vs faster machine) are in the endeavour
+report §11.4/§11.6 and the SDD ledger.
+
+**Also uncommitted:** the official-benchmark tier-4 feature (tier-4 now scores
+BOTH `v53_lgbm_ender60` gated + `v53_lgbm_ender20` informational; dashboard
+renders both) — fold into the next commit with its docs.

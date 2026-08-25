@@ -158,9 +158,117 @@ Parallel-session commits interleaved throughout (mutation-gate work, dataless CI
 
 ## 10. Open Items (Honest State)
 
-1. **Fleet real-data verification (Task 13) — NOT DONE.** The 19 fleet cells have never been scored on real v5.3 data; no placements/gate verdicts measured; anchors not re-pinned. Resumable from the handoff doc: smoke → full run (tens of CPU-hours for the deep cells) → end-of-session gate.
+1. **Fleet real-data verification (Task 13) — PARTIALLY DONE, then ABORTED.** Full-param real scores exist for 5 Stage-1 cells, the full hierarchy (14 rows, gates passed), and 3 Stage-3 cells — see §11. Stage 2 (8 cells) was aborted twice on this hardware (once by throttle, once by user decision after 9.3h on cell 1 of 8 with zero cells complete), and Stage 4/5 never started. **The 19-cell fleet has NO complete full-param scorecard.** Resuming requires the decision in §11.6 (multi-day run vs off-spec tree-count trims vs a faster machine).
 2. **Thread caps** — nothing in `nmr/` caps polars/OpenMP (`n_jobs=1` covers tree fits only). Joint design decision deferred until after the campaign; the machine is now free to have it.
 3. **Checkpoint coverage** — DONE (2026-08-23). All three uninsured stages now checkpoint under the code/device identity manifest: CV folds, deploy fits (`e5a038e`), and validation era-batch predicts (this commit, `feat(runner): validation predict-batch checkpoints + docs`), with the shared helpers extracted in `b8d635b`. The final `evaluate_model` scorecard call stays uncheckpointed (single call, no clean granularity).
 4. **Parked findings** — full list with rulings in the SDD ledger (error-message cosmetics, `fleet_frame` empty-placements corner, search-mode test hardening, the all-loaded-resume device-swap note, etc.). All ruled defer; triage before any future change touches those lines.
 5. **`e01fbb9` is a red ancestor** — docs-only CI failure (stale test-count claim) fixed by `1da1478`; harmless unless bisecting through that range.
 6. **Backlog from the parallel session**: `_transforms` re-measurement, mutmut harness patch, upstream mutmut issue, Monday's mutation-gate run review.
+
+---
+
+## 11. Fleet Real-Data Run — What Finished, What Didn't, and Why (2026-08-24)
+
+This section is the cold-handoff record for whoever resumes the fleet scoring
+work. The raw operational log is in the SDD ledger
+(`.superpowers/sdd/2026-08-19-benchmark-fleet/progress.md`).
+
+### 11.1 What finished (real v5.3 data, full parameters, persisted)
+
+| Output | State |
+|---|---|
+| Fleet smoke (08-23) | 19/19 cells, all hard gates passed — but 50-tree **fast-mode** values, deliberately degraded |
+| **Stage 1** | 5 cells: `fa_v05_ridge_stack`, `fa_v150_ridge_stack_tail10`, `fa_v151_ridge_ensemble` (`selection_bias: true` by design), 2 silly cells — `benchmark_fleet_scorecard_stage1.csv` |
+| **Hierarchy full run** | 14 rows (13 tier cells + tier-4 `v53_lgbm_ender60`), "All hard gates passed" — `benchmark_hierarchy_scorecard.csv`. Measured: `tree_lgbm_fast_medium` corr 0.013692; `canon_neutralized_50` 0.014974 (anchor 0.0220); **`canon_hello_numerai` 0.001561 vs anchor 0.0130 — anomaly, flagged, not buried** |
+| **Stage 3** | 3 cells: community example/advanced/sunshine **shallow**, placements tier1..tier2 — `benchmark_fleet_scorecard_stage3.csv` |
+| Official-benchmark tier-4 feature | Implemented + tested + docs (uncommitted): tier-4 now scores BOTH official Numerai benchmark models — `v53_lgbm_ender60` (gated capital line) + `v53_lgbm_ender20` (informational); dashboard renders both. See §11.5 |
+
+### 11.2 What did not finish
+
+- **Stage 2 (8 cells): 0 of 8.** Refired 09:18 after a reboot; cell 1
+  (`fa_v03_lgbm_mt`, 3×20k-tree LightGBM on small features) ran **9.3h at full
+  single-core speed** (CPU delta 4.3–5.0 s/5 s throughout — no throttle, no
+  OOM) and never completed. Killed by user decision. **No CSV was written**:
+  the fleet runner writes its scorecard once at stage end, so a mid-stage stop
+  loses the whole stage.
+- **Stage 4** (3 deep community cells) and **Stage 5** (hierarchy re-run with
+  both tier-4 references + dashboard regeneration): never started.
+- The watcher cron was deleted; **nothing auto-resumes**.
+
+### 11.3 The runtime discovery — why the plan's estimate was ~40× off
+
+The plan assumed 1–2 h per deep cell. Measured reality on this laptop
+(i7-12800H, 20 logical CPUs, fits `n_jobs=1` by the determinism invariant):
+
+| Features | Rate | Evidence |
+|---|---|---|
+| small (42) | **~0.5 s/tree** | `fa_v03` measured (2,746,268 train rows, depth-6/64-leaf, `deterministic=True` + `force_col_wise=True`) |
+| medium (780) | **~0.85 s/tree** | Stage 3 measured (2k-tree shallow = 28.5 min) |
+
+Implication: `fa_v03` alone ≈ 10–12 h; **Stage 2 ≈ 2.5–3 days** (the
+`tutorial_ensemble_deep` 120k-tree cell ≈ 20–30 h on its own); Stage 4
+≈ 25–30 h; Stage 5 ≈ 6–8 h — **~4 days total on this box**, versus the
+hours-scale plan. Takeaways:
+
+- **19 of 20 cores sit idle** — single-core fits by design.
+- **GPU is not the lever** for these cells: fleet cells are deliberately
+  CPU-only (cross-machine bit-determinism; spec §7 deferred GPU), and the
+  dominant backend (LightGBM GPU on Windows = OpenCL) is historically flaky.
+- **The 08-23 throttle incident did not recur** post-reboot — the box ran
+  pegged and healthy for the full 9.3 h; this is a *speed* problem, not a
+  stability one.
+- **Structural weakness surfaced:** the benchmark runner persists its CSV only
+  at stage end (no per-cell checkpointing) — the same exposure the campaign
+  had before the checkpoint work. A long stage crashing at hour N loses N
+  hours. Not fixed mid-run (no harness changes under a live run).
+
+### 11.4 What is still pending (next session, in order)
+
+1. **Decision required: how to run the remaining stages on this hardware at
+   all** — (a) accept multi-day unattended runs (power-loss risk; `powercfg`
+   applied), (b) trim deep-cell tree counts off-spec (user must accept the
+   deviation), or (c) run on a faster machine. Nothing fires automatically.
+2. Commit the official-benchmark tier-4 feature (code + tests + docs together).
+3. Push: `origin/main` is at `1da1478`; local-only commits `6905d22`, `e5a038e`,
+   `b8d635b`, `8cc7f41`, `8202ba2`, `ad74934`, `82c3907` — CI has seen none.
+4. Test-count drift: **1034 collected vs 1007 claimed** in AGENTS.md /
+   CONTRIBUTING.md (checkpoint-ext added ~27 tests). Sync in the same commit.
+5. Two pre-existing real-data dashboard test failures
+   (`test_real_recompute_matches_stored_corr`,
+   `test_real_multimetric_payload_and_payout_parity`) — registry/data window
+   drift, verified pre-existing via `git stash`; decide whether to rebuild
+   registry scorecards (registry is immutable by design).
+6. `canon_hello_numerai` corr 0.001561 vs anchor 0.0130 — investigate (likely
+   window drift vs the pinned anchor, not a code bug as far as known).
+7. Re-pin tier anchors after any full run, or explicitly skip.
+8. Backlog item 4: Monday's mutation-gate run review, `_transforms`
+   re-measurement, mutmut harness patch + upstream issue (posting needs
+   explicit user confirmation), parked minors in the ledger.
+
+### 11.5 Official-benchmark tier-4 feature (uncommitted, this session)
+
+Discovery: `data/v5.3/validation_benchmark_models.parquet` is **bit-identical
+to the official numerapi download** for overlapping rows — so `v53_lgbm_ender20`
+/ `v53_lgbm_ender60` are **Numerai's own benchmark models**, not locally
+trained (corrects an earlier misreading of the 08-10..13 rebuild note). The
+change: `configs/benchmarks/tier4_gate.yaml` gains `reference_columns:
+[v53_lgbm_ender20]`; `nmr/benchmark.py` scores every reference column as a
+tier-4 row (the gated capital line first); `nmr/dashboard.py` +
+`dashboard_ui/report.py` render both official models as reference curves, BMC
+benchmark stays pinned to `v53_lgbm_ender60`. Verified: hierarchy + dashboard
+test files green (63 passed, incl. 2 new multi-reference tests), ruff clean,
+AGENTS.md at 31,937 B (budget 32,768 B). **Not committed** — fold into the next
+commit together with its docs.
+
+### 11.6 Resume instructions (exact)
+
+Stage 2 (8 cells):
+`NMR_MAX_THREADS=16 nohup ./.venv/Scripts/python -u benchmark_runner.py --only-fleet --fleet-ids "fa_v03_lgbm_mt,fa_v04_xgb_weighted,fa_v060_mlp,tutorial_hello_deep,tutorial_neutralized_small,tutorial_neutralized_deep,tutorial_ensemble_small,tutorial_ensemble_deep" --fleet-output artifacts/reports/benchmark_fleet_scorecard_stage2.csv > artifacts/reports/fleet_stage2.log 2>&1 &`
+
+Stage 4 (3 cells), only after Stage 2's CSV has 8 rows and no runner remains:
+`NMR_MAX_THREADS=16 nohup ./.venv/Scripts/python -u benchmark_runner.py --only-fleet --fleet-ids "community_example_deep,community_advanced_deep,community_sunshine_deep" --fleet-output artifacts/reports/benchmark_fleet_scorecard_stage4.csv > artifacts/reports/fleet_stage4.log 2>&1 &`
+
+Stage 5 (hierarchy re-run + dashboard), only after Stage 4: 
+`NMR_MAX_THREADS=16 nohup ./.venv/Scripts/python -u benchmark_runner.py --no-fleet --seed 42 --n-boot 1000 > artifacts/reports/hierarchy_full_stage5.log 2>&1 &` then `./.venv/Scripts/python generate_dashboard.py`.
+
+Health probes (Git Bash `ps` cannot see Windows python): `wmic process where "name='python.exe'" get ProcessId,CommandLine` and a 5 s CPU-delta probe on the non-stub pid (healthy > 2.0 s/5 s; throttle alarm < 1.5 s). One runner per output, ever.

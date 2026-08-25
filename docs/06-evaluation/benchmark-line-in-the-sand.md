@@ -12,12 +12,12 @@ Tiers 0–3 exist so a candidate's scorecard can be read as a rung on a ladder; 
 | 1 | Ridge small / medium / 4-target blend (purged, standardized) | linear factor frontier; non-linear models must beat it |
 | 2 | shallow LightGBM/XGBoost + canonical fast preset | depth/interaction hurdle |
 | 3 | hello-numerai, neutralized-50, sunshine 4×20D ensemble (in-process re-fits) | canonical community references |
-| 4 | `v53_lgbm_ender60` benchmark column | the line in the sand for capital |
+| 4 | `v53_lgbm_ender60` (capital gate) + `v53_lgbm_ender20` (informational) official Numerai benchmark columns | the line in the sand for capital |
 
 ## 2) Hard gates (enforced by `nmr/benchmark.py`)
 
 - **G — Tier-0 null floor:** |CORR| ≤ 0.005 and |AC-Sharpe| ≤ 0.15 for the three structural nulls (constant-0.5, uniform-random, gaussian-random). `null_feature_mean` is scored but excluded from the gate — it is not structurally null on v5.3 (corr 0.0029, sharpe 0.257). There is **no DSR check**: null DSRs span 0.11–1.0, so deflated Sharpe has no constant null value. A structural null scoring above its floor means a broken metric.
-- **G — Tier-4 production gate:** measured on `v53_lgbm_ender60` over the shared meta-model overlap window — CORR ≥ 0.0286, AC-Sharpe ≥ 0.78, FNC@medium ≥ 0.020, DSR ≥ 0.95, GPR ≥ 1.50, CAGR > 0, turnover ≤ 0.35. Thresholds live in `configs/benchmarks/tier4_gate.yaml` and are re-pinned to measured v5.3 values with evidence when they deviate. Turnover is structurally unavailable on v5.3 (consecutive validation eras share zero ids): it is reported as measured=None/pass=None in the gate report, **excluded from hard failure**, and logged loudly.
+- **G — Tier-4 production gate:** measured on `v53_lgbm_ender60` (the gated capital line; `v53_lgbm_ender20` is scored alongside as an informational tier-4 row) over the shared meta-model overlap window — CORR ≥ 0.0286, AC-Sharpe ≥ 0.78, FNC@medium ≥ 0.020, DSR ≥ 0.95, GPR ≥ 1.50, CAGR > 0, turnover ≤ 0.35. Thresholds live in `configs/benchmarks/tier4_gate.yaml` and are re-pinned to measured v5.3 values with evidence when they deviate. Turnover is structurally unavailable on v5.3 (consecutive validation eras share zero ids): it is reported as measured=None/pass=None in the gate report, **excluded from hard failure**, and logged loudly.
 - **G — Monotonicity:** per-tier max of mean CORR orders Tier0 < Tier1 < Tier2 < Tier3 ≤ Tier4 (atol 1e-5); `rank_scalar` is selectable via `metric="rank_scalar"` but its noise spread swamps the null-vs-ridge rung on real data (evidence in the design-spec amendments). Enforced in full runs; logged-only in `--fast-mode` (fast tree params degrade tiers 2–3 by design).
 - **G — Determinism:** same data-version + seed + configs ⇒ identical scorecard hashes across processes (`scorecards_sha256`).
 

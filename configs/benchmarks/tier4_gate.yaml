@@ -1,6 +1,10 @@
 # Tier 4 — Production capital gate (the line in the sand).
+# reference_column = the gated capital line (thresholds are evidence-pinned
+# to its measured v5.3 values); reference_columns = additional official
+# Numerai benchmark columns scored as informational tier-4 rows (no gate).
 tier: 4
 reference_column: v53_lgbm_ender60
+reference_columns: [v53_lgbm_ender20]
 gate:
   corr_min: 0.0286
   corr_sharpe_ac_min: 0.78
