@@ -288,7 +288,15 @@ class CrossCheckResult:
 
 
 # Fixed replay constants (spec §7) — the cross-check never varies these.
+# ``n_boot``/``alpha``/``pf``/``clip``/``sr0_benchmark`` equal
+# ``evaluate_model``'s defaults (pinned so the persisted ``scorecard.json``
+# replay record is authoritative, not documentation).
 CROSSCHECK_N_TRIALS = 1
+CROSSCHECK_N_BOOT = 1000
+CROSSCHECK_ALPHA = 0.05
+CROSSCHECK_PF = 1.0
+CROSSCHECK_CLIP = 0.05
+CROSSCHECK_SR0_BENCHMARK = 0.0
 
 
 def _sorted_numeric_keys(values: dict[str, float]) -> list[str]:
@@ -921,6 +929,11 @@ def evaluate_cross_check(
         horizon=horizon,
         main_target=main_target,
         backend="official",
+        n_boot=CROSSCHECK_N_BOOT,
+        alpha=CROSSCHECK_ALPHA,
+        pf=CROSSCHECK_PF,
+        clip=CROSSCHECK_CLIP,
+        sr0_benchmark=CROSSCHECK_SR0_BENCHMARK,
     )
     raw_sharpe = _plain_sharpe(list(corr_by_era.values()))
     per_era = {

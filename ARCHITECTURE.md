@@ -322,7 +322,7 @@ def predict(live_features: pd.DataFrame, live_benchmark_models: pd.DataFrame | N
 | [run_campaign.py](run_campaign.py) | Run a named batch of configs and record trial lineage (see §R) |
 | [analyze_dataset.py](analyze_dataset.py) | Modular dataset analysis: 17 named stages (`overview`, `targets`, `ic_by_era`, `screens`, `screens_train`, `summary`, `psi`, `drift`, `derived_sets`, `corr_medium`, `corr_all`, `set_membership`, `ic_by_split`, `regimes`, `benchmarks`, `meta_ortho`, `manifest`). Flags: `--only a,b` / `--skip a,b` run a subset (dependencies auto-included; `manifest` always runs), `--features small\|medium\|all`, `--max-eras N`, `--full-all-matrix`. `screens` writes the **descriptive full-span** screen (`feature_ic_screen.parquet`, eras 0001..1231 — never an input to subset derivation); `screens_train` writes the **train-only** screen (`feature_ic_screen_train.parquet`, eras 0001..0574); `derived_sets` reads **only** the train-only screen and writes `derived_feature_sets.json` (`screen_stable`, `screen_nonlinear`, `screen_linear_or_nonlinear`, `screen_drift_filtered` — pure functions of the train-only screen + drift dumps, sorted; see §P); `drift` writes the PSI + W1 + adversarial-AUC profile (`feature_drift_profile.parquet`, `w1_norm = w1 / σ_train`); `meta_ortho` writes per-feature meta-model orthogonality; the FNE profile uses an 11-point neutralization grid. Stage boundaries and per-era ticks print progress to stdout/stderr (never into artifacts); the manifest records `stages_run` + a machine-hardware summary (informational — never hashed). |
 | [hardware_status.py](hardware_status.py) | Print machine specs + live resource status (`--record` writes `artifacts/reports/hardware_specs.json`); all logic in `nmr/hardware.py` (stdlib only) |
-| [promote_model.py](promote_model.py) | Promote a registry run to a full version (Model Uploads `predict.pkl`): `--run-id` / `--family` / `--models-dir` / `--override-gate` / `--force`; all logic in `nmr/promote.py`; writes `artifacts/models/<family>/full/<run_id>/{predict.pkl, manifest.json}` and, on a tier-4 gate pass, the atomic `current.json` pointer; prints the Model Uploads upload instructions |
+| [promote_model.py](promote_model.py) | Promote a registry run to a full/partial export (Model Uploads `predict.pkl`): `--run-id` / `--champion` / `--family` / `--models-dir` / `--override-gate` / `--force`; all logic in `nmr/promote.py`; publishes `experiments/<family>/exports/<scope>/<run_id>/{predict.pkl, export.json}` (+ `scorecard.json` for partials) and, for `scope="full"`, the atomic `current.json` pointer; prints the Model Uploads upload instructions |
 | [rehearse_promotion.py](rehearse_promotion.py) | Truncated-window promotion rehearsal (D7 Stage 1): exercises the whole promotion path — including the spawned full-history fit (`NMR_FULL_HISTORY_SPAWN_MIN_BYTES`) — at small scale, measures peak commit + working set for the RAM guard, and writes a `rehearsal: true` artifact that is excluded from `scan_full_versions` and never becomes `current.json` |
 | [measure_ram_curve.py](measure_ram_curve.py) | Three-point full-history **commit** curve (measured, not estimated): runs real worker fits at increasing row counts in fresh subprocesses, fits `peak = a + b·rows`, and writes `artifacts/reports/ram_curve.json` (intercept, slope, R², extrapolation factor, both anchors). All logic in `nmr/promote.py` / `nmr/models.py`. **Measured (2026-08-18):** `commit = 2.57 + 8.87e-6·rows` GiB (R² = 0.993), `ws = 1.10 + 8.18e-6·rows` GiB; full-version (6.85M rows) extrapolates to combined commit ≈ 61–65 GiB, working set ≈ 55–58 GiB (86–90% of physical). **Open hypothesis (next cycle):** the per-row slope implies ~2.5 float32-equivalents held simultaneously — suspects sklearn `check_array` copying the polars→numpy view and LightGBM `Dataset` construction (`lgb.Dataset(..., free_raw_data=True)`); target slope ~5e-6 GiB/row → full-scale commit ≈ 40 GiB (own determinism proof required). |
 | [refresh_data.py](refresh_data.py) | Round-aware dataset refresh + era-ledger update (`--dry-run`, `--check-only`, `--strict`, `--live-only`); policy in `nmr/refresh.py`, this script only wires `numerapi` calls and file I/O |
@@ -491,24 +491,31 @@ residue is discarded, never half-published. `run_id` is regex-validated
 
 A model **family** is the set of registry runs sharing `manifest.config.run.name`
 (e.g. `brb1-xgb-v6`; duplicate reruns belong to one family). Promotion to a
-**full version** (trained on train+validation, deployed) writes one immutable
-slot per promoted run at `artifacts/models/<family>/full/<run_id>/manifest.json`
-plus an atomic `current.json` pointer (`{"run_id": <64-hex>, "promoted_at": ...}`,
-temp + fsync + `os.replace`) naming the active slot. The pointer + valid slot
-manifest IS the marker. `nmr/families.py` is the read-only discovery layer
-(writes live in `nmr/promote.py`, the promotion writer): resolution is
-pointer-driven — a missing/corrupt/dangling `current.json` fails loud via
-`full_manifest_path` (listing `available_slots`) and yields `None` from the
-tolerant `load_full_version`/`scan_full_versions` scans. Slots are never
-selected by mtime. Old slots remain for rollback; repointing `current.json`
-is a deliberate write.
+**full version** (deployed artifact; `scope="full"` trains on train+validation,
+`scope="train_only"` trains on train only → a **partial** export) publishes one
+immutable slot per promoted run at
+`experiments/<family>/exports/<scope>/<run_id>/` (git-tracked record
+`export.json`; partials additionally carry a post-fit cross-check
+`scorecard.json`), and a `scope="full"` promotion repoints the atomic
+`current.json` pointer (`{"run_id": <64-hex>, "promoted_at": ...}`,
+temp + fsync + `os.replace`) naming the active full slot — the pointer +
+valid slot record IS the marker. Writes live in `nmr/promote.py` (the
+promotion writer, Task 8+). The read-side discovery layer (`nmr/families.py`)
+is mid-plan compat: it still scans the legacy
+`artifacts/models/<family>/full/<run_id>/manifest.json` layout and is
+retargeted to the experiment layout in Task 9. Resolution is pointer-driven —
+a missing/corrupt/dangling `current.json` fails loud via `full_manifest_path`
+(listing `available_slots`) and yields `None` from the tolerant
+`load_full_version`/`scan_full_versions` scans. Slots are never selected by
+mtime. Old slots remain for rollback; repointing `current.json` is a
+deliberate write.
 
-Manifest schema (`manifest.json`, per-slot):
+Export record schema (`export.json`, per-slot):
 
 | Field | Requirement |
 |---|---|
 | `family` | equals the directory name (lowercase `^[a-z0-9_-]+$`) |
-| `training_scope` | `"full"` |
+| `training_scope` | `"full"` for full exports; `"partial"` for `train_only` (partial) exports — never `"train_only"` |
 | `promoted_from_run_id` | non-empty registry run id (dangling lineage warns, never invalidates) |
 | `promoted_at` | display metadata only — never in a canonical hash |
 | `artifact_path` | non-empty relative path — no leading `/`, no drive letter, no `..`; resolved against the manifest's own slot dir; file must exist (hollow promotions rejected) |
@@ -577,7 +584,7 @@ registry.py  ──> _atomicio, experiment_store, paths, runner (RunResult)
 dashboard.py ──> benchmark, config, ensemble, evaluation, families, payout, scorecard
 explainers.py ──> dashboard_ui.service (read-only dynamic model labels)
 scenarios.py  ──> payout, evaluation (allocation scenario research helpers)
-promote.py   ──> _atomicio, benchmark, config, data, families, models, runner, submission
+promote.py   ──> _atomicio, benchmark, config, data, deployment, experiment_store, families, models, paths, runner, scorecard, submission
 
 nmr/__init__.py re-exports the public API of all modules (keep imports and __all__ in sync).
 ```

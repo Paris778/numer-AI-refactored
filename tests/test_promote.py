@@ -18,6 +18,7 @@ import pandas as pd
 import polars as pl
 import pytest
 
+from nmr import lifecycle, paths
 from nmr.benchmark import Tier4GateConfig
 from nmr.config import (
     DataConfig,
@@ -29,37 +30,64 @@ from nmr.config import (
     RunConfig,
     SplitConfig,
 )
+from nmr.data import IngestionAgent
 from nmr.deployment import load_predict
-from nmr.families import CURRENT_POINTER_NAME, available_slots, load_full_version
-from nmr.promote import PromotionResult, promote_full_version, rehearse_promotion
+from nmr.promote import (
+    PromotionResult,
+    promote_full_version,
+    rehearse_promotion,
+)
+from nmr.promote import (
+    _full_history_frame as _orig_full_history_frame,
+)
 from nmr.runner import ExperimentRunner
+from nmr.scorecard import CROSSCHECK_N_TRIALS
 
 _RID = "a" * 64
 
 
-def _make_data(root: Path) -> Path:
+@pytest.fixture(autouse=True)
+def _isolated_experiments_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pin the experiment layout to tmp — promotions never touch the repo tree."""
+    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", tmp_path / "experiments")
+
+
+def _make_data(root: Path, *, validation_eras: int = 8) -> Path:
     version_dir = root / "vtest"
     version_dir.mkdir(parents=True, exist_ok=True)
+    train_eras = 8
+    total_eras = train_eras + validation_eras
     rows = []
-    for era in range(1, 17):
+    for era in range(1, total_eras + 1):
         for idx in range(8):
-            f1 = idx * 0.05
-            f2 = (idx % 3) * 0.1
+            f1 = idx * 0.1
+            f2 = (idx % 4) * 0.1
+            # Era-dependent, NON-proportional slopes so the per-era target
+            # ordering (and therefore per-era corr) varies: a near-constant
+            # corr series makes scipy's bias=False skew/kurt collapse to NaN
+            # and deflated_sharpe raises — the cross-check needs finite
+            # moments. (Measured: corr std ~0.05 across eras.)
             rows.append(
                 {
                     "era": f"{era:04d}",
                     "id": f"{era}_{idx}",
                     "f1": f1,
                     "f2": f2,
-                    "target": 0.4 * f1 - 0.2 * f2 + 0.01 * era,
+                    "target": (0.5 + 0.03 * era) * f1 - (0.05 * era) * f2 + 0.01 * era,
                 }
             )
-    pl.DataFrame([r for r in rows if int(r["era"]) <= 8]).write_parquet(
+    pl.DataFrame([r for r in rows if int(r["era"]) <= train_eras]).write_parquet(
         version_dir / "train.parquet"
     )
-    pl.DataFrame([r for r in rows if int(r["era"]) > 8]).write_parquet(
-        version_dir / "validation.parquet"
-    )
+    val_rows = [r for r in rows if int(r["era"]) > train_eras]
+    pl.DataFrame(val_rows).write_parquet(version_dir / "validation.parquet")
+    # meta_model.parquet over the validation eras — required by the partial
+    # cross-check (MMC) and the runner's validation stage.
+    pl.DataFrame(val_rows).select(["era", "id"]).with_columns(
+        pl.lit(0.35).alias("numerai_meta_model")
+    ).write_parquet(version_dir / "meta_model.parquet")
     # Rehearsal needs features.json + live files in the same layout as v5.3.
     version_dir.joinpath("features.json").write_text(
         json.dumps({"feature_sets": {"small": ["f1", "f2"]}}), encoding="utf-8"
@@ -170,35 +198,40 @@ def test_promote_happy_path_manifest_and_artifact(tmp_path: Path) -> None:
         _RID, "brb1-lgbm-v6", models_dir=tmp_path / "models", registry_dir=registry
     )
 
+    assert result.scope == "full"
+    assert result.cross_check_path is None
     assert result.artifact_path == (
-        tmp_path / "models" / "brb1-lgbm-v6" / "full" / _RID / "predict.pkl"
+        paths.export_dir("brb1-lgbm-v6", "full", _RID) / "predict.pkl"
     )
     assert result.artifact_path.is_file()
     assert result.tier4_gate_passed is True
     assert result.override_used is False
 
-    # families.py read-side validates the published manifest (pointer + slot).
-    version = load_full_version(tmp_path / "models", "brb1-lgbm-v6")
+    # lifecycle read-side validates the published export (pointer + slot).
+    version = lifecycle.valid_export("brb1-lgbm-v6", "full", _RID)
     assert version is not None
     assert version.family == "brb1-lgbm-v6"
-    assert version.promoted_from_run_id == _RID
-    assert version.artifact_path == "predict.pkl"
-    assert available_slots(tmp_path / "models", "brb1-lgbm-v6") == [_RID]
-    pointer = tmp_path / "models" / "brb1-lgbm-v6" / "full" / CURRENT_POINTER_NAME
+    assert version.run_id == _RID
+    assert version.scope == "full"
+    assert version.training_scope == "full"
+    assert [v.run_id for v in lifecycle.scan_valid_exports("brb1-lgbm-v6", "full")] == [_RID]
+    pointer = paths.current_pointer_path("brb1-lgbm-v6")
     assert json.loads(pointer.read_text(encoding="utf-8"))["run_id"] == _RID
 
-    # Manifest records the promotion verdict block + config normalizations.
-    manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
-    assert manifest["tier4_gate_passed"] is True
-    assert manifest["override_used"] is False
-    normalizations = {n["field"]: n for n in manifest["config_normalizations"]}
+    # The git-tracked promotion record is export.json (not manifest.json).
+    record = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert result.manifest_path.name == "export.json"
+    assert record["tier4_gate_passed"] is True
+    assert record["override_used"] is False
+    assert record["training_scope"] == "full"
+    normalizations = {n["field"]: n for n in record["config_normalizations"]}
     assert normalizations["split.embargo_eras"] == {"field": "split.embargo_eras", "from": 4, "to": 0}
     assert normalizations["data.horizon"] == {"field": "data.horizon", "from": None, "to": "20D"}
     # First-class training provenance (review directive 2026-08-18): a genuine
     # full version is explicitly NOT a rehearsal and states what it trained on.
-    assert manifest["rehearsal"] is False
-    assert manifest["training_rows"] > 0
-    assert len(manifest["training_era_range"]) == 2
+    assert record["rehearsal"] is False
+    assert record["training_rows"] > 0
+    assert len(record["training_era_range"]) == 2
 
     # The artifact loads and the raw contract output is strictly in (0,1).
     predict_fn = load_predict(result.artifact_path)
@@ -302,10 +335,12 @@ def test_promote_overwrite_and_repoint_guards(tmp_path: Path) -> None:
     promote_full_version(
         _RID, "brb1-lgbm-v6", models_dir=tmp_path / "models", registry_dir=registry
     )
-    # Same slot again: immutable, refused without force.
+    # Same slot again: immutable — refused even with force (a slot is never
+    # overwritten; force only gates repointing current.json).
     with pytest.raises(ValueError, match="already exists"):
         promote_full_version(
-            _RID, "brb1-lgbm-v6", models_dir=tmp_path / "models", registry_dir=registry
+            _RID, "brb1-lgbm-v6", models_dir=tmp_path / "models",
+            registry_dir=registry, force=True,
         )
     # A second run repointing current.json away: refused without force.
     other = "b" * 64
@@ -318,8 +353,11 @@ def test_promote_overwrite_and_repoint_guards(tmp_path: Path) -> None:
         other, "brb1-lgbm-v6", models_dir=tmp_path / "models",
         registry_dir=registry, force=True,
     )
-    assert available_slots(tmp_path / "models", "brb1-lgbm-v6") == [_RID, other]
-    assert load_full_version(tmp_path / "models", "brb1-lgbm-v6").promoted_from_run_id == other
+    assert sorted(v.run_id for v in lifecycle.scan_valid_exports("brb1-lgbm-v6", "full")) == [_RID, other]
+    pointer = json.loads(
+        paths.current_pointer_path("brb1-lgbm-v6").read_text(encoding="utf-8")
+    )
+    assert pointer["run_id"] == other
 
 
 def test_promote_rejects_invalid_run_id_and_family(tmp_path: Path) -> None:
@@ -390,11 +428,11 @@ def test_rehearse_promotion_end_to_end(tmp_path: Path) -> None:
     # The rehearsal artifact states its own scope and is never the current
     # pointer (review directive 2026-08-18).
     slot_manifest = json.loads(
-        (result.artifact_path.parent / "manifest.json").read_text(encoding="utf-8")
+        (result.artifact_path.parent / "export.json").read_text(encoding="utf-8")
     )
     assert slot_manifest["rehearsal"] is True
     assert slot_manifest["training_rows"] == result.train_validation_rows
-    assert not (tmp_path / "models" / "brb1-lgbm-v6" / "full" / CURRENT_POINTER_NAME).exists()
+    assert not paths.current_pointer_path("brb1-lgbm-v6").exists()
 
 
 def _gate() -> Tier4GateConfig:
@@ -463,7 +501,7 @@ def test_ram_guard_curve_path_passes_when_under_guard(
 
     data = _make_data(tmp_path / "data")
     config = _config(data)
-    reports = tmp_path / "reports"
+    reports = paths.shared_reports_dir(config.run.artifacts_dir)
     reports.mkdir(parents=True)
     (reports / "ram_curve.json").write_text(
         json.dumps(
@@ -476,7 +514,7 @@ def test_ram_guard_curve_path_passes_when_under_guard(
         encoding="utf-8",
     )
     with caplog.at_level(logging.INFO, logger="nmr.promote"):
-        _ram_guard(config, tmp_path / "models")  # must not raise
+        _ram_guard(config, tmp_path / "models", scope="full")  # must not raise
     assert "extrapolated full-version combined commit" in caplog.text
 
 
@@ -495,11 +533,11 @@ def test_ram_guard_over_ceiling_raises(tmp_path: Path) -> None:
     from nmr.promote import _ram_guard
 
     data = _make_data(tmp_path / "data")
-    reports = tmp_path / "reports"
+    reports = paths.shared_reports_dir(_config(data).run.artifacts_dir)
     reports.mkdir(parents=True)
     (reports / "ram_curve.json").write_text(_huge_curve(commit_slope=1e9, ws_slope=0.0), encoding="utf-8")
     with pytest.raises(RuntimeError, match="exceeds the 45 GiB guard"):
-        _ram_guard(_config(data), tmp_path / "models")
+        _ram_guard(_config(data), tmp_path / "models", scope="full")
 
 
 def test_ram_guard_over_commit_limit_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -512,11 +550,11 @@ def test_ram_guard_over_commit_limit_raises(tmp_path: Path, monkeypatch: pytest.
         pytest.skip("platform reports no commit limit (Unix)")
     monkeypatch.setattr("nmr.promote._RAM_GUARD_BYTES", 2**70)
     data = _make_data(tmp_path / "data")
-    reports = tmp_path / "reports"
+    reports = paths.shared_reports_dir(_config(data).run.artifacts_dir)
     reports.mkdir(parents=True)
     (reports / "ram_curve.json").write_text(_huge_curve(commit_slope=1e9, ws_slope=0.0), encoding="utf-8")
     with pytest.raises(RuntimeError, match="exceeds the machine commit limit"):
-        _ram_guard(_config(data), tmp_path / "models")
+        _ram_guard(_config(data), tmp_path / "models", scope="full")
 
 
 def test_ram_guard_over_working_set_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -529,11 +567,11 @@ def test_ram_guard_over_working_set_raises(tmp_path: Path, monkeypatch: pytest.M
         pytest.skip("platform reports no physical RAM")
     monkeypatch.setattr("nmr.promote._RAM_GUARD_BYTES", 2**70)
     data = _make_data(tmp_path / "data")
-    reports = tmp_path / "reports"
+    reports = paths.shared_reports_dir(_config(data).run.artifacts_dir)
     reports.mkdir(parents=True)
     (reports / "ram_curve.json").write_text(_huge_curve(commit_slope=0.0, ws_slope=1e9), encoding="utf-8")
     with pytest.raises(RuntimeError, match="would thrash"):
-        _ram_guard(_config(data), tmp_path / "models")
+        _ram_guard(_config(data), tmp_path / "models", scope="full")
 
 
 def _write_estimate(reports: Path, payload: dict) -> None:
@@ -548,8 +586,9 @@ def test_ram_guard_estimate_path_passes_when_under_guard(
     from nmr.promote import _ram_guard
 
     data = _make_data(tmp_path / "data")
+    config = _config(data)
     _write_estimate(
-        tmp_path / "reports",
+        paths.shared_reports_dir(config.run.artifacts_dir),
         {
             "peak_commit_bytes": 1,
             "peak_bytes": 1,
@@ -559,7 +598,7 @@ def test_ram_guard_estimate_path_passes_when_under_guard(
         },
     )
     with caplog.at_level(logging.WARNING, logger="nmr.promote"):
-        _ram_guard(_config(data), tmp_path / "models")  # must not raise
+        _ram_guard(config, tmp_path / "models", scope="full")  # must not raise
     assert "single-point estimate extrapolation" in caplog.text
 
 
@@ -569,9 +608,13 @@ def test_ram_guard_estimate_missing_dual_metric_skips(
     from nmr.promote import _ram_guard
 
     data = _make_data(tmp_path / "data")
-    _write_estimate(tmp_path / "reports", {"peak_bytes": 1, "parent_peak_bytes": 0, "train_validation_rows": 1})
+    config = _config(data)
+    _write_estimate(
+        paths.shared_reports_dir(config.run.artifacts_dir),
+        {"peak_bytes": 1, "parent_peak_bytes": 0, "train_validation_rows": 1},
+    )
     with caplog.at_level(logging.WARNING, logger="nmr.promote"):
-        _ram_guard(_config(data), tmp_path / "models")  # must not raise
+        _ram_guard(config, tmp_path / "models", scope="full")  # must not raise
     assert "lacks dual-metric data" in caplog.text
 
 
@@ -581,7 +624,8 @@ def test_ram_guard_corrupt_curve_falls_back_to_estimate(
     from nmr.promote import _ram_guard
 
     data = _make_data(tmp_path / "data")
-    reports = tmp_path / "reports"
+    config = _config(data)
+    reports = paths.shared_reports_dir(config.run.artifacts_dir)
     reports.mkdir(parents=True)
     (reports / "ram_curve.json").write_text("{corrupt", encoding="utf-8")
     _write_estimate(
@@ -595,7 +639,7 @@ def test_ram_guard_corrupt_curve_falls_back_to_estimate(
         },
     )
     with caplog.at_level(logging.WARNING, logger="nmr.promote"):
-        _ram_guard(_config(data), tmp_path / "models")  # must not raise
+        _ram_guard(config, tmp_path / "models", scope="full")  # must not raise
     assert "unreadable RAM curve" in caplog.text
 
 
@@ -605,11 +649,12 @@ def test_ram_guard_corrupt_estimate_skips(
     from nmr.promote import _ram_guard
 
     data = _make_data(tmp_path / "data")
-    reports = tmp_path / "reports"
+    config = _config(data)
+    reports = paths.shared_reports_dir(config.run.artifacts_dir)
     reports.mkdir(parents=True)
     (reports / "full_version_ram_estimate.json").write_text("{corrupt", encoding="utf-8")
     with caplog.at_level(logging.WARNING, logger="nmr.promote"):
-        _ram_guard(_config(data), tmp_path / "models")  # must not raise
+        _ram_guard(config, tmp_path / "models", scope="full")  # must not raise
     assert "unreadable RAM estimate" in caplog.text
 
 
@@ -699,9 +744,9 @@ def test_promote_corrupt_current_pointer_requires_force(tmp_path: Path) -> None:
     data = _make_data(tmp_path / "data")
     registry = tmp_path / "registry"
     _write_registry(registry, stored_config=_stored_config_dict(data))
-    full_dir = tmp_path / "models" / "brb1-lgbm-v6" / "full"
-    full_dir.mkdir(parents=True)
-    (full_dir / CURRENT_POINTER_NAME).write_text("{corrupt", encoding="utf-8")
+    pointer = paths.current_pointer_path("brb1-lgbm-v6")
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text("{corrupt", encoding="utf-8")
     with pytest.raises(ValueError, match="repointing requires force"):
         promote_full_version(
             _RID, "brb1-lgbm-v6", models_dir=tmp_path / "models", registry_dir=registry
@@ -786,9 +831,9 @@ def test_rehearse_restores_env_and_removes_stale_pointer(
     data = _make_data(tmp_path / "data")
     registry = tmp_path / "registry"
     _write_registry(registry, stored_config=_stored_config_dict(data))
-    full_dir = tmp_path / "models" / "brb1-lgbm-v6" / "full"
-    full_dir.mkdir(parents=True)
-    (full_dir / CURRENT_POINTER_NAME).write_text(
+    pointer = paths.current_pointer_path("brb1-lgbm-v6")
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text(
         json.dumps({"run_id": "c" * 64}), encoding="utf-8"
     )
     result = rehearse_promotion(
@@ -802,7 +847,7 @@ def test_rehearse_restores_env_and_removes_stale_pointer(
     )
     assert result.acceptance_passed is True
     assert os.environ["NMR_FULL_HISTORY_SPAWN_MIN_BYTES"] == "7777"
-    assert not (full_dir / CURRENT_POINTER_NAME).exists()
+    assert not pointer.exists()
 
 
 def test_rehearse_manifest_without_config_refused(tmp_path: Path) -> None:
@@ -824,11 +869,12 @@ def _fake_promotion_result(tmp_path: Path) -> PromotionResult:
     artifact.write_bytes(b"not-a-real-model")
     return PromotionResult(
         artifact_path=artifact,
-        manifest_path=tmp_path / "manifest.json",
+        manifest_path=tmp_path / "export.json",
         run_id=_RID,
         family="brb1-lgbm-v6",
         tier4_gate_passed=False,
         override_used=True,
+        scope="full",
     )
 
 
@@ -887,3 +933,254 @@ def test_rehearse_acceptance_failure_propagates(
             validation_eras=6,
         )
     assert "acceptance FAILED" in caplog.text
+
+
+# --- Task 8: scope, fit-phase isolation, cross-check, atomic staging ---------
+
+def test_train_only_scope_fits_train_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """train_only promotes into exports/partial/<run_id>/ with persisted
+    training_scope "partial", and the FIT phase never opens validation. The
+    fit-phase spy records IngestionAgent.load calls only for the duration of
+    the fit — the post-fit cross-check legitimately opens validation later."""
+    data = _make_data(tmp_path / "data", validation_eras=32)
+    registry = tmp_path / "registry"
+    _write_registry(registry, stored_config=_stored_config_dict(data))
+    opened: list[str] = []
+    original_load = IngestionAgent.load
+
+    def _recording_load(self, split, **kwargs):
+        opened.append(split)
+        return original_load(self, split, **kwargs)
+
+    def _spy_frame(config, feature_cols, target_cols, orchestrator, *, scope):
+        monkeypatch.setattr(IngestionAgent, "load", _recording_load)
+        try:
+            return _orig_full_history_frame(
+                config, feature_cols, target_cols, orchestrator, scope=scope
+            )
+        finally:
+            monkeypatch.setattr(IngestionAgent, "load", original_load)
+
+    monkeypatch.setattr("nmr.promote._full_history_frame", _spy_frame)
+    result = promote_full_version(
+        _RID,
+        "brb1-lgbm-v6",
+        models_dir=tmp_path / "models",
+        registry_dir=registry,
+        override_gate=True,
+        scope="train_only",
+    )
+    assert result.scope == "train_only"
+    assert result.cross_check_path is not None
+    export = lifecycle.valid_export("brb1-lgbm-v6", "partial", _RID)
+    assert export is not None
+    assert export.training_scope == "partial"
+    assert opened == ["train"]  # the fit-phase spy saw only train.parquet
+
+
+def test_full_history_frame_train_only_returns_train_only_rows(
+    tmp_path: Path,
+) -> None:
+    """_full_history_frame with scope='train_only' returns exactly the train
+    split — validation rows never enter the fit frame."""
+    from nmr.models import ModelOrchestrator
+    from nmr.promote import _full_history_frame
+
+    data = _make_data(tmp_path / "data")
+    config = _config(data)
+    orch = ModelOrchestrator(config.model, seed=config.run.seed)
+    frame = _full_history_frame(
+        config, ["f1", "f2"], ["target"], orch, scope="train_only"
+    )
+    eras = sorted({int(e) for e in frame.get_column("era").unique().to_list()})
+    assert eras == list(range(1, 9))  # train eras 1..8 only
+
+
+def test_train_only_spawn_spec_excludes_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The spawned-worker spec carries include_validation=False for train_only
+    (fit-phase isolation on the fresh-process path)."""
+    from nmr.models import ModelOrchestrator
+
+    captured: dict[str, object] = {}
+    original = ModelOrchestrator._fit_full_history_subprocess
+
+    def _spy(self, train_df, *, feature_cols, target_col, era_col, data, include_validation=False):
+        captured["include_validation"] = include_validation
+        return original(
+            self, train_df, feature_cols=feature_cols, target_col=target_col,
+            era_col=era_col, data=data, include_validation=include_validation,
+        )
+
+    monkeypatch.setattr(ModelOrchestrator, "_fit_full_history_subprocess", _spy)
+    monkeypatch.setenv("NMR_FULL_HISTORY_SPAWN_MIN_BYTES", "1")
+    data = _make_data(tmp_path / "data", validation_eras=32)
+    registry = tmp_path / "registry"
+    _write_registry(registry, stored_config=_stored_config_dict(data))
+    promote_full_version(
+        _RID,
+        "brb1-lgbm-v6",
+        models_dir=tmp_path / "models",
+        registry_dir=registry,
+        override_gate=True,
+        scope="train_only",
+    )
+    assert captured["include_validation"] is False
+
+
+def test_train_only_writes_cross_check_scorecard(tmp_path: Path) -> None:
+    """The partial export ships a versioned scorecard.json (official backend,
+    fixed replay constants, window eras + per-era series + raw Sharpe)."""
+    data = _make_data(tmp_path / "data", validation_eras=32)
+    registry = tmp_path / "registry"
+    _write_registry(registry, stored_config=_stored_config_dict(data))
+    result = promote_full_version(
+        _RID,
+        "brb1-lgbm-v6",
+        models_dir=tmp_path / "models",
+        registry_dir=registry,
+        override_gate=True,
+        scope="train_only",
+    )
+    slot = paths.export_dir("brb1-lgbm-v6", "partial", _RID)
+    sc = json.loads((slot / "scorecard.json").read_text(encoding="utf-8"))
+    assert result.cross_check_path == slot / "scorecard.json"
+    assert sc["schema_version"] == 3
+    assert sc["replay"]["backend"] == "official"
+    assert sc["replay"]["n_trials"] == CROSSCHECK_N_TRIALS
+    assert sc["scope"] == "partial"
+    assert sc["window"]["eras"] == sorted(sc["window"]["eras"], key=int)
+    # 32 validation eras minus the 8-era 20D-target purge.
+    assert len(sc["window"]["eras"]) == 24
+    assert sc["per_era"]["corr"] and all(
+        {"era", "value"} <= set(entry) for entry in sc["per_era"]["corr"]
+    )
+    assert sc["per_era"]["mmc"] and sc["per_era"]["fnc"]
+    assert isinstance(sc["raw_sharpe"], float)
+    assert sc["generated_at"]
+    assert set(sc["scorecard"]) >= {"corr", "mmc", "corr_sharpe_ac", "fnc", "n_eras"}
+
+
+def test_full_scope_requires_current_pointer(tmp_path: Path) -> None:
+    """A full-scope promotion repoints current.json atomically."""
+    data = _make_data(tmp_path / "data")
+    registry = tmp_path / "registry"
+    _write_registry(registry, stored_config=_stored_config_dict(data))
+    result = promote_full_version(
+        _RID,
+        "brb1-lgbm-v6",
+        models_dir=tmp_path / "models",
+        registry_dir=registry,
+        override_gate=True,
+        scope="full",
+    )
+    assert result.scope == "full"
+    assert result.cross_check_path is None
+    pointer = json.loads(
+        paths.current_pointer_path("brb1-lgbm-v6").read_text(encoding="utf-8")
+    )
+    assert pointer["run_id"] == _RID
+
+
+def test_repromotion_rejected(tmp_path: Path) -> None:
+    """Exports are immutable: promoting an existing slot raises even with
+    force=True (force only gates repointing current.json, never overwrites)."""
+    data = _make_data(tmp_path / "data")
+    registry = tmp_path / "registry"
+    _write_registry(registry, stored_config=_stored_config_dict(data))
+    promote_full_version(
+        _RID,
+        "brb1-lgbm-v6",
+        models_dir=tmp_path / "models",
+        registry_dir=registry,
+        override_gate=True,
+        force=True,
+        scope="full",
+    )
+    with pytest.raises(ValueError, match="already exists"):
+        promote_full_version(
+            _RID,
+            "brb1-lgbm-v6",
+            models_dir=tmp_path / "models",
+            registry_dir=registry,
+            override_gate=True,
+            force=True,
+            scope="full",
+        )
+
+
+def test_partial_scoring_failure_discards_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cross-check failure discards the staging dir — no half-written slot
+    and no .tmp- residue (publication atomicity)."""
+    data = _make_data(tmp_path / "data", validation_eras=32)
+    registry = tmp_path / "registry"
+    _write_registry(registry, stored_config=_stored_config_dict(data))
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("scoring exploded")
+
+    monkeypatch.setattr("nmr.promote._run_cross_check", _boom)
+    with pytest.raises(RuntimeError, match="scoring exploded"):
+        promote_full_version(
+            _RID,
+            "brb1-lgbm-v6",
+            models_dir=tmp_path / "models",
+            registry_dir=registry,
+            override_gate=True,
+            scope="train_only",
+        )
+    slot = paths.export_dir("brb1-lgbm-v6", "partial", _RID)
+    assert not slot.exists()
+    assert not (slot.parent / f".tmp-{_RID}").exists()
+    assert lifecycle.scan_valid_exports("brb1-lgbm-v6", "partial") == []
+
+
+def test_promote_invalid_scope_refused(tmp_path: Path) -> None:
+    data = _make_data(tmp_path / "data")
+    registry = tmp_path / "registry"
+    _write_registry(registry, stored_config=_stored_config_dict(data))
+    with pytest.raises(ValueError, match="scope"):
+        promote_full_version(
+            _RID,
+            "brb1-lgbm-v6",
+            models_dir=tmp_path / "models",
+            registry_dir=registry,
+            override_gate=True,
+            scope="bogus",
+        )
+
+
+def test_ram_guard_train_only_scans_train_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A train_only guard call derives rows from train.parquet alone —
+    validation.parquet is never scanned."""
+    from nmr.promote import _ram_guard
+
+    data = _make_data(tmp_path / "data")
+    config = _config(data)
+    _write_estimate(
+        paths.shared_reports_dir(config.run.artifacts_dir),
+        {
+            "peak_commit_bytes": 1,
+            "peak_bytes": 1,
+            "parent_peak_commit_bytes": 0,
+            "parent_peak_bytes": 0,
+            "train_validation_rows": 1,
+        },
+    )
+    scanned: list[str] = []
+    original_scan = pl.scan_parquet
+
+    def _spy_scan(path, *args, **kwargs):
+        scanned.append(Path(path).name)
+        return original_scan(path, *args, **kwargs)
+
+    monkeypatch.setattr(pl, "scan_parquet", _spy_scan)
+    _ram_guard(config, tmp_path / "models", scope="train_only")
+    assert scanned == ["train.parquet"]

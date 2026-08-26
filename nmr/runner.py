@@ -759,6 +759,7 @@ def _build_deploy_pipeline(
     proportion: float,
     data: DataConfig,
     deploy_checkpoint_dir: Path | None = None,
+    include_validation: bool = False,
 ) -> tuple[Callable[[pd.DataFrame], pd.DataFrame], dict[str, object]]:
     """Train per-target full-history models ONCE and return (predict, model_meta).
 
@@ -767,6 +768,12 @@ def _build_deploy_pipeline(
     code. The closure's code path references only numpy/pandas plus the shared
     transform helpers; cloudpickle.register_pickle_by_value(nmr._transforms)
     embeds those helpers by value so the artifact loads without `nmr`.
+
+    ``include_validation`` (promotion writer only): forwarded to
+    ``train_full_history`` so a spawned full-history fit re-reads
+    train+validation when the promotion scope is ``"full"`` and train only
+    when ``"train_only"`` (fit-phase isolation). The runner passes the
+    default False — its deploy artifact trains on the train frame it passes.
 
     With ``deploy_checkpoint_dir`` set (runner only; the promotion writer
     passes None), each fitted model is persisted with cloudpickle to
@@ -832,6 +839,7 @@ def _build_deploy_pipeline(
             target_col=target,
             era_col="era",
             data=data,
+            include_validation=include_validation,
         )
         if pkl_path is not None:
             if not manifest_written:

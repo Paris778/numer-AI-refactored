@@ -1,22 +1,26 @@
-"""Promotion writer: train the full version (train+validation) and publish it.
+"""Promotion writer: train the full version and publish it to the experiment layout.
 
 The money-path terminus of the audit remediation. ``promote_full_version``
-takes a registry run, re-trains per-target full-history models on
-**train+validation** (the research run trained on train only), rebuilds the
+takes a registry run, re-trains per-target full-history models on the
+scope's fit data (``scope="full"``: **train+validation**, the research run
+trained on train only; ``scope="train_only"``: train only), rebuilds the
 exact deploy closure shared with the runner
 (``nmr.runner._build_deploy_pipeline`` — never a second copy), and publishes
 one immutable slot per promoted run at
-``artifacts/models/<family>/full/<run_id>/`` plus the atomic ``current.json``
-pointer (families.py D2 layout).
+``experiments/<family>/exports/<scope>/<run_id>/`` (spec §6). The record is
+``export.json`` (git-tracked); a ``train_only`` (partial) export additionally
+carries a post-fit cross-check ``scorecard.json`` (spec §7). ``scope="full"``
+repoints the atomic ``current.json`` pointer; ``scope="train_only"`` never
+touches it.
 
-The full-version manifest is families.py-compatible and additionally records
-the promotion verdict block: ``tier4_gate_passed``, ``tier4_receipts``,
-``override_used``, and ``config_normalizations``. A rehearsal artifact is
-byte-indistinguishable from a real promotion: if the run fails the tier-4 gate
-and ``--override-gate`` was used, the artifact's own manifest says
-``tier4_gate_passed: false``. ``override_gate`` covers tier-4 *performance*
-only — never contract *validity* (the (0,1) submission contract is enforced by
-the D5 acceptance path against ``numerai_tools`` on real live data).
+The export record carries the promotion verdict block: ``tier4_gate_passed``,
+``tier4_receipts``, ``override_used``, and ``config_normalizations``. A
+rehearsal artifact is byte-indistinguishable from a real promotion: if the
+run fails the tier-4 gate and ``--override-gate`` was used, the artifact's
+own record says ``tier4_gate_passed: false``. ``override_gate`` covers
+tier-4 *performance* only — never contract *validity* (the (0,1) submission
+contract is enforced by the D5 acceptance path against ``numerai_tools`` on
+real live data).
 """
 
 from __future__ import annotations
@@ -28,29 +32,41 @@ import logging
 import os
 import re
 import shutil
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
+import pandas as pd
 import polars as pl
 
-from nmr import paths
+from nmr import experiment_store, paths
 from nmr._atomicio import atomic_write_text
 from nmr.benchmark import Tier4GateConfig, load_benchmark_file
 from nmr.config import ExperimentConfig, config_from_dict
 from nmr.data import IngestionAgent
-from nmr.families import (
-    CURRENT_POINTER_NAME,
-    DEFAULT_MODELS_DIR,
-    FULL_DIR_NAME,
-    FULL_MANIFEST_NAME,
-    validate_family_name,
-)
+from nmr.deployment import load_predict
+from nmr.families import DEFAULT_MODELS_DIR, validate_family_name
 from nmr.models import ModelOrchestrator
-from nmr.runner import ExperimentRunner, _build_deploy_pipeline, _serialize_predict_artifact
+from nmr.runner import (
+    ExperimentRunner,
+    _build_deploy_pipeline,
+    _predict_in_era_batches,
+    _serialize_predict_artifact,
+)
+from nmr.scorecard import (
+    CROSSCHECK_ALPHA,
+    CROSSCHECK_CLIP,
+    CROSSCHECK_N_BOOT,
+    CROSSCHECK_N_TRIALS,
+    CROSSCHECK_PF,
+    CROSSCHECK_SR0_BENCHMARK,
+    CrossCheckResult,
+    MetricCell,
+    evaluate_cross_check,
+)
 
 logger = logging.getLogger("nmr.promote")
 
@@ -64,6 +80,10 @@ __all__ = [
 
 _RID_RE = re.compile(r"^[0-9a-f]{64}$")
 RAM_ESTIMATE_FILENAME = "full_version_ram_estimate.json"
+_VALID_SCOPES = ("train_only", "full")
+# Eras per validation predict chunk for the partial cross-check (bounds peak
+# RAM; mirrors the runner's _VAL_PREDICT_ERA_BATCH).
+_CROSSCHECK_PREDICT_ERA_BATCH = 40
 # RAM guard derivation (reviewed 2026-08-18): set to the documented WORST CASE
 # the machine has already sustained — the recorded solo full-universe fit peak
 # of ~40-45 GiB commit (AGENTS.md operational hazards; 3,555 features on 2.12M
@@ -103,6 +123,8 @@ class PromotionResult:
     family: str
     tier4_gate_passed: bool
     override_used: bool
+    scope: str
+    cross_check_path: Path | None = None
     measured_peak_bytes: int | None = None
     measured_peak_commit_bytes: int | None = None
 
@@ -231,7 +253,17 @@ def _scan_len(path: Path) -> int:
     return pl.scan_parquet(path).select(pl.len()).collect().item()
 
 
-def _ram_guard(config: ExperimentConfig, models_dir: Path) -> None:
+def _scope_rows(config: ExperimentConfig, scope: str) -> int:
+    """Row count of the SCOPE's fit file(s) — ``train_only`` counts train alone
+    (fit-phase isolation: a train-only guard call never scans validation)."""
+    if scope == "train_only":
+        return _scan_len(config.data.path("train.parquet"))
+    return _scan_len(config.data.path("train.parquet")) + _scan_len(
+        config.data.path("validation.parquet")
+    )
+
+
+def _ram_guard(config: ExperimentConfig, models_dir: Path, *, scope: str) -> None:
     """Enforce the measured dual-metric guard (D7 rehearsal/curve).
 
     Two metrics guard two different failure modes (review directive 2026-08-18):
@@ -241,22 +273,28 @@ def _ram_guard(config: ExperimentConfig, models_dir: Path) -> None:
     | peak commit   | hard allocation failure (OOM)| commit limit (RAM+page) |
     | peak WS       | thrash (1.1 iters/s collapse)| physical RAM            |
 
-    Extrapolation uses the FITTED CURVE (``artifacts/reports/ram_curve.json``,
-    ``peak = a + b*rows`` — intercept + slope from the three measured points),
-    never a through-origin single-point scaling: the curve's intercept captures
-    histograms + fixed overhead, and forcing it through zero inflates the slope
-    by ~40% (measured 2026-08-18). The child terms extrapolate by the fitted
-    line at the CURRENT row count (validation grows weekly); the parent terms
-    are the curve's measured fixed parent medians. Refuses when: combined
-    commit exceeds the ``_RAM_GUARD_BYTES`` ceiling, combined commit exceeds
-    the machine's commit limit, or combined working set approaches physical
-    RAM (``_RAM_WS_FRACTION``). Falls back to the single-point rehearsal
-    estimate (through-origin, logged as a weak extrapolation) only when no
-    curve exists. Missing/incomplete data ⇒ SKIP WITH A WARNING — a guard that
+    Extrapolation uses the FITTED CURVE (``paths.shared_reports_dir(config.run.
+    artifacts_dir)/ram_curve.json``, ``peak = a + b*rows`` — intercept + slope
+    from the three measured points), never a through-origin single-point
+    scaling: the curve's intercept captures histograms + fixed overhead, and
+    forcing it through zero inflates the slope by ~40% (measured 2026-08-18).
+    The child terms extrapolate by the fitted line at the CURRENT row count —
+    the SCOPE's file(s) only (``scope="train_only"`` counts train.parquet
+    alone; fit-phase isolation: a train-only guard call never scans
+    validation.parquet) — and the parent terms are the curve's measured fixed
+    parent medians. Refuses when: combined commit exceeds the
+    ``_RAM_GUARD_BYTES`` ceiling, combined commit exceeds the machine's commit
+    limit, or combined working set approaches physical RAM
+    (``_RAM_WS_FRACTION``). Falls back to the single-point rehearsal estimate
+    (through-origin, logged as a weak extrapolation) only when no curve
+    exists. Missing/incomplete data ⇒ SKIP WITH A WARNING — a guard that
     silently approves on the wrong metric is worse than no guard.
+    ``models_dir`` is retained for call-site compatibility; the report paths
+    now derive from ``config.run.artifacts_dir`` (shared-reports retarget).
     """
-    curve_path = Path(models_dir).parent / "reports" / "ram_curve.json"
-    estimate_path = Path(models_dir).parent / "reports" / RAM_ESTIMATE_FILENAME
+    curve_path = paths.shared_reports_dir(config.run.artifacts_dir) / "ram_curve.json"
+    estimate_path = paths.shared_reports_dir(config.run.artifacts_dir) / RAM_ESTIMATE_FILENAME
+    current_rows = _scope_rows(config, scope)
     if curve_path.is_file():
         try:
             curve = json.loads(curve_path.read_text(encoding="utf-8"))
@@ -279,9 +317,6 @@ def _ram_guard(config: ExperimentConfig, models_dir: Path) -> None:
             )
             curve = None
         if curve is not None:
-            current_rows = _scan_len(config.data.path("train.parquet")) + _scan_len(
-                config.data.path("validation.parquet")
-            )
             child_commit = (
                 (fit_commit["intercept_gib"] + fit_commit["slope_gib_per_row"] * current_rows)
                 * 2**30
@@ -318,9 +353,6 @@ def _ram_guard(config: ExperimentConfig, models_dir: Path) -> None:
                 estimate_path,
             )
             return
-        current_rows = _scan_len(config.data.path("train.parquet")) + _scan_len(
-            config.data.path("validation.parquet")
-        )
         scale = current_rows / max(1, rows)
         combined_commit = (child_commit or 0) * scale + (parent_commit or 0)
         combined_ws = (child_ws or 0) * scale + (parent_ws or 0)
@@ -380,31 +412,43 @@ def _full_history_frame(
     feature_cols: Sequence[str],
     target_cols: Sequence[str],
     orchestrator: ModelOrchestrator,
+    *,
+    scope: str,
 ) -> pl.DataFrame:
-    """Load train+validation with only needed columns.
+    """Load the scope's fit data (train+validation for "full", train only for
+    "train_only") with only needed columns.
 
-    When the fit will spawn a subprocess (medium/full scale), the parent frame
-    stays lightweight (era column only — the child re-reads from disk via the
-    spawn spec); otherwise the full column set is loaded for the in-process
-    fit.
+    Fit-phase isolation (B1-round-3): a ``scope="train_only"`` fit NEVER opens
+    ``validation.parquet`` — this function is the fit phase's only data
+    access, so the isolation holds for both the in-process load and the light
+    scan path. The post-fit cross-check phase (a separate, later phase of the
+    same promotion) legitimately reads validation. When the fit will spawn a
+    subprocess (medium/full scale), the parent frame stays lightweight (era
+    column only — the child re-reads from disk via the spawn spec, whose
+    ``include_validation`` mirrors ``scope``); otherwise the full column set
+    is loaded for the in-process fit.
     """
     cols = ["era", "id", *feature_cols, *target_cols]
     train_path = config.data.path("train.parquet")
     val_path = config.data.path("validation.parquet")
-    for path, name in ((train_path, "train.parquet"), (val_path, "validation.parquet")):
-        if not path.is_file():
-            raise FileNotFoundError(
-                f"full-version training requires {path} ({name} missing)"
-            )
+    if not train_path.is_file():
+        raise FileNotFoundError(
+            f"full-version training requires {train_path} (train.parquet missing)"
+        )
+    include_validation = scope == "full"
+    if include_validation and not val_path.is_file():
+        raise FileNotFoundError(
+            f"full-version training requires {val_path} (validation.parquet missing)"
+        )
     agent = IngestionAgent(config.data)
 
     def _light(extra_cols: Sequence[str]) -> pl.DataFrame:
-        return pl.concat(
-            [
-                pl.scan_parquet(train_path).select(["era", *extra_cols]).collect(),
-                pl.scan_parquet(val_path).select(["era", *extra_cols]).collect(),
-            ]
-        )
+        parts = [pl.scan_parquet(train_path).select(["era", *extra_cols]).collect()]
+        if include_validation:
+            parts.append(
+                pl.scan_parquet(val_path).select(["era", *extra_cols]).collect()
+            )
+        return pl.concat(parts)
 
     if orchestrator._should_spawn_full_history(_light([]), feature_cols):
         # Spawn path: keep the parent frame lightweight (era + target columns
@@ -417,12 +461,10 @@ def _full_history_frame(
             _light([]).height,
         )
         return _light(list(target_cols))
-    return pl.concat(
-        [
-            agent.load("train", columns=cols),
-            agent.load("validation", columns=cols),
-        ]
-    )
+    parts = [agent.load("train", columns=cols)]
+    if include_validation:
+        parts.append(agent.load("validation", columns=cols))
+    return pl.concat(parts)
 
 
 def resolve_champion_run_id(registry_dir: Path) -> str:
@@ -458,26 +500,45 @@ def promote_full_version(
     force: bool = False,
     data_dir: Path | None = None,
     rehearsal: bool = False,
+    scope: Literal["train_only", "full"] = "full",
 ) -> PromotionResult:
-    """Train the full version (train+validation) for ``run_id`` and publish it.
+    """Train the full version for ``run_id`` and publish it to the experiment layout.
+
+    ``scope`` selects the fit data and the export target (spec §6):
+    ``"full"`` trains on train+validation and publishes the immutable slot
+    ``exports/full/<run_id>/`` (repointing ``current.json`` atomically —
+    except for rehearsals); ``"train_only"`` trains on train only and
+    publishes ``exports/partial/<run_id>/`` with a post-fit cross-check
+    ``scorecard.json`` (never touching ``current.json``). The persisted
+    ``training_scope`` is ``"partial"``/``"full"`` — never ``"train_only"``.
 
     Enforces, in order: registry-run existence, the tier-4 promotion gate
-    (refused without ``override_gate``; the verdict is recorded in the
-    manifest either way), supplemental feature-set identity, and the measured
-    RAM guard. Writes the immutable slot ``full/<run_id>/`` and repoints
-    ``current.json`` atomically — **except for rehearsals** (``rehearsal=True``
-    writes the slot with ``rehearsal: true`` + training provenance but never
-    touches ``current.json``, so a rehearsal can never be read as the family's
-    current full version). ``force`` permits overwriting an existing slot /
-    repointing away from an existing current version. ``data_dir`` is the
-    rehearsal override — train/validation are read from this directory
-    instead of the stored config's, and the substitution is recorded in
-    ``config_normalizations``.
+    (refused without ``override_gate``; the verdict is recorded in the record
+    either way), supplemental feature-set identity, and the measured RAM guard
+    (scoped to the fit's rows). The slot is staged under
+    ``exports/<scope>/.tmp-<run_id>/`` (predict.pkl + sibling manifest +
+    export.json, plus scorecard.json for partials) and published by a single
+    atomic directory rename; any failure discards the staging dir — a
+    half-written slot never appears. Exports are immutable: promoting an
+    already-present slot raises ``ValueError`` regardless of ``force``
+    (``force=True`` only gates repointing ``current.json`` at a different
+    existing full slot — never overwrites a slot). ``rehearsal=True`` writes
+    the slot with ``rehearsal: true`` + training provenance but never touches
+    ``current.json``, so a rehearsal can never be read as the family's current
+    full version. ``data_dir`` is the rehearsal override — train/validation
+    are read from this directory instead of the stored config's, and the
+    substitution is recorded in ``config_normalizations``.
     """
+    # models_dir is retained for call-site compatibility (rehearse_promotion /
+    # promote_model.py still pass it); output now lives under the experiment
+    # layout (paths.export_dir), never artifacts/models.
     models_dir = Path(models_dir) if models_dir is not None else DEFAULT_MODELS_DIR
     registry_dir = Path(registry_dir) if registry_dir is not None else (
         DEFAULT_MODELS_DIR.parent / "registry"
     )
+    if scope not in _VALID_SCOPES:
+        raise ValueError(f"scope={scope!r} not in {_VALID_SCOPES}")
+    persisted_scope = "partial" if scope == "train_only" else "full"
     validate_family_name(family)
     payload = _load_registry_run(registry_dir, run_id)
     manifest = payload.get("manifest") or {}
@@ -506,7 +567,7 @@ def promote_full_version(
             f"run {run_id!r} fails the tier-4 promotion gate: "
             + "; ".join(violations)
             + "; pass override_gate=True to promote/rehearse anyway "
-            "(recorded as tier4_gate_passed: false in the manifest)"
+            "(recorded as tier4_gate_passed: false in the record)"
         )
 
     normalized, normalizations = _normalize_stored_config(stored_config)
@@ -522,113 +583,286 @@ def promote_full_version(
         )
     config = config_from_dict(normalized)
     _supplemental_identity_check(config, manifest)
-    _ram_guard(config, models_dir)
+    _ram_guard(config, models_dir, scope=scope)
 
-    full_dir = models_dir / family / FULL_DIR_NAME
-    slot_dir = full_dir / run_id
-    if slot_dir.exists() and not force:
+    slot = paths.export_dir(family, persisted_scope, run_id)
+    if slot.exists():
         raise ValueError(
-            f"slot {slot_dir} already exists; pass force=True to overwrite "
-            "(slots are immutable by design — prefer a new run)"
+            f"export slot {slot} already exists; exports are immutable — "
+            "force=True only gates repointing current.json, never overwrites "
+            "a slot (prefer a new run)"
         )
-    pointer = full_dir / CURRENT_POINTER_NAME
-    if pointer.is_file():
-        try:
-            current = json.loads(pointer.read_text(encoding="utf-8"))
-            current_id = current.get("run_id") if isinstance(current, dict) else None
-        except (json.JSONDecodeError, OSError):
-            current_id = None
-        if current_id != run_id and not force:
+    pointer = paths.current_pointer_path(family)
+    if scope == "full":
+        if pointer.is_file():
+            try:
+                current = json.loads(pointer.read_text(encoding="utf-8"))
+                current_id = current.get("run_id") if isinstance(current, dict) else None
+            except (json.JSONDecodeError, OSError):
+                current_id = None
+            if current_id != run_id and not force:
+                raise ValueError(
+                    f"current.json for family {family!r} points to {current_id!r}; "
+                    "repointing requires force=True"
+                )
+
+    staging = experiment_store.stage_export(family, persisted_scope, run_id)
+    try:
+        feature_cols = list(manifest.get("feature_cols") or [])
+        if not feature_cols:
+            raise ValueError(f"run {run_id!r} manifest has no feature_cols")
+        target_cols = list(config.data.targets)
+        weights = list(manifest.get("weights") or [])
+        if len(weights) != len(target_cols):
             raise ValueError(
-                f"current.json for family {family!r} points to {current_id!r}; "
-                "repointing requires force=True"
+                f"run {run_id!r} weights ({len(weights)}) do not match targets "
+                f"({len(target_cols)})"
+            )
+        proportion = float(config.risk.neutralization_proportion)
+
+        orchestrator = ModelOrchestrator(config.model, seed=config.run.seed)
+        frame = _full_history_frame(
+            config, feature_cols, target_cols, orchestrator, scope=scope
+        )
+        # Training provenance: actual rows + era range the artifact was fit on —
+        # first-class in the record (not buried in normalizations), so a
+        # rehearsal (~68k rows on a truncated window) can never be mistaken for
+        # a genuine full version (6.85M rows, full era range) at a glance.
+        training_rows = frame.height
+        era_series = frame.get_column("era").cast(pl.Int32)
+        training_era_range = [int(era_series.min()), int(era_series.max())]
+        predict_fn, model_meta = _build_deploy_pipeline(
+            orchestrator=orchestrator,
+            train_df=frame,
+            feature_cols=feature_cols,
+            target_cols=target_cols,
+            weights=weights,
+            proportion=proportion,
+            data=config.data,
+            include_validation=(scope == "full"),
+        )
+        del frame
+        artifact_path = staging / "predict.pkl"
+        _serialize_predict_artifact(
+            predict_fn=predict_fn,
+            model_meta=model_meta,
+            artifact_path=artifact_path,
+        )
+
+        promoted_at = datetime.now(UTC).isoformat()
+        export_payload = {
+            "family": family,
+            "training_scope": persisted_scope,
+            "promoted_from_run_id": run_id,
+            "promoted_at": promoted_at,
+            "artifact_path": "predict.pkl",
+            "config": json.loads(
+                json.dumps(dataclasses.asdict(config), default=str)
+            ),
+            "tier4_gate_passed": bool(gate_passed),
+            "tier4_receipts": receipts,
+            "override_used": bool(override_gate),
+            "config_normalizations": normalizations,
+            # First-class rehearsal discriminator + training provenance (review
+            # directive 2026-08-18): an artifact whose record overstates its own
+            # training scope is the one thing we agreed never to ship.
+            "rehearsal": bool(rehearsal),
+            "training_rows": training_rows,
+            "training_era_range": training_era_range,
+        }
+        atomic_write_text(
+            staging / "export.json",
+            json.dumps(export_payload, sort_keys=True, indent=2),
+        )
+
+        cross_check_path: Path | None = None
+        if scope == "train_only":
+            # Post-fit cross-check on the STAGED artifact (hash-verified
+            # load_predict): the exact predict.pkl that will be published.
+            # This phase legitimately opens validation.parquet — fit-phase
+            # isolation applies to the fit only.
+            cross_check, window_eras = _run_cross_check(
+                load_predict(artifact_path),
+                config=config,
+                feature_cols=feature_cols,
+                target_cols=list(
+                    dict.fromkeys([*target_cols, config.evaluation.main_target])
+                ),
+            )
+            cross_check_path = staging / "scorecard.json"
+            atomic_write_text(
+                cross_check_path,
+                json.dumps(
+                    _cross_check_payload(
+                        cross_check,
+                        run_id=run_id,
+                        family=family,
+                        scored_eras=window_eras,
+                    ),
+                    sort_keys=True,
+                    indent=2,
+                ),
             )
 
-    slot_dir.mkdir(parents=True, exist_ok=True)
-    feature_cols = list(manifest.get("feature_cols") or [])
-    if not feature_cols:
-        raise ValueError(f"run {run_id!r} manifest has no feature_cols")
-    target_cols = list(config.data.targets)
-    weights = list(manifest.get("weights") or [])
-    if len(weights) != len(target_cols):
-        raise ValueError(
-            f"run {run_id!r} weights ({len(weights)}) do not match targets "
-            f"({len(target_cols)})"
+        slot = experiment_store.publish_staged_export(family, persisted_scope, run_id)
+        if scope == "train_only":
+            # The staging dir was renamed into the final slot — report the
+            # published scorecard path (the staging path no longer exists).
+            cross_check_path = slot / "scorecard.json"
+    except Exception:
+        experiment_store.discard_staged_export(family, persisted_scope, run_id)
+        logger.error(
+            "[promote] promotion for %s (%s scope) FAILED; staged export discarded",
+            run_id,
+            persisted_scope,
         )
-    proportion = float(config.risk.neutralization_proportion)
+        raise
 
-    orchestrator = ModelOrchestrator(config.model, seed=config.run.seed)
-    frame = _full_history_frame(config, feature_cols, target_cols, orchestrator)
-    # Training provenance: actual rows + era range the artifact was fit on —
-    # first-class in the manifest (not buried in normalizations), so a
-    # rehearsal (~68k rows on a truncated window) can never be mistaken for a
-    # genuine full version (6.85M rows, full era range) at a glance.
-    training_rows = frame.height
-    era_series = frame.get_column("era").cast(pl.Int32)
-    training_era_range = [int(era_series.min()), int(era_series.max())]
-    predict_fn, model_meta = _build_deploy_pipeline(
-        orchestrator=orchestrator,
-        train_df=frame,
-        feature_cols=feature_cols,
-        target_cols=target_cols,
-        weights=weights,
-        proportion=proportion,
-        data=config.data,
-    )
-    del frame
-    artifact_path = slot_dir / "predict.pkl"
-    _serialize_predict_artifact(
-        predict_fn=predict_fn,
-        model_meta=model_meta,
-        artifact_path=artifact_path,
-    )
-
-    promoted_at = datetime.now(UTC).isoformat()
-    slot_manifest = {
-        "family": family,
-        "training_scope": "full",
-        "promoted_from_run_id": run_id,
-        "promoted_at": promoted_at,
-        "artifact_path": "predict.pkl",
-        "config": json.loads(
-            json.dumps(dataclasses.asdict(config), default=str)
-        ),
-        "tier4_gate_passed": bool(gate_passed),
-        "tier4_receipts": receipts,
-        "override_used": bool(override_gate),
-        "config_normalizations": normalizations,
-        # First-class rehearsal discriminator + training provenance (review
-        # directive 2026-08-18): an artifact whose manifest overstates its own
-        # training scope is the one thing we agreed never to ship.
-        "rehearsal": bool(rehearsal),
-        "training_rows": training_rows,
-        "training_era_range": training_era_range,
-    }
-    manifest_path = slot_dir / FULL_MANIFEST_NAME
-    atomic_write_text(manifest_path, json.dumps(slot_manifest, sort_keys=True, indent=2))
-    if not rehearsal:
+    if scope == "full" and not rehearsal:
         atomic_write_text(
             pointer,
             json.dumps({"run_id": run_id, "promoted_at": promoted_at}, sort_keys=True),
         )
     logger.info(
-        "[promote] %s published: %s (gate_passed=%s, override=%s, rows=%d)",
-        "rehearsal" if rehearsal else "full version",
-        artifact_path,
+        "[promote] %s published: %s (scope=%s, gate_passed=%s, override=%s, rows=%d)",
+        "rehearsal" if rehearsal else "promotion",
+        slot / "predict.pkl",
+        persisted_scope,
         gate_passed,
         override_gate,
         training_rows,
     )
     return PromotionResult(
-        artifact_path=artifact_path,
-        manifest_path=manifest_path,
+        artifact_path=slot / "predict.pkl",
+        manifest_path=slot / "export.json",
         run_id=run_id,
         family=family,
         tier4_gate_passed=bool(gate_passed),
         override_used=bool(override_gate),
+        scope=scope,
+        cross_check_path=cross_check_path,
         measured_peak_bytes=orchestrator.last_full_history_peak_bytes,
         measured_peak_commit_bytes=orchestrator.last_full_history_peak_commit_bytes,
     )
+
+
+def _run_cross_check(
+    predict_fn: Callable[[pd.DataFrame], pd.DataFrame],
+    *,
+    config: ExperimentConfig,
+    feature_cols: Sequence[str],
+    target_cols: Sequence[str],
+) -> tuple[CrossCheckResult, list[str]]:
+    """Score the staged partial artifact on validation eras (post-fit phase).
+
+    Generates the artifact's own validation predictions (era-batched, the
+    shared ``_predict_in_era_batches`` computation path) and evaluates them
+    with ``evaluate_cross_check`` (official backend, fixed replay constants;
+    no benchmarks). Returns ``(result, window_eras)`` — the exact ordered
+    scored era list for the persisted ``window`` record. This phase
+    legitimately reads ``validation.parquet`` and ``meta_model.parquet``:
+    fit-phase isolation applies to the fit (``_full_history_frame``) only.
+    """
+    data = config.data
+    val_path = data.path("validation.parquet")
+    if not val_path.is_file():
+        raise FileNotFoundError(
+            f"train_only promotion cross-check requires {val_path} "
+            "(validation.parquet missing)"
+        )
+    meta_path = data.path("meta_model.parquet")
+    if not meta_path.is_file():
+        raise FileNotFoundError(
+            f"train_only promotion cross-check requires {meta_path} "
+            "(meta_model.parquet missing; MMC is mandatory)"
+        )
+    agent = IngestionAgent(data)
+    val_df = agent.load(
+        "validation", columns=["era", "id", *feature_cols, *target_cols]
+    )
+    purge = config.split.purge_eras
+    if purge > 0:
+        # Same window rule as the runner's validation stage: the first
+        # purge_eras validation eras overlap the last train eras' targets.
+        all_eras = sorted({int(e) for e in val_df.get_column("era").unique().to_list()})
+        val_df = val_df.filter(pl.col("era").cast(pl.Int32).is_in(all_eras[purge:]))
+        logger.info(
+            "[promote] cross-check dropping first %d validation eras "
+            "(20D-target overlap); %d eras scored",
+            purge,
+            val_df.select(pl.col("era").n_unique()).item(),
+        )
+    meta_model = pl.read_parquet(meta_path).select(["era", "id", "numerai_meta_model"])
+    preds = _predict_in_era_batches(
+        val_df, feature_cols, predict_fn, _CROSSCHECK_PREDICT_ERA_BATCH
+    )
+    window_eras = list(dict.fromkeys(str(e) for e in preds.get_column("era").to_list()))
+    result = evaluate_cross_check(
+        preds,
+        meta_model=meta_model,
+        features=val_df.select(["era", "id", *feature_cols]),
+        targets=val_df.select(["era", "id", *target_cols]),
+        horizon=config.data.horizon,
+        main_target=config.evaluation.main_target,
+        seed=config.run.seed,
+    )
+    return result, window_eras
+
+
+def _cross_check_payload(
+    result: CrossCheckResult,
+    *,
+    run_id: str,
+    family: str,
+    scored_eras: Sequence[str],
+) -> dict[str, Any]:
+    """Serialize the cross-check into the versioned scorecard.json record
+    (spec §7): window, MetricScorecard shapes, raw Sharpe, the fixed replay
+    record, and labeled per-era series. ``generated_at`` is display metadata —
+    excluded from any canonical comparison (timing-strip discipline)."""
+
+    def _cell(cell: MetricCell) -> dict[str, Any]:
+        return {
+            "value": float(cell.value),
+            "ci_low": None if cell.ci_low is None else float(cell.ci_low),
+            "ci_high": None if cell.ci_high is None else float(cell.ci_high),
+            "n_eras": int(cell.n_eras),
+        }
+
+    sc = result.scorecard
+    return {
+        "schema_version": 3,
+        "run_id": run_id,
+        "family": family,
+        "scope": "partial",
+        "window": {
+            "first_era": scored_eras[0],
+            "last_era": scored_eras[-1],
+            "eras": list(scored_eras),
+        },
+        "scorecard": {
+            "corr": _cell(sc.corr),
+            "mmc": _cell(sc.mmc),
+            "corr_sharpe_ac": _cell(sc.corr_sharpe_ac),
+            "fnc": float(sc.fnc),
+            "n_eras": int(sc.n_eras),
+            "deflated_sharpe": float(sc.deflated_sharpe),
+            "max_drawdown": float(sc.max_drawdown),
+            "burn_rate": float(sc.burn_rate),
+        },
+        "raw_sharpe": float(result.raw_sharpe),
+        "replay": {
+            "n_trials": CROSSCHECK_N_TRIALS,
+            "n_boot": CROSSCHECK_N_BOOT,
+            "alpha": CROSSCHECK_ALPHA,
+            "pf": CROSSCHECK_PF,
+            "clip": CROSSCHECK_CLIP,
+            "sr0_benchmark": CROSSCHECK_SR0_BENCHMARK,
+            "backend": "official",
+        },
+        "per_era": result.per_era,
+        "generated_at": datetime.now(UTC).isoformat(),
+    }
 
 
 def _build_truncated_data(
@@ -733,7 +967,9 @@ def measure_full_history_peak(
     normalized["data"]["data_dir"] = str(Path(data_dir))
     config = config_from_dict(normalized)
     orchestrator = ModelOrchestrator(config.model, seed=seed)
-    frame = _full_history_frame(config, feature_cols, target_cols, orchestrator)
+    frame = _full_history_frame(
+        config, feature_cols, target_cols, orchestrator, scope="full"
+    )
     rows = frame.height
     orchestrator.train_full_history(
         frame,
@@ -775,10 +1011,11 @@ def rehearse_promotion(
     ``NMR_FULL_HISTORY_SPAWN_MIN_BYTES``, promotes with ``override_gate=True``
     (the leading family fails tier-4 by design), measures the worker's peak
     RSS, extrapolates full-scale RAM into
-    ``artifacts/reports/full_version_ram_estimate.json`` (the promotion RAM
-    guard reads it), and validates the artifact's RAW contract output against
-    the official validator on the real local ``live.parquet`` — the Phase D
-    acceptance criterion (decision 10), which is NOT overridable.
+    ``paths.shared_reports_dir(config.run.artifacts_dir)/full_version_ram_estimate.json``
+    (the promotion RAM guard reads it), and validates the artifact's RAW
+    contract output against the official validator on the real local
+    ``live.parquet`` — the Phase D acceptance criterion (decision 10), which
+    is NOT overridable.
     """
     models_dir = Path(models_dir) if models_dir is not None else DEFAULT_MODELS_DIR
     registry_dir = Path(registry_dir) if registry_dir is not None else (
@@ -814,7 +1051,8 @@ def rehearse_promotion(
             registry_dir=registry_dir,
             override_gate=True,
             data_dir=rehearsal_root,
-            force=True,  # rehearsal regenerates its scratch slot on re-runs
+            force=True,  # repoints/repairs current.json; a rehearsal slot is
+            # immutable like any export (re-rehearsing the same run_id raises)
             rehearsal=True,
         )
     finally:
@@ -827,12 +1065,20 @@ def rehearse_promotion(
     # not repoint current.json, and any stale pointer is removed (review
     # directive 2026-08-18 — an artifact trained on the truncated subset must
     # not be readable as the deployed full version at a glance).
-    pointer = Path(models_dir) / family / FULL_DIR_NAME / CURRENT_POINTER_NAME
+    pointer = paths.current_pointer_path(family)
     if pointer.exists():
         pointer.unlink()
         logger.info("[rehearse] removed stale current.json pointer (rehearsal is not a full version)")
 
-    estimate_path = Path(models_dir).parent / "reports" / RAM_ESTIMATE_FILENAME
+    # The RAM estimate must land where the promotion guard reads it
+    # (paths.shared_reports_dir(config.run.artifacts_dir) — shared-reports
+    # retarget, Task 8).
+    normalized, _ = _normalize_stored_config(stored_config)
+    estimate_config = config_from_dict(normalized)
+    estimate_path = (
+        paths.shared_reports_dir(estimate_config.run.artifacts_dir)
+        / RAM_ESTIMATE_FILENAME
+    )
     estimate_path.parent.mkdir(parents=True, exist_ok=True)
     from nmr.models import _peak_memory_counters
 
