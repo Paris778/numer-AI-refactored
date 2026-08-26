@@ -436,6 +436,19 @@ The browser renderer is pointer-driven across all chart surfaces: mouse hover an
 
 **Standardized window & regeneration rule:** all dashboard rows (trained runs and benchmark tiers) are compared on the **meta-overlap window** = `validation.parquet ∩ meta_model.parquet` — currently eras `1133..1218` (86 eras); it is meta coverage, not an arbitrary choice. `meta_model.parquet` (v5.3) only exists from era 1133 onward, and the window moves forward as the local data snapshot is refreshed (`refresh_data.py` + `nmr/refresh.py`; the live file expands weekly). **After every data refresh, regenerate the report** (`./.venv/Scripts/python generate_dashboard.py`) — a stale `artifacts/dashboard.html` would compare rows on a window that no longer matches the refreshed data. The capital-cell recompute derives its era axis from the same meta overlap at generation time.
 
+### X. Experiment Path Derivation — `nmr/paths.py`
+
+Pure path derivation for the experiment layout: the single place that knows
+where anything lives under `experiments/` (repo root) and the shared machine
+cache. No other module hardcodes the `experiments` / `artifacts` strings.
+Consumes `nmr/config.py` (`REPO_ROOT`) only; reads/writes nothing and never
+enters a canonical hash (the shared helpers take a config-provided
+`artifacts_dir` override). API: `EXPERIMENTS_ROOT`, `SLUG_RE` /
+`validate_slug` (lowercase `^[a-z0-9_-]+$` family slugs), `experiment_dir`,
+`run_dir`, `run_json_path`, `export_dir` (scope ∈ `partial`/`full`),
+`export_json_path`, `current_pointer_path`, `champion_path`,
+`shared_cache_dir`, `shared_reports_dir`.
+
 ---
 
 ## Model Families & Full Versions (nmr/families.py)
@@ -504,6 +517,7 @@ features.py   (leaf — stdlib/NumPy/Polars only)
 data.py      ──> config (DataConfig)
 splitter.py  ──> config (SplitConfig)
 families.py  ──> config (REPO_ROOT)
+paths.py     ──> config (REPO_ROOT)
 evaluation.py──> _transforms (power_1_5, rank_gaussianize)
 ensemble.py  ──> _transforms (rank_gaussianize, rank_gaussianize_unit_variance)
 payout.py    ──> inference
