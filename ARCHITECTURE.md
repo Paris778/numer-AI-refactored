@@ -431,9 +431,9 @@ Long-running paths print console progress that never enters artifacts: `analyze_
 
 ### W. Executive Dashboard Engine — `nmr/dashboard.py` + `dashboard_ui/`
 
-`nmr/dashboard.py` — Model Tournament engine — unified leaderboard, explicit metric directions with default `mmc` ranking, source/tier-derived cohorts, deterministic rank maps, ML ADVANTAGE comparisons, compact immutable model dossiers, tier-4 gate projection, stored-first capital recompute, 7-metric multimetric timeseries, and pairwise rank-gaussian similarity. `UNIFIED_SCHEMA` is unchanged. `dashboard_ui/charts.py` provides tested SVG geometry plus compact columnar payload encoding; `dashboard_ui/static/{layout.html,app.js,style.css}` is the single leaderboard-first renderer for search, rank switching, cohort filters, shortcuts, landscape/profile charts, and the model dossier drawer. `dashboard_ui/report.py` compiles the deterministic single-file HTML using generated `app.min.js` and `style.min.css`; `dashboard_ui/app.py` embeds the same HTML with `st.components.v1.html`. The report is explicitly offline evaluation and contains no live or production performance. Presentation tests live in `tests/test_dashboard_ui.py`.
+`nmr/dashboard.py` — Model Tournament engine — unified leaderboard, explicit metric directions with default `mmc` ranking, source/tier-derived cohorts, deterministic rank maps, ML ADVANTAGE comparisons, compact immutable model dossiers, tier-4 gate projection, stored-first capital recompute, 7-metric multimetric timeseries, and pairwise rank-gaussian similarity. `UNIFIED_SCHEMA` carries the family lifecycle facts (`display_name`, `lifecycle_stage`, `current_full_status`, `stale` — spec §8). `dashboard_ui/charts.py` provides tested SVG geometry plus compact columnar payload encoding; `dashboard_ui/static/{layout.html,app.js,style.css}` is the single leaderboard-first renderer for search, rank switching, cohort filters, shortcuts, landscape/profile charts, and the model dossier drawer. `dashboard_ui/report.py` compiles the deterministic single-file HTML using generated `app.min.js` and `style.min.css`; `dashboard_ui/app.py` embeds the same HTML with `st.components.v1.html`. The report is explicitly offline evaluation and contains no live or production performance. Presentation tests live in `tests/test_dashboard_ui.py`.
 
-Dashboard cohorts are presentation-derived, not a new registry field: trained rows are `source in {trained, trained_legacy}`; heuristic rows are benchmark tiers 0–2 (null, Ridge, and shallow trees); benchmark rows are tiers 3–4 (canonical/community and official references); and `source == full` rows are lineage-only with null comparable metrics. Every rank metric declares whether higher or lower is better; nulls sort last and ties use `model_id`. The ML ADVANTAGE strip compares the best trained row with the best available heuristic and benchmark rows on the active metric. RAPS and win-rate are not active scorecard fields and are omitted rather than inferred.
+Dashboard cohorts are presentation-derived, not a new registry field: trained rows are `source in {trained, trained_legacy}`; heuristic rows are benchmark tiers 0–2 (null, Ridge, and shallow trees); benchmark rows are tiers 3–4 (canonical/community and official references); and `source in {full, partial}` rows are diagnostic-only with null comparable metrics — never ranked (full = in-sample, partial = train-only cross-check). Every rank metric declares whether higher or lower is better; nulls sort last and ties use `model_id`. The ML ADVANTAGE strip compares the best trained row with the best available heuristic and benchmark rows on the active metric. RAPS and win-rate are not active scorecard fields and are omitted rather than inferred.
 
 The browser renderer is pointer-driven across all chart surfaces: mouse hover and touch `pointermove`/`pointerdown` events show a local contextual tooltip, with a crosshair on the era chart. The alpha trajectory includes a dynamic title, y-axis metric ticks, x-axis era ticks, and explicit `Evaluation era` labeling. Benchmark rows receive a distinct visual background/stripe, and the first three trained rows in the active ranking receive gold, silver, and bronze `(1)`, `(2)`, and `(3)` medal markers while retaining their true leaderboard ranks.
 
@@ -533,15 +533,16 @@ constants `FAMILY_DIR_NAME` / `FULL_DIR_NAME` / `FULL_MANIFEST_NAME` /
 compat).
 
 Leaderboard integration (`nmr/dashboard.py`): `UNIFIED_SCHEMA` carries
-`family`, `training_scope` (`"research"` / `"full"`), `has_full_version`.
-`load_unified_leaderboard` scans full exports ONCE (via
-`nmr.families.scan_full_versions`), stamps trained rows
-via set membership, and appends one `source="full"` row per valid manifest
-(`model_id = "<family>::full"`, all metric cells null — in-sample metrics are
-never shown as comparable OOF numbers). `evaluate_gate_status` stamps full
-rows `FULL` (all gate receipts null). `EVALUABLE_ROWS = pl.col("source") != "full"`
-is the single chart-inclusion predicate (source-based so benchmark rows with
-null `training_scope` remain visible).
+`family`, `training_scope` (`"research"` / `"full"` / `"partial"`),
+`has_full_version`, `display_name`, `lifecycle_stage`, `current_full_status`,
+`stale`. `load_unified_leaderboard` is the Task-10 bridge: run records come
+from the legacy registry AND `experiments/<family>/runs/<run_id>/run.json`;
+exports come from `nmr.lifecycle.scan_valid_exports` — one row per VALID slot
+(`model_id = "<family>::<scope>::<run_id>"`, all metric cells null; dangling
+lineage warns but still renders). `evaluate_gate_status` stamps full rows
+`FULL` and partial rows `PARTIAL` (never gated). `EVALUABLE_ROWS =
+pl.col("source").is_in(["trained", "trained_legacy"])` is the single
+chart-inclusion predicate — full + partial rows are diagnostic-only.
 
 ---
 
@@ -584,7 +585,7 @@ benchmark_fleet.py ──> benchmark, ensemble, features, models, risk, scorecar
 meta.py      ──> analysis, config, data, evaluation, features, inference
 runner.py    ──> _oof, _transforms, config, data, deployment, ensemble, evaluation, models, risk, scorecard, splitter
 registry.py  ──> _atomicio, experiment_store, paths, runner (RunResult)
-dashboard.py ──> benchmark, config, ensemble, evaluation, families, payout, scorecard
+dashboard.py ──> benchmark, config, ensemble, evaluation, lifecycle, paths, payout, scorecard
 explainers.py ──> dashboard_ui.service (read-only dynamic model labels)
 scenarios.py  ──> payout, evaluation (allocation scenario research helpers)
 promote.py   ──> _atomicio, benchmark, config, data, deployment, experiment_store, families, models, paths, runner, scorecard, submission

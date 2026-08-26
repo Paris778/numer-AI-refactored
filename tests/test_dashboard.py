@@ -10,10 +10,11 @@ import pytest
 
 import nmr.dashboard as dash
 import nmr.evaluation as nmr_evaluation
-import nmr.families as fam
 import nmr.payout as payout
 from dashboard_ui import report as generate_dashboard
+from nmr import lifecycle, paths
 from nmr.config import REPO_ROOT
+from nmr.deployment import serialize_predict
 from nmr.payout import annual_compounded_return
 
 
@@ -1070,35 +1071,34 @@ def test_unified_schema_has_family_columns() -> None:
         assert col in dash.UNIFIED_SCHEMA.names()
 
 
-def _write_models_dir(tmp_path: Path, families: dict[str, dict]) -> Path:
-    """families: {family: manifest-dict}; a predict.pkl artifact is auto-created.
+def _write_export_slot(
+    root: Path,
+    family: str,
+    scope: str,
+    run_id: str,
+    *,
+    config: dict | None = None,
+) -> Path:
+    """Write a VALID export slot at ``root/<family>/exports/<scope>/<run_id>``.
 
-    Writes the versioned D2 layout: ``full/<run_id>/predict.pkl`` +
-    ``manifest.json``, plus the atomic ``current.json`` pointer.
+    Validity (``lifecycle.valid_export``): export.json identity binding plus a
+    hash-verified loadable predict.pkl — ``serialize_predict`` writes the
+    sha256 sibling manifest so the loadability predicate holds.
     """
-    models = tmp_path / "models"
-    for family, manifest in families.items():
-        run_id = manifest.get("promoted_from_run_id") or "a" * 64
-        full = models / family / "full"
-        slot = full / run_id
-        slot.mkdir(parents=True)
-        (slot / "predict.pkl").write_text("weights", encoding="utf-8")
-        (slot / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
-        (full / fam.CURRENT_POINTER_NAME).write_text(
-            json.dumps({"run_id": run_id, "promoted_at": "2026-08-17T12:00:00Z"}),
-            encoding="utf-8",
-        )
-    return models
+    slot = root / family / "exports" / scope / run_id
+    slot.mkdir(parents=True, exist_ok=True)
 
+    def dummy_predict(live_features, live_benchmark_models=None):
+        return live_features
 
-def _full_manifest_dict(family: str, run_id: str) -> dict:
-    return {
+    serialize_predict(dummy_predict, path=slot / "predict.pkl", feature_names=["f1"])
+    payload = {
         "family": family,
-        "training_scope": "full",
+        "training_scope": scope,
         "promoted_from_run_id": run_id,
         "promoted_at": "2026-08-17T12:00:00Z",
-        "artifact_path": "predict.pkl",
-        "config": {
+        "config": config
+        or {
             "run": {"name": family},
             "data": {
                 "feature_set": "all",
@@ -1108,24 +1108,79 @@ def _full_manifest_dict(family: str, run_id: str) -> dict:
             "model": {"backend": "xgboost", "preset": "fast"},
         },
     }
+    (slot / "export.json").write_text(json.dumps(payload), encoding="utf-8")
+    if scope == "partial":
+        (slot / "scorecard.json").write_text(
+            json.dumps({"schema_version": 3}), encoding="utf-8"
+        )
+    return slot
 
 
-def test_load_unified_leaderboard_family_columns_and_full_rows(tmp_path: Path) -> None:
+def _write_family_meta(
+    root: Path,
+    family: str,
+    *,
+    display_name: str | None = None,
+    staked: dict | None = None,
+) -> None:
+    meta = root / family / "meta.json"
+    meta.parent.mkdir(parents=True, exist_ok=True)
+    meta.write_text(
+        json.dumps({"display_name": display_name or family, "staked": staked}),
+        encoding="utf-8",
+    )
+
+
+def _write_current_pointer(root: Path, family: str, run_id: str) -> None:
+    pointer = root / family / "exports" / "full" / "current.json"
+    pointer.parent.mkdir(parents=True, exist_ok=True)
+    pointer.write_text(
+        json.dumps({"run_id": run_id, "promoted_at": "2026-08-17T12:00:00Z"}),
+        encoding="utf-8",
+    )
+
+
+def _write_experiments_run(root: Path, family: str, entry: dict) -> None:
+    run_dir = root / family / "runs" / entry["run_id"]
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "run.json").write_text(json.dumps(entry), encoding="utf-8")
+
+
+def _full_export_config(family: str) -> dict:
+    return {
+        "run": {"name": family},
+        "data": {
+            "feature_set": "all",
+            "feature_subset": "medium",
+            "targets": ["target"],
+        },
+        "model": {"backend": "xgboost", "preset": "fast"},
+    }
+
+
+def test_load_unified_leaderboard_family_columns_and_full_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = tmp_path / "registry"
+    experiments = tmp_path / "experiments"
+    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", experiments)
     entry = _registry_entry("a" * 64)
     entry["manifest"]["config"]["run"]["name"] = "brb1-xgb-v6"
-    _write_registry(tmp_path, [entry])
-    models = _write_models_dir(
-        tmp_path, {"brb1-xgb-v6": _full_manifest_dict("brb1-xgb-v6", "a" * 64)}
-    )
-    frame = dash.load_unified_leaderboard(
-        tmp_path, benchmark_path=False, models_dir=models
-    )
+    _write_registry(registry, [entry])
+    _write_family_meta(experiments, "brb1-xgb-v6", display_name="Brb1 XGB v6")
+    _write_export_slot(experiments, "brb1-xgb-v6", "full", "a" * 64)
+    _write_current_pointer(experiments, "brb1-xgb-v6", "a" * 64)
+    frame = dash.load_unified_leaderboard(registry, benchmark_path=False)
     rows = {r["model_id"]: r for r in frame.to_dicts()}
     trained = rows["a" * 64]
     assert trained["family"] == "brb1-xgb-v6"
     assert trained["training_scope"] == "research"
     assert trained["has_full_version"] is True
-    full = rows["brb1-xgb-v6::full"]
+    assert trained["display_name"] == "Brb1 XGB v6"
+    assert trained["lifecycle_stage"] == "full"
+    assert trained["current_full_status"] == "full"
+    full_id = "brb1-xgb-v6::full::" + "a" * 64
+    full = rows[full_id]
     assert full["source"] == "full"
     assert full["run_name"] == "brb1-xgb-v6"
     assert full["training_scope"] == "full"
@@ -1134,26 +1189,37 @@ def test_load_unified_leaderboard_family_columns_and_full_rows(tmp_path: Path) -
     assert full["corr_sharpe_ac"] is None
     assert full["backend"] == "xgboost"
     assert full["feature_subset"] == "medium"
-    # D2 versioned layout: the full row's run_dir is the immutable slot dir.
-    assert full["run_dir"] == str(models / "brb1-xgb-v6" / "full" / ("a" * 64))
+    assert full["display_name"] == "Brb1 XGB v6"
+    # experiment layout: the full row's run_dir is the immutable export slot.
+    assert full["run_dir"] == str(
+        experiments / "brb1-xgb-v6" / "exports" / "full" / ("a" * 64)
+    )
 
 
 def test_load_unified_leaderboard_scan_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _write_registry(tmp_path, [_registry_entry("a" * 64), _registry_entry("b" * 64)])
-    calls = {"n": 0}
-    real_scan = dash.scan_full_versions
+    registry = tmp_path / "registry"
+    experiments = tmp_path / "experiments"
+    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", experiments)
+    _write_registry(registry, [_registry_entry("a" * 64)])
+    _write_family_meta(experiments, "sample-run")
+    _write_export_slot(experiments, "sample-run", "full", "a" * 64)
+    _write_export_slot(experiments, "sample-run", "full", "b" * 64)
+    _write_export_slot(experiments, "sample-run", "partial", "a" * 64)
+    calls: list[tuple[str, str]] = []
+    real_scan = dash.lifecycle.scan_valid_exports
 
-    def counting_scan(models_dir: Path) -> dict:
-        calls["n"] += 1
-        return real_scan(models_dir)
+    def counting_scan(family: str, scope: str):
+        calls.append((family, scope))
+        return real_scan(family, scope)
 
-    monkeypatch.setattr(dash, "scan_full_versions", counting_scan)
-    dash.load_unified_leaderboard(
-        tmp_path, benchmark_path=False, models_dir=tmp_path / "models"
-    )
-    assert calls["n"] == 1
+    monkeypatch.setattr(dash.lifecycle, "scan_valid_exports", counting_scan)
+    dash.load_unified_leaderboard(registry, benchmark_path=False, models_dir=experiments)
+    # Per (family, scope) the dashboard scans once; lifecycle internals
+    # (current_full_status / derive_stage) add one more each — never per slot.
+    assert calls.count(("sample-run", "full")) == 2
+    assert calls.count(("sample-run", "partial")) == 2
 
 
 def test_load_unified_leaderboard_missing_models_dir(tmp_path: Path) -> None:
@@ -1166,20 +1232,212 @@ def test_load_unified_leaderboard_missing_models_dir(tmp_path: Path) -> None:
 
 
 def test_load_unified_leaderboard_dangling_lineage_warns(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _write_registry(tmp_path, [_registry_entry("a" * 64)])
-    models = _write_models_dir(
-        tmp_path,
-        {"orphan-family": _full_manifest_dict("orphan-family", "f" * 64)},
-    )
+    registry = tmp_path / "registry"
+    experiments = tmp_path / "experiments"
+    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", experiments)
+    _write_registry(registry, [_registry_entry("a" * 64)])
+    _write_family_meta(experiments, "orphan-family")
+    _write_export_slot(experiments, "orphan-family", "full", "f" * 64)
     with caplog.at_level(logging.WARNING, logger="nmr.dashboard"):
-        frame = dash.load_unified_leaderboard(
-            tmp_path, benchmark_path=False, models_dir=models
-        )
+        frame = dash.load_unified_leaderboard(registry, benchmark_path=False)
     assert "orphan-family" in caplog.text  # dangling lineage warned
     rows = {r["model_id"]: r for r in frame.to_dicts()}
-    assert "orphan-family::full" in rows  # still rendered
+    assert "orphan-family::full::" + "f" * 64 in rows  # still rendered
+    assert rows["orphan-family::full::" + "f" * 64]["lifecycle_stage"] == "degraded"
+
+
+def test_unified_schema_has_lifecycle_columns() -> None:
+    for col in ("display_name", "lifecycle_stage", "current_full_status", "stale"):
+        assert col in dash.UNIFIED_SCHEMA.names()
+
+
+def test_load_unified_leaderboard_reads_experiments_run_records(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = tmp_path / "registry"
+    experiments = tmp_path / "experiments"
+    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", experiments)
+    entry = _registry_entry("c" * 64)
+    entry["manifest"]["config"]["run"]["name"] = "fam-exp"
+    _write_experiments_run(experiments, "fam-exp", entry)
+    frame = dash.load_unified_leaderboard(
+        registry, benchmark_path=False, models_dir=experiments
+    )
+    rows = {r["model_id"]: r for r in frame.to_dicts()}
+    assert "c" * 64 in rows
+    assert rows["c" * 64]["source"] == "trained"
+    assert rows["c" * 64]["family"] == "fam-exp"
+    assert rows["c" * 64]["run_dir"] == str(
+        experiments / "fam-exp" / "runs" / ("c" * 64)
+    )
+    assert rows["c" * 64]["lifecycle_stage"] == "research"
+
+
+def test_load_unified_leaderboard_full_row_export_version_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Landmine regression guard: full rows read ExportVersion fields
+    (run_id / slot_dir), never the removed promoted_from_run_id / manifest_path."""
+    registry = tmp_path / "registry"
+    experiments = tmp_path / "experiments"
+    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", experiments)
+    _write_registry(registry, [_registry_entry("a" * 64)])
+    _write_family_meta(experiments, "sample-run")
+    _write_export_slot(experiments, "sample-run", "full", "a" * 64)
+    _write_current_pointer(experiments, "sample-run", "a" * 64)
+    frame = dash.load_unified_leaderboard(registry, benchmark_path=False)
+    full_id = "sample-run::full::" + "a" * 64
+    full = {r["model_id"]: r for r in frame.to_dicts()}[full_id]
+    assert full["run_dir"] == str(experiments / "sample-run" / "exports" / "full" / ("a" * 64))
+    assert full["feature_set"] == "all"
+    assert full["n_targets"] == 1
+    assert full["targets"] == "target"
+
+
+def test_load_unified_leaderboard_partial_rows_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = tmp_path / "registry"
+    experiments = tmp_path / "experiments"
+    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", experiments)
+    _write_registry(registry, [_registry_entry("a" * 64)])
+    _write_family_meta(experiments, "sample-run")
+    _write_export_slot(experiments, "sample-run", "partial", "a" * 64)
+    frame = dash.load_unified_leaderboard(
+        registry, benchmark_path=False, models_dir=experiments
+    )
+    rows = {r["model_id"]: r for r in frame.to_dicts()}
+    partial = rows["sample-run::partial::" + "a" * 64]
+    assert partial["source"] == "partial"
+    assert partial["training_scope"] == "partial"
+    assert partial["corr"] is None
+    assert partial["lifecycle_stage"] == "partial"
+    assert dash.dashboard_cohort(partial) == "partial"
+
+
+def test_partial_rows_not_evaluable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = tmp_path / "registry"
+    experiments = tmp_path / "experiments"
+    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", experiments)
+    entry = _registry_entry("a" * 64)
+    entry["scorecard"]["mmc"] = 0.2
+    _write_registry(registry, [entry])
+    _write_family_meta(experiments, "sample-run")
+    _write_export_slot(experiments, "sample-run", "full", "a" * 64)
+    _write_export_slot(experiments, "sample-run", "partial", "a" * 64)
+    frame = dash.load_unified_leaderboard(
+        registry, benchmark_path=False, models_dir=experiments
+    )
+    ranked = frame.filter(dash.EVALUABLE_ROWS)
+    ids = ranked.get_column("model_id").to_list()
+    assert "a" * 64 in ids
+    assert not any("::partial::" in mid for mid in ids)
+    assert not any("::full::" in mid for mid in ids)
+    # rank_leaderboard renders diagnostic rows unranked (rank None) — the
+    # evaluable path never gives them a rank
+    ranked = dash.rank_leaderboard(frame)
+    ranked_by_id = {r["model_id"]: r for r in ranked.to_dicts()}
+    assert ranked_by_id["a" * 64]["rank"] is not None
+    assert ranked_by_id["sample-run::full::" + "a" * 64]["rank"] is None
+    assert ranked_by_id["sample-run::partial::" + "a" * 64]["rank"] is None
+
+
+def test_payload_carries_lifecycle_fields(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = tmp_path / "registry"
+    experiments = tmp_path / "experiments"
+    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", experiments)
+    entry = _registry_entry("a" * 64)
+    entry["manifest"]["config"]["run"]["name"] = "fam1"
+    entry["scorecard"]["mmc"] = 0.2
+    _write_registry(registry, [entry])
+    _write_family_meta(experiments, "fam1", display_name="Fam One")
+    _write_export_slot(experiments, "fam1", "full", "a" * 64)
+    _write_export_slot(experiments, "fam1", "partial", "a" * 64)
+    _write_current_pointer(experiments, "fam1", "a" * 64)
+    frame = dash.load_unified_leaderboard(
+        registry, benchmark_path=False, models_dir=experiments
+    )
+    payload = dash.build_tournament_payload(frame, evaluation_eras=["0001"])
+    row_fields = payload["row_fields"]
+    payload_rows = [
+        {**dict(zip(row_fields, record)), "model_id": payload["model_ids"][index]}
+        for index, record in enumerate(payload["rows"])
+    ]
+    family_rows = [r for r in payload_rows if r["family"] == "fam1"]
+    assert family_rows
+    for r in family_rows:
+        assert r["lifecycle_stage"] in lifecycle.LIFECYCLE_STAGES
+        assert r["display_name"] == "Fam One"  # from meta.json
+    partial_rows = [r for r in payload_rows if "::partial::" in r["model_id"]]
+    assert partial_rows and all(r["source"] == "partial" for r in partial_rows)
+    assert all(r["model_id"].startswith("fam1::") for r in partial_rows)
+
+
+def test_stale_staked_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    registry = tmp_path / "registry"
+    experiments = tmp_path / "experiments"
+    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", experiments)
+    _write_registry(registry, [_registry_entry("a" * 64)])
+    staked = {
+        "run_id": "dead" * 16,
+        "scope": "full",
+        "numerai_model_id": "m1",
+        "staked_at": "2026-08-26T11:00:00+00:00",
+        "status": "active",
+    }
+    _write_family_meta(experiments, "sample-run", staked=staked)
+    _write_export_slot(experiments, "sample-run", "full", "a" * 64)
+    _write_current_pointer(experiments, "sample-run", "a" * 64)
+    frame = dash.load_unified_leaderboard(registry, benchmark_path=False)
+    rows = {r["model_id"]: r for r in frame.to_dicts()}
+    # active staked record referencing an invalid export => underlying stage + stale
+    assert rows["a" * 64]["lifecycle_stage"] == "full"
+    assert rows["a" * 64]["stale"] is True
+    assert rows["sample-run::full::" + "a" * 64]["stale"] is True
+
+
+def test_valid_staked_record_not_stale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    registry = tmp_path / "registry"
+    experiments = tmp_path / "experiments"
+    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", experiments)
+    _write_registry(registry, [_registry_entry("a" * 64)])
+    staked = {
+        "run_id": "a" * 64,
+        "scope": "full",
+        "numerai_model_id": "m1",
+        "staked_at": "2026-08-26T11:00:00+00:00",
+        "status": "active",
+    }
+    _write_family_meta(experiments, "sample-run", staked=staked)
+    _write_export_slot(experiments, "sample-run", "full", "a" * 64)
+    _write_current_pointer(experiments, "sample-run", "a" * 64)
+    frame = dash.load_unified_leaderboard(registry, benchmark_path=False)
+    rows = {r["model_id"]: r for r in frame.to_dicts()}
+    assert rows["a" * 64]["lifecycle_stage"] == "staked"
+    assert rows["a" * 64]["stale"] is False
+
+
+def test_series_label_prefers_display_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = tmp_path / "registry"
+    experiments = tmp_path / "experiments"
+    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", experiments)
+    entry = _registry_entry("a" * 64)
+    entry["manifest"]["config"]["run"]["name"] = "brb1-xgb-v6"
+    _write_registry(registry, [entry])
+    _write_family_meta(experiments, "brb1-xgb-v6", display_name="Brb1 XGB v6")
+    assert dash._series_label(registry, "a" * 64) == "Brb1 XGB v6 · " + "a" * 8
+    # no experiments meta -> falls back to the run name
+    assert dash._series_label(registry, "z" * 64) == "unknown · " + "z" * 8
 
 
 def test_gate_status_full_rows_stamped_full(tmp_path: Path) -> None:
@@ -1219,7 +1477,7 @@ def test_evaluable_rows_predicate() -> None:
         strict=False,
     )
     keep = frame.filter(dash.EVALUABLE_ROWS).get_column("model_id").to_list()
-    assert keep == ["a", "b"]
+    assert keep == ["a"]
 
 
 def test_dashboard_metric_specs_make_direction_and_default_explicit() -> None:
@@ -1239,6 +1497,7 @@ def test_dashboard_cohort_uses_source_and_benchmark_tier() -> None:
     assert dash.dashboard_cohort({"source": "trained"}) == "trained"
     assert dash.dashboard_cohort({"source": "trained_legacy"}) == "trained"
     assert dash.dashboard_cohort({"source": "full"}) == "full"
+    assert dash.dashboard_cohort({"source": "partial"}) == "partial"
     assert dash.dashboard_cohort({"source": "benchmark", "tier": 0}) == "heuristic"
     assert dash.dashboard_cohort({"source": "benchmark", "tier": 2}) == "heuristic"
     assert dash.dashboard_cohort({"source": "benchmark", "tier": 3}) == "benchmark"
@@ -1487,24 +1746,26 @@ def test_generate_dashboard_bar_input_excludes_full_rows() -> None:
 
 
 def test_dashboard_app_load_registry_frame_includes_full_sources(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from dashboard_ui import app
 
+    registry = tmp_path / "registry"
+    experiments = tmp_path / "experiments"
+    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", experiments)
     entry = _registry_entry("a" * 64)
     entry["manifest"]["config"]["run"]["name"] = "brb1-xgb-v6"
-    _write_registry(tmp_path, [entry])
-    models = _write_models_dir(
-        tmp_path, {"brb1-xgb-v6": _full_manifest_dict("brb1-xgb-v6", "a" * 64)}
-    )
-    frame = app.load_registry_frame(tmp_path, models_dir=models)
+    _write_registry(registry, [entry])
+    _write_family_meta(experiments, "brb1-xgb-v6")
+    _write_export_slot(experiments, "brb1-xgb-v6", "full", "a" * 64)
+    _write_current_pointer(experiments, "brb1-xgb-v6", "a" * 64)
+    frame = app.load_registry_frame(registry, models_dir=experiments)
     sources = frame.get_column("source").to_list()
     assert "full" in sources
     assert "trained" in sources
-    full_row = frame.filter(pl.col("model_id") == "brb1-xgb-v6::full").row(
-        0, named=True
-    )
-    assert full_row["backend"] == "xgboost"  # filled from manifest snapshot
+    full_id = "brb1-xgb-v6::full::" + "a" * 64
+    full_row = frame.filter(pl.col("model_id") == full_id).row(0, named=True)
+    assert full_row["backend"] == "xgboost"  # filled from export.json snapshot
     assert full_row["has_full_version"] is False
 
 

@@ -195,6 +195,10 @@ td { color: var(--text-mid); font-size: .72rem; }
 .type-marker.trained { color: var(--gold); }
 .type-marker.heuristic { color: var(--text-lo); }
 .type-marker.full { color: var(--gold-deep); }
+.type-marker.partial { color: var(--coral); }
+.badge.lifecycle { display: inline-block; margin-left: 6px; padding: 2px 6px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-lo); font: 700 .54rem "JetBrains Mono", "Cascadia Mono", monospace; letter-spacing: .04em; white-space: nowrap; }
+.badge.lifecycle.full, .badge.lifecycle.staked { color: var(--gold); border-color: rgba(245, 185, 33, .45); }
+.badge.lifecycle.degraded { color: var(--coral); border-color: rgba(255, 122, 122, .5); }
 .champion-mark { display: inline-block; margin-left: 6px; color: var(--gold); font: 700 .55rem "JetBrains Mono", "Cascadia Mono", monospace; letter-spacing: .04em; }
 .medal { display: inline-flex; min-width: 31px; height: 25px; align-items: center; justify-content: center; border: 1px solid; border-radius: 8px; font: 700 .67rem "JetBrains Mono", "Cascadia Mono", monospace; }
 .medal-gold { border-color: var(--gold); background: rgba(245, 185, 33, .16); color: var(--gold); box-shadow: 0 0 14px rgba(245, 185, 33, .12); }

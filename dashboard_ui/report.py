@@ -110,9 +110,10 @@ def _fmt(value, *, pct: bool = False) -> str:
 
 def _bar_label(row: dict) -> str:
     model_id = row["model_id"] or "?"
+    label = row.get("display_name") or row["run_name"]
     if row["source"] == "benchmark":
-        return f"{row['run_name']} · {model_id}"
-    return f"{row['run_name']} · {model_id[:8]}"
+        return f"{label} · {model_id}"
+    return f"{label} · {model_id[:8]}"
 
 
 def _bar_input(leaderboard: pl.DataFrame, champion: str | None) -> pl.DataFrame:
@@ -201,6 +202,10 @@ def _table_rows(leaderboard: pl.DataFrame, champion: str | None) -> list[dict]:
         [r for r in rows if r["source"] == "full"],
         key=lambda r: (str(r["run_name"] or ""), str(r["model_id"])),
     )
+    partial_rows = sorted(
+        [r for r in rows if r["source"] == "partial"],
+        key=lambda r: (str(r["run_name"] or ""), str(r["model_id"])),
+    )
     fleet_rows = sorted(
         [
             r
@@ -221,14 +226,15 @@ def _table_rows(leaderboard: pl.DataFrame, champion: str | None) -> list[dict]:
         [r for r in rows if r["source"] == "benchmark"],
         key=lambda r: ((r["tier"] if r["tier"] is not None else 99), r["model_id"]),
     )
-    if full_rows:
-        return (
-            champion_rows
-            + [{"_group_header": "Promoted Full Versions"}]
-            + full_rows
-            + fleet_rows
-            + bench_rows
-        )
+    if full_rows or partial_rows:
+        groups: list[dict] = []
+        if full_rows:
+            groups.append({"_group_header": "Promoted Full Versions"})
+            groups.extend(full_rows)
+        if partial_rows:
+            groups.append({"_group_header": "Train-Only Exports"})
+            groups.extend(partial_rows)
+        return champion_rows + groups + fleet_rows + bench_rows
     return champion_rows + fleet_rows + bench_rows
 
 
@@ -239,6 +245,7 @@ _STATUS_BADGE = {
     "GATE HURDLE": "hurdle",
     "BENCHMARK": "benchmark",
     "FULL": "full",
+    "PARTIAL": "partial",
 }
 
 
@@ -251,6 +258,20 @@ def _td_gate(value_str: str, gate_pass: bool | None) -> str:
     if gate_pass is False:
         return f'<td class="num gate-fail">{value_str}</td>'
     return f'<td class="num">{value_str}</td>'
+
+
+def _lifecycle_badge(row: dict) -> str:
+    """Family lifecycle badge; DEGRADED surfaced under current_full_status,
+    STALE flagged on broken active staked records (spec §5/§8)."""
+    stage = row.get("lifecycle_stage")
+    if not stage:
+        return ""
+    degraded = stage == "degraded" or row.get("current_full_status") == "degraded"
+    cls = "lifecycle" + (" degraded" if degraded else f" {stage}")
+    text = "DEGRADED" if degraded else str(stage).upper()
+    if row.get("stale"):
+        text += " · STALE"
+    return f' <span class="badge {cls}">{html.escape(text)}</span>'
 
 
 def _row_html(row: dict) -> str:
@@ -268,8 +289,9 @@ def _row_html(row: dict) -> str:
     ):
         ci = f"[{_fmt(row['corr_sharpe_ac_ci_low'])}–{_fmt(row['corr_sharpe_ac_ci_high'])}]"
     model_label = html.escape(_bar_label(row))
-    if row.get("has_full_version"):
+    if row.get("has_full_version") and not row.get("lifecycle_stage"):
         model_label += ' <span class="badge full">FULL</span>'
+    model_label += _lifecycle_badge(row)
     return (
         "<tr>"
         f"<td>{status}</td>"

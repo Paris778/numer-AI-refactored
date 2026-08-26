@@ -30,7 +30,7 @@ These four files obey a strict **Single Source of Truth (SSOT) hierarchy**. One 
 
 ## 1. Agent Identity & Mission
 
-You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (1136 collected tests, sole functional gate) + `ruff check` (lint gate, `ruff.toml` E/F/I/UP @120, pinned in `requirements-dev.txt`). Both enforced by CI (`.github/workflows/ci.yml`).
+You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (1149 collected tests, sole functional gate) + `ruff check` (lint gate, `ruff.toml` E/F/I/UP @120, pinned in `requirements-dev.txt`). Both enforced by CI (`.github/workflows/ci.yml`).
 
 Your mission:
 
@@ -151,7 +151,7 @@ When modifying or generating code, enforce these seven invariants:
 | perturbation/horizon/regime diagnostics | `nmr/robustness.py` |
 | Benchmark hierarchy (cells, gates, thresholds) | `nmr/benchmark.py` + `configs/benchmarks/` + `benchmark_runner.py` |
 | Untiered benchmark fleet (configs, generators, runner) | `nmr/benchmark_fleet.py` + `configs/benchmarks/fleet/` (spec: `docs/superpowers/specs/2026-08-19-benchmark-fleet-design.md`) |
-| Model Tournament dashboard data engine and shared renderer | `nmr/dashboard.py` + `dashboard_ui/{charts.py,report.py,app.py,static/}`; `generate_dashboard.py` and `dashboard_app.py` are thin hosts. Ranking/cohorts/ML Advantage/detail payloads are deterministic and read-only; the static report and Streamlit host use the same vanilla renderer. |
+| Model Tournament dashboard data engine and shared renderer | `nmr/dashboard.py` + `dashboard_ui/{charts.py,report.py,app.py,static/}`; `generate_dashboard.py`/`dashboard_app.py` are thin hosts. Runs read from the legacy registry AND `experiments/` (Task-10 bridge); exports via `nmr.lifecycle` — one `family::<scope>::<run_id>` row per VALID slot, carrying `display_name`/`lifecycle_stage`/`current_full_status`/`stale`; full+partial rows are diagnostic-only (`EVALUABLE_ROWS` = trained sources). Ranking/cohorts/ML Advantage/detail payloads are deterministic and read-only; the static report and Streamlit host share one vanilla renderer. |
 | model-family / full-version discovery | `nmr/families.py` — compat wrapper over `nmr/lifecycle` (pointer-driven full exports under `experiments/`; spec: `ARCHITECTURE.md` Model Families section) |
 | Promote a run to a full/partial export (`train_only` → partial + cross-check `scorecard.json`; Model Uploads `predict.pkl`) | `nmr/promote.py` (`promote_full_version`, `rehearse_promotion`) + `promote_model.py` / `rehearse_promotion.py` CLIs; acceptance gate `nmr/submission.py::accept_promoted_artifact` (raw output vs the official validator) |
 | campaign orchestration | `nmr/campaign.py` + `run_campaign.py` (spec: `ARCHITECTURE.md` §R) |
@@ -188,7 +188,7 @@ Four gates, in order of rigor — **exact commands live only in [`CONTRIBUTING.m
 
 1. **Fast gate** — `ruff check .` + full `pytest -q` after every meaningful change.
 2. **Targeted subsets** while iterating — oracle parity (`tests/test_parity.py` + `tests/test_risk_parity.py`) and determinism hashes (`tests/test_benchmark_hierarchy.py`).
-3. **Pre-sign-off gate** (mandatory before delivering work) — full 1136-test collection plus the real-data benchmark smoke (`benchmark_runner.py --fast-mode` → `artifacts/reports/benchmark_hierarchy_scorecard_smoke.csv` + `benchmark_gate_report_smoke.csv`).
+3. **Pre-sign-off gate** (mandatory before delivering work) — full 1149-test collection plus the real-data benchmark smoke (`benchmark_runner.py --fast-mode` → `artifacts/reports/benchmark_hierarchy_scorecard_smoke.csv` + `benchmark_gate_report_smoke.csv`).
 4. **End-of-session gate (mandatory)** — before stopping or handing off for review, run the linter and functional gate on the final state: `ruff check .` + `pytest -q`. Never end a session with unverified changes; report actual results, including skips or pre-existing failures.
 
 Real-data tests require the `data/v5.3/` parquet assets (see [`README.md`](README.md#data-assets)). If they are missing, report which tests were skipped — never claim full verification. CI (`.github/workflows/ci.yml`) enforces the fast gate on every push/PR (see [`CONTRIBUTING.md`](CONTRIBUTING.md#testing--verification)).
@@ -249,19 +249,19 @@ The deploy closure's final rank step changed the exposure definition: post-fix r
 Local `load_predict` fidelity is tested, but CatBoost availability in Numerai's hosted predict runtime is **UNVERIFIED** — validate a catboost deploy against the hosted runtime before staking on it.
 
 ### Ruff lint gate (adopted 2026-08-16)
-`ruff check .` (config `ruff.toml`: E/F/I/UP, line-length 120) is the CI lint gate; ruff is pinned in `requirements-dev.txt`. pytest is the sole *functional* gate; `ruff format` is NOT adopted — deferred to a dedicated Phase-2 reformat commit.
+`ruff check .` (config `ruff.toml`: E/F/I/UP @120) is the CI lint gate; ruff pinned in `requirements-dev.txt`; pytest is the sole *functional* gate; `ruff format` deferred to a dedicated Phase-2 reformat commit.
 
 ### Coverage specs must be package-level (2026-08-19)
 Use package-level `--cov` specs only (`--cov=nmr --cov=dashboard_ui`); dotted submodule specs crash at conftest import (see `CONTRIBUTING.md`); CI gate: `scripts/coverage_gate.py`.
 
 ### Mutation gate is CI-only (mutmut refuses native Windows)
-mutmut is fork-based; Windows refused (#397). Linux CI only (`.github/workflows/mutation.yml`: weekly + manual, never on push). mutmut 3.x is config-driven; the gate writes a scratch `[tool.mutmut]` per module and RAISES on unparseable stats, zero mutants, or >10% timeouts (SEV-1, 2026-08-20). Floors ratchet on SURVIVORS only (timeouts are harness wedges, not quality signals); gate mode scopes to floored modules and never rewrites `configs/mutation_receipt.json` — a human commits it via PR to set floors.
+mutmut is fork-based; Windows refused (#397). Linux CI only (`.github/workflows/mutation.yml`: weekly + manual, never on push). mutmut 3.x is config-driven; the gate writes a scratch `[tool.mutmut]` per module and RAISES on unparseable stats, zero mutants, or >10% timeouts (SEV-1, 2026-08-20). Floors ratchet on SURVIVORS only (timeouts are harness wedges, not quality signals); gate mode never rewrites `configs/mutation_receipt.json` — a human commits it via PR to set floors.
 
 ### `../numer-AI/` is read-only legacy
 The V1 repo is mined for logic only. Never import from it, never modify it, never add it to any path.
 
-### Stale era-range manifest fields in pre-rebuild registry rows (2026-08-14)
-RETIRED (2026-08-26): the 29 pre-rebuild `artifacts/registry/` rows are gone — the `experiments/` layout starts clean by design (design spec §14). History: those rows' `manifest.scoring_eras`/`weight_learning_eras` were the old window while their `validation_preds.parquet` covered the refreshed one — zero overlap was the tell. Never use era-range manifest fields as "what this run was scored on" — trust the scorecard `*_n_eras` cells and the stored parquet. Registry files stay immutable: document, never backfill.
+### Era-range manifest fields are not the scoring window (2026-08-14; retired 2026-08-26)
+Never use `manifest.scoring_eras`/`weight_learning_eras` as "what this run was scored on" — trust the scorecard `*_n_eras` cells and the stored parquet (the pre-rebuild rows that violated this are gone; `experiments/` starts clean by design). Registry files stay immutable: document, never backfill.
 
 ### Dashboard window drifts on data refresh
 The standardized comparison window = meta overlap; refresh shifts it — regenerate `artifacts/dashboard.html` after every `refresh_data.py` run (definition + regeneration rule: `ARCHITECTURE.md` §W).

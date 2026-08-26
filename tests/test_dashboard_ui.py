@@ -514,6 +514,90 @@ def test_table_html_gate_fail_tint() -> None:
     assert "badge research" in html_text
 
 
+def test_bar_label_prefers_display_name() -> None:
+    row = {
+        "model_id": "a" * 64,
+        "run_name": "slug-name",
+        "display_name": "Fancy Label",
+        "source": "trained",
+    }
+    assert report._bar_label(row) == "Fancy Label · " + "a" * 8
+    benchmark = {
+        "model_id": "ref",
+        "run_name": "ref",
+        "display_name": "Tier-4 Ref",
+        "source": "benchmark",
+    }
+    assert report._bar_label(benchmark) == "Tier-4 Ref · ref"
+
+
+def test_row_html_escapes_display_name() -> None:
+    row = {
+        "model_id": "a" * 64,
+        "run_name": "slug-name",
+        "display_name": '<script>alert(1)</script> & "quoted"',
+        "source": "trained",
+        "status": "RESEARCH",
+        "corr_sharpe_ac": 0.5,
+        "corr_sharpe_ac_ci_low": None,
+        "corr_sharpe_ac_ci_high": None,
+        "cagr_1y": None,
+        "max_drawdown": None,
+        "gain_to_pain_ratio": None,
+        "mmc_down": None,
+        "deflated_sharpe": None,
+        "gate_cagr_1y": None,
+        "gate_corr_sharpe_ac": None,
+        "gate_gain_to_pain_ratio": None,
+        "gate_deflated_sharpe": None,
+        "has_full_version": False,
+    }
+    html_out = report._row_html(row)
+    assert "<script>" not in html_out
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html_out
+    assert "&quot;quoted&quot;" in html_out
+
+
+def test_row_html_renders_lifecycle_badge() -> None:
+    base = {
+        "model_id": "a" * 64,
+        "run_name": "slug-name",
+        "display_name": "Slug Name",
+        "source": "trained",
+        "status": "RESEARCH",
+        "corr_sharpe_ac": 0.5,
+        "corr_sharpe_ac_ci_low": None,
+        "corr_sharpe_ac_ci_high": None,
+        "cagr_1y": None,
+        "max_drawdown": None,
+        "gain_to_pain_ratio": None,
+        "mmc_down": None,
+        "deflated_sharpe": None,
+        "gate_cagr_1y": None,
+        "gate_corr_sharpe_ac": None,
+        "gate_gain_to_pain_ratio": None,
+        "gate_deflated_sharpe": None,
+        "has_full_version": False,
+    }
+    degraded = dict(base, lifecycle_stage="degraded", current_full_status="degraded", stale=True)
+    html_out = report._row_html(degraded)
+    assert "DEGRADED" in html_out
+    assert "STALE" in html_out
+    staked = dict(base, lifecycle_stage="staked", current_full_status="full", stale=False)
+    staked_html = report._row_html(staked)
+    assert "STAKED" in staked_html
+    assert "STALE" not in staked_html
+
+
+def test_app_js_renders_lifecycle_badge_and_display_name() -> None:
+    js = report._read_asset("app.js")
+    assert "lifecycle_stage" in js
+    assert "current_full_status" in js
+    assert "display_name" in js
+    assert "STALE" in js
+    assert "DEGRADED" in js
+
+
 def _registry_entry(run_id: str) -> dict:
     return {
         "run_id": run_id,

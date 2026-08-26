@@ -50,7 +50,9 @@ def load_registry_frame(
     frame = load_unified_leaderboard(
         Path(registry_dir), benchmark_path=False, models_dir=models_dir
     )
-    return frame.filter(pl.col("source").is_in(["trained", "trained_legacy", "full"]))
+    return frame.filter(
+        pl.col("source").is_in(["trained", "trained_legacy", "full", "partial"])
+    )
 
 
 def load_benchmarks(path: Path) -> pl.DataFrame:
@@ -125,13 +127,14 @@ def champion_run_id(registry_dir: Path) -> str | None:
     return read_champion_pointer(Path(registry_dir) / "champion.json")
 
 
-def _bar_label(source: str, run_name: str, model_id: str | None) -> str:
+def _bar_label(source: str, run_name: str, model_id: str | None, display_name=None) -> str:
     """Format the former chart label helper for compatibility callers."""
     identifier = model_id or "?"
+    label = display_name or run_name
     return (
-        f"{run_name} · {identifier}"
+        f"{label} · {identifier}"
         if source == "benchmark"
-        else f"{run_name} · {identifier[:8]}"
+        else f"{label} · {identifier[:8]}"
     )
 
 
@@ -149,9 +152,12 @@ def _shaped_leaderboard_pdf(
     pdf["ci_plus"] = pdf["corr_sharpe_ac_ci_high"] - pdf["corr_sharpe_ac"]
     pdf["ci_minus"] = pdf["corr_sharpe_ac"] - pdf["corr_sharpe_ac_ci_low"]
     pdf["label"] = [
-        _bar_label(source, run_name, model_id)
-        for source, run_name, model_id in zip(
-            pdf["source"], pdf["run_name"], pdf["model_id"]
+        _bar_label(source, run_name, model_id, display_name)
+        for source, run_name, model_id, display_name in zip(
+            pdf["source"],
+            pdf["run_name"],
+            pdf["model_id"],
+            pdf.get("display_name", [None] * len(pdf)),
         )
     ]
     return pdf.drop(columns=["_is_full"])

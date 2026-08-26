@@ -17,10 +17,10 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from nmr import lifecycle, paths
 from nmr.config import REPO_ROOT
 from nmr.ensemble import Ensembler
 from nmr.evaluation import EvaluationEngine, downside_era_indices, sorted_era_labels
-from nmr.families import DEFAULT_MODELS_DIR, scan_full_versions
 from nmr.payout import (
     annual_compounded_return,
     gain_to_pain_ratio,
@@ -66,6 +66,10 @@ UNIFIED_SCHEMA = pl.Schema(
         "source": pl.String,
         "run_name": pl.String,
         "family": pl.String,
+        "display_name": pl.String,
+        "lifecycle_stage": pl.String,
+        "current_full_status": pl.String,
+        "stale": pl.Boolean,
         "training_scope": pl.String,
         "has_full_version": pl.Boolean,
         "backend": pl.String,
@@ -115,10 +119,10 @@ UNIFIED_SCHEMA = pl.Schema(
 )
 
 # Single predicate for every chart / candidate-selection path: rows that carry
-# validation metrics. Source-based (never null) so benchmark rows (null
-# training_scope) stay visible in charts; full rows (in-sample metrics) are
-# excluded everywhere.
-EVALUABLE_ROWS: pl.Expr = pl.col("source") != "full"
+# validation metrics. Trained rows only — partial (train-only cross-check) and
+# full (in-sample metrics) rows are diagnostic and never ranked, and benchmark
+# tiers are reference curves, not candidates (Task 10).
+EVALUABLE_ROWS: pl.Expr = pl.col("source").is_in(["trained", "trained_legacy"])
 
 
 @dataclass(frozen=True)
@@ -167,6 +171,8 @@ def dashboard_cohort(row: Mapping[str, Any]) -> str:
         return "trained"
     if source == "full":
         return "full"
+    if source == "partial":
+        return "partial"
     if source == "benchmark":
         tier = row.get("tier")
         try:
@@ -205,10 +211,17 @@ def _dashboard_sort_key(
 def rank_leaderboard(
     leaderboard: pl.DataFrame, metric: str = DEFAULT_RANK_METRIC
 ) -> pl.DataFrame:
-    """Decorate and deterministically rank all non-full leaderboard rows."""
+    """Decorate and deterministically rank all evaluable leaderboard rows.
+
+    Diagnostic scopes (full: in-sample metrics; partial: train-only
+    cross-check) are never ranked — they render at the bottom with ``rank``
+    None and their own cohort stamp.
+    """
     spec = _dashboard_metric_spec(metric)
     rows = leaderboard.to_dicts()
-    evaluable = [row for row in rows if dashboard_cohort(row) != "full"]
+    evaluable = [
+        row for row in rows if dashboard_cohort(row) not in ("full", "partial")
+    ]
     ranked_rows = [
         row for row in evaluable if _finite_metric_value(row, metric) is not None
     ]
@@ -227,9 +240,9 @@ def rank_leaderboard(
         item["rank"] = ranks.get(id(row))
         decorated.append(item)
     for row in rows:
-        if dashboard_cohort(row) == "full":
+        if dashboard_cohort(row) in ("full", "partial"):
             item = dict(row)
-            item["cohort"] = "full"
+            item["cohort"] = dashboard_cohort(row)
             item["rank"] = None
             decorated.append(item)
     if not decorated:
@@ -493,7 +506,13 @@ _DETAIL_PROVENANCE_FIELDS = (
     "timestamp",
 )
 _ROW_FIELDS = (
+    "model_id",
+    "source",
     "run_name",
+    "display_name",
+    "lifecycle_stage",
+    "current_full_status",
+    "stale",
     "cohort",
     "family",
     "backend",
@@ -610,12 +629,12 @@ def load_model_detail(row: Mapping[str, Any]) -> dict[str, Any]:
             else:
                 detail["reason"] = "scorecard_unavailable"
     elif source == "full" and run_dir:
-        manifest = _read_json_mapping(Path(str(run_dir)) / "manifest.json")
+        manifest = _read_json_mapping(Path(str(run_dir)) / "export.json")
         family = str(row.get("family") or row.get("run_name") or "unknown")
         promoted_from = (manifest or {}).get("promoted_from_run_id")
         if promoted_from:
             detail["evidence_ref"] = (
-                f"models/{family}/full/{promoted_from}/manifest.json"
+                f"experiments/{family}/exports/full/{promoted_from}/export.json"
             )
         if manifest is None:
             detail["reason"] = "full_manifest_unavailable"
@@ -662,7 +681,13 @@ def build_tournament_payload(
             "CAPITAL READY",
         )
         item: dict[str, Any] = {
+            "model_id": model_id,
+            "source": row.get("source"),
             "run_name": row.get("run_name"),
+            "display_name": row.get("display_name"),
+            "lifecycle_stage": row.get("lifecycle_stage"),
+            "current_full_status": row.get("current_full_status"),
+            "stale": row.get("stale"),
             "cohort": cohort,
             "family": row.get("family"),
             "backend": row.get("backend"),
@@ -722,7 +747,7 @@ def build_tournament_payload(
         )
         corr = _finite_metric_value(row, "corr")
         mmc = _finite_metric_value(row, "mmc")
-        if corr is not None and mmc is not None and cohort != "full":
+        if corr is not None and mmc is not None and cohort not in ("full", "partial"):
             landscape.append(
                 {
                     "model_id": model_id,
@@ -883,26 +908,225 @@ def load_benchmark_frame(benchmark_path: Path) -> pl.DataFrame:
     return pl.DataFrame(rows, schema=UNIFIED_SCHEMA, strict=False)
 
 
+def _registry_row(payload: dict[str, Any], run_file: Path) -> dict[str, Any]:
+    """Build one unified row from a run.json record (legacy or experiments).
+
+    ``has_full_version`` / family facts are patched in after the experiments
+    scan; a scorecard value of 0.0 is real and must not fall through to the
+    legacy train-OOF ``metrics``.
+    """
+    metrics = payload.get("metrics") or {}
+    manifest = payload.get("manifest") or {}
+    cfg = manifest.get("config") or {}
+    data_cfg = cfg.get("data") or {}
+    model_cfg = cfg.get("model") or {}
+    run_cfg = cfg.get("run") or {}
+    risk_cfg = cfg.get("risk") or {}
+
+    scorecard = payload.get("scorecard") or {}
+    sc_corr = scorecard.get("corr")
+    sc_sharpe = scorecard.get("corr_sharpe_ac")
+    sc_std = scorecard.get("std_corr")
+    sc_dd = scorecard.get("max_drawdown")
+    return {
+        "model_id": payload.get("run_id") or run_file.parent.name,
+        "source": "trained" if scorecard else "trained_legacy",
+        "run_name": run_cfg.get("name", "unknown"),
+        "family": run_cfg.get("name", "unknown"),
+        "training_scope": "research",
+        "has_full_version": False,
+        "backend": model_cfg.get("backend", "unknown"),
+        "preset": model_cfg.get("preset", "unknown"),
+        "feature_set": data_cfg.get("feature_set", "unknown"),
+        "feature_subset": data_cfg.get("feature_subset"),
+        "n_targets": len(data_cfg.get("targets", [])),
+        "targets": ", ".join(data_cfg.get("targets", [])),
+        "neutralization_proportion": risk_cfg.get("neutralization_proportion"),
+        "oof_device": manifest.get("oof_device"),
+        "corr": sc_corr if sc_corr is not None else metrics.get("mean"),
+        "corr_ci_low": scorecard.get("corr_ci_low"),
+        "corr_ci_high": scorecard.get("corr_ci_high"),
+        "corr_n_eras": scorecard.get("corr_n_eras"),
+        "corr_sharpe_ac": (
+            sc_sharpe if sc_sharpe is not None else metrics.get("sharpe")
+        ),
+        "corr_sharpe_ac_ci_low": scorecard.get("corr_sharpe_ac_ci_low"),
+        "corr_sharpe_ac_ci_high": scorecard.get("corr_sharpe_ac_ci_high"),
+        "corr_sharpe_ac_n_eras": scorecard.get("corr_sharpe_ac_n_eras"),
+        "std_corr": sc_std if sc_std is not None else metrics.get("std"),
+        "max_drawdown": (
+            sc_dd if sc_dd is not None else metrics.get("max_drawdown")
+        ),
+        "deflated_sharpe": scorecard.get("deflated_sharpe"),
+        "fnc": scorecard.get("fnc"),
+        "mmc": scorecard.get("mmc"),
+        "mmc_sharpe_ac": scorecard.get("mmc_sharpe_ac"),
+        "bmc": scorecard.get("bmc"),
+        "cwmm": scorecard.get("cwmm"),
+        "mean_payout": scorecard.get("mean_payout"),
+        "cagr_1y": scorecard.get("cagr_1y"),
+        "gain_to_pain_ratio": scorecard.get("gain_to_pain_ratio"),
+        "kelly_fraction": scorecard.get("kelly_fraction"),
+        "mmc_down": scorecard.get("mmc_down"),
+        "mmc_down_reason": scorecard.get("mmc_down_reason"),
+        "turnover_mean": scorecard.get("turnover_mean"),
+        "n_eras": scorecard.get("n_eras"),
+        "rank_scalar": scorecard.get("rank_scalar"),
+        "cvar5": scorecard.get("cvar5"),
+        "burn_rate": scorecard.get("burn_rate"),
+        # Exposure definition boundary (SEV-1 #14): post-fix runs
+        # (scorecard_prediction_scale=percentile_rank) measure exposure
+        # on the ranked (0,1) vector Numerai receives; legacy rows
+        # measured ~machine-epsilon on unranked neutralized preds and
+        # must not be compared with them — null + documented reason.
+        "max_feature_exposure": (
+            scorecard.get("max_feature_exposure")
+            if manifest.get("scorecard_prediction_scale") == "percentile_rank"
+            else None
+        ),
+        "max_feature_exposure_reason": (
+            None
+            if manifest.get("scorecard_prediction_scale") == "percentile_rank"
+            else "pre_rank_fix_definition"
+        ),
+        "has_bmc": scorecard.get("bmc") is not None,
+        "has_horizon": scorecard.get("horizon_model_sharpe_20") is not None,
+        "has_perturb": scorecard.get("perturb_ceiling_stability") is not None,
+        "has_regime": scorecard.get("regime_count") is not None,
+        "tier": None,
+        "run_dir": str(run_file.parent),
+    }
+
+
+def _export_row(
+    version: lifecycle.ExportVersion, family: str, info: dict[str, Any]
+) -> dict[str, Any]:
+    """One unified row per VALID export slot (full or partial — diagnostic)."""
+    row = dict.fromkeys(UNIFIED_SCHEMA.names())  # all metric cells null
+    cfg_data = (version.config.get("data") or {}) if version.config else {}
+    cfg_model = (version.config.get("model") or {}) if version.config else {}
+    targets = cfg_data.get("targets") or []
+    row.update(
+        {
+            "model_id": f"{family}::{version.scope}::{version.run_id}",
+            "source": version.scope,
+            "run_name": family,
+            "family": family,
+            "display_name": info["display_name"],
+            "lifecycle_stage": info["lifecycle_stage"],
+            "current_full_status": info["current_full_status"],
+            "stale": info["stale"],
+            "training_scope": version.scope,
+            "has_full_version": False,
+            "backend": cfg_model.get("backend"),
+            "preset": cfg_model.get("preset"),
+            "feature_set": cfg_data.get("feature_set"),
+            "feature_subset": cfg_data.get("feature_subset"),
+            "n_targets": len(targets) if targets else None,
+            "targets": ", ".join(targets) if targets else None,
+            "run_dir": str(version.slot_dir),
+        }
+    )
+    return row
+
+
+def _scan_experiment_families(
+    experiments_root: Path,
+    legacy_run_ids: set[str],
+) -> tuple[dict[str, dict[str, Any]], set[str], list[dict[str, Any]]]:
+    """Iterate ``experiments/<family>/`` for exports + family metadata.
+
+    Returns ``(family_info, promoted_families, export_rows)``: per-family
+    display facts (display_name, lifecycle stage from ``derive_stage``, stale
+    flag), the set of families with a genuine (non-rehearsal) full version,
+    and one unified row per VALID export slot (``family::<scope>::<run_id>``).
+    Exports whose ``run_id`` has no run record — neither in the legacy registry
+    nor ``experiments/<family>/runs/<run_id>/run.json`` — warn (dangling
+    lineage) but still render.
+    """
+    family_info: dict[str, dict[str, Any]] = {}
+    promoted_families: set[str] = set()
+    export_rows: list[dict[str, Any]] = []
+    root = Path(experiments_root)
+    if not root.is_dir():
+        return family_info, promoted_families, export_rows
+    for family_dir in sorted(root.iterdir()):
+        if not family_dir.is_dir() or not paths.SLUG_RE.fullmatch(family_dir.name):
+            continue
+        family = family_dir.name
+        meta_payload = _read_json_mapping(family_dir / "meta.json") or {}
+        display_name = (
+            str(meta_payload.get("display_name") or family)
+            if isinstance(meta_payload, dict)
+            else family
+        )
+        staked = lifecycle.load_staked_record(family_dir / "meta.json")
+        stage, full_status = lifecycle.derive_stage(family, staked)
+        stale = bool(
+            staked is not None and staked.status == "active" and stage != "staked"
+        )
+        info = {
+            "display_name": display_name,
+            "lifecycle_stage": stage,
+            "current_full_status": full_status,
+            "stale": stale,
+        }
+        family_info[family] = info
+        full_versions = [
+            v for v in lifecycle.scan_valid_exports(family, "full") if not v.rehearsal
+        ]
+        partial_versions = [
+            v
+            for v in lifecycle.scan_valid_exports(family, "partial")
+            if not v.rehearsal
+        ]
+        if full_versions:
+            promoted_families.add(family)
+        for version in [*full_versions, *partial_versions]:
+            if (
+                version.run_id not in legacy_run_ids
+                and not (family_dir / "runs" / version.run_id / "run.json").is_file()
+            ):
+                logger.warning(
+                    "nmr.dashboard: family %s %s export %s lineage dangling "
+                    "(run_id %s has no run record)",
+                    family,
+                    version.scope,
+                    version.run_id[:8],
+                    version.run_id,
+                )
+            export_rows.append(_export_row(version, family, info))
+    return family_info, promoted_families, export_rows
+
+
 def load_unified_leaderboard(
     registry_dir: Path,
     benchmark_path: Path | None | bool = None,
     reports_dir: Path | None = None,
     models_dir: Path | None = None,
 ) -> pl.DataFrame:
-    """Load registry runs and (optionally) benchmark rows into one frame.
+    """Load run records and (optionally) benchmark rows into one frame.
 
-    Explicit-None discipline: a scorecard value of 0.0 is real and must not
-    fall through to the legacy train-OOF ``metrics``. Corrupt ``run.json``
+    Task-10 bridge scan: run records come from BOTH the legacy registry
+    (``<registry_dir>/<run_id>/run.json`` — the pre-Task-11 recording side)
+    and the experiments layout (``experiments/<family>/runs/<run_id>/run.json``);
+    exports come from the experiments layout via ``nmr.lifecycle`` — one
+    ``family::full::<run_id>`` row per VALID full slot and one
+    ``family::partial::<run_id>`` per VALID partial slot (diagnostic-only,
+    never ranked). ``models_dir`` overrides the experiments root (test
+    isolation); it defaults to ``paths.EXPERIMENTS_ROOT``. Corrupt ``run.json``
     files are skipped. ``benchmark_path=False`` disables benchmark loading
     (registry-only); otherwise a missing path falls through the resolution
     chain.
     """
     rows: list[dict] = []
-    full_versions = scan_full_versions(
-        Path(models_dir) if models_dir is not None else DEFAULT_MODELS_DIR
-    )
-    promoted_families = set(full_versions)
     registry = Path(registry_dir)
+    experiments_root = (
+        Path(models_dir) if models_dir is not None else paths.EXPERIMENTS_ROOT
+    )
+
+    # 1) legacy registry run records (pre-Task-11 recording side)
+    legacy_run_ids: set[str] = set()
     for run_file in sorted(registry.glob("*/run.json")):
         try:
             payload = json.loads(run_file.read_text(encoding="utf-8"))
@@ -910,121 +1134,47 @@ def load_unified_leaderboard(
             continue
         if not isinstance(payload, dict):
             continue
-        metrics = payload.get("metrics") or {}
-        manifest = payload.get("manifest") or {}
-        cfg = manifest.get("config") or {}
-        data_cfg = cfg.get("data") or {}
-        model_cfg = cfg.get("model") or {}
-        run_cfg = cfg.get("run") or {}
-        risk_cfg = cfg.get("risk") or {}
+        rows.append(_registry_row(payload, run_file))
+        legacy_run_ids.add(str(payload.get("run_id") or run_file.parent.name))
 
-        scorecard = payload.get("scorecard") or {}
-        sc_corr = scorecard.get("corr")
-        sc_sharpe = scorecard.get("corr_sharpe_ac")
-        sc_std = scorecard.get("std_corr")
-        sc_dd = scorecard.get("max_drawdown")
-        rows.append(
-            {
-                "model_id": payload.get("run_id") or run_file.parent.name,
-                "source": "trained" if scorecard else "trained_legacy",
-                "run_name": run_cfg.get("name", "unknown"),
-                "family": run_cfg.get("name", "unknown"),
-                "training_scope": "research",
-                "has_full_version": run_cfg.get("name", "unknown") in promoted_families,
-                "backend": model_cfg.get("backend", "unknown"),
-                "preset": model_cfg.get("preset", "unknown"),
-                "feature_set": data_cfg.get("feature_set", "unknown"),
-                "feature_subset": data_cfg.get("feature_subset"),
-                "n_targets": len(data_cfg.get("targets", [])),
-                "targets": ", ".join(data_cfg.get("targets", [])),
-                "neutralization_proportion": risk_cfg.get("neutralization_proportion"),
-                "oof_device": manifest.get("oof_device"),
-                "corr": sc_corr if sc_corr is not None else metrics.get("mean"),
-                "corr_ci_low": scorecard.get("corr_ci_low"),
-                "corr_ci_high": scorecard.get("corr_ci_high"),
-                "corr_n_eras": scorecard.get("corr_n_eras"),
-                "corr_sharpe_ac": (
-                    sc_sharpe if sc_sharpe is not None else metrics.get("sharpe")
-                ),
-                "corr_sharpe_ac_ci_low": scorecard.get("corr_sharpe_ac_ci_low"),
-                "corr_sharpe_ac_ci_high": scorecard.get("corr_sharpe_ac_ci_high"),
-                "corr_sharpe_ac_n_eras": scorecard.get("corr_sharpe_ac_n_eras"),
-                "std_corr": sc_std if sc_std is not None else metrics.get("std"),
-                "max_drawdown": (
-                    sc_dd if sc_dd is not None else metrics.get("max_drawdown")
-                ),
-                "deflated_sharpe": scorecard.get("deflated_sharpe"),
-                "fnc": scorecard.get("fnc"),
-                "mmc": scorecard.get("mmc"),
-                "mmc_sharpe_ac": scorecard.get("mmc_sharpe_ac"),
-                "bmc": scorecard.get("bmc"),
-                "cwmm": scorecard.get("cwmm"),
-                "mean_payout": scorecard.get("mean_payout"),
-                "cagr_1y": scorecard.get("cagr_1y"),
-                "gain_to_pain_ratio": scorecard.get("gain_to_pain_ratio"),
-                "kelly_fraction": scorecard.get("kelly_fraction"),
-                "mmc_down": scorecard.get("mmc_down"),
-                "mmc_down_reason": scorecard.get("mmc_down_reason"),
-                "turnover_mean": scorecard.get("turnover_mean"),
-                "n_eras": scorecard.get("n_eras"),
-                "rank_scalar": scorecard.get("rank_scalar"),
-                "cvar5": scorecard.get("cvar5"),
-                "burn_rate": scorecard.get("burn_rate"),
-                # Exposure definition boundary (SEV-1 #14): post-fix runs
-                # (scorecard_prediction_scale=percentile_rank) measure exposure
-                # on the ranked (0,1) vector Numerai receives; legacy rows
-                # measured ~machine-epsilon on unranked neutralized preds and
-                # must not be compared with them — null + documented reason.
-                "max_feature_exposure": (
-                    scorecard.get("max_feature_exposure")
-                    if manifest.get("scorecard_prediction_scale") == "percentile_rank"
-                    else None
-                ),
-                "max_feature_exposure_reason": (
-                    None
-                    if manifest.get("scorecard_prediction_scale") == "percentile_rank"
-                    else "pre_rank_fix_definition"
-                ),
-                "has_bmc": scorecard.get("bmc") is not None,
-                "has_horizon": scorecard.get("horizon_model_sharpe_20") is not None,
-                "has_perturb": scorecard.get("perturb_ceiling_stability") is not None,
-                "has_regime": scorecard.get("regime_count") is not None,
-                "tier": None,
-                "run_dir": str(run_file.parent),
-            }
-        )
+    # 2) experiments layout: family metadata + export slots (full/partial)
+    family_info, promoted_families, export_rows = _scan_experiment_families(
+        experiments_root, legacy_run_ids
+    )
+    rows.extend(export_rows)
 
-    for family in sorted(full_versions):
-        version = full_versions[family]
-        if not (Path(registry_dir) / version.promoted_from_run_id).is_dir():
-            logger.warning(
-                "nmr.dashboard: full version %s lineage dangling "
-                "(promoted_from_run_id %s not in registry)",
-                family,
-                version.promoted_from_run_id,
-            )
-        full_row = dict.fromkeys(UNIFIED_SCHEMA.names())  # all metric cells null
-        cfg_data = (version.config.get("data") or {}) if version.config else {}
-        cfg_model = (version.config.get("model") or {}) if version.config else {}
-        targets = cfg_data.get("targets") or []
-        full_row.update(
-            {
-                "model_id": f"{family}::full",
-                "source": "full",
-                "run_name": family,
-                "family": family,
-                "training_scope": "full",
-                "has_full_version": False,
-                "backend": cfg_model.get("backend"),
-                "preset": cfg_model.get("preset"),
-                "feature_set": cfg_data.get("feature_set"),
-                "feature_subset": cfg_data.get("feature_subset"),
-                "n_targets": len(targets) if targets else None,
-                "targets": ", ".join(targets) if targets else None,
-                "run_dir": str(version.manifest_path.parent),
-            }
-        )
-        rows.append(full_row)
+    # 3) experiments run records (Task-11 side; deduped against legacy)
+    seen_run_ids = set(legacy_run_ids)
+    if experiments_root.is_dir():
+        for family_dir in sorted(experiments_root.iterdir()):
+            if not family_dir.is_dir() or not paths.SLUG_RE.fullmatch(family_dir.name):
+                continue
+            runs_dir = family_dir / "runs"
+            if not runs_dir.is_dir():
+                continue
+            for run_file in sorted(runs_dir.glob("*/run.json")):
+                run_id = run_file.parent.name
+                if run_id in seen_run_ids:
+                    continue
+                try:
+                    payload = json.loads(run_file.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                rows.append(_registry_row(payload, run_file))
+                seen_run_ids.add(run_id)
+
+    # 4) family facts on trained rows (display_name / lifecycle / stale)
+    for row in rows:
+        if row["source"] not in ("trained", "trained_legacy"):
+            continue
+        info = family_info.get(str(row.get("family"))) or {}
+        row["display_name"] = info.get("display_name") or row.get("family")
+        row["lifecycle_stage"] = info.get("lifecycle_stage")
+        row["current_full_status"] = info.get("current_full_status")
+        row["stale"] = bool(info.get("stale"))
+        row["has_full_version"] = str(row.get("family")) in promoted_families
 
     resolved = resolve_benchmark_path(benchmark_path, reports_dir=reports_dir)
     if resolved is not None:
@@ -1117,6 +1267,8 @@ def evaluate_gate_status(
         model_id = row["model_id"]
         if row["source"] == "full":
             status = "FULL"
+        elif row["source"] == "partial":
+            status = "PARTIAL"  # train-only cross-check — never gated
         elif row["source"] == "benchmark":
             status = "GATE HURDLE" if model_id == reference_column else "BENCHMARK"
         elif (
@@ -1345,8 +1497,24 @@ def reconcile_capital_metrics(
     return pl.DataFrame(rows, schema=UNIFIED_SCHEMA, strict=False)
 
 
+def _family_display_name(family: str) -> str:
+    """meta.json display_name for a family slug; falls back to the slug."""
+    if not paths.SLUG_RE.fullmatch(family):
+        return family
+    meta = _read_json_mapping(paths.experiment_dir(family) / "meta.json")
+    if isinstance(meta, dict) and meta.get("display_name"):
+        return str(meta["display_name"])
+    return family
+
+
 def _series_label(registry_dir: Path, run_id: str) -> str:
     run_file = Path(registry_dir) / run_id / "run.json"
+    if not run_file.exists():
+        # Task-11 bridge: experiments runs live under experiments/<family>/runs/
+        run_file = next(
+            iter(paths.EXPERIMENTS_ROOT.glob(f"*/runs/{run_id}/run.json")),
+            run_file,
+        )
     name = "unknown"
     if run_file.exists():
         try:
@@ -1356,7 +1524,8 @@ def _series_label(registry_dir: Path, run_id: str) -> str:
         if isinstance(payload, dict):
             manifest = payload.get("manifest") or {}
             name = (manifest.get("config") or {}).get("run", {}).get("name", "unknown")
-    return f"{name} · {run_id[:8]}"
+    display = _family_display_name(name) if name != "unknown" else name
+    return f"{display} · {run_id[:8]}"
 
 
 _METRIC_NAMES = ("payout", "corr20", "mmc20", "corr60", "mmc60", "bmc", "cwmm")

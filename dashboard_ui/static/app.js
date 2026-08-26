@@ -90,8 +90,18 @@
   function compactModelLabel(value) {
     var raw = String(value === null || value === undefined ? "" : value);
     var row = rows.filter(function (item) { return item.model_id === raw; })[0];
-    if (row && row.cohort === "trained" && row.run_name) return row.run_name + " / " + raw.slice(0, 8);
+    if (row && row.cohort === "trained" && (row.display_name || row.run_name)) return (row.display_name || row.run_name) + " / " + raw.slice(0, 8);
     return raw.length > 24 ? raw.slice(0, 12) + "..." + raw.slice(-4) : raw;
+  }
+
+  function lifecycleBadge(row) {
+    var stage = row.lifecycle_stage;
+    if (!stage) return "";
+    var degraded = stage === "degraded" || row.current_full_status === "degraded";
+    var cls = "badge lifecycle" + (degraded ? " degraded" : " " + stage);
+    var text = degraded ? "DEGRADED" : String(stage).toUpperCase();
+    if (row.stale) text += " · STALE";
+    return "<span class=\"" + cls + "\">" + esc(text) + "</span>";
   }
 
   function chartContainer(element) {
@@ -197,7 +207,7 @@
 
   function searchable(row) {
     if (!state.search) return true;
-    return [row.model_id, row.run_name, row.family, row.backend, row.preset, row.feature_set]
+    return [row.model_id, row.run_name, row.family, row.backend, row.preset, row.feature_set, row.display_name]
       .join(" ").toLowerCase().indexOf(state.search.toLowerCase()) !== -1;
   }
 
@@ -259,6 +269,7 @@
     if (row.cohort === "heuristic") return "<span class=\"type-marker heuristic\">&#9670; heuristic</span>";
     if (row.cohort === "benchmark") return "<span class=\"type-marker benchmark\">&#8212; benchmark</span>";
     if (row.cohort === "full") return "<span class=\"type-marker full\">&#9671; full lineage</span>";
+    if (row.cohort === "partial") return "<span class=\"type-marker partial\">&#9673; train-only</span>";
     return "<span class=\"type-marker trained\">&#9679; trained</span>";
   }
 
@@ -281,8 +292,9 @@
       if (row.cohort === "benchmark") rowClass += " benchmark-row";
       if (row.cohort === "heuristic") rowClass += " heuristic-row";
       html += "<tr class=\"model-row" + rowClass + "\" data-model-id=\"" + esc(row.model_id) + "\" tabindex=\"0\">";
-      html += "<td class=\"rank-cell mono\">" + rankCell(row) + "</td><td class=\"model-cell\"><strong>" + esc(row.run_name || row.model_id) + "</strong>";
+      html += "<td class=\"rank-cell mono\">" + rankCell(row) + "</td><td class=\"model-cell\"><strong>" + esc(row.display_name || row.run_name || row.model_id) + "</strong>";
       html += row.champion ? " <span class=\"champion-mark\">CHAMPION</span>" : "";
+      html += lifecycleBadge(row);
       html += "<small>" + esc(row.model_id) + "</small></td><td>" + marker(row) + "</td>";
       html += "<td class=\"num\">" + valueText(row, "cagr_1y") + "</td><td class=\"num\">" + valueText(row, "mmc") + "</td>";
       html += "<td class=\"num\">" + valueText(row, "corr") + "</td><td class=\"num\">" + ciText(row) + "</td>";
@@ -318,9 +330,9 @@
     var host = byId("advantage-strip"); if (!host) return;
     var metric = state.metric, spec = specFor(metric), trained = bestRow(rows, "trained", metric), heuristic = bestRow(rows, "heuristic", metric), benchmark = bestRow(rows, "benchmark", metric);
     host.innerHTML = "<div class=\"advantage-title\"><span>ML ADVANTAGE</span><small>Best trained vs simple alternatives &middot; " + esc(spec.label) + "</small></div>" +
-      "<div class=\"advantage-track\"><div><span>Trained</span><strong>" + (trained ? valueText(trained, metric) : "&#8212;") + "</strong><small>" + esc(trained ? trained.run_name : "Unavailable") + "</small></div>" +
-      "<div><span>Heuristic</span><strong>" + (heuristic ? valueText(heuristic, metric) : "&#8212;") + "</strong><small>" + esc(heuristic ? heuristic.run_name : "Unavailable") + "</small></div>" +
-      "<div><span>Benchmark</span><strong>" + (benchmark ? valueText(benchmark, metric) : "&#8212;") + "</strong><small>" + esc(benchmark ? benchmark.run_name : "Unavailable") + "</small></div></div>" +
+      "<div class=\"advantage-track\"><div><span>Trained</span><strong>" + (trained ? valueText(trained, metric) : "&#8212;") + "</strong><small>" + esc(trained ? (trained.display_name || trained.run_name) : "Unavailable") + "</small></div>" +
+      "<div><span>Heuristic</span><strong>" + (heuristic ? valueText(heuristic, metric) : "&#8212;") + "</strong><small>" + esc(heuristic ? (heuristic.display_name || heuristic.run_name) : "Unavailable") + "</small></div>" +
+      "<div><span>Benchmark</span><strong>" + (benchmark ? valueText(benchmark, metric) : "&#8212;") + "</strong><small>" + esc(benchmark ? (benchmark.display_name || benchmark.run_name) : "Unavailable") + "</small></div></div>" +
       "<div class=\"advantage-edges\"><span>Edge vs heuristic <b class=\"" + edgeClass(trained, heuristic, metric) + "\">" + edgeText(trained, heuristic, metric) + "</b></span><span>Edge vs benchmark <b class=\"" + edgeClass(trained, benchmark, metric) + "\">" + edgeText(trained, benchmark, metric) + "</b></span></div>";
   }
 
@@ -372,7 +384,7 @@
     var svg = byId("profile-svg"), label = byId("profile-label"); if (!svg || !label) return;
     svg.textContent = "";
     if (!row) { label.textContent = "Select a row"; svg.appendChild(textNode(svg, "Select a model", 380, 180)); return; }
-    label.textContent = row.run_name || row.model_id;
+    label.textContent = row.display_name || row.run_name || row.model_id;
     var available = metricSpecs.filter(function (spec) { return finite(metricValue(row, spec.name)); });
     if (!available.length) { svg.appendChild(textNode(svg, "Metric profile unavailable", 380, 180)); return; }
     var max = Math.max.apply(null, available.map(function (spec) { return Math.abs(Number(metricValue(row, spec.name))); }).concat([.000001]));
@@ -412,7 +424,7 @@
     if (!evidenceRef && row.cohort === "trained") evidenceRef = "registry/" + row.model_id + "/run.json";
     var ref = evidenceRef ? "<a href=\"" + esc(evidenceRef) + "\">Open immutable evidence</a>" : "<span class=\"missing\">Evidence link unavailable</span>";
     var meta = payload.meta || {}, window = meta.evaluation_window || {};
-    host.innerHTML = "<div class=\"drawer-kicker\">" + esc(row.cohort) + " &middot; " + esc(row.status || "RESEARCH") + "</div><h2 id=\"drawer-title\">" + esc(row.run_name || row.model_id) + "</h2><p class=\"drawer-id mono\">" + esc(row.model_id) + "</p>" +
+    host.innerHTML = "<div class=\"drawer-kicker\">" + esc(row.cohort) + " &middot; " + esc(row.status || "RESEARCH") + "</div><h2 id=\"drawer-title\">" + esc(row.display_name || row.run_name || row.model_id) + "</h2><p class=\"drawer-id mono\">" + esc(row.model_id) + "</p>" +
       "<div class=\"drawer-meta\"><span>Suite " + safeText(meta.suite_version) + "</span><span>Window " + safeText(window.start) + " &rarr; " + safeText(window.end) + "</span><span>Timestamp " + safeText(provenance.timestamp) + "</span></div>" +
       "<h3>Rank across metrics</h3><div class=\"rank-list\">" + (ranks || "<span>&#8212;</span>") + "</div><h3>Full scorecard evidence</h3><table class=\"dossier-table\"><tbody>" + scorecardHtml + "</tbody></table>" +
       "<h3>Provenance / lineage</h3><div class=\"provenance-list\">" + provenanceHtml + "</div><p class=\"evidence-link\">" + ref + "</p><p class=\"drawer-note\">Missing values remain unavailable; this dossier contains offline evaluation evidence only.</p>";
