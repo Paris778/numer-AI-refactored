@@ -34,7 +34,8 @@ ExperimentConfig
 +----------------------------------------------------------------+
      |
      v  RunResult(run_id, oof, metrics, artifact, manifest)
-RunRegistry.record() ──> root/{run_id}/{run.json, oof.parquet, validation_preds.parquet?}   (legacy compat layout; removed Task 11)
+scripts (train_first_model.py / run_campaign.py) ──> experiment_store.record_run_result(slug, result)
+         └── experiments/{slug}/runs/{run_id}/{run.json, oof.parquet, validation_preds.parquet?}
 RunRegistry.promote() ─> experiments/champion.json   (atomic pointer {run_id, experiment_slug, promoted_at})
 RunRegistry.promote_if_better() ─> experiments/champion.json  (cross-family, guarded: scorecard metric + direction)
      |
@@ -292,7 +293,7 @@ experiments/
 experiments/{slug}/exports/{scope}/{run_id}/export.json  # promoted full/partial record + atomic current.json pointer (read-only via nmr/families.py)
 ```
 
-All JSON writes: temp file in parent dir → fsync → `os.replace()`; the OOF parquet likewise writes temp + `os.replace` (no fsync). `list() -> list[str]` returns every run_id across families (sorted); `best(metric="corr_sharpe_ac") -> (run_id, slug) | None` picks the highest scorecard metric across families (runs lacking the metric are skipped); `promote(run_id, slug)` and `promote_if_better(run_id, slug, metric="corr_sharpe_ac") -> (Path, bool)` write `experiments/champion.json` atomically — `promote_if_better` promotes only when the candidate's scorecard metric strictly beats the champion's, honoring direction (`_SCORECARD_METRIC_DIRECTION`: `max_drawdown`/`std_corr` are lower-is-better); a scorecard-bearing candidate may displace a scorecard-less champion; a candidate lacking the metric or an unknown metric raises `ValueError`; `resolve_champion() -> (run_id, slug)` fails loud on a missing/dangling/corrupt pointer (never silently treats it as no champion). **Compat shims (removed in Task 11):** `record(RunResult)` keeps the legacy single-pool layout (`root/<run_id>/` — `tests/test_campaign.py` pins it; stub manifests carry no `config.run.name`); iteration and `promote`/`promote_if_better` additionally accept legacy rows (slug derived from `manifest.config.run.name` when a champion pointer needs one); `promote(run_id, slug=None)` / `promote_if_better(run_id, slug=None, ...)` resolve the slug by scanning the registry root (ambiguous/not-found ⇒ `ValueError`); `nmr/promote.py::resolve_champion_run_id` still reads the legacy pointer file. Champion writes are single-writer (CLI/runner entry points only — design spec §9).
+All JSON writes: temp file in parent dir → fsync → `os.replace()`; the OOF parquet likewise writes temp + `os.replace` (no fsync). Recording goes through `experiment_store.record_run_result(slug, result)` (parquets + run.json, §Z); `list() -> list[str]` returns every run_id across families (sorted); `best(metric="corr_sharpe_ac") -> (run_id, slug) | None` picks the highest scorecard metric across families (runs lacking the metric are skipped); `promote(run_id, slug=None)` and `promote_if_better(run_id, slug=None, metric="corr_sharpe_ac") -> (Path, bool)` write `experiments/champion.json` atomically — a `None` slug is resolved by scanning the experiments layout (ambiguous/not-found ⇒ `ValueError`); `promote_if_better` promotes only when the candidate's scorecard metric strictly beats the champion's, honoring direction (`_SCORECARD_METRIC_DIRECTION`: `max_drawdown`/`std_corr` are lower-is-better); a scorecard-bearing candidate may displace a scorecard-less champion; a candidate lacking the metric or an unknown metric raises `ValueError`; `resolve_champion() -> (run_id, slug)` fails loud on a missing/dangling/corrupt pointer (never silently treats it as no champion). Champion writes are single-writer (CLI/runner entry points only — design spec §9).
 
 **Retired (2026-08-26):** the pre-rebuild `artifacts/registry/<run_id>/` rows are gone (clean slate by design — design spec §14); their era-range manifest quirk is historical — never trust era-range manifest fields for "what this run was scored on"; use scorecard `*_n_eras` cells and the stored parquet. Registry files stay immutable: document, never backfill.
 
@@ -312,7 +313,7 @@ def predict(live_features: pd.DataFrame, live_benchmark_models: pd.DataFrame | N
 
 | Script | What it does |
 |---|---|
-| [train_first_model.py](train_first_model.py) | `load_config("configs/first_model.yaml")` → `ExperimentRunner.run(deploy=True)` → `RunRegistry.record` + `promote_if_better` (prints promotion verdict) → prints summary, writes `summary.json` |
+| [train_first_model.py](train_first_model.py) | `load_config("configs/first_model.yaml")` → `ExperimentRunner.run(deploy=True)` → `experiment_store.record_run_result` + `promote_if_better` (prints promotion verdict) → prints summary, writes `summary.json` |
 | [benchmark_runner.py](benchmark_runner.py) | 5-tier hierarchy control plane: `--data-dir`, `--configs`, `--seed`, `--n-boot`, `--fast-mode`; writes `artifacts/reports/benchmark_hierarchy_scorecard.csv` + `benchmark_gate_report.csv`; exit 1 on hard-gate failure |
 | [generate_dashboard.py](generate_dashboard.py) | **Thin entry wrapper** — all logic in `dashboard_ui/report.py`; compiles the deterministic offline Model Tournament `artifacts/dashboard.html` (112 KiB artifact budget, enforced by `dashboard_ui.report.MAX_ARTIFACT_BYTES`) on the `nmr/dashboard.py` engine; CLI surface unchanged (`python generate_dashboard.py`) |
 | [dashboard_app.py](dashboard_app.py) | **Thin entry wrapper** — calls `dashboard_ui.app.main`; embeds the same vanilla Model Tournament renderer with `st.components.v1.html`; read-only; launch: `streamlit run dashboard_app.py` |
@@ -364,7 +365,7 @@ Decision layer on top of `nmr.inference` and `nmr.evaluation`; reuses the repo's
 
 `fleet_summary(runs, *, metric="corr_sharpe_ac", n_trials, dsr_confidence=0.95) -> pl.DataFrame` — flattens registry entries into a per-run fleet table: the requested scorecard metric (value + CI + n_eras), stored `deflated_sharpe` with a `dsr_pass` flag against `dsr_confidence`, `max_feature_exposure`, `oof_device`, manifest-config grouping columns (`preset`, `feature_set`, `feature_subset`, `neutralization_proportion`), robustness presence flags (`has_bmc`, `has_horizon`, `has_perturb`, `has_regime`), and policy context columns (`policy_n_trials`, `policy_dsr_confidence`). Runs without a scorecard are flagged (legacy), never silently dropped. Deterministic: sorted by metric desc, run_id tiebreak. **DSR policy note:** the stored `deflated_sharpe` was computed with `n_trials=1` at scorecard time (standalone contract); campaign-aware and sweep-aware deflation are computed post-hoc by `campaign_evidence` (below) and `opt.sweep_dsr` (§S) — never here.
 
-`campaign_evidence(campaign_log_path, registry_root, *, data, main_target="target", fne_reference_set="medium", n_boot=200, seed=0, min_overlap_eras=MIN_OVERLAP_ERAS) -> CampaignEvidence` — assembles per-variant validation evidence for every recorded run of a campaign log: validation mean IC with the run scorecard's 95% CI, IC Sharpe and max drawdown (scorecard), feature count and backend/device (manifest), and FNE at 100% neutralization against `fne_reference_set` with its own bootstrap CI (per-era residual ICs via `neutralized_ic_series`). **Campaign-aware DSR (2026-08-14):** per recorded cell with `n_eras >= 4` and `ic_std > 0`, the full-window IC Sharpe is deflated post-hoc against the empirical cross-cell Sharpe distribution — `n_trials` = valid cell count, `trials_sr_var` = sample variance of the cells' Sharpes (ddof=1, no analytic fallback), via `inference.deflated_sharpe_fleet`. Columns: `dsr_campaign_aware`, `dsr_pass_campaign` (≥ 0.95), `dsr_reason` (`zero_cross_trial_sharpe_variance` / `degenerate_series` / `insufficient_trials` / `radicand`), `dsr_n_trials`, `dsr_trials_sr_var`; evidence assembly never crashes on degenerate fleets (Guard A). `pairwise` block-bootstraps the per-era validation-IC difference for the screen-defining pairs (v2 vs v3, v2 vs v4, v3 vs v4) per config-prefix (e.g. `lgbm_v2`), positive diff = first variant better; `NonVacuityError` pairs surface as error rows. Runs with status ≠ `recorded` or missing artifacts become error rows — never silently dropped. Requires `validation_preds.parquet` per run (persisted by `RunRegistry.record` when the validation scorecard is enabled). Headline metrics (`mean_ic`, CI, Sharpe, max drawdown) are computed on the **full validation window** from the per-era IC series (numeric-ordered — lexicographic era sorts scramble the block bootstrap), with the scorecard's 86-era meta-overlap cells kept as explicit `scorecard_*_86era` columns. The assembled evidence for the 2026-08 benchmark-rebuild campaign is persisted at `artifacts/reports/dataset_analysis/campaign_{variants,pairwise}.parquet` and rendered into §7 of the joined pre-modeling document `docs/04-research/pre-modelling-dataset-feature-study-2026-08.md` (also §8 operational findings: purge-bug fix, HPO padding fix, hardware ceilings).
+`campaign_evidence(campaign_log_path, registry_root, *, data, main_target="target", fne_reference_set="medium", n_boot=200, seed=0, min_overlap_eras=MIN_OVERLAP_ERAS) -> CampaignEvidence` — assembles per-variant validation evidence for every recorded run of a campaign log: validation mean IC with the run scorecard's 95% CI, IC Sharpe and max drawdown (scorecard), feature count and backend/device (manifest), and FNE at 100% neutralization against `fne_reference_set` with its own bootstrap CI (per-era residual ICs via `neutralized_ic_series`). **Campaign-aware DSR (2026-08-14):** per recorded cell with `n_eras >= 4` and `ic_std > 0`, the full-window IC Sharpe is deflated post-hoc against the empirical cross-cell Sharpe distribution — `n_trials` = valid cell count, `trials_sr_var` = sample variance of the cells' Sharpes (ddof=1, no analytic fallback), via `inference.deflated_sharpe_fleet`. Columns: `dsr_campaign_aware`, `dsr_pass_campaign` (≥ 0.95), `dsr_reason` (`zero_cross_trial_sharpe_variance` / `degenerate_series` / `insufficient_trials` / `radicand`), `dsr_n_trials`, `dsr_trials_sr_var`; evidence assembly never crashes on degenerate fleets (Guard A). `pairwise` block-bootstraps the per-era validation-IC difference for the screen-defining pairs (v2 vs v3, v2 vs v4, v3 vs v4) per config-prefix (e.g. `lgbm_v2`), positive diff = first variant better; `NonVacuityError` pairs surface as error rows. Runs with status ≠ `recorded` or missing artifacts become error rows — never silently dropped. Requires `validation_preds.parquet` per run (persisted by `experiment_store.record_run_result` when the validation scorecard is enabled). Headline metrics (`mean_ic`, CI, Sharpe, max drawdown) are computed on the **full validation window** from the per-era IC series (numeric-ordered — lexicographic era sorts scramble the block bootstrap), with the scorecard's 86-era meta-overlap cells kept as explicit `scorecard_*_86era` columns. The assembled evidence for the 2026-08 benchmark-rebuild campaign is persisted at `artifacts/reports/dataset_analysis/campaign_{variants,pairwise}.parquet` and rendered into §7 of the joined pre-modeling document `docs/04-research/pre-modelling-dataset-feature-study-2026-08.md` (also §8 operational findings: purge-bug fix, HPO padding fix, hardware ceilings).
 
 ### R. Campaign Orchestration — `nmr/campaign.py` + `run_campaign.py`
 
@@ -385,7 +386,7 @@ A campaign is a named batch of experiment configs whose runs share a hypothesis;
 }
 ```
 
-CLI contract (`run_campaign.py`, zero business logic): `--config` (repeatable, required), `--name` (required), `--registry` (default `artifacts/registry`), `--campaigns-dir` (default `artifacts/campaigns`), `--deploy` (passes `deploy=True` to `ExperimentRunner.run`), `--dry-run` (prints computed `run_id`s without training or writing — the registry is not even constructed). Per config: an invalid config is logged and recorded as `status="error"` with the message; an already-recorded `run_id` is `"skipped"`; a successful run is recorded via `RunRegistry.record` as `"recorded"`. Prints one `status<TAB>config_path<TAB>run_id` line per run; exits `0` when no run failed, `1` otherwise (`--dry-run` always exits `0`).
+CLI contract (`run_campaign.py`, zero business logic): `--config` (repeatable, required), `--name` (required), `--registry` (default `experiments` — the run-discovery root), `--campaigns-dir` (default `artifacts/campaigns`), `--deploy` (passes `deploy=True` to `ExperimentRunner.run`), `--dry-run` (prints computed `run_id`s without training or writing — the registry is not even constructed). Per config: an invalid config is logged and recorded as `status="error"` with the message; an already-recorded `run_id` is `"skipped"`; a successful run is recorded via `experiment_store.record_run_result(slug, result)` (slug = `config.run.name`) as `"recorded"`. Prints one `status<TAB>config_path<TAB>run_id` line per run; exits `0` when no run failed, `1` otherwise (`--dry-run` always exits `0`).
 
 ### S. Bayesian HPO — `nmr/opt.py`
 
@@ -473,12 +474,18 @@ slug match; a `partial` export additionally requires `scorecard.json`.
 Write-path companion to §X/§Y: run persistence, family-scaffold creation, and
 atomic export publication. Consumes `nmr.paths` (layout) and
 `nmr._atomicio.atomic_write_text` (temp + fsync + replace). API:
-`ensure_family`, `record_run`, `read_run`, `stage_export`,
-`discard_staged_export`, `publish_staged_export`. `record_run` creates the
+`ensure_family`, `record_run_result`, `record_run`, `read_run`,
+`stage_export`, `discard_staged_export`, `publish_staged_export`.
+`record_run` creates the
 family scaffold (`meta.json` + `base_config.yaml` + `README.md`) atomically
 with the first `run.json` (spec §2 family-creation rule); `base_config.yaml`
 is the NON-authoritative reference copy — the per-run `run.json` config is
-authoritative. Export slots are staged at `exports/<scope>/.tmp-<run_id>/` and
+authoritative. `record_run_result(slug, result)` is the script-facing
+recorder (the retired `registry.record`): it persists `oof.parquet` and
+`validation_preds.parquet` (when the validation scorecard ran) atomically and
+then writes `run.json` via `record_run` — parquets land before the record
+marker so a partial failure never leaves a run.json without its artifacts.
+Export slots are staged at `exports/<scope>/.tmp-<run_id>/` and
 published by a single `os.replace` directory rename into the immutable slot
 `exports/<scope>/<run_id>/`; discovery ignores `.tmp-` names. Re-publishing an
 existing slot raises `ValueError` (exports immutable — spec §6); staged
@@ -504,8 +511,7 @@ promotion writer, Task 8+). The read-side discovery layer (`nmr/families.py`)
 is a thin compatibility wrapper over `nmr/lifecycle` + `nmr/paths`: it
 re-exports `lifecycle.ExportVersion` as `FullVersion` and resolves the
 experiment layout. Resolution is pointer-driven — a missing/corrupt/dangling
-`current.json` fails loud via the deprecated `full_manifest_path` shim
-(listing `available_slots`) and yields `None` from the tolerant
+`current.json` yields `None` from the tolerant
 `load_full_version`; `scan_full_versions` additionally surfaces degraded
 families (valid exports, no pointer) via their newest valid export. Slots are
 never selected by mtime. Old slots remain for rollback; repointing
@@ -525,18 +531,18 @@ Export record schema (`export.json`, per-slot):
 | `training_rows` / `training_era_range` | actual rows + `[min, max]` era range the artifact was fit on — a rehearsal (~68k rows on a subset) is distinguishable from a genuine full version (6.85M rows, `[0001..1231]`) without reading `config_normalizations` |
 | `tier4_gate_passed` / `tier4_receipts` / `override_used` / `config_normalizations` | promotion verdict block — always written by the writer; a failed-gate rehearsal artifact carries `tier4_gate_passed: false` in its own manifest |
 
-Public API: `full_manifest_path` (deprecated fail-loud shim — removed in
-Task 11), `available_slots`, `load_full_version`, `scan_full_versions`,
+Public API: `available_slots`, `load_full_version`, `scan_full_versions`,
 `family_has_full_version`, `FullVersion` (= `lifecycle.ExportVersion`),
-constants `FAMILY_DIR_NAME` / `FULL_DIR_NAME` / `FULL_MANIFEST_NAME` /
+constants `FAMILY_DIR_NAME` / `FULL_DIR_NAME` /
 `CURRENT_POINTER_NAME` / `DEFAULT_MODELS_DIR` (legacy, retained for call-site
 compat).
 
 Leaderboard integration (`nmr/dashboard.py`): `UNIFIED_SCHEMA` carries
 `family`, `training_scope` (`"research"` / `"full"` / `"partial"`),
 `has_full_version`, `display_name`, `lifecycle_stage`, `current_full_status`,
-`stale`. `load_unified_leaderboard` is the Task-10 bridge: run records come
-from the legacy registry AND `experiments/<family>/runs/<run_id>/run.json`;
+`stale`. `load_unified_leaderboard` reads run records from the experiments
+layout (`experiments/<family>/runs/<run_id>/run.json` — the legacy
+`artifacts/registry` scan is vestigial since Task 11 and nothing writes it);
 exports come from `nmr.lifecycle.scan_valid_exports` — one row per VALID slot
 (`model_id = "<family>::<scope>::<run_id>"`; full rows carry null metric
 cells, partial rows carry their cross-check cells mapped from the slot's

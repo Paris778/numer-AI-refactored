@@ -1,9 +1,9 @@
 """Thin control plane for the promotion writer (nmr/promote.py).
 
-Trains the full version (train+validation) for a registry run and publishes
-it under ``artifacts/models/<family>/full/<run_id>/`` with the atomic
-``current.json`` pointer. The promotion run is a REHEARSAL unless the user
-explicitly uploads the artifact — see the printed instructions.
+Trains the full version (train+validation) for an experiments-layout run and
+publishes it under ``experiments/<family>/exports/<scope>/<run_id>/`` with
+the atomic ``current.json`` pointer. The promotion run is a REHEARSAL unless
+the user explicitly uploads the artifact — see the printed instructions.
 
 Usage:
     python promote_model.py --run-id <64-hex> --family <family> [--override-gate] [--force]
@@ -20,14 +20,25 @@ apply_thread_limits()
 
 import argparse
 import logging
-from pathlib import Path
 
-from nmr.promote import promote_full_version, resolve_champion_run_id
+from nmr import paths
+from nmr.promote import promote_full_version
+from nmr.registry import RunRegistry
 
 logger = logging.getLogger("promote_model")
 
 
-def main(argv: list[str] | None = None) -> int:
+def _resolve_champion_run_id() -> str:
+    """Run id of the current champion — the atomic experiments-root pointer."""
+    champion = RunRegistry(paths.EXPERIMENTS_ROOT).resolve_champion()
+    if champion is None:
+        raise FileNotFoundError(
+            f"no champion: {paths.champion_path()} missing — promote a run first"
+        )
+    return champion[0]
+
+
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-id", help="64-hex run id to promote")
     parser.add_argument(
@@ -36,8 +47,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--family", required=True, help="model family name (run.name convention)"
     )
-    parser.add_argument("--models-dir", type=Path, default=None)
-    parser.add_argument("--registry-dir", type=Path, default=None)
     parser.add_argument(
         "--override-gate",
         action="store_true",
@@ -50,22 +59,27 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="overwrite an existing slot / repoint current.json",
     )
-    args = parser.parse_args(argv)
+    return parser
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    return _build_parser().parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     if bool(args.run_id) == bool(args.champion):
-        parser.error("provide exactly one of --run-id or --champion")
+        _build_parser().error("provide exactly one of --run-id or --champion")
 
-    registry_dir = args.registry_dir or (Path("artifacts") / "registry")
     run_id = args.run_id
     if args.champion:
-        run_id = resolve_champion_run_id(registry_dir)
+        run_id = _resolve_champion_run_id()
 
     result = promote_full_version(
         run_id,
         args.family,
-        models_dir=args.models_dir,
-        registry_dir=registry_dir,
         override_gate=args.override_gate,
         force=args.force,
     )

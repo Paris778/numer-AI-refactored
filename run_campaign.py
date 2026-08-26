@@ -1,11 +1,12 @@
 """Run a named batch of experiment configs and record trial lineage.
 
 Thin control plane: argument parsing, wiring, and printing only. All logic
-lives in ``nmr.campaign`` / ``nmr.runner`` / ``nmr.registry``.
+lives in ``nmr.campaign`` / ``nmr.runner`` / ``nmr.registry`` /
+``nmr.experiment_store``.
 
 Usage:
     python run_campaign.py --config configs/a.yaml --config configs/b.yaml \
-        --name my-campaign [--registry artifacts/registry] \
+        --name my-campaign [--registry experiments] \
         [--campaigns-dir artifacts/campaigns] [--deploy] [--dry-run]
 """
 
@@ -21,7 +22,7 @@ import argparse
 import logging
 from pathlib import Path
 
-from nmr import ExperimentRunner, RunRegistry, load_config
+from nmr import ExperimentRunner, RunRegistry, experiment_store, load_config, paths
 from nmr.campaign import CampaignRun, build_campaign_log, write_campaign_log
 
 logging.basicConfig(
@@ -32,25 +33,29 @@ logging.basicConfig(
 logger = logging.getLogger("run_campaign")
 
 
-def main(argv: list[str] | None = None) -> int:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", action="append", required=True,
                         help="path to an experiment config YAML (repeatable)")
     parser.add_argument("--name", required=True, help="campaign name")
-    parser.add_argument("--registry", default="artifacts/registry",
-                        help="registry root directory")
+    parser.add_argument("--registry", default=str(paths.EXPERIMENTS_ROOT),
+                        help="run-discovery root (experiments layout)")
     parser.add_argument("--campaigns-dir", default="artifacts/campaigns",
                         help="campaign log output directory")
     parser.add_argument("--deploy", action="store_true",
                         help="pass deploy=True to ExperimentRunner.run")
     parser.add_argument("--dry-run", action="store_true",
                         help="print run ids without training or writing")
-    args = parser.parse_args(argv)
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
 
     config_paths = [Path(p) for p in args.config]
     # Defer construction out of --dry-run: dry-run must not touch the registry
-    # root. (Task 11 retargets the root to the experiments layout; the
-    # registry root arg is currently only used for run discovery.)
+    # root. The root is the experiments layout (Task 11); it is used for run
+    # discovery only — recording goes through experiment_store.
     registry: RunRegistry | None = None
     existing: set[str] = set()
     if not args.dry_run:
@@ -81,14 +86,9 @@ def main(argv: list[str] | None = None) -> int:
             continue
 
         try:
-            if registry is None:
-                # constructed whenever not args.dry_run — never rely on assert
-                # for control flow (stripped under python -O)
-                raise RuntimeError(
-                    "internal error: registry is None outside dry-run mode"
-                )
             result = ExperimentRunner(cfg).run(deploy=args.deploy)
-            registry.record(result)
+            slug = paths.validate_slug(cfg.run.name)
+            experiment_store.record_run_result(slug, result)
             existing.add(result.run_id)
             runs.append(CampaignRun(str(path), run_id=result.run_id, status="recorded"))
             logger.info("[campaign] recorded %s -> %s", path, result.run_id)

@@ -15,18 +15,13 @@ enters a canonical hash — it is display metadata only.
 from __future__ import annotations
 
 import json
-import logging
 from pathlib import Path
 
 from nmr import lifecycle, paths
 
-logger = logging.getLogger("nmr.families")
-
-# Legacy constants retained for call-site compatibility (Task 11 may drop
-# the ones no longer referenced once the dashboard and CLI are retargeted).
+# Legacy constants retained for call-site compatibility.
 FAMILY_DIR_NAME = "models"
 FULL_DIR_NAME = "full"
-FULL_MANIFEST_NAME = "manifest.json"
 CURRENT_POINTER_NAME = "current.json"
 DEFAULT_MODELS_DIR = paths.DEFAULT_ARTIFACTS_DIR / FAMILY_DIR_NAME
 
@@ -38,11 +33,9 @@ __all__ = [
     "DEFAULT_MODELS_DIR",
     "FAMILY_DIR_NAME",
     "FULL_DIR_NAME",
-    "FULL_MANIFEST_NAME",
     "FullVersion",
     "available_slots",
     "family_has_full_version",
-    "full_manifest_path",
     "load_full_version",
     "scan_full_versions",
     "validate_family_name",
@@ -61,30 +54,6 @@ def validate_family_name(family: str) -> str:
         raise ValueError(
             f"invalid family name {family!r}: must match {paths.SLUG_RE.pattern}"
         ) from exc
-
-
-def full_manifest_path(models_dir: Path, family: str) -> Path:
-    """DEPRECATED compat shim (removed in Task 11): the current full slot's
-    ``export.json`` path, fail loud on a missing/dangling pointer.
-
-    The pre-rebuild layout stored the slot record as ``manifest.json`` under
-    ``artifacts/models/<family>/full/<run_id>/``; both moved (the record is
-    ``export.json`` under ``experiments/<family>/exports/full/<run_id>/``).
-    Resolution stays pointer-driven; prefer ``lifecycle.valid_export`` +
-    ``paths.current_pointer_path`` over this shim.
-    """
-    logger.warning(
-        "nmr.families.full_manifest_path is deprecated; resolve via "
-        "nmr.lifecycle.valid_export / nmr.paths.current_pointer_path"
-    )
-    if lifecycle.current_full_status(family) != "full":
-        raise FileNotFoundError(
-            f"no current full version for family {family!r}: "
-            f"{paths.current_pointer_path(family)} missing or dangling; "
-            f"available slots: {available_slots(models_dir, family) or 'none'}"
-        )
-    pointer = json.loads(paths.current_pointer_path(family).read_text(encoding="utf-8"))
-    return paths.export_json_path(family, "full", pointer["run_id"])
 
 
 def available_slots(models_dir: Path, family: str) -> list[str]:

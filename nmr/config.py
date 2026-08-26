@@ -276,10 +276,12 @@ class EnsembleConfig:
 
 @dataclass(frozen=True)
 class RunConfig:
-    """Run identity, determinism seed, and artifact output location."""
+    """Run identity, determinism seed, and shared machine cache root."""
 
     name: str = "default"
     seed: int = 42
+    # Shared machine cache root (cache/reports/campaigns); run/export outputs
+    # derive from EXPERIMENTS_ROOT, never from this directory.
     artifacts_dir: Path = REPO_ROOT / "artifacts"
 
     def __post_init__(self) -> None:

@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+
+import pytest
 
 import benchmark_runner
 import generate_dashboard
 import train_first_model  # noqa: F401  (import-time smoke)
+from nmr import paths
 
 
 def test_benchmark_runner_import_surface() -> None:
@@ -312,3 +316,100 @@ def test_dashboard_app_has_no_plotly_reference() -> None:
     from dashboard_ui import app as dashboard_app
 
     assert "plotly" not in inspect.getsource(dashboard_app).lower()
+
+
+def test_train_first_model_registry_points_at_experiments_root() -> None:
+    # Task 11: the comparison/champion registry reads the experiments layout.
+    assert train_first_model._build_registry()._root == paths.EXPERIMENTS_ROOT
+
+
+def test_run_campaign_default_registry_root_is_experiments() -> None:
+    import run_campaign
+
+    args = run_campaign._parse_args(["--config", "a.yaml", "--name", "camp"])
+    assert Path(args.registry) == paths.EXPERIMENTS_ROOT
+
+
+def test_run_campaign_records_via_experiment_store(tmp_path, monkeypatch) -> None:
+    import polars as pl
+
+    import run_campaign
+    from nmr.evaluation import MetricSummary
+    from nmr.runner import ExperimentRunner, RunResult
+
+    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", tmp_path / "experiments")
+
+    def fake_run(self, *, deploy: bool = False) -> RunResult:
+        return RunResult(
+            run_id="a" * 64,
+            oof=pl.DataFrame({"id": ["x"], "era": ["1"], "prediction": [0.5]}),
+            metrics=MetricSummary(mean=0.1, std=0.2, sharpe=0.5, max_drawdown=0.05),
+            artifact=None,
+            manifest={"run_id": "a" * 64, "oof_device": "cpu"},
+        )
+
+    monkeypatch.setattr(ExperimentRunner, "run", fake_run)
+    monkeypatch.setattr(
+        ExperimentRunner, "compute_run_id", staticmethod(lambda config: "a" * 64)
+    )
+    monkeypatch.setattr(
+        ExperimentRunner,
+        "_compute_run_id",
+        staticmethod(lambda config, **_: "a" * 64),
+    )
+    cfg = tmp_path / "a.yaml"
+    cfg.write_text("run:\n  name: x\n", encoding="utf-8")
+    rc = run_campaign.main([
+        "--config", str(cfg), "--name", "camp",
+        "--registry", str(paths.EXPERIMENTS_ROOT),
+        "--campaigns-dir", str(tmp_path / "campaigns"),
+    ])
+    assert rc == 0
+    # Recording lands in the experiments layout (not artifacts/registry).
+    assert (
+        paths.EXPERIMENTS_ROOT / "x" / "runs" / ("a" * 64) / "run.json"
+    ).is_file()
+
+
+def test_promote_model_champion_resolves_from_paths_pointer(
+    tmp_path, monkeypatch
+) -> None:
+    import promote_model
+    from nmr import experiment_store
+    from nmr.registry import RunRegistry
+
+    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", tmp_path / "experiments")
+    experiment_store.record_run("fam-a", "a" * 64, {"scorecard": {}})
+    RunRegistry(paths.EXPERIMENTS_ROOT).promote("a" * 64, "fam-a")
+    # Task 11: champion resolution reads paths.champion_path() only.
+    assert promote_model._resolve_champion_run_id() == "a" * 64
+
+
+def test_promote_model_missing_champion_fails_loud(tmp_path, monkeypatch) -> None:
+    import promote_model
+
+    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", tmp_path / "experiments")
+    with pytest.raises(FileNotFoundError, match="no champion"):
+        promote_model._resolve_champion_run_id()
+
+
+def test_promote_and_rehearse_clis_reject_legacy_dir_args() -> None:
+    # Task 11: models_dir/registry_dir are gone from the promotion CLIs.
+    import promote_model
+    import rehearse_promotion
+
+    with pytest.raises(SystemExit):
+        promote_model._parse_args(
+            ["--run-id", "a" * 64, "--family", "fam", "--models-dir", "x"]
+        )
+    with pytest.raises(SystemExit):
+        rehearse_promotion._parse_args(
+            ["--run-id", "a" * 64, "--family", "fam", "--registry-dir", "x"]
+        )
+
+
+def test_dashboard_defaults_point_at_experiments_root() -> None:
+    from nmr import dashboard
+
+    assert dashboard.DEFAULT_REGISTRY_DIR == paths.EXPERIMENTS_ROOT
+    assert dashboard_app._DEFAULT_REGISTRY_DIR == paths.EXPERIMENTS_ROOT

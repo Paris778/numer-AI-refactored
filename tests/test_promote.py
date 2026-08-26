@@ -18,7 +18,7 @@ import pandas as pd
 import polars as pl
 import pytest
 
-from nmr import lifecycle, paths
+from nmr import experiment_store, lifecycle, paths
 from nmr.benchmark import Tier4GateConfig
 from nmr.config import (
     DataConfig,
@@ -146,21 +146,17 @@ def _passing_scorecard() -> dict:
 
 
 def _write_registry(
-    registry: Path,
     *,
     run_id: str = _RID,
-    stored_config: dict | None = None,
+    stored_config: dict,
     scorecard: dict | None = None,
     feature_cols: list[str] | None = None,
     weights: list[float] | None = None,
     supplemental_sha: str | None = None,
 ) -> Path:
-    run_dir = registry / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
+    """Write the run record through experiment_store (experiments layout)."""
     manifest = {
-        "config": stored_config if stored_config is not None else _stored_config_dict(
-            registry.parent / "data"
-        ),
+        "config": stored_config,
         "feature_cols": feature_cols if feature_cols is not None else ["f1", "f2"],
         "weights": weights if weights is not None else [1.0],
     }
@@ -172,30 +168,24 @@ def _write_registry(
         "manifest": manifest,
         "scorecard": scorecard if scorecard is not None else _passing_scorecard(),
     }
-    path = run_dir / "run.json"
-    path.write_text(json.dumps(payload, default=str), encoding="utf-8")
-    return path
+    return experiment_store.record_run("brb1-lgbm-v6", run_id, payload)
 
 
 def _promote(tmp_path: Path, **kwargs) -> object:
     data = _make_data(tmp_path / "data")
-    registry = tmp_path / "registry"
-    _write_registry(registry, stored_config=_stored_config_dict(data))
+    _write_registry(stored_config=_stored_config_dict(data))
     return promote_full_version(
         _RID,
         "brb1-lgbm-v6",
-        models_dir=tmp_path / "models",
-        registry_dir=registry,
         **kwargs,
     )
 
 
 def test_promote_happy_path_manifest_and_artifact(tmp_path: Path) -> None:
     data = _make_data(tmp_path / "data")
-    registry = tmp_path / "registry"
-    _write_registry(registry, stored_config=_stored_config_dict(data))
+    _write_registry(stored_config=_stored_config_dict(data))
     result = promote_full_version(
-        _RID, "brb1-lgbm-v6", models_dir=tmp_path / "models", registry_dir=registry
+        _RID, "brb1-lgbm-v6"
     )
 
     assert result.scope == "full"
@@ -258,22 +248,19 @@ def test_promote_happy_path_manifest_and_artifact(tmp_path: Path) -> None:
 
 def test_promote_gate_refusal_and_override(tmp_path: Path) -> None:
     data = _make_data(tmp_path / "data")
-    registry = tmp_path / "registry"
     failing = _passing_scorecard()
     failing["corr"] = 0.01  # below corr_min 0.0286
-    _write_registry(registry, stored_config=_stored_config_dict(data), scorecard=failing)
+    _write_registry(stored_config=_stored_config_dict(data), scorecard=failing)
 
     with pytest.raises(ValueError, match="tier-4 promotion gate"):
         promote_full_version(
-            _RID, "brb1-lgbm-v6", models_dir=tmp_path / "models", registry_dir=registry
+            _RID, "brb1-lgbm-v6"
         )
     # The rehearsal path: override records the failure in the artifact's own
     # manifest — a failed-gate artifact carries its verdict with it.
     result = promote_full_version(
         _RID,
         "brb1-lgbm-v6",
-        models_dir=tmp_path / "models",
-        registry_dir=registry,
         override_gate=True,
     )
     assert result.tier4_gate_passed is False
@@ -286,28 +273,24 @@ def test_promote_gate_refusal_and_override(tmp_path: Path) -> None:
 
 def test_promote_missing_scorecard_refused(tmp_path: Path) -> None:
     data = _make_data(tmp_path / "data")
-    registry = tmp_path / "registry"
-    _write_registry(
-        registry, stored_config=_stored_config_dict(data), scorecard={}
+    _write_registry(stored_config=_stored_config_dict(data), scorecard={}
     )
     with pytest.raises(ValueError, match="no validation scorecard"):
         promote_full_version(
-            _RID, "brb1-lgbm-v6", models_dir=tmp_path / "models", registry_dir=registry
+            _RID, "brb1-lgbm-v6"
         )
 
 
 def test_promote_supplemental_identity_mismatch_refused(tmp_path: Path) -> None:
     data = _make_data(tmp_path / "data")
-    registry = tmp_path / "registry"
     # Stored run carries a supplemental SHA but the config has no path.
     _write_registry(
-        registry,
         stored_config=_stored_config_dict(data),
         supplemental_sha="f" * 64,
     )
     with pytest.raises(ValueError, match="supplemental feature-set identity"):
         promote_full_version(
-            _RID, "brb1-lgbm-v6", models_dir=tmp_path / "models", registry_dir=registry
+            _RID, "brb1-lgbm-v6"
         )
 
 
@@ -318,40 +301,35 @@ def test_promote_supplemental_identity_match(tmp_path: Path) -> None:
     stored = _stored_config_dict(data)
     stored["data"]["supplemental_feature_sets"] = str(supp)
     sha = ExperimentRunner._supplemental_fingerprint(supp)
-    registry = tmp_path / "registry"
-    _write_registry(
-        registry, stored_config=stored, supplemental_sha=sha
+    _write_registry(stored_config=stored, supplemental_sha=sha
     )
     result = promote_full_version(
-        _RID, "brb1-lgbm-v6", models_dir=tmp_path / "models", registry_dir=registry
+        _RID, "brb1-lgbm-v6"
     )
     assert result.artifact_path.is_file()
 
 
 def test_promote_overwrite_and_repoint_guards(tmp_path: Path) -> None:
     data = _make_data(tmp_path / "data")
-    registry = tmp_path / "registry"
-    _write_registry(registry, stored_config=_stored_config_dict(data), run_id=_RID)
+    _write_registry(stored_config=_stored_config_dict(data), run_id=_RID)
     promote_full_version(
-        _RID, "brb1-lgbm-v6", models_dir=tmp_path / "models", registry_dir=registry
+        _RID, "brb1-lgbm-v6"
     )
     # Same slot again: immutable — refused even with force (a slot is never
     # overwritten; force only gates repointing current.json).
     with pytest.raises(ValueError, match="already exists"):
         promote_full_version(
-            _RID, "brb1-lgbm-v6", models_dir=tmp_path / "models",
-            registry_dir=registry, force=True,
+            _RID, "brb1-lgbm-v6", force=True,
         )
     # A second run repointing current.json away: refused without force.
     other = "b" * 64
-    _write_registry(registry, stored_config=_stored_config_dict(data), run_id=other)
+    _write_registry(stored_config=_stored_config_dict(data), run_id=other)
     with pytest.raises(ValueError, match="repointing requires force"):
         promote_full_version(
-            other, "brb1-lgbm-v6", models_dir=tmp_path / "models", registry_dir=registry
+            other, "brb1-lgbm-v6"
         )
     promote_full_version(
-        other, "brb1-lgbm-v6", models_dir=tmp_path / "models",
-        registry_dir=registry, force=True,
+        other, "brb1-lgbm-v6", force=True,
     )
     assert sorted(v.run_id for v in lifecycle.scan_valid_exports("brb1-lgbm-v6", "full")) == [_RID, other]
     pointer = json.loads(
@@ -362,21 +340,18 @@ def test_promote_overwrite_and_repoint_guards(tmp_path: Path) -> None:
 
 def test_promote_rejects_invalid_run_id_and_family(tmp_path: Path) -> None:
     data = _make_data(tmp_path / "data")
-    registry = tmp_path / "registry"
-    _write_registry(registry, stored_config=_stored_config_dict(data))
+    _write_registry(stored_config=_stored_config_dict(data))
     with pytest.raises(ValueError, match="64-char"):
         promote_full_version(
-            "not-a-run-id", "brb1-lgbm-v6", models_dir=tmp_path / "models",
-            registry_dir=registry,
+            "not-a-run-id", "brb1-lgbm-v6",
         )
     with pytest.raises(ValueError, match="invalid family name"):
         promote_full_version(
-            _RID, "../evil", models_dir=tmp_path / "models", registry_dir=registry
+            _RID, "../evil"
         )
-    with pytest.raises(FileNotFoundError, match="does not exist"):
+    with pytest.raises(FileNotFoundError, match="has no record"):
         promote_full_version(
-            "c" * 64, "brb1-lgbm-v6", models_dir=tmp_path / "models",
-            registry_dir=registry,
+            "c" * 64, "brb1-lgbm-v6",
         )
 
 
@@ -388,10 +363,9 @@ def test_promote_spawn_path_trains_on_train_plus_validation(
     prove include_validation wiring: the child re-reads train+validation."""
     monkeypatch.setenv("NMR_FULL_HISTORY_SPAWN_MIN_BYTES", "1")
     data = _make_data(tmp_path / "data")
-    registry = tmp_path / "registry"
-    _write_registry(registry, stored_config=_stored_config_dict(data))
+    _write_registry(stored_config=_stored_config_dict(data))
     result = promote_full_version(
-        _RID, "brb1-lgbm-v6", models_dir=tmp_path / "models", registry_dir=registry,
+        _RID, "brb1-lgbm-v6",
     )
     assert result.artifact_path.is_file()
     predict_fn = load_predict(result.artifact_path)
@@ -407,13 +381,10 @@ def test_rehearse_promotion_end_to_end(tmp_path: Path) -> None:
     """D7 Stage-1 rehearsal: truncated data dir, forced spawn path, measured
     peak RAM estimate, and the acceptance criterion on the live frame."""
     data = _make_data(tmp_path / "data")
-    registry = tmp_path / "registry"
-    _write_registry(registry, stored_config=_stored_config_dict(data))
+    _write_registry(stored_config=_stored_config_dict(data))
     result = rehearse_promotion(
         _RID,
         "brb1-lgbm-v6",
-        models_dir=tmp_path / "models",
-        registry_dir=registry,
         rehearsal_data_root=tmp_path / "rehearsal",
         train_eras=6,
         validation_eras=6,
@@ -470,26 +441,31 @@ def test_evaluate_gate_strict_cagr_fails_at_threshold() -> None:
     assert receipts["cagr_1y"]["passed"] is False
 
 
-def test_load_registry_run_corrupt_json(tmp_path: Path) -> None:
-    from nmr.promote import _load_registry_run
+def test_load_run_record_corrupt_json(tmp_path: Path) -> None:
+    from nmr.promote import _load_run_record
 
-    registry = tmp_path / "registry"
-    run_dir = registry / _RID
+    run_dir = paths.run_dir("brb1-lgbm-v6", _RID)
     run_dir.mkdir(parents=True)
     (run_dir / "run.json").write_text("{not json", encoding="utf-8")
     with pytest.raises(ValueError, match="corrupt run.json"):
-        _load_registry_run(registry, _RID)
+        _load_run_record("brb1-lgbm-v6", _RID)
 
 
-def test_load_registry_run_non_mapping(tmp_path: Path) -> None:
-    from nmr.promote import _load_registry_run
+def test_load_run_record_non_mapping(tmp_path: Path) -> None:
+    from nmr.promote import _load_run_record
 
-    registry = tmp_path / "registry"
-    run_dir = registry / _RID
+    run_dir = paths.run_dir("brb1-lgbm-v6", _RID)
     run_dir.mkdir(parents=True)
     (run_dir / "run.json").write_text("[]", encoding="utf-8")
     with pytest.raises(ValueError, match="not a mapping"):
-        _load_registry_run(registry, _RID)
+        _load_run_record("brb1-lgbm-v6", _RID)
+
+
+def test_load_run_record_missing_fails_loud(tmp_path: Path) -> None:
+    from nmr.promote import _load_run_record
+
+    with pytest.raises(FileNotFoundError, match="has no record"):
+        _load_run_record("brb1-lgbm-v6", _RID)
 
 
 def test_ram_guard_curve_path_passes_when_under_guard(
@@ -514,7 +490,7 @@ def test_ram_guard_curve_path_passes_when_under_guard(
         encoding="utf-8",
     )
     with caplog.at_level(logging.INFO, logger="nmr.promote"):
-        _ram_guard(config, tmp_path / "models", scope="full")  # must not raise
+        _ram_guard(config, scope="full")  # must not raise
     assert "extrapolated full-version combined commit" in caplog.text
 
 
@@ -537,7 +513,7 @@ def test_ram_guard_over_ceiling_raises(tmp_path: Path) -> None:
     reports.mkdir(parents=True)
     (reports / "ram_curve.json").write_text(_huge_curve(commit_slope=1e9, ws_slope=0.0), encoding="utf-8")
     with pytest.raises(RuntimeError, match="exceeds the 45 GiB guard"):
-        _ram_guard(_config(data), tmp_path / "models", scope="full")
+        _ram_guard(_config(data), scope="full")
 
 
 def test_ram_guard_over_commit_limit_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -554,7 +530,7 @@ def test_ram_guard_over_commit_limit_raises(tmp_path: Path, monkeypatch: pytest.
     reports.mkdir(parents=True)
     (reports / "ram_curve.json").write_text(_huge_curve(commit_slope=1e9, ws_slope=0.0), encoding="utf-8")
     with pytest.raises(RuntimeError, match="exceeds the machine commit limit"):
-        _ram_guard(_config(data), tmp_path / "models", scope="full")
+        _ram_guard(_config(data), scope="full")
 
 
 def test_ram_guard_over_working_set_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -571,7 +547,7 @@ def test_ram_guard_over_working_set_raises(tmp_path: Path, monkeypatch: pytest.M
     reports.mkdir(parents=True)
     (reports / "ram_curve.json").write_text(_huge_curve(commit_slope=0.0, ws_slope=1e9), encoding="utf-8")
     with pytest.raises(RuntimeError, match="would thrash"):
-        _ram_guard(_config(data), tmp_path / "models", scope="full")
+        _ram_guard(_config(data), scope="full")
 
 
 def _write_estimate(reports: Path, payload: dict) -> None:
@@ -598,7 +574,7 @@ def test_ram_guard_estimate_path_passes_when_under_guard(
         },
     )
     with caplog.at_level(logging.WARNING, logger="nmr.promote"):
-        _ram_guard(config, tmp_path / "models", scope="full")  # must not raise
+        _ram_guard(config, scope="full")  # must not raise
     assert "single-point estimate extrapolation" in caplog.text
 
 
@@ -614,7 +590,7 @@ def test_ram_guard_estimate_missing_dual_metric_skips(
         {"peak_bytes": 1, "parent_peak_bytes": 0, "train_validation_rows": 1},
     )
     with caplog.at_level(logging.WARNING, logger="nmr.promote"):
-        _ram_guard(config, tmp_path / "models", scope="full")  # must not raise
+        _ram_guard(config, scope="full")  # must not raise
     assert "lacks dual-metric data" in caplog.text
 
 
@@ -639,7 +615,7 @@ def test_ram_guard_corrupt_curve_falls_back_to_estimate(
         },
     )
     with caplog.at_level(logging.WARNING, logger="nmr.promote"):
-        _ram_guard(config, tmp_path / "models", scope="full")  # must not raise
+        _ram_guard(config, scope="full")  # must not raise
     assert "unreadable RAM curve" in caplog.text
 
 
@@ -654,72 +630,19 @@ def test_ram_guard_corrupt_estimate_skips(
     reports.mkdir(parents=True)
     (reports / "full_version_ram_estimate.json").write_text("{corrupt", encoding="utf-8")
     with caplog.at_level(logging.WARNING, logger="nmr.promote"):
-        _ram_guard(config, tmp_path / "models", scope="full")  # must not raise
+        _ram_guard(config, scope="full")  # must not raise
     assert "unreadable RAM estimate" in caplog.text
 
 
-def test_resolve_champion_run_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from nmr import paths
-    from nmr.promote import resolve_champion_run_id
-
-    # Pin the fallback target (paths.champion_path) to tmp so the
-    # FileNotFoundError case never depends on the real experiments/ pointer.
-    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", tmp_path / "experiments")
-    registry = tmp_path / "registry"
-    registry.mkdir()
-    with pytest.raises(FileNotFoundError, match="no champion"):
-        resolve_champion_run_id(registry)
-    champion = registry / "champion.json"
-    champion.write_text("{corrupt", encoding="utf-8")
-    with pytest.raises(ValueError, match="corrupt champion"):
-        resolve_champion_run_id(registry)
-    champion.write_text(json.dumps({"run_id": "not-hex"}), encoding="utf-8")
-    with pytest.raises(ValueError, match="no valid run_id"):
-        resolve_champion_run_id(registry)
-    champion.write_text(json.dumps({"run_id": _RID}), encoding="utf-8")
-    assert resolve_champion_run_id(registry) == _RID
-
-
-def test_resolve_champion_run_id_falls_back_to_paths_pointer(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Legacy ``registry_dir/champion.json`` absent → read the pointer where
-    ``RunRegistry.promote`` writes post-Task-6 (``paths.champion_path()`` =
-    ``experiments/champion.json``), validating its run_id as 64-hex."""
-    from nmr import paths
-    from nmr.promote import resolve_champion_run_id
-
-    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", tmp_path / "experiments")
-    champion = paths.champion_path()
-    champion.parent.mkdir(parents=True, exist_ok=True)
-    champion.write_text(
-        json.dumps({"run_id": _RID, "experiment_slug": "fam-a"}), encoding="utf-8"
-    )
-
-    registry = tmp_path / "registry"  # no legacy champion.json here
-    registry.mkdir()
-    assert resolve_champion_run_id(registry) == _RID
-
-    # The fallback still validates the 64-hex run_id.
-    champion.write_text(
-        json.dumps({"run_id": "not-hex", "experiment_slug": "fam-a"}),
-        encoding="utf-8",
-    )
-    with pytest.raises(ValueError, match="no valid run_id"):
-        resolve_champion_run_id(registry)
-
-
 def test_promote_manifest_without_config_refused(tmp_path: Path) -> None:
-    registry = tmp_path / "registry"
-    run_dir = registry / _RID
-    run_dir.mkdir(parents=True)
-    (run_dir / "run.json").write_text(
-        json.dumps({"run_id": _RID, "manifest": {}, "scorecard": _passing_scorecard()}),
-        encoding="utf-8",
+    experiment_store.record_run(
+        "brb1-lgbm-v6",
+        _RID,
+        {"run_id": _RID, "manifest": {}, "scorecard": _passing_scorecard()},
     )
     with pytest.raises(ValueError, match="no config dict"):
         promote_full_version(
-            _RID, "brb1-lgbm-v6", models_dir=tmp_path / "models", registry_dir=registry
+            _RID, "brb1-lgbm-v6"
         )
 
 
@@ -729,49 +652,44 @@ def test_promote_gate_missing_from_yaml_refused(
     import types
 
     data = _make_data(tmp_path / "data")
-    registry = tmp_path / "registry"
-    _write_registry(registry, stored_config=_stored_config_dict(data))
+    _write_registry(stored_config=_stored_config_dict(data))
     monkeypatch.setattr(
         "nmr.promote.load_benchmark_file", lambda path: types.SimpleNamespace(gate=None)
     )
     with pytest.raises(ValueError, match="no gate"):
         promote_full_version(
-            _RID, "brb1-lgbm-v6", models_dir=tmp_path / "models", registry_dir=registry
+            _RID, "brb1-lgbm-v6"
         )
 
 
 def test_promote_corrupt_current_pointer_requires_force(tmp_path: Path) -> None:
     data = _make_data(tmp_path / "data")
-    registry = tmp_path / "registry"
-    _write_registry(registry, stored_config=_stored_config_dict(data))
+    _write_registry(stored_config=_stored_config_dict(data))
     pointer = paths.current_pointer_path("brb1-lgbm-v6")
     pointer.parent.mkdir(parents=True, exist_ok=True)
     pointer.write_text("{corrupt", encoding="utf-8")
     with pytest.raises(ValueError, match="repointing requires force"):
         promote_full_version(
-            _RID, "brb1-lgbm-v6", models_dir=tmp_path / "models", registry_dir=registry
+            _RID, "brb1-lgbm-v6"
         )
 
 
 def test_promote_missing_feature_cols_refused(tmp_path: Path) -> None:
     data = _make_data(tmp_path / "data")
-    registry = tmp_path / "registry"
-    _write_registry(registry, stored_config=_stored_config_dict(data), feature_cols=[])
+    _write_registry(stored_config=_stored_config_dict(data), feature_cols=[])
     with pytest.raises(ValueError, match="no feature_cols"):
         promote_full_version(
-            _RID, "brb1-lgbm-v6", models_dir=tmp_path / "models", registry_dir=registry
+            _RID, "brb1-lgbm-v6"
         )
 
 
 def test_promote_weight_count_mismatch_refused(tmp_path: Path) -> None:
     data = _make_data(tmp_path / "data")
-    registry = tmp_path / "registry"
-    _write_registry(
-        registry, stored_config=_stored_config_dict(data), weights=[1.0, 1.0]
+    _write_registry(stored_config=_stored_config_dict(data), weights=[1.0, 1.0]
     )
     with pytest.raises(ValueError, match="do not match targets"):
         promote_full_version(
-            _RID, "brb1-lgbm-v6", models_dir=tmp_path / "models", registry_dir=registry
+            _RID, "brb1-lgbm-v6"
         )
 
 
@@ -829,8 +747,7 @@ def test_rehearse_restores_env_and_removes_stale_pointer(
     left by an earlier rehearsal is removed (a rehearsal is never the full version)."""
     monkeypatch.setenv("NMR_FULL_HISTORY_SPAWN_MIN_BYTES", "7777")
     data = _make_data(tmp_path / "data")
-    registry = tmp_path / "registry"
-    _write_registry(registry, stored_config=_stored_config_dict(data))
+    _write_registry(stored_config=_stored_config_dict(data))
     pointer = paths.current_pointer_path("brb1-lgbm-v6")
     pointer.parent.mkdir(parents=True, exist_ok=True)
     pointer.write_text(
@@ -839,8 +756,6 @@ def test_rehearse_restores_env_and_removes_stale_pointer(
     result = rehearse_promotion(
         _RID,
         "brb1-lgbm-v6",
-        models_dir=tmp_path / "models",
-        registry_dir=registry,
         rehearsal_data_root=tmp_path / "rehearsal",
         train_eras=6,
         validation_eras=6,
@@ -851,16 +766,14 @@ def test_rehearse_restores_env_and_removes_stale_pointer(
 
 
 def test_rehearse_manifest_without_config_refused(tmp_path: Path) -> None:
-    registry = tmp_path / "registry"
-    run_dir = registry / _RID
-    run_dir.mkdir(parents=True)
-    (run_dir / "run.json").write_text(
-        json.dumps({"run_id": _RID, "manifest": {}, "scorecard": _passing_scorecard()}),
-        encoding="utf-8",
+    experiment_store.record_run(
+        "brb1-lgbm-v6",
+        _RID,
+        {"run_id": _RID, "manifest": {}, "scorecard": _passing_scorecard()},
     )
     with pytest.raises(ValueError, match="no config dict"):
         rehearse_promotion(
-            _RID, "brb1-lgbm-v6", models_dir=tmp_path / "models", registry_dir=registry
+            _RID, "brb1-lgbm-v6"
         )
 
 
@@ -884,9 +797,7 @@ def test_rehearse_missing_feature_cols_refused(
     """The post-promotion feature_cols check (promote.py:870-872) — the promotion
     itself is stubbed out so the test never fits a model."""
     data = _make_data(tmp_path / "data")
-    registry = tmp_path / "registry"
-    _write_registry(
-        registry, stored_config=_stored_config_dict(data), feature_cols=[]
+    _write_registry(stored_config=_stored_config_dict(data), feature_cols=[]
     )
     fake = _fake_promotion_result(tmp_path)
     monkeypatch.setattr("nmr.promote.promote_full_version", lambda *a, **k: fake)
@@ -894,8 +805,6 @@ def test_rehearse_missing_feature_cols_refused(
         rehearse_promotion(
             _RID,
             "brb1-lgbm-v6",
-            models_dir=tmp_path / "models",
-            registry_dir=registry,
             rehearsal_data_root=tmp_path / "rehearsal",
             train_eras=6,
             validation_eras=6,
@@ -910,8 +819,7 @@ def test_rehearse_acceptance_failure_propagates(
     """The Phase-D acceptance criterion is NOT overridable: a failed raw-contract
     validation is logged at ERROR and re-raised (promote.py:883-894)."""
     data = _make_data(tmp_path / "data")
-    registry = tmp_path / "registry"
-    _write_registry(registry, stored_config=_stored_config_dict(data))
+    _write_registry(stored_config=_stored_config_dict(data))
     fake = _fake_promotion_result(tmp_path)
     monkeypatch.setattr("nmr.promote.promote_full_version", lambda *a, **k: fake)
 
@@ -926,8 +834,6 @@ def test_rehearse_acceptance_failure_propagates(
         rehearse_promotion(
             _RID,
             "brb1-lgbm-v6",
-            models_dir=tmp_path / "models",
-            registry_dir=registry,
             rehearsal_data_root=tmp_path / "rehearsal",
             train_eras=6,
             validation_eras=6,
@@ -945,8 +851,7 @@ def test_train_only_scope_fits_train_only(
     fit-phase spy records IngestionAgent.load calls only for the duration of
     the fit — the post-fit cross-check legitimately opens validation later."""
     data = _make_data(tmp_path / "data", validation_eras=32)
-    registry = tmp_path / "registry"
-    _write_registry(registry, stored_config=_stored_config_dict(data))
+    _write_registry(stored_config=_stored_config_dict(data))
     opened: list[str] = []
     original_load = IngestionAgent.load
 
@@ -967,8 +872,6 @@ def test_train_only_scope_fits_train_only(
     result = promote_full_version(
         _RID,
         "brb1-lgbm-v6",
-        models_dir=tmp_path / "models",
-        registry_dir=registry,
         override_gate=True,
         scope="train_only",
     )
@@ -1018,13 +921,10 @@ def test_train_only_spawn_spec_excludes_validation(
     monkeypatch.setattr(ModelOrchestrator, "_fit_full_history_subprocess", _spy)
     monkeypatch.setenv("NMR_FULL_HISTORY_SPAWN_MIN_BYTES", "1")
     data = _make_data(tmp_path / "data", validation_eras=32)
-    registry = tmp_path / "registry"
-    _write_registry(registry, stored_config=_stored_config_dict(data))
+    _write_registry(stored_config=_stored_config_dict(data))
     promote_full_version(
         _RID,
         "brb1-lgbm-v6",
-        models_dir=tmp_path / "models",
-        registry_dir=registry,
         override_gate=True,
         scope="train_only",
     )
@@ -1035,13 +935,10 @@ def test_train_only_writes_cross_check_scorecard(tmp_path: Path) -> None:
     """The partial export ships a versioned scorecard.json (official backend,
     fixed replay constants, window eras + per-era series + raw Sharpe)."""
     data = _make_data(tmp_path / "data", validation_eras=32)
-    registry = tmp_path / "registry"
-    _write_registry(registry, stored_config=_stored_config_dict(data))
+    _write_registry(stored_config=_stored_config_dict(data))
     result = promote_full_version(
         _RID,
         "brb1-lgbm-v6",
-        models_dir=tmp_path / "models",
-        registry_dir=registry,
         override_gate=True,
         scope="train_only",
     )
@@ -1067,13 +964,10 @@ def test_train_only_writes_cross_check_scorecard(tmp_path: Path) -> None:
 def test_full_scope_requires_current_pointer(tmp_path: Path) -> None:
     """A full-scope promotion repoints current.json atomically."""
     data = _make_data(tmp_path / "data")
-    registry = tmp_path / "registry"
-    _write_registry(registry, stored_config=_stored_config_dict(data))
+    _write_registry(stored_config=_stored_config_dict(data))
     result = promote_full_version(
         _RID,
         "brb1-lgbm-v6",
-        models_dir=tmp_path / "models",
-        registry_dir=registry,
         override_gate=True,
         scope="full",
     )
@@ -1089,13 +983,10 @@ def test_repromotion_rejected(tmp_path: Path) -> None:
     """Exports are immutable: promoting an existing slot raises even with
     force=True (force only gates repointing current.json, never overwrites)."""
     data = _make_data(tmp_path / "data")
-    registry = tmp_path / "registry"
-    _write_registry(registry, stored_config=_stored_config_dict(data))
+    _write_registry(stored_config=_stored_config_dict(data))
     promote_full_version(
         _RID,
         "brb1-lgbm-v6",
-        models_dir=tmp_path / "models",
-        registry_dir=registry,
         override_gate=True,
         force=True,
         scope="full",
@@ -1104,8 +995,6 @@ def test_repromotion_rejected(tmp_path: Path) -> None:
         promote_full_version(
             _RID,
             "brb1-lgbm-v6",
-            models_dir=tmp_path / "models",
-            registry_dir=registry,
             override_gate=True,
             force=True,
             scope="full",
@@ -1118,8 +1007,7 @@ def test_partial_scoring_failure_discards_staging(
     """A cross-check failure discards the staging dir — no half-written slot
     and no .tmp- residue (publication atomicity)."""
     data = _make_data(tmp_path / "data", validation_eras=32)
-    registry = tmp_path / "registry"
-    _write_registry(registry, stored_config=_stored_config_dict(data))
+    _write_registry(stored_config=_stored_config_dict(data))
 
     def _boom(*args, **kwargs):
         raise RuntimeError("scoring exploded")
@@ -1129,8 +1017,6 @@ def test_partial_scoring_failure_discards_staging(
         promote_full_version(
             _RID,
             "brb1-lgbm-v6",
-            models_dir=tmp_path / "models",
-            registry_dir=registry,
             override_gate=True,
             scope="train_only",
         )
@@ -1142,14 +1028,11 @@ def test_partial_scoring_failure_discards_staging(
 
 def test_promote_invalid_scope_refused(tmp_path: Path) -> None:
     data = _make_data(tmp_path / "data")
-    registry = tmp_path / "registry"
-    _write_registry(registry, stored_config=_stored_config_dict(data))
+    _write_registry(stored_config=_stored_config_dict(data))
     with pytest.raises(ValueError, match="scope"):
         promote_full_version(
             _RID,
             "brb1-lgbm-v6",
-            models_dir=tmp_path / "models",
-            registry_dir=registry,
             override_gate=True,
             scope="bogus",
         )
@@ -1182,5 +1065,5 @@ def test_ram_guard_train_only_scans_train_only(
         return original_scan(path, *args, **kwargs)
 
     monkeypatch.setattr(pl, "scan_parquet", _spy_scan)
-    _ram_guard(config, tmp_path / "models", scope="train_only")
+    _ram_guard(config, scope="train_only")
     assert scanned == ["train.parquet"]

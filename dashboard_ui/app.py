@@ -11,6 +11,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 from dashboard_ui.report import build_dashboard_html
+from nmr import paths
 from nmr.config import REPO_ROOT
 from nmr.dashboard import (
     EVALUABLE_ROWS,
@@ -37,7 +38,7 @@ _ROBUSTNESS_CELLS = {
     "has_perturb": "perturb_ceiling_stability",
     "has_regime": "regime_count",
 }
-_DEFAULT_REGISTRY_DIR = REPO_ROOT / "artifacts" / "registry"
+_DEFAULT_REGISTRY_DIR = paths.EXPERIMENTS_ROOT
 _DEFAULT_BENCHMARK_PATH = (
     REPO_ROOT / "artifacts" / "reports" / "benchmark_hierarchy_scorecard.csv"
 )

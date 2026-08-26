@@ -54,7 +54,9 @@ __all__ = [
 ]
 
 REPORTS_DIR = REPO_ROOT / "artifacts" / "reports"
-DEFAULT_REGISTRY_DIR = REPO_ROOT / "artifacts" / "registry"
+# Run records live under the experiments layout (Task 11); the legacy
+# artifacts/registry is no longer written and the legacy scan is vestigial.
+DEFAULT_REGISTRY_DIR = paths.EXPERIMENTS_ROOT
 DEFAULT_DATA_DIR = REPO_ROOT / "data" / "v5.3"
 DEFAULT_GATE_PATH = REPO_ROOT / "configs" / "benchmarks" / "tier4_gate.yaml"
 
@@ -1585,6 +1587,19 @@ def _series_label(registry_dir: Path, run_id: str) -> str:
     return f"{display} · {run_id[:8]}"
 
 
+def _run_preds_path(registry_dir: Path, run_id: str) -> Path:
+    """Validation-preds parquet for ``run_id``: legacy path first, then the
+    experiments layout (``experiments/<family>/runs/<run_id>/`` — where
+    ``experiment_store.record_run_result`` persists it since Task 11)."""
+    legacy = Path(registry_dir) / run_id / "validation_preds.parquet"
+    if legacy.exists():
+        return legacy
+    return next(
+        iter(paths.EXPERIMENTS_ROOT.glob(f"*/runs/{run_id}/validation_preds.parquet")),
+        legacy,
+    )
+
+
 _METRIC_NAMES = ("payout", "corr20", "mmc20", "corr60", "mmc60", "bmc", "cwmm")
 
 
@@ -1666,7 +1681,7 @@ def extract_multimetric_timeseries(
             )
             label = model_id
         else:
-            preds_path = Path(registry_dir) / model_id / "validation_preds.parquet"
+            preds_path = _run_preds_path(registry_dir, model_id)
             if not preds_path.exists():
                 logger.warning("nmr.dashboard: skipping missing preds %s", preds_path)
                 continue
@@ -1851,7 +1866,7 @@ def extract_pairwise_similarity_matrix(
     for model_id in sorted(set(run_ids)):
         if model_id == tier4_column:
             continue
-        preds_path = Path(registry_dir) / model_id / "validation_preds.parquet"
+        preds_path = _run_preds_path(registry_dir, model_id)
         if not preds_path.exists():
             logger.warning("nmr.dashboard: skipping missing preds %s", preds_path)
             continue

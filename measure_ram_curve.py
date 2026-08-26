@@ -21,7 +21,7 @@ through the origin was rejected. Results (with both anchors and an honest
 uncertainty label) land in ``artifacts/reports/ram_curve.json``.
 
 Usage:
-    python measure_ram_curve.py --run-id <64-hex>
+    python measure_ram_curve.py --run-id <64-hex> --family <family>
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from pathlib import Path
 
 import numpy as np
 
-from nmr.promote import DEFAULT_MODELS_DIR, _build_truncated_data, _load_registry_run
+from nmr.promote import DEFAULT_MODELS_DIR, _build_truncated_data, _load_run_record
 
 logger = logging.getLogger("measure_ram_curve")
 
@@ -122,13 +122,14 @@ def _fit_ws(points: list[dict]) -> dict:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--registry-dir", type=Path, default=None)
+    parser.add_argument(
+        "--family", required=True, help="family slug of the run (run.name)"
+    )
     parser.add_argument("--rehearsal-data-root", type=Path, default=None)
     args = parser.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    registry_dir = args.registry_dir or (Path("artifacts") / "registry")
-    payload = _load_registry_run(registry_dir, args.run_id)
+    payload = _load_run_record(args.family, args.run_id)
     stored_config = (payload.get("manifest") or {}).get("config")
     if not isinstance(stored_config, dict):
         raise ValueError("run manifest has no config dict")

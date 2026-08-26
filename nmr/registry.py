@@ -1,37 +1,24 @@
 """Cross-family run registry: global comparison + champion pointer only.
 
 Runs live under ``experiments/<slug>/runs/<run_id>/run.json`` (persistence
-lives in :mod:`nmr.experiment_store`); this class iterates families for
+lives in :mod:`nmr.experiment_store` — run recording is
+``experiment_store.record_run_result``); this class iterates families for
 comparison and owns the atomic ``champion.json`` pointer at the experiments
 root. Champion writes are single-writer (CLI/runner entry points only —
 design spec §9).
-
-Interim compat shims (removed in Task 11): ``record(RunResult)`` keeps the
-legacy single-pool layout (``root/<run_id>/`` — ``tests/test_campaign.py``
-pins it and its stub manifests carry no ``config.run.name``); iteration and
-``promote``/``promote_if_better`` additionally accept legacy rows (slug
-derived from ``manifest.config.run.name`` when a champion pointer needs one),
-and ``promote``/``promote_if_better`` accept ``slug=None``, resolving the
-family by scanning the registry root (fail loud on not-found/ambiguous). The
-plan's callers are retargeted in Task 11.
 """
 
 from __future__ import annotations
 
-import dataclasses
 import json
 import logging
-import os
 import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import polars as pl
-
 from nmr import experiment_store, paths
 from nmr._atomicio import atomic_write_text
-from nmr.runner import RunResult
 
 logger = logging.getLogger("nmr.registry")
 
@@ -66,9 +53,6 @@ def _iter_run_records(root: Path):
     """Yield ``(slug, run_id, payload)`` for every ``run.json`` under ``root``.
 
     New layout: ``root/<slug>/runs/<run_id>/run.json`` (slug = family dir).
-    Legacy compat layout: ``root/<run_id>/run.json`` (64-hex run dir directly
-    under the root, slug ``None``) — written by the compat ``record()`` until
-    Task 11.
     """
     if not root.is_dir():
         return
@@ -76,30 +60,14 @@ def _iter_run_records(root: Path):
         if not entry.is_dir():
             continue
         runs_dir = entry / "runs"
-        if runs_dir.is_dir():
-            for run_dir in sorted(runs_dir.iterdir()):
-                run_json = run_dir / "run.json"
-                if run_json.is_file():
-                    yield entry.name, run_dir.name, json.loads(
-                        run_json.read_text(encoding="utf-8")
-                    )
-        elif _RUN_ID_PATTERN.fullmatch(entry.name):
-            run_json = entry / "run.json"
+        if not runs_dir.is_dir():
+            continue
+        for run_dir in sorted(runs_dir.iterdir()):
+            run_json = run_dir / "run.json"
             if run_json.is_file():
-                yield None, entry.name, json.loads(
+                yield entry.name, run_dir.name, json.loads(
                     run_json.read_text(encoding="utf-8")
                 )
-
-
-def _write_parquet_atomic(path: Path, frame: pl.DataFrame) -> None:
-    """Write a parquet frame via temp file + os.replace (no fsync)."""
-    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
-    try:
-        frame.write_parquet(tmp)
-        os.replace(tmp, path)
-    finally:
-        if tmp.exists():
-            tmp.unlink()
 
 
 class RunRegistry:
@@ -124,32 +92,13 @@ class RunRegistry:
             )
 
     def _read_run(self, run_id: str, slug: str) -> dict[str, Any]:
-        """Read a run record from the experiments layout or the legacy root."""
-        try:
-            return experiment_store.read_run(slug, run_id)
-        except FileNotFoundError:
-            legacy = self._root / run_id / "run.json"
-            if legacy.is_file():
-                return json.loads(legacy.read_text(encoding="utf-8"))
-            raise
+        """Read a run record from the experiments layout (fail loud)."""
+        return experiment_store.read_run(slug, run_id)
 
     def _resolve_slug(self, run_id: str) -> str:
         matches: list[str] = []
-        for slug, rid, payload in self._iter_run_records():
-            if rid != run_id:
-                continue
-            if slug is None:
-                name = ((payload.get("manifest") or {}).get("config") or {}).get(
-                    "run"
-                ) or {}
-                candidate = name.get("name")
-                if not isinstance(candidate, str) or not candidate:
-                    raise ValueError(
-                        f"run {run_id} is a legacy row without manifest "
-                        "config.run.name; pass slug explicitly"
-                    )
-                matches.append(candidate)
-            else:
+        for slug, rid, _ in self._iter_run_records():
+            if rid == run_id:
                 matches.append(slug)
         if not matches:
             raise ValueError(f"run {run_id} not found under {self._root}")
@@ -160,46 +109,6 @@ class RunRegistry:
                 "pass slug explicitly"
             )
         return unique[0]
-
-    def record(self, result: RunResult) -> Path:
-        """Interim compat (removed in Task 11): legacy-layout record.
-
-        Writes ``self._root/<run_id>/{run.json, oof.parquet,
-        validation_preds.parquet?}`` exactly like the pre-refactor registry —
-        ``tests/test_campaign.py`` pins this layout and its stub manifests
-        carry no ``config.run.name`` (no slug available at record time). Task 7
-        moves run persistence to :func:`nmr.experiment_store.record_run`.
-        """
-        run_dir = self._root / result.run_id
-        run_dir.mkdir(parents=True, exist_ok=True)
-        _write_parquet_atomic(run_dir / "oof.parquet", result.oof)
-        if result.validation_predictions is not None:
-            _write_parquet_atomic(
-                run_dir / "validation_preds.parquet", result.validation_predictions
-            )
-        self._atomic_json_write(run_dir / "run.json", self._result_payload(result))
-        logger.info("[record] run %s recorded -> %s", result.run_id, run_dir)
-        return run_dir
-
-    @staticmethod
-    def _result_payload(result: RunResult) -> dict[str, Any]:
-        scorecard_block = None
-        if result.scorecard is not None:
-            row = result.scorecard.to_frame().to_dicts()[0]
-            scorecard_block = {
-                key: value
-                for key, value in row.items()
-                if not key.startswith(("timing_", "quality_metric"))
-            }
-        return {
-            "run_id": result.run_id,
-            "metrics": dataclasses.asdict(result.metrics),
-            "manifest": result.manifest,
-            "scorecard": scorecard_block,
-            "oof_path": "oof.parquet",
-            "artifact_path": str(result.artifact.path) if result.artifact else None,
-            "artifact_manifest": result.artifact.manifest if result.artifact else None,
-        }
 
     def list(self) -> list[str]:
         return sorted(run_id for _, run_id, _ in self._iter_run_records())

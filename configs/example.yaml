@@ -6,6 +6,8 @@
 run:
   name: baseline-lgbm-small
   seed: 42
+  artifacts_dir: artifacts     # shared machine cache root (cache/reports/campaigns);
+                               # run/export outputs derive from EXPERIMENTS_ROOT
 
 data:
   version: v5.3

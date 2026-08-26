@@ -89,48 +89,10 @@ def test_full_version_is_lifecycle_export_version() -> None:
     assert fam.FullVersion is lifecycle.ExportVersion
 
 
-def test_full_manifest_path_resolves_via_pointer(tmp_path: Path) -> None:
-    _write_export("brb1-xgb-v6", "full", "a" * 64, write_pointer=True)
-    assert fam.full_manifest_path(tmp_path, "brb1-xgb-v6") == (
-        paths.export_json_path("brb1-xgb-v6", "full", "a" * 64)
-    )
-
-
-@pytest.mark.parametrize("bad", ["../evil", "a/b", "a b", "a:b", "", "ModelA", "A"])
-def test_full_manifest_path_rejects_invalid_family(tmp_path: Path, bad: str) -> None:
-    with pytest.raises(ValueError):
-        fam.full_manifest_path(tmp_path, bad)
-
-
 @pytest.mark.parametrize("bad", ["../evil", "a/b", "a b", "a:b", "", "ModelA", "A"])
 def test_load_full_version_rejects_invalid_family(tmp_path: Path, bad: str) -> None:
     with pytest.raises(ValueError):
         fam.load_full_version(tmp_path, bad)
-
-
-def test_full_manifest_path_missing_pointer_fails_loud(tmp_path: Path) -> None:
-    """No mtime-based slot guessing: an absent pointer is an explicit absence."""
-    _write_export("brb1-xgb-v6", "full", "a" * 64)  # no current.json -> degraded
-    with pytest.raises(FileNotFoundError, match="available slots"):
-        fam.full_manifest_path(tmp_path, "brb1-xgb-v6")
-    assert fam.load_full_version(tmp_path, "brb1-xgb-v6") is None
-
-
-def test_full_manifest_path_dangling_pointer_fails_loud(tmp_path: Path) -> None:
-    _write_export("brb1-xgb-v6", "full", "b" * 64, write_pointer=True)
-    paths.current_pointer_path("brb1-xgb-v6").write_text(
-        json.dumps({"run_id": "c" * 64}), encoding="utf-8"
-    )
-    with pytest.raises(FileNotFoundError):
-        fam.full_manifest_path(tmp_path, "brb1-xgb-v6")
-
-
-def test_full_manifest_path_corrupt_pointer_fails_loud(tmp_path: Path) -> None:
-    _write_export("brb1-xgb-v6", "full", "b" * 64, write_pointer=True)
-    paths.current_pointer_path("brb1-xgb-v6").write_text("{not json", encoding="utf-8")
-    with pytest.raises(FileNotFoundError):
-        fam.full_manifest_path(tmp_path, "brb1-xgb-v6")
-    assert fam.load_full_version(tmp_path, "brb1-xgb-v6") is None
 
 
 def test_available_slots_lists_all_slot_dirs(tmp_path: Path) -> None:

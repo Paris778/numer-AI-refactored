@@ -312,10 +312,15 @@ def _technical_entries(registry_dir: Path) -> list[dict]:
 
     Full ``run.json`` dumps (~25 KB per run) blow the < 112 KiB artifact budget
     (measured: 29 runs = ~715 KB), so the accordion carries the curated config
-    summary only; the immutable full payload lives in the registry.
+    summary only; the immutable full payload lives in the registry. Legacy
+    one-level layout first (test fixtures); the experiments layout
+    (``*/runs/*/run.json`` — where records live since Task 11) when empty.
     """
     entries = []
-    for run_file in sorted(registry_dir.glob("*/run.json")):
+    run_files = sorted(registry_dir.glob("*/run.json"))
+    if not run_files:
+        run_files = sorted(registry_dir.glob("*/runs/*/run.json"))
+    for run_file in run_files:
         try:
             payload = json.loads(run_file.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):

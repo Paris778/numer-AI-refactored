@@ -30,7 +30,7 @@ These four files obey a strict **Single Source of Truth (SSOT) hierarchy**. One 
 
 ## 1. Agent Identity & Mission
 
-You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (1151 collected tests, sole functional gate) + `ruff check` (lint gate, `ruff.toml` E/F/I/UP @120, pinned in `requirements-dev.txt`). Both enforced by CI (`.github/workflows/ci.yml`).
+You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (1146 collected tests, sole functional gate) + `ruff check` (lint gate, `ruff.toml` E/F/I/UP @120, pinned in `requirements-dev.txt`). Both enforced by CI (`.github/workflows/ci.yml`).
 
 Your mission:
 
@@ -129,7 +129,7 @@ When modifying or generating code, enforce these seven invariants:
 | config schema / valid values | `nmr/config.py` — frozen dataclasses, `load_config`, `VALID_*` tuples |
 | experiment-layout path derivation | `nmr/paths.py` — pure layout: `validate_slug`, run/export/pointer paths, shared cache/report dirs (spec: `ARCHITECTURE.md` §X) |
 | lifecycle stages / export validity | `nmr/lifecycle.py` — `derive_stage` (total), `valid_export`/`scan_valid_exports`, `current_full_status`, `sort_exports`, `StakedRecord` (spec: `ARCHITECTURE.md` §Y) |
-| run persistence / atomic export publication | `nmr/experiment_store.py` — `record_run`/`read_run`, `stage_export`/`publish_staged_export` (spec: `ARCHITECTURE.md` §Z) |
+| run persistence / atomic export publication | `nmr/experiment_store.py` — `record_run_result`/`record_run`/`read_run`, `stage_export`/`publish_staged_export` (spec: `ARCHITECTURE.md` §Z) |
 | data loading / feature sets | `nmr/data.py` — `IngestionAgent` (lazy Polars, `features.json`) |
 | feature-set resolution / stability screening | `nmr/features.py` — `resolve_feature_sets`, `feature_stability_screen`, `select_stable_features` (spec: `ARCHITECTURE.md` §P) |
 | fold construction / purge math | `nmr/splitter.py` — `PurgedEraSplitter` |
@@ -151,7 +151,7 @@ When modifying or generating code, enforce these seven invariants:
 | perturbation/horizon/regime diagnostics | `nmr/robustness.py` |
 | Benchmark hierarchy (cells, gates, thresholds) | `nmr/benchmark.py` + `configs/benchmarks/` + `benchmark_runner.py` |
 | Untiered benchmark fleet (configs, generators, runner) | `nmr/benchmark_fleet.py` + `configs/benchmarks/fleet/` (spec: `docs/superpowers/specs/2026-08-19-benchmark-fleet-design.md`) |
-| Model Tournament dashboard data engine and shared renderer | `nmr/dashboard.py` + `dashboard_ui/{charts.py,report.py,app.py,static/}`; `generate_dashboard.py`/`dashboard_app.py` are thin hosts. Runs read from the legacy registry AND `experiments/` (Task-10 bridge); exports via `nmr.lifecycle` — one `family::<scope>::<run_id>` row per VALID slot, carrying `display_name`/`lifecycle_stage`/`current_full_status`/`stale`; full+partial rows are diagnostic-only (`EVALUABLE_ROWS` = trained + benchmark; partials carry cross-check cells). Ranking/cohorts/ML Advantage/detail payloads are deterministic and read-only; the static report and Streamlit host share one vanilla renderer. |
+| Model Tournament dashboard data engine and shared renderer | `nmr/dashboard.py` + `dashboard_ui/{charts.py,report.py,app.py,static/}`; `generate_dashboard.py`/`dashboard_app.py` are thin hosts. Runs read from `experiments/`; exports via `nmr.lifecycle` — one `family::<scope>::<run_id>` row per VALID slot, carrying `display_name`/`lifecycle_stage`/`current_full_status`/`stale`; full+partial rows are diagnostic-only (`EVALUABLE_ROWS` = trained + benchmark; partials carry cross-check cells). Ranking/cohorts/ML Advantage/detail payloads are deterministic and read-only; the static report and Streamlit host share one vanilla renderer. |
 | model-family / full-version discovery | `nmr/families.py` — compat wrapper over `nmr/lifecycle` (pointer-driven full exports under `experiments/`; spec: `ARCHITECTURE.md` Model Families section) |
 | Promote a run to a full/partial export (`train_only` → partial + cross-check `scorecard.json`; Model Uploads `predict.pkl`) | `nmr/promote.py` (`promote_full_version`, `rehearse_promotion`) + `promote_model.py` / `rehearse_promotion.py` CLIs; acceptance gate `nmr/submission.py::accept_promoted_artifact` (raw output vs the official validator) |
 | campaign orchestration | `nmr/campaign.py` + `run_campaign.py` (spec: `ARCHITECTURE.md` §R) |
@@ -188,7 +188,7 @@ Four gates, in order of rigor — **exact commands live only in [`CONTRIBUTING.m
 
 1. **Fast gate** — `ruff check .` + full `pytest -q` after every meaningful change.
 2. **Targeted subsets** while iterating — oracle parity (`tests/test_parity.py` + `tests/test_risk_parity.py`) and determinism hashes (`tests/test_benchmark_hierarchy.py`).
-3. **Pre-sign-off gate** (mandatory before delivering work) — full 1151-test collection plus the real-data benchmark smoke (`benchmark_runner.py --fast-mode` → `artifacts/reports/benchmark_hierarchy_scorecard_smoke.csv` + `benchmark_gate_report_smoke.csv`).
+3. **Pre-sign-off gate** (mandatory before delivering work) — full 1146-test collection plus the real-data benchmark smoke (`benchmark_runner.py --fast-mode` → `artifacts/reports/benchmark_hierarchy_scorecard_smoke.csv` + `benchmark_gate_report_smoke.csv`).
 4. **End-of-session gate (mandatory)** — before stopping or handing off for review, run the linter and functional gate on the final state: `ruff check .` + `pytest -q`. Never end a session with unverified changes; report actual results, including skips or pre-existing failures.
 
 Real-data tests require the `data/v5.3/` parquet assets (see [`README.md`](README.md#data-assets)). If they are missing, report which tests were skipped — never claim full verification. CI (`.github/workflows/ci.yml`) enforces the fast gate on every push/PR (see [`CONTRIBUTING.md`](CONTRIBUTING.md#testing--verification)).
@@ -287,8 +287,8 @@ Heavy CLIs (`benchmark_runner.py`, `run_campaign.py`, `analyze_dataset.py`, `tra
 <execution_safeguards>
 ## 10. Agent Execution & Shell Safeguards
 
-- 🚫 **Prohibited Commands:** Never execute `git push --force`, `git reset --hard` (without explicit user instruction), or recursive deletes on `data/`, `artifacts/registry/`, or `docs/`. Never delete `data/v5.3/` parquet assets — they are multi-GB local downloads not recoverable from git.
+- 🚫 **Prohibited Commands:** Never execute `git push --force`, `git reset --hard` (without explicit user instruction), or recursive deletes on `data/` or `docs/`. Never delete `data/v5.3/` parquet assets — they are multi-GB local downloads not recoverable from git.
 - 🚫 **Environment Protection:** Never read, output, or write raw secret values (`.env`, numerapi keys) to logs or files.
 - ⏱️ **Execution Timeouts:** Full-preset training (`standard`/`deep`, 20k–30k trees) can run for hours. For verification use the `fast` preset, `--fast-mode` on the benchmark runner, or truncated era windows. If a command exceeds 300 seconds unexpectedly, terminate and inspect output.
-- 🧹 **Artifact Hygiene:** `artifacts/cache/`, `experiments/*/runs/`, and `artifacts/registry/` are machine-generated. Clearing the neutralization cache is safe (it repopulates); clearing the registry destroys run history — ask first.
+- 🧹 **Artifact Hygiene:** `artifacts/cache/` and `experiments/*/runs/` are machine-generated. Clearing the neutralization cache is safe (it repopulates); clearing the registry destroys run history — ask first.
 </execution_safeguards>

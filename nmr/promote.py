@@ -75,7 +75,6 @@ __all__ = [
     "RehearsalResult",
     "promote_full_version",
     "rehearse_promotion",
-    "resolve_champion_run_id",
 ]
 
 _RID_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -210,16 +209,22 @@ def _evaluate_gate(
     return not violations, receipts
 
 
-def _load_registry_run(registry_dir: Path, run_id: str) -> dict[str, Any]:
+def _load_run_record(family: str, run_id: str) -> dict[str, Any]:
+    """Read the promoted run's record from the experiments layout.
+
+    The family IS the run's slug (``config.run.name`` convention) — the
+    record lives at ``experiments/<family>/runs/<run_id>/run.json``, written
+    by ``experiment_store.record_run_result`` at record time.
+    """
     if not _RID_RE.fullmatch(run_id):
         raise ValueError(f"run_id={run_id!r} is not a 64-char lowercase hex string")
-    run_json = Path(registry_dir) / run_id / "run.json"
-    if not run_json.is_file():
-        raise FileNotFoundError(
-            f"Run {run_id!r} does not exist in registry {registry_dir}"
-        )
     try:
-        payload = json.loads(run_json.read_text(encoding="utf-8"))
+        payload = experiment_store.read_run(family, run_id)
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(
+            f"Run {run_id!r} has no record for family {family!r} under "
+            f"{paths.EXPERIMENTS_ROOT}"
+        ) from exc
     except (json.JSONDecodeError, OSError) as exc:
         raise ValueError(f"corrupt run.json for {run_id!r}: {exc}") from exc
     if not isinstance(payload, dict):
@@ -263,7 +268,7 @@ def _scope_rows(config: ExperimentConfig, scope: str) -> int:
     )
 
 
-def _ram_guard(config: ExperimentConfig, models_dir: Path, *, scope: str) -> None:
+def _ram_guard(config: ExperimentConfig, *, scope: str) -> None:
     """Enforce the measured dual-metric guard (D7 rehearsal/curve).
 
     Two metrics guard two different failure modes (review directive 2026-08-18):
@@ -288,9 +293,8 @@ def _ram_guard(config: ExperimentConfig, models_dir: Path, *, scope: str) -> Non
     (``_RAM_WS_FRACTION``). Falls back to the single-point rehearsal estimate
     (through-origin, logged as a weak extrapolation) only when no curve
     exists. Missing/incomplete data ⇒ SKIP WITH A WARNING — a guard that
-    silently approves on the wrong metric is worse than no guard.
-    ``models_dir`` is retained for call-site compatibility; the report paths
-    now derive from ``config.run.artifacts_dir`` (shared-reports retarget).
+    silently approves on the wrong metric is worse than no guard. Report paths
+    derive from ``config.run.artifacts_dir`` (shared-reports retarget).
     """
     curve_path = paths.shared_reports_dir(config.run.artifacts_dir) / "ram_curve.json"
     estimate_path = paths.shared_reports_dir(config.run.artifacts_dir) / RAM_ESTIMATE_FILENAME
@@ -467,35 +471,10 @@ def _full_history_frame(
     return pl.concat(parts)
 
 
-def resolve_champion_run_id(registry_dir: Path) -> str:
-    """Read the atomic ``champion.json`` pointer's run_id.
-
-    Task 6/11 shim: ``RunRegistry.promote`` now writes the pointer at
-    ``paths.champion_path()`` (``experiments/champion.json``); the legacy
-    ``registry_dir/champion.json`` is honored when present. Task 11 removes
-    the legacy read and retargets ``promote_model.py``.
-    """
-    legacy = Path(registry_dir) / "champion.json"
-    primary = paths.champion_path()
-    champion_path = legacy if legacy.is_file() else primary
-    if not champion_path.is_file():
-        raise FileNotFoundError(f"no champion: {champion_path} missing")
-    try:
-        payload = json.loads(champion_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError) as exc:
-        raise ValueError(f"corrupt champion.json: {exc}") from exc
-    run_id = payload.get("run_id") if isinstance(payload, dict) else None
-    if not isinstance(run_id, str) or not _RID_RE.fullmatch(run_id):
-        raise ValueError(f"champion.json has no valid run_id: {payload!r}")
-    return run_id
-
-
 def promote_full_version(
     run_id: str,
     family: str,
     *,
-    models_dir: Path | None = None,
-    registry_dir: Path | None = None,
     override_gate: bool = False,
     force: bool = False,
     data_dir: Path | None = None,
@@ -527,20 +506,15 @@ def promote_full_version(
     ``current.json``, so a rehearsal can never be read as the family's current
     full version. ``data_dir`` is the rehearsal override — train/validation
     are read from this directory instead of the stored config's, and the
-    substitution is recorded in ``config_normalizations``.
+    substitution is recorded in ``config_normalizations``. The run record is
+    read from the experiments layout (``experiments/<family>/runs/``) — the
+    layout's only record store since Task 11.
     """
-    # models_dir is retained for call-site compatibility (rehearse_promotion /
-    # promote_model.py still pass it); output now lives under the experiment
-    # layout (paths.export_dir), never artifacts/models.
-    models_dir = Path(models_dir) if models_dir is not None else DEFAULT_MODELS_DIR
-    registry_dir = Path(registry_dir) if registry_dir is not None else (
-        DEFAULT_MODELS_DIR.parent / "registry"
-    )
     if scope not in _VALID_SCOPES:
         raise ValueError(f"scope={scope!r} not in {_VALID_SCOPES}")
     persisted_scope = "partial" if scope == "train_only" else "full"
     validate_family_name(family)
-    payload = _load_registry_run(registry_dir, run_id)
+    payload = _load_run_record(family, run_id)
     manifest = payload.get("manifest") or {}
     stored_config = manifest.get("config")
     if not isinstance(stored_config, dict):
@@ -583,7 +557,7 @@ def promote_full_version(
         )
     config = config_from_dict(normalized)
     _supplemental_identity_check(config, manifest)
-    _ram_guard(config, models_dir, scope=scope)
+    _ram_guard(config, scope=scope)
 
     slot = paths.export_dir(family, persisted_scope, run_id)
     if slot.exists():
@@ -995,8 +969,6 @@ def rehearse_promotion(
     run_id: str,
     family: str,
     *,
-    models_dir: Path | None = None,
-    registry_dir: Path | None = None,
     rehearsal_data_root: Path | None = None,
     train_eras: int = 6,
     validation_eras: int = 6,
@@ -1017,11 +989,7 @@ def rehearse_promotion(
     ``live.parquet`` — the Phase D acceptance criterion (decision 10), which
     is NOT overridable.
     """
-    models_dir = Path(models_dir) if models_dir is not None else DEFAULT_MODELS_DIR
-    registry_dir = Path(registry_dir) if registry_dir is not None else (
-        DEFAULT_MODELS_DIR.parent / "registry"
-    )
-    payload = _load_registry_run(registry_dir, run_id)
+    payload = _load_run_record(family, run_id)
     stored_config = (payload.get("manifest") or {}).get("config")
     if not isinstance(stored_config, dict):
         raise ValueError(f"run {run_id!r} manifest has no config dict")
@@ -1047,8 +1015,6 @@ def rehearse_promotion(
         result = promote_full_version(
             run_id,
             family,
-            models_dir=models_dir,
-            registry_dir=registry_dir,
             override_gate=True,
             data_dir=rehearsal_root,
             force=True,  # repoints/repairs current.json; a rehearsal slot is

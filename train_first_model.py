@@ -11,7 +11,7 @@ apply_thread_limits()
 import json
 import logging
 
-from nmr import ExperimentRunner, load_config
+from nmr import ExperimentRunner, experiment_store, load_config, paths
 from nmr.registry import RunRegistry
 
 logging.basicConfig(
@@ -21,13 +21,19 @@ logging.basicConfig(
 )
 
 
+def _build_registry() -> RunRegistry:
+    """Comparison/champion registry — reads the experiments layout."""
+    return RunRegistry(paths.EXPERIMENTS_ROOT)
+
+
 def main() -> int:
     cfg = load_config("configs/first_model.yaml")
     runner = ExperimentRunner(cfg)
     result = runner.run(deploy=True)
 
-    registry = RunRegistry(cfg.run.artifacts_dir / "registry")
-    run_dir = registry.record(result)
+    slug = paths.validate_slug(cfg.run.name)
+    run_dir = experiment_store.record_run_result(slug, result)
+    registry = _build_registry()
     champion_path, promoted = registry.promote_if_better(result.run_id)
     print(f"promoted:    {promoted} (champion: {champion_path})")
 

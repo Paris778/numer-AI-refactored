@@ -27,27 +27,31 @@ from nmr.promote import rehearse_promotion
 logger = logging.getLogger("rehearse_promotion")
 
 
-def main(argv: list[str] | None = None) -> int:
+def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-id", required=True, help="64-hex run id to rehearse")
     parser.add_argument(
         "--family", required=True, help="model family name (run.name convention)"
     )
-    parser.add_argument("--models-dir", type=Path, default=None)
-    parser.add_argument("--registry-dir", type=Path, default=None)
     parser.add_argument("--rehearsal-data-root", type=Path, default=None)
     parser.add_argument("--train-eras", type=int, default=6)
     parser.add_argument("--validation-eras", type=int, default=6)
     parser.add_argument("--live-features", type=Path, default=None)
     parser.add_argument("--live-benchmark", type=Path, default=None)
-    args = parser.parse_args(argv)
+    return parser
+
+
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    return _build_parser().parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     result = rehearse_promotion(
         args.run_id,
         args.family,
-        models_dir=args.models_dir,
-        registry_dir=args.registry_dir,
         rehearsal_data_root=args.rehearsal_data_root,
         train_eras=args.train_eras,
         validation_eras=args.validation_eras,

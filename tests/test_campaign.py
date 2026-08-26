@@ -8,6 +8,7 @@ import polars as pl
 import pytest
 
 import run_campaign
+from nmr import paths
 from nmr.campaign import (
     CampaignRun,
     build_campaign_log,
@@ -16,6 +17,12 @@ from nmr.campaign import (
 )
 from nmr.evaluation import MetricSummary
 from nmr.runner import ExperimentRunner, RunResult
+
+
+@pytest.fixture(autouse=True)
+def _isolated_experiments_root(tmp_path, monkeypatch) -> None:
+    """Route the experiments layout under tmp_path — never the repo root."""
+    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", tmp_path / "experiments")
 
 
 def _write_config(tmp_path, name: str, content: str) -> None:
@@ -119,14 +126,19 @@ def _stub_run(tmp_path, monkeypatch) -> None:
 def test_run_campaign_main_records_and_writes_log(tmp_path, monkeypatch) -> None:
     cfg = _write_config(tmp_path, "a.yaml", "run:\n  name: x\n")
     _stub_run(tmp_path, monkeypatch)
-    registry_dir = tmp_path / "registry"
     campaigns_dir = tmp_path / "campaigns"
     rc = run_campaign.main([
         "--config", str(cfg), "--name", "camp",
-        "--registry", str(registry_dir), "--campaigns-dir", str(campaigns_dir),
+        "--registry", str(paths.EXPERIMENTS_ROOT), "--campaigns-dir", str(campaigns_dir),
     ])
     assert rc == 0
-    assert (registry_dir / ("a" * 64) / "run.json").exists()
+    # Task 11: recording goes through experiment_store into the experiments
+    # layout — experiments/<slug>/runs/<run_id>/run.json.
+    run_json = paths.EXPERIMENTS_ROOT / "x" / "runs" / ("a" * 64) / "run.json"
+    assert run_json.exists()
+    assert (paths.EXPERIMENTS_ROOT / "x" / "runs" / ("a" * 64) / "oof.parquet").exists()
+    payload = json.loads(run_json.read_text(encoding="utf-8"))
+    assert payload["run_id"] == "a" * 64
     logs = list(campaigns_dir.glob("*.json"))
     assert len(logs) == 1
     payload = json.loads(logs[0].read_text(encoding="utf-8"))
@@ -139,12 +151,12 @@ def test_run_campaign_dry_run_writes_nothing(tmp_path, monkeypatch) -> None:
     _stub_run(tmp_path, monkeypatch)
     rc = run_campaign.main([
         "--config", str(cfg), "--name", "camp",
-        "--registry", str(tmp_path / "registry"),
+        "--registry", str(tmp_path / "experiments"),
         "--campaigns-dir", str(tmp_path / "campaigns"),
         "--dry-run",
     ])
     assert rc == 0
-    assert not (tmp_path / "registry").exists()
+    assert not (tmp_path / "experiments").exists()
     assert not (tmp_path / "campaigns").exists()
 
 
@@ -158,7 +170,7 @@ def test_run_campaign_error_records_and_returns_1(tmp_path, monkeypatch) -> None
     monkeypatch.setattr(ExperimentRunner, "run", boom)
     rc = run_campaign.main([
         "--config", str(cfg), "--name", "camp",
-        "--registry", str(tmp_path / "registry"),
+        "--registry", str(paths.EXPERIMENTS_ROOT),
         "--campaigns-dir", str(tmp_path / "campaigns"),
     ])
     assert rc == 1
@@ -184,7 +196,7 @@ def test_run_campaign_config_load_failure_records_error_and_continues(tmp_path, 
     monkeypatch.setattr(run_campaign, "load_config", fake_load_config)
     rc = run_campaign.main([
         "--config", str(bad), "--config", str(good), "--name", "camp",
-        "--registry", str(tmp_path / "registry"),
+        "--registry", str(paths.EXPERIMENTS_ROOT),
         "--campaigns-dir", str(tmp_path / "campaigns"),
     ])
     assert rc == 1  # failed incremented; batch continues
@@ -194,15 +206,16 @@ def test_run_campaign_config_load_failure_records_error_and_continues(tmp_path, 
     assert [r["status"] for r in payload["runs"]] == ["error", "recorded"]
     assert payload["runs"][0]["run_id"] is None
     assert "invalid config" in payload["runs"][0]["error"]
-    assert (tmp_path / "registry" / ("a" * 64) / "run.json").exists()  # batch continued
+    # batch continued — the good config's run landed in the experiments layout
+    assert (paths.EXPERIMENTS_ROOT / "good" / "runs" / ("a" * 64) / "run.json").exists()
 
 
 def test_run_campaign_skips_config_already_in_registry(tmp_path, monkeypatch) -> None:
     cfg = _write_config(tmp_path, "a.yaml", "run:\n  name: x\n")
     _stub_run(tmp_path, monkeypatch)
-    registry_dir = tmp_path / "registry"
-    (registry_dir / ("a" * 64)).mkdir(parents=True, exist_ok=True)
-    (registry_dir / ("a" * 64) / "run.json").write_text(
+    run_json = paths.EXPERIMENTS_ROOT / "x" / "runs" / ("a" * 64) / "run.json"
+    run_json.parent.mkdir(parents=True, exist_ok=True)
+    run_json.write_text(
         json.dumps({"run_id": "a" * 64, "metrics": {}, "manifest": {}}),
         encoding="utf-8",
     )
@@ -213,7 +226,7 @@ def test_run_campaign_skips_config_already_in_registry(tmp_path, monkeypatch) ->
     monkeypatch.setattr(ExperimentRunner, "run", must_not_train)
     rc = run_campaign.main([
         "--config", str(cfg), "--name", "camp",
-        "--registry", str(registry_dir),
+        "--registry", str(paths.EXPERIMENTS_ROOT),
         "--campaigns-dir", str(tmp_path / "campaigns"),
     ])
     assert rc == 0
@@ -222,7 +235,7 @@ def test_run_campaign_skips_config_already_in_registry(tmp_path, monkeypatch) ->
     payload = json.loads(logs[0].read_text(encoding="utf-8"))
     assert payload["runs"][0]["status"] == "skipped"
     assert payload["runs"][0]["run_id"] == "a" * 64
-    assert len(list((registry_dir / ("a" * 64)).glob("run.json"))) == 1  # untouched
+    assert len(list(run_json.parent.glob("run.json"))) == 1  # untouched
 
 
 def test_run_campaign_same_config_twice_dedupes_in_single_invocation(tmp_path, monkeypatch) -> None:
@@ -250,16 +263,15 @@ def test_run_campaign_same_config_twice_dedupes_in_single_invocation(tmp_path, m
         "_compute_run_id",
         staticmethod(lambda config, **_: "a" * 64),
     )
-    registry_dir = tmp_path / "registry"
-    campaigns_dir = tmp_path / "campaigns"
+    registry_dir = paths.EXPERIMENTS_ROOT
     rc = run_campaign.main([
         "--config", str(cfg), "--config", str(cfg), "--name", "camp",
-        "--registry", str(registry_dir), "--campaigns-dir", str(campaigns_dir),
+        "--registry", str(registry_dir), "--campaigns-dir", str(tmp_path / "campaigns"),
     ])
     assert rc == 0
     assert trains == ["train"]  # trained exactly once despite duplicate config
-    assert len(list((registry_dir / ("a" * 64)).glob("run.json"))) == 1
-    logs = list(campaigns_dir.glob("*.json"))
+    assert len(list((paths.EXPERIMENTS_ROOT / "x" / "runs" / ("a" * 64)).glob("run.json"))) == 1
+    logs = list((tmp_path / "campaigns").glob("*.json"))
     assert len(logs) == 1
     payload = json.loads(logs[0].read_text(encoding="utf-8"))
     assert [r["status"] for r in payload["runs"]] == ["recorded", "skipped"]

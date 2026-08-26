@@ -3,19 +3,28 @@
 ``record_run`` creates the family scaffold atomically with the first run.json
 (spec §2 family-creation rule). Export slots are staged under ``.tmp-<run_id>``
 and published by a single directory rename; discovery ignores ``.tmp-`` names.
+``record_run_result`` is the script-facing recorder: it persists the run's
+parquet outputs (``oof.parquet`` + ``validation_preds.parquet`` when the
+validation scorecard ran) alongside the run.json built by ``record_run``.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
 import re
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+import polars as pl
 
 from nmr import paths
 from nmr._atomicio import atomic_write_text
+
+if TYPE_CHECKING:
+    from nmr.runner import RunResult
 
 logger = logging.getLogger("nmr.experiment_store")
 
@@ -67,6 +76,66 @@ def read_run(slug: str, run_id: str) -> dict[str, Any]:
     if not path.is_file():
         raise FileNotFoundError(f"no run record at {path}")
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_parquet_atomic(path: Path, frame: pl.DataFrame) -> None:
+    """Write a parquet frame via temp file + os.replace (no fsync)."""
+    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
+    try:
+        frame.write_parquet(tmp)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def _result_payload(result: RunResult) -> dict[str, Any]:
+    """Serialize a runner result into the persisted run.json record.
+
+    The scorecard block drops timing/instrumentation columns — they capture
+    wall-clock durations that differ across processes and are excluded from
+    canonical serialization (AGENTS.md timing-hazard).
+    """
+    scorecard_block = None
+    if result.scorecard is not None:
+        row = result.scorecard.to_frame().to_dicts()[0]
+        scorecard_block = {
+            key: value
+            for key, value in row.items()
+            if not key.startswith(("timing_", "quality_metric"))
+        }
+    return {
+        "run_id": result.run_id,
+        "metrics": dataclasses.asdict(result.metrics),
+        "manifest": result.manifest,
+        "scorecard": scorecard_block,
+        "oof_path": "oof.parquet",
+        "artifact_path": str(result.artifact.path) if result.artifact else None,
+        "artifact_manifest": result.artifact.manifest if result.artifact else None,
+    }
+
+
+def record_run_result(slug: str, result: RunResult) -> Path:
+    """Record a runner result under ``experiments/<slug>/runs/<run_id>/``.
+
+    Persists ``oof.parquet`` and (when the validation scorecard ran)
+    ``validation_preds.parquet`` atomically, then writes ``run.json`` via
+    :func:`record_run` — the parquets land before the record marker so a
+    partial failure never leaves a run.json without its artifacts. Returns
+    the run directory (the script-facing analogue of the retired
+    ``registry.record``). ``slug`` is the family slug (``config.run.name``).
+    """
+    paths.validate_slug(slug)
+    _validate_run_id(result.run_id)
+    run_dir = paths.run_dir(slug, result.run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    _write_parquet_atomic(run_dir / "oof.parquet", result.oof)
+    if result.validation_predictions is not None:
+        _write_parquet_atomic(
+            run_dir / "validation_preds.parquet", result.validation_predictions
+        )
+    record_run(slug, result.run_id, _result_payload(result))
+    return run_dir
 
 
 def stage_export(slug: str, scope: str, run_id: str) -> Path:
