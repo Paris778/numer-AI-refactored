@@ -85,7 +85,7 @@ If a request violates any of these, **decline the violating component** and offe
 - 🚫 **Never** include wall-clock timings, absolute paths, or environment-variable state in canonical hashes.
 - 🚫 **Never** import from or modify `../numer-AI/` (read-only legacy — mine it for logic, never import it).
 - 🚫 **Never** introduce unrelated refactoring, cosmetic tweaks, or scope creep.
-- 🚫 **Never** add third-party dependencies when the stdlib, NumPy/SciPy, or Polars can do the job. **User-granted exceptions (all pinned in `requirements.txt`):** Optuna (HPO — only in `nmr/opt.py`; parallel trials forbidden, `n_jobs=1`); CatBoost (model backend — only in `nmr/models.py`; CPU-only, §G); Streamlit (interactive dashboard — only in `dashboard_ui/app.py` + thin wrapper `dashboard_app.py`; never in `nmr/`; the static executive report is a zero-dependency vanilla HTML/CSS/SVG compiler in `dashboard_ui/` (`report.py` + `static/`), no charting library); cupy + NVIDIA runtime wheels (analysis rankdata — only in `nmr/_gpu.py`; optional at runtime, automatic scipy fallback; §8). All direct dependencies are exact-pinned in `requirements.txt`; upgrading a pin is a deliberate act (see `CONTRIBUTING.md`).
+- 🚫 **Never** add third-party dependencies when the stdlib, NumPy/SciPy, or Polars can do the job. **User-granted exceptions (all pinned in `requirements.txt`):** Optuna (HPO — only in `nmr/opt.py`; parallel trials forbidden, `n_jobs=1`); CatBoost (model backend — only in `nmr/models.py`; CPU-only, §G); Streamlit (interactive dashboard — only in `dashboard_ui/app.py` + thin wrapper `dashboard_app.py`; never in `nmr/`; the static report is zero-dependency vanilla HTML/CSS/SVG (`dashboard_ui/report.py` + `static/`), no charting library); cupy + NVIDIA runtime wheels (analysis rankdata — only in `nmr/_gpu.py`; optional at runtime, automatic scipy fallback; §8). All direct dependencies are exact-pinned in `requirements.txt`; upgrading a pin is a deliberate act (see `CONTRIBUTING.md`).
 - 🚫 **Never** suppress or silently swallow exceptions.
 
 ---
@@ -151,9 +151,9 @@ When modifying or generating code, enforce these seven invariants:
 | perturbation/horizon/regime diagnostics | `nmr/robustness.py` |
 | Benchmark hierarchy (cells, gates, thresholds) | `nmr/benchmark.py` + `configs/benchmarks/` + `benchmark_runner.py` |
 | Untiered benchmark fleet (configs, generators, runner) | `nmr/benchmark_fleet.py` + `configs/benchmarks/fleet/` (spec: `docs/superpowers/specs/2026-08-19-benchmark-fleet-design.md`) |
-| Model Tournament dashboard data engine and shared renderer | `nmr/dashboard.py` + `dashboard_ui/{charts.py,report.py,app.py,static/}`; `generate_dashboard.py`/`dashboard_app.py` are thin hosts. Runs read from `experiments/`; exports via `nmr.lifecycle` — one `family::<scope>::<run_id>` row per VALID slot, carrying `display_name`/`lifecycle_stage`/`current_full_status`/`stale`; full+partial rows are diagnostic-only (`EVALUABLE_ROWS` = trained + benchmark; partials carry cross-check cells). Ranking/cohorts/ML Advantage/detail payloads are deterministic and read-only; the static report and Streamlit host share one vanilla renderer. |
-| model-family / full-version discovery | `nmr/families.py` — compat wrapper over `nmr/lifecycle` (pointer-driven full exports under `experiments/`; spec: `ARCHITECTURE.md` Model Families section) |
-| Promote a run to a full/partial export (`train_only` → partial + cross-check `scorecard.json`; Model Uploads `predict.pkl`) | `nmr/promote.py` (`promote_full_version`, `rehearse_promotion`) + `promote_model.py` / `rehearse_promotion.py` CLIs; acceptance gate `nmr/submission.py::accept_promoted_artifact` (raw output vs the official validator) |
+| Model Tournament dashboard engine + shared renderer | `nmr/dashboard.py` + `dashboard_ui/`; `generate_dashboard.py`/`dashboard_app.py` are thin hosts. Runs read from `experiments/`; exports via `nmr.lifecycle` — one `family::<scope>::<run_id>` row per VALID slot (carries `display_name`/`lifecycle_stage`/`current_full_status`/`stale`); full+partial rows are diagnostic-only (`EVALUABLE_ROWS` = trained + benchmark; partials carry cross-check cells). Ranking/cohorts/ML Advantage/detail payloads are deterministic and read-only; static report + Streamlit host share one vanilla renderer. |
+| model-family / full-version discovery | `nmr/families.py` — compat wrapper over `nmr/lifecycle` (spec: `ARCHITECTURE.md` Model Families section) |
+| Promote a run to a full/partial export (`train_only` → partial + cross-check `scorecard.json`; Model Uploads `predict.pkl`) | `nmr/promote.py` (`promote_full_version`, `rehearse_promotion`) + `promote_model.py` / `rehearse_promotion.py` CLIs; acceptance gate `nmr/submission.py::accept_promoted_artifact` |
 | campaign orchestration | `nmr/campaign.py` + `run_campaign.py` (spec: `ARCHITECTURE.md` §R) |
 | Inspect models / campaigns interactively | `dashboard_ui/app.py` (thin shared-renderer host; wrapper `dashboard_app.py`) — `streamlit run` (read-only) |
 | Analyze the dataset / run one analysis stage | `analyze_dataset.py` — modular stages, `--only`/`--skip` (deps auto-included), progress markers (stage registry: `ARCHITECTURE.md` §O) |
@@ -165,13 +165,13 @@ When modifying or generating code, enforce these seven invariants:
 
 ### Knowledge base map (docs/)
 
-The `docs/` tree is a curated Numerai domain library. **`docs/DOCS_README.md` is its master map** — importance tiers, the full per-file table, and task-oriented reading recipes. Never duplicate that map here; go there. Start with the agent reading order (§1; 15-minute version §2–§3). Two entry points carry the most weight: `docs/06-evaluation/evaluation-suite-bible.md` (how this repo judges a model) and `docs/04-research/pre-modelling-dataset-feature-study-2026-08.md` (the golden pre-modelling document).
+The `docs/` tree is a curated Numerai domain library. **`docs/DOCS_README.md` is its master map** — importance tiers, the full per-file table, and task-oriented reading recipes. Never duplicate that map here; go there. Start with its §1–§3 reading orders. Two entry points carry the most weight: `docs/06-evaluation/evaluation-suite-bible.md` (how this repo judges a model) and `docs/04-research/pre-modelling-dataset-feature-study-2026-08.md` (the golden pre-modelling document).
 
 Never invent a `numerai_tools` / `numerapi` signature — open the installed source: `.venv/Lib/site-packages/numerai_tools/scoring.py` (the parity oracle), `numerai_tools/submissions.py` (submission contract), `numerapi/base_api.py` (live API). Versions pinned in `requirements.txt` (numerai-tools 0.5.3, numerapi 2.22.0).
 
 **First-session orientation (10 minutes):**
 
-1. Run the fast gate ([Verification Gates](#7-verification-gates)) — establish the green baseline (test count is CI-enforced against this file's claims).
+1. Run the fast gate ([Verification Gates](#7-verification-gates)) — establish the green baseline.
 2. `nmr/__init__.py` — the public API surface (imports + `__all__`); nothing outside it is public.
 3. `configs/first_model.yaml` — the current competitive config; `configs/example.yaml` — annotated schema.
 4. `ARCHITECTURE.md` §1 (pipeline diagram) and §3 (module dependency graph) — the system map.
@@ -202,16 +202,16 @@ Real-data tests require the `data/v5.3/` parquet assets (see [`README.md`](READM
 These are real, verified issues — do not "fix" them silently as a side effect.
 
 ### Timing fields poison canonical hashes (regression class, fixed 2026-07-13)
-`MetricScorecard.metric_timing_seconds` and `timing_*` / `quality_metric_*_seconds` columns capture wall-clock durations that differ across processes. `canonical_scorecards_bytes()` deliberately strips them. Any new instrumentation field must also be excluded from canonical serialization, or cross-process determinism tests (`tests/test_benchmark_hierarchy.py`, `tests/test_scorecard.py`) will fail non-deterministically.
+`MetricScorecard.metric_timing_seconds` and `timing_*` / `quality_metric_*_seconds` columns capture wall-clock durations that differ across processes. `canonical_scorecards_bytes()` deliberately strips them. Any new instrumentation field must also be excluded from canonical serialization, or the determinism tests will fail non-deterministically.
 
 ### Benchmark parquet gap in early train eras
-`train_benchmark_models.parquet` has **no rows for the first ~30 train eras** — early-era BMC/benchmark-corr checks produce empty joins. The hierarchy scores both official `validation_benchmark_models.parquet` benchmark columns — `v53_lgbm_ender60` (tier-4 capital gate) and `v53_lgbm_ender20` (informational tier-4 row); tiers 1–3 fit their own models (`ARCHITECTURE.md` Known Gaps).
+`train_benchmark_models.parquet` has **no rows for the first ~30 train eras** — early-era BMC/benchmark-corr checks produce empty joins. The hierarchy scores both official `validation_benchmark_models.parquet` benchmark columns — `v53_lgbm_ender60` (tier-4 capital gate) and `v53_lgbm_ender20` (informational tier-4 row); tiers 1–3 fit their own models.
 
 ### Benchmark hierarchy runtime
 Full hierarchy runs are multi-hour (medium tree fits on ~2.1M train rows). Use `--fast-mode` for smoke; the FNE gate is FNC@medium per the feature-universe policy.
 
 ### Fleet deep-cell runtime & selection bias (2026-08-19)
-Fleet deep cells (20k/30k-tree LightGBM fits on ~2.1M train rows) are multi-hour CPU jobs; a full 19-cell fleet run is tens of CPU-hours across waves — use `nohup` + log polling; fast-mode keeps the smoke gate minutes-scale. `fa_v151_ridge_ensemble` is **selection-biased by design** (candidate selection uses validation, as the notebook did) — its scorecard row carries `selection_bias: true`; never compare it naively against unbiased cells. Fleet results never participate in the hard gates.
+Fleet deep cells (20k/30k-tree LightGBM fits on ~2.1M train rows) are multi-hour CPU jobs; a full fleet run is tens of CPU-hours — use `nohup` + log polling; fast-mode keeps the smoke gate minutes-scale. `fa_v151_ridge_ensemble` is **selection-biased by design** (candidate selection uses validation, as the notebook did) — its scorecard row carries `selection_bias: true`; never compare it naively against unbiased cells. Fleet results never participate in the hard gates.
 
 ### Era-overlap-before-limit rule for real-data fixtures
 Build real v5.3 scorecard payloads from **overlap eras first** (join/filter by shared eras across validation/meta/benchmarks), then limit/window — limiting first produces flaky fixtures. `NonVacuityError` fires when overlap < `MIN_OVERLAP_ERAS` (20).
@@ -221,20 +221,20 @@ Build real v5.3 scorecard payloads from **overlap eras first** (join/filter by s
 - **xgboost ≥ 3.0 (fixed 2026-08-09):** the old GPU-first params silently fell back to CPU on every fit; CUDA now actually engages (measured: `ARCHITECTURE.md` §U).
 - **cupy (user-granted, pinned in `requirements.txt`):** `nmr/_gpu.py` provides `rankdata` — lazy load, bit-identical to scipy on finite data, automatic fallback (measurements: `ARCHITECTURE.md` §U). Rules: never import cupy into `nmr/_transforms` (embedded by value in deploy artifacts — must stay numpy/scipy-only); `_gpu.rankdata` isolates NaN instead of scipy's all-NaN propagation (`nan_policy='propagate'`) — v5.3 features have zero NaN so both paths agree.
 - **Windows pip pitfall:** `./.venv/Scripts/pip` is a shim into the legacy `../numer-AI/.venv` — always `./.venv/Scripts/python -m pip` (see CONTRIBUTING.md).
-- **Long jobs:** background tasks die when the session closes — use `nohup ./.venv/Scripts/python <script> > <log> 2>&1 &` and poll the log (stage markers + era ticks show progress). **This laptop enters Modern Standby overnight (2026-08-21: ender fold 3 lost ~9.4 h)** — `powercfg /change standby-timeout-ac 0` + `hibernate-timeout-ac 0` applied; if wall ≫ fit time, check Kernel-Power 506/507 events first.
+- **Long jobs:** background tasks die when the session closes — use `nohup ./.venv/Scripts/python <script> > <log> 2>&1 &` and poll the log. **This laptop enters Modern Standby overnight (2026-08-21: ender fold 3 lost ~9.4 h)** — `powercfg /change standby-timeout-ac 0` + `hibernate-timeout-ac 0` applied; if wall ≫ fit time, check Kernel-Power 506/507 events first.
 - **Analysis runtime:** full-universe (`--features all`) analysis is ~4–5 h, dominated by three 3,555-feature streaming passes (measured: the pre-modelling study §8).
 
 ### Full-version training is RAM-bound on this box (measured 2026-08-18)
 - **Machine:** 63.7 GiB RAM, 148.8 GiB commit limit. The **full version** (train+validation, 6.85M rows, medium/780 features) extrapolates to **commit ≈ 61–65 GiB / working set 86–90% of physical** — marginal-to-infeasible here. `promote_full_version`'s RAM guard refuses with the measured numbers in the error (dual-metric: commit vs commit limit, WS vs physical). **Stage 2 (full-history promotion at medium) is deferred, not attempted; the D7 Stage-1 truncated artifact is the accepted deliverable.** Curve constants and the open memory-slope hypothesis live in `ARCHITECTURE.md` §5 (`measure_ram_curve.py`).
 - **Full-universe training** (3,555 features): **run only when the machine is otherwise idle** (a concurrent analysis/benchmark job caused the `lgbm_v1` campaign OOM: `_ArrayMemoryError: 28.1 GiB, shape (3555, 2123070)`).
-- **Memory guards live in code** (`coerce_float32_features`, zero-copy numpy views, era-batched predicts, spawned full-history worker + dual-metric RAM guard — full spec: `ARCHITECTURE.md` §G). OOF neutralization at 3,555 features is compute-bound (per-era pinv, ~3.5 h) — not memory, do not "optimize" (oracle parity).
+- **Memory guards live in code** (`coerce_float32_features`, zero-copy numpy views, era-batched predicts, spawned full-history worker + dual-metric RAM guard — full spec: `ARCHITECTURE.md` §G). OOF neutralization at 3,555 features is compute-bound (per-era pinv, ~3.5 h) — not memory, do not "optimize".
 
 ### Feature-universe policy (director directive, 2026-08-14)
 All routine research, screening, HPO, and model iteration uses `medium` (780), `small` (42), or screen-derived subsets (`derived_feature_sets.json`). The full `all` universe (3,555) is **prohibited** for routine iteration (RAM ceiling above; ~3.5 h per-era neutralization; empirically weaker OOF IC). Approved exceptions: feature-bagged sub-ensembles, or single-shot offline deploy fits. Analysis dumps and the pre-modelling study are generated with `--features medium`.
 - **Full-universe campaign cells:** if a 3,555-feature variant OOMs, re-run it solo with the current code; never run two full-universe jobs concurrently.
 
 ### `embargo_eras` is rejected at load (A2, 2026-08-18)
-`SplitConfig.embargo_eras` was validated yet inert — a config knob that lies (audit SEV-3). Any non-zero value raises `ValueError` at load (`purge_eras` is the active buffer). Pre-change registry manifests carry `embargo_eras: 4`; the promotion writer normalizes to 0 in `config_normalizations`.
+`SplitConfig.embargo_eras` was validated yet inert — a config knob that lies (audit SEV-3). Any non-zero value raises `ValueError` at load (`purge_eras` is the active buffer). The promotion writer normalizes to 0 in `config_normalizations`.
 
 ### `cloudpickle` deserialization executes arbitrary code
 `load_predict()` verifies a SHA256 manifest (corruption detection only, **not** authentication) then calls `cloudpickle.loads()`. Only load artifacts produced by this repo. Pin `cloudpickle==3.1.1` — Numerai's hosted runtime must unpickle what we pickle.
@@ -249,7 +249,7 @@ The deploy closure's final rank step changed the exposure definition: post-fix r
 Local `load_predict` fidelity is tested, but CatBoost availability in Numerai's hosted predict runtime is **UNVERIFIED** — validate a catboost deploy against the hosted runtime before staking on it.
 
 ### Ruff lint gate (adopted 2026-08-16)
-`ruff check .` (config `ruff.toml`: E/F/I/UP @120) is the CI lint gate; ruff pinned in `requirements-dev.txt`; pytest is the sole *functional* gate; `ruff format` deferred to a dedicated Phase-2 reformat commit.
+`ruff check .` (config `ruff.toml`: E/F/I/UP @120) is the CI lint gate; ruff pinned in `requirements-dev.txt`; pytest is the sole *functional* gate; `ruff format` is deferred.
 
 ### Coverage specs must be package-level (2026-08-19)
 Use package-level `--cov` specs only (`--cov=nmr --cov=dashboard_ui`); dotted submodule specs crash at conftest import (see `CONTRIBUTING.md`); CI gate: `scripts/coverage_gate.py`.
@@ -261,7 +261,13 @@ mutmut is fork-based; Windows refused (#397). Linux CI only (`.github/workflows/
 The V1 repo is mined for logic only. Never import from it, never modify it, never add it to any path.
 
 ### Era-range manifest fields are not the scoring window (2026-08-14; retired 2026-08-26)
-Never use `manifest.scoring_eras`/`weight_learning_eras` as "what this run was scored on" — trust the scorecard `*_n_eras` cells and the stored parquet (the pre-rebuild rows that violated this are gone; `experiments/` starts clean by design). Registry files stay immutable: document, never backfill.
+Never use `manifest.scoring_eras`/`weight_learning_eras` as "what this run was scored on" — trust the scorecard `*_n_eras` cells and the stored parquet (the pre-rebuild rows are gone; `experiments/` starts clean by design). Registry files stay immutable: document, never backfill.
+
+### Junction/worktree deletion hazard (2026-08-26)
+Never junction `artifacts/` or `experiments/` into scratch worktrees — `git worktree remove` recurses through junctions and deletes the real directory (the 2026-08-26 registry-loss incident).
+
+### Single-writer champion invariant (2026-08-26)
+`experiments/champion.json` and `exports/*/full/current.json` are written only from CLI/runner entry points — never from concurrent processes or hand-edits (the read-compare-write is not atomic; design spec §9).
 
 ### Dashboard window drifts on data refresh
 The standardized comparison window = meta overlap; refresh shifts it — regenerate `artifacts/dashboard.html` after every `refresh_data.py` run (definition + regeneration rule: `ARCHITECTURE.md` §W).
@@ -278,7 +284,7 @@ Heavy CLIs (`benchmark_runner.py`, `run_campaign.py`, `analyze_dataset.py`, `tra
 ## 9. Security Hard Constraints
 
 - Never commit secrets. Numerai API credentials are used only in notebooks via `numerapi`; never hardcode or print them. `.env` is git-ignored and is never read by `nmr/`.
-- Deployment artifacts are trusted-source-only: the SHA256 sibling manifest detects accidental corruption, not tampering. Never auto-load `.pkl` files from outside `artifacts/`.
+- Deployment artifacts are trusted-source-only: the SHA256 sibling manifest detects accidental corruption, not tampering. Never auto-load `.pkl` files from outside `artifacts/` or `experiments/*/exports/` (the lifecycle validity predicate is the only trusted reader).
 - Registry JSON, artifact payload + manifest, OOF parquet, and the neutralization-cache pair all write via temp + fsync + `os.replace`.
 - Never print API keys, tokens, or `.env` contents in logs, notebooks, or test output.
 
@@ -290,5 +296,5 @@ Heavy CLIs (`benchmark_runner.py`, `run_campaign.py`, `analyze_dataset.py`, `tra
 - 🚫 **Prohibited Commands:** Never execute `git push --force`, `git reset --hard` (without explicit user instruction), or recursive deletes on `data/` or `docs/`. Never delete `data/v5.3/` parquet assets — they are multi-GB local downloads not recoverable from git.
 - 🚫 **Environment Protection:** Never read, output, or write raw secret values (`.env`, numerapi keys) to logs or files.
 - ⏱️ **Execution Timeouts:** Full-preset training (`standard`/`deep`, 20k–30k trees) can run for hours. For verification use the `fast` preset, `--fast-mode` on the benchmark runner, or truncated era windows. If a command exceeds 300 seconds unexpectedly, terminate and inspect output.
-- 🧹 **Artifact Hygiene:** `artifacts/cache/` and `experiments/*/runs/` are machine-generated. Clearing the neutralization cache is safe (it repopulates); clearing the registry destroys run history — ask first.
+- 🧹 **Artifact Hygiene:** `artifacts/cache/` and `experiments/*/runs/` are machine-generated. Clearing the neutralization cache is safe (it repopulates); clearing `experiments/*/runs/` destroys run history — ask first.
 </execution_safeguards>

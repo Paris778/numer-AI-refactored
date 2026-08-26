@@ -86,6 +86,7 @@ Useful targeted runs while iterating:
 .\.venv\Scripts\python -m pytest tests/test_parity.py tests/test_risk_parity.py -q   # oracle parity
 .\.venv\Scripts\python -m pytest tests/test_benchmark_hierarchy.py -q              # benchmark determinism hashes
 .\.venv\Scripts\python -m pytest tests/test_runner.py tests/test_registry.py -q       # pipeline + registry
+.\.venv\Scripts\python -m pytest tests/test_experiment_layout.py tests/test_lifecycle.py tests/test_promote.py -q  # experiment layout + lifecycle
 ```
 
 ### Pre-sign-off gate

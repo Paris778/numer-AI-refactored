@@ -122,6 +122,7 @@ Interpretation for this repository:
 - `03-reference/numerapi.md`
 - `03-reference/numerai-tools.md`
 - `02-strategy/target-ensembling-math.md`
+- `02-strategy/model-lifecycle.md` (repo-internal: how a model moves research → partial → full → staked over `experiments/`)
 - `04-research/advanced-ideas.md` (merged with former `neural-networks.md`, 2026-08-06)
 - `04-research/State-of-the-Art Deep Learning for Obfuscated, Non-Stationary Tabular Regression.md`
 
@@ -148,6 +149,7 @@ Interpretation for this repository:
 | `02-strategy/community-wisdom.md` | T2 | Community heuristics and caveats | `community_notes.md` |
 | `02-strategy/why-it-works.md` | T2 | System-level architecture and intuition | `Pipeline Grand Scheme.txt` + `NumerAI Architecture Explained.txt` |
 | `02-strategy/target-ensembling-math.md` | T3 | Meta-learning and stacking notes | `Gemini-Ensemble-Meta-Learning.txt` |
+| `02-strategy/model-lifecycle.md` | T3 | Model lifecycle + experiment-layout workflow: six stages, promotion, naming, git rules, operations | this build |
 | `03-reference/numerapi.md` | T3 | NumerAPI practical reference | `numerapi_reference.md` + `API/` docs |
 | `03-reference/numerai-tools.md` | T3 | numerai_tools scoring/ref utility map | `numerai_tools_reference.md` |
 | `04-research/research-program.md` | T2 | Main advanced research playbook | `llm_reports/perplexity_deep_research.md` |
@@ -175,6 +177,7 @@ Subsets of the §1 fast-start order, for focused goals:
 - **Scoring comprehension:** `01-canon/scoring/00-definitions.md` → `01-canon/scoring/01-correlation.md` → `01-canon/scoring/02-mmc-bmc.md` → `01-canon/scoring/03-fnc.md` → `01-canon/staking.md`
 - **Data-to-submission lifecycle:** `01-canon/data.md` → `01-canon/models.md` → `01-canon/submissions.md` → `01-canon/staking.md` → `03-reference/numerapi.md`
 - **Robust modeling intuition:** `02-strategy/strategy-bible.md` → `02-strategy/community-wisdom.md` → `02-strategy/why-it-works.md` → `04-research/research-program.md`
+- **Model promotion & lifecycle ops:** `02-strategy/model-lifecycle.md` → `06-evaluation/evaluation-suite-bible.md` (how this repo judges a model) → [`ARCHITECTURE.md`](../ARCHITECTURE.md) §N/§X–§Z (schemas)
 
 ## 8) Scope Boundary
 

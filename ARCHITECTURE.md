@@ -275,23 +275,35 @@ Fleet scorecards join `canonical_scorecards_bytes`. Spec:
 
 ### N. Runner, Registry, Submission, Deployment
 
-**`nmr/runner.py`** — stage order in §1 diagram. `RunResult(run_id, oof, metrics, artifact, manifest, scorecard=None, validation_predictions=None)`. `run_id` = SHA256 of `{config (data_dir/artifacts_dir/supplemental_feature_sets paths stripped; when supplemental_feature_sets is configured, a supplemental_feature_sets_sha256 of the resolved file's CRLF-normalized contents is included — identical files at different roots hash identically, and editing the file changes run identity), data_version, data_fingerprint, code_fingerprint, environment_fingerprint}` where code fingerprint = SHA256 over sorted `nmr/*.py` names+contents and environment = Python + versions of numpy/polars/pandas/lightgbm/xgboost/optuna (plus `catboost` when `model.backend == "catboost"` — config-aware, §G/§S). **data_fingerprint** (B1, 2026-08-18) = SHA256 over per-file snapshots of `train.parquet` + `validation.parquet` (+ `meta_model.parquet`/`validation_benchmark_models.parquet` when `evaluation.validation_scorecard` — config-aware): `{name, footer schema, footer row count, era min, era max, era count}` + `features.json` content SHA256; byte size excluded from the hash (cache key only, cached under `artifacts/cache/`); detection limits documented (restated feature values within unchanged schema/row-count/era-stats are NOT detected); missing data files raise (run_id requires the data snapshot). The run_id scheme bumped once on 2026-08-18 (data term + optuna): future run_ids differ from pre-bump legacy rows; registry rows stay immutable. Ensemble weights are learned on the validation eras of folds `0..K-2` via `EnsembleConfig.method`; when `n_folds < 2` they fall back to uniform `1/n_components` with a logged warning. OOF metrics are computed on the **final fold's** validation eras only (`scoring_eras`), so the OOF scorecard carries no in-sample weight-fitting bias; the returned OOF frame itself still spans every fold. The manifest records `weights`, `weight_learning_eras`, `scoring_eras`, and `summary_metrics` (OOF aggregates for each requested non-MMC metric), plus the rebuild identity (spec §3.1): `data_fingerprint` (the exact value hashed into the run_id, computed once in `__init__`), `code_fingerprint` (the portable full-package sha256, same as the run-id code term), `environment` (sorted `name==version` list over the pinned deps), `pipeline_device` (config knob), `oof_device` (post-fit `resolved_device`). The deploy pipeline is built **at most once** per run, when `deploy or evaluation.validation_scorecard` (`_build_deploy_pipeline`: per-target all-eras CPU-only models + rank-gaussianize + learned weights + neutralize; no `splitter`), and that single closure is shared by the validation stage and the deploy block — never retrained. The **validation stage** (`_run_validation_stage`) loads `validation.parquet` plus `meta_model.parquet` (required — missing ⇒ `FileNotFoundError`) and `validation_benchmark_models.parquet` (optional — BMC/horizon disabled when absent), with target columns = config targets ∪ `main_target` ∪ **every `target`/`target_*` column in the validation schema** (so horizon target pairs reach the scorecard’s inference — loading only config targets silently disabled horizon stability on every runner scorecard), drops the first `split.purge_eras` validation eras (20D-target overlap), scores the shared pipeline, and produces a full `MetricScorecard` with `benchmark_col` = first non-join benchmark column (same convention as `benchmark_runner`); the run manifest records `validation_purge_dropped_first_eras`. Then `_serialize_predict_artifact(predict_fn, model_meta, artifact_path)` serializes (never retrains) to `experiments/{slug}/runs/{run_id}/predict.pkl` + manifest. The artifact's `models` metadata carries `targets`/`weights`/`proportion`/`geometry="all_eras"`/`device="cpu"`/`feature_names`; the run manifest adds `pipeline_device="cpu"`.
+**`nmr/runner.py`** — stage order in §1 diagram. `RunResult(run_id, oof, metrics, artifact, manifest, scorecard=None, validation_predictions=None)`. `run_id` = SHA256 of `{config (data_dir/artifacts_dir/supplemental_feature_sets paths stripped; when supplemental_feature_sets is configured, a supplemental_feature_sets_sha256 of the resolved file's CRLF-normalized contents is included — identical files at different roots hash identically, and editing the file changes run identity), data_version, data_fingerprint, code_fingerprint, environment_fingerprint}` where code fingerprint = SHA256 over sorted `nmr/*.py` names+contents and environment = Python + versions of numpy/polars/pandas/lightgbm/xgboost/optuna (plus `catboost` when `model.backend == "catboost"` — config-aware, §G/§S). **data_fingerprint** (B1, 2026-08-18) = SHA256 over per-file snapshots of `train.parquet` + `validation.parquet` (+ `meta_model.parquet`/`validation_benchmark_models.parquet` when `evaluation.validation_scorecard` — config-aware): `{name, footer schema, footer row count, era min, era max, era count}` + `features.json` content SHA256; byte size excluded from the hash (cache key only, cached under `artifacts/cache/`); detection limits documented (restated feature values within unchanged schema/row-count/era-stats are NOT detected); missing data files raise (run_id requires the data snapshot). The run_id scheme bumped once on 2026-08-18 (data term + optuna): future run_ids differ from pre-bump legacy rows; registry rows stay immutable. Ensemble weights are learned on the validation eras of folds `0..K-2` via `EnsembleConfig.method`; when `n_folds < 2` they fall back to uniform `1/n_components` with a logged warning. OOF metrics are computed on the **final fold's** validation eras only (`scoring_eras`), so the OOF scorecard carries no in-sample weight-fitting bias; the returned OOF frame itself still spans every fold. The manifest records `weights`, `weight_learning_eras`, `scoring_eras`, and `summary_metrics` (OOF aggregates for each requested non-MMC metric), plus the rebuild identity (spec §3.1): `data_fingerprint` (the exact value hashed into the run_id, computed once in `__init__`), `code_fingerprint` (the portable full-package sha256, same as the run-id code term), `environment` (sorted `name==version` list over the pinned deps), `pipeline_device` (config knob), `oof_device` (post-fit `resolved_device`). The deploy pipeline is built **at most once** per run, when `deploy or evaluation.validation_scorecard` (`_build_deploy_pipeline`: per-target all-eras CPU-only models + rank-gaussianize + learned weights + neutralize; no `splitter`), and that single closure is shared by the validation stage and the deploy block — never retrained. The **validation stage** (`_run_validation_stage`) loads `validation.parquet` plus `meta_model.parquet` (required — missing ⇒ `FileNotFoundError`) and `validation_benchmark_models.parquet` (optional — BMC/horizon disabled when absent), with target columns = config targets ∪ `main_target` ∪ **every `target`/`target_*` column in the validation schema** (so horizon target pairs reach the scorecard’s inference — loading only config targets silently disabled horizon stability on every runner scorecard), drops the first `split.purge_eras` validation eras (20D-target overlap), scores the shared pipeline, and produces a full `MetricScorecard` with `benchmark_col` = first non-join benchmark column (same convention as `benchmark_runner`); the run manifest records `validation_purge_dropped_first_eras`. Then `_serialize_predict_artifact(predict_fn, model_meta, artifact_path)` serializes (never retrains) to `experiments/{slug}/runs/{run_id}/predict.pkl` + manifest. The artifact's `models` metadata carries `targets`/`weights`/`proportion`/`geometry="all_eras"`/`device="cpu"`/`feature_names`. The run manifest persists the **rebuild-identity fields** (spec §3.1) — `data_fingerprint` (the exact value hashed into the run_id, computed once at runner construction), `code_fingerprint`, `environment`, `pipeline_device` (the config knob `auto`/`gpu`/`cpu`), `oof_device` (the actual fit device) — making the reproducibility boundary verifiable.
 
 **`nmr/registry.py`** — cross-family `RunRegistry(root)` — **comparison + champion pointer only** (run persistence lives in `nmr/experiment_store.py`, §Z). Runs live under the experiments root:
 
 ```
 experiments/
 ├── champion.json                 # {"run_id", "experiment_slug", "promoted_at"}  (atomic pointer)
-└── {slug}/runs/{run_id}/
-    ├── run.json                  # {run_id, metrics{mean,std,sharpe,max_drawdown},
-    │                             #  manifest, scorecard{flat scalars}|null, oof_path,
-    │                             #  artifact_path|null, artifact_manifest|null}
-    ├── oof.parquet
-    └── validation_preds.parquet  # [era, id, prediction] on validation eras,
-                                  # only when evaluation.validation_scorecard
-
-experiments/{slug}/exports/{scope}/{run_id}/export.json  # promoted full/partial record + atomic current.json pointer (read-only via nmr/families.py)
+└── {slug}/                       # family = research lineage (scaffold created with the first run)
+    ├── README.md                 # human record: what was done, decisions, results
+    ├── base_config.yaml          # family base config — NON-authoritative reference copy
+    ├── meta.json                 # {display_name, staked: {run_id, scope, numerai_model_id, staked_at, status}}
+    ├── runs/{run_id}/
+    │   ├── run.json              # {run_id, metrics{mean,std,sharpe,max_drawdown},
+    │   │                         #  manifest (incl. rebuild-identity fields), scorecard{flat scalars}|null,
+    │   │                         #  oof_path, artifact_path|null, artifact_manifest|null}
+    │   ├── oof.parquet
+    │   └── validation_preds.parquet  # [era, id, prediction] on validation eras,
+    │                                 # only when evaluation.validation_scorecard
+    └── exports/
+        ├── partial/{run_id}/     # train-only promotion: export.json + scorecard.json (cross-check) + predict.pkl
+        ├── full/{run_id}/        # full-history promotion: export.json + predict.pkl
+        └── full/current.json     # {"run_id", "promoted_at"} — atomic active-full pointer
 ```
+
+Family records (`README.md`, `base_config.yaml`, `meta.json`, `runs/*/run.json`,
+`exports/**/export.json`, `exports/**/scorecard.json`,
+`exports/full/current.json`, `champion.json`) are **git-tracked**; heavy or
+reconstructable artifacts (parquet, `predict.pkl` + sibling manifests,
+checkpoints) are git-ignored (tree kept alive by `.gitkeep`).
 
 All JSON writes: temp file in parent dir → fsync → `os.replace()`; the OOF parquet likewise writes temp + `os.replace` (no fsync). Recording goes through `experiment_store.record_run_result(slug, result)` (parquets + run.json, §Z); `list() -> list[str]` returns every run_id across families (sorted); `best(metric="corr_sharpe_ac") -> (run_id, slug) | None` picks the highest scorecard metric across families (runs lacking the metric are skipped); `promote(run_id, slug=None)` and `promote_if_better(run_id, slug=None, metric="corr_sharpe_ac") -> (Path, bool)` write `experiments/champion.json` atomically — a `None` slug is resolved by scanning the experiments layout (ambiguous/not-found ⇒ `ValueError`); `promote_if_better` promotes only when the candidate's scorecard metric strictly beats the champion's, honoring direction (`_SCORECARD_METRIC_DIRECTION`: `max_drawdown`/`std_corr` are lower-is-better); a scorecard-bearing candidate may displace a scorecard-less champion; a candidate lacking the metric or an unknown metric raises `ValueError`; `resolve_champion() -> (run_id, slug)` fails loud on a missing/dangling/corrupt pointer (never silently treats it as no champion). Champion writes are single-writer (CLI/runner entry points only — design spec §9).
 
@@ -507,7 +519,7 @@ immutable slot per promoted run at
 `current.json` pointer (`{"run_id": <64-hex>, "promoted_at": ...}`,
 temp + fsync + `os.replace`) naming the active full slot — the pointer +
 valid slot record IS the marker. Writes live in `nmr/promote.py` (the
-promotion writer, Task 8+). The read-side discovery layer (`nmr/families.py`)
+promotion writer). The read-side discovery layer (`nmr/families.py`)
 is a thin compatibility wrapper over `nmr/lifecycle` + `nmr/paths`: it
 re-exports `lifecycle.ExportVersion` as `FullVersion` and resolves the
 experiment layout. Resolution is pointer-driven — a missing/corrupt/dangling
@@ -542,7 +554,7 @@ Leaderboard integration (`nmr/dashboard.py`): `UNIFIED_SCHEMA` carries
 `has_full_version`, `display_name`, `lifecycle_stage`, `current_full_status`,
 `stale`. `load_unified_leaderboard` reads run records from the experiments
 layout (`experiments/<family>/runs/<run_id>/run.json` — the legacy
-`artifacts/registry` scan is vestigial since Task 11 and nothing writes it);
+`artifacts/registry` scan is vestigial, retired 2026-08-26, and nothing writes it);
 exports come from `nmr.lifecycle.scan_valid_exports` — one row per VALID slot
 (`model_id = "<family>::<scope>::<run_id>"`; full rows carry null metric
 cells, partial rows carry their cross-check cells mapped from the slot's
@@ -575,6 +587,7 @@ splitter.py  ──> config (SplitConfig)
 families.py  ──> lifecycle, paths
 paths.py     ──> config (REPO_ROOT)
 lifecycle.py ──> paths, deployment (load_predict — export-validity predicate)
+experiment_store.py ──> _atomicio (atomic_write_text), paths
 evaluation.py──> _transforms (power_1_5, rank_gaussianize)
 ensemble.py  ──> _transforms (rank_gaussianize, rank_gaussianize_unit_variance)
 payout.py    ──> inference

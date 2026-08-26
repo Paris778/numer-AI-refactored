@@ -17,7 +17,7 @@ A **lean, deterministic research framework** for the [Numerai Classic tournament
 - **Feature neutralization** — intercept-aware per-era least squares with a content-addressed pseudo-inverse cache.
 - **Institution-grade evaluation** — block-bootstrap CIs, AC-adjusted Sharpe, Deflated Sharpe, payout proxy with burn/drawdown/CVaR/sortino diagnostics, perturbation / horizon / regime robustness.
 - **5-tier benchmark hierarchy** — tier-0 null baselines (constant/uniform/gaussian + small feature-mean), tier-1 purged Ridge baselines, tier-2 shallow trees, tier-3 canonical community models (hello-numerai / neutralized-50 / sunshine), tier-4 production gate against the `v53_lgbm_ender60` benchmark column; tier-0 null-floor, tier-4 production-threshold (`configs/benchmarks/tier4_gate.yaml`), and tier-monotonicity (per-tier max of mean CORR) gates.
-- **Run registry & deployment** — atomic filesystem registry with champion promotion; cloudpickled `predict()` artifacts with SHA256 integrity manifests.
+- **Model lifecycle & deployment** — six-state lifecycle (research → partial → full → staked) over self-contained `experiments/<slug>/` families; cloudpickled `predict()` artifacts with SHA256 integrity manifests; atomic champion pointer. Workflow: [docs/02-strategy/model-lifecycle.md](docs/02-strategy/model-lifecycle.md).
 
 ---
 
@@ -46,8 +46,11 @@ A **lean, deterministic research framework** for the [Numerai Classic tournament
 │   ├── benchmark.py           # 5-tier benchmark hierarchy: tier-0..tier-4 cells, hard gates, scorecards_sha256
 │   ├── campaign.py            # campaign orchestration — trial-lineage logs
 │   ├── runner.py              # ExperimentRunner — deterministic end-to-end pipeline
-│   ├── registry.py            # RunRegistry — atomic run store + champion promotion
-│   ├── promote.py             # promotion writer — full-version training, tier-4 gate, versioned slots
+│   ├── paths.py               # pure experiment-layout path derivation
+│   ├── lifecycle.py           # six-stage lifecycle derivation + export validity
+│   ├── experiment_store.py    # run/export persistence + atomic publication
+│   ├── registry.py            # RunRegistry — cross-family comparison + champion pointer
+│   ├── promote.py             # promotion writer — full/partial export training, tier-4 gate, immutable slots
 │   ├── _oof.py                # shared multi-target OOF construction (runner + research)
 │   ├── submission.py          # submission build / numerai_tools validation / promoted-artifact acceptance gate
 │   └── deployment.py          # cloudpickle predict artifact + integrity manifest
@@ -57,8 +60,9 @@ A **lean, deterministic research framework** for the [Numerai Classic tournament
 │   └── first_model.yaml       # current competitive config (4×20D-target ensemble)
 ├── tests/                     # unit / parity / determinism / real-data tests
 ├── data/                      # local Numerai v5.3 assets (parquets git-ignored)
-├── artifacts/                 # runs, registry, caches, campaigns, benchmark CSVs (generated)
-│   └── models/                # promoted full versions — <family>/full/<run_id>/{predict.pkl,manifest.json} + atomic current.json pointer
+├── experiments/               # model families — <slug>/{meta.json, base_config.yaml, README.md, runs/, exports/} + champion.json
+│                              # small record git-tracked; parquet/pkl/checkpoints ignored (workflow: docs/02-strategy/model-lifecycle.md)
+├── artifacts/                 # shared cache, campaigns, benchmark CSVs, reports (generated)
 ├── docs/                      # curated Numerai knowledge base — start at docs/DOCS_README.md
 ├── notebooks/                 # researcher control plane (thin, zero business logic)
 ├── .kimi-code/skills/          # project Kimi skills — research protocols for agents (map: ARCHITECTURE.md §T)
@@ -150,13 +154,13 @@ The Model Tournament ranks trained runs and benchmark tiers on the same validati
 Library usage:
 
 ```python
-from nmr import ExperimentRunner, RunRegistry, load_config, paths
+from nmr import ExperimentRunner, RunRegistry, experiment_store, load_config, paths
 
 cfg = load_config("configs/first_model.yaml")
 result = ExperimentRunner(cfg).run(deploy=True)   # RunResult(run_id, oof, metrics, artifact, manifest)
 
+experiment_store.record_run_result(cfg.run.name, result)  # → experiments/<slug>/runs/<run_id>/run.json + oof.parquet
 registry = RunRegistry(paths.EXPERIMENTS_ROOT)     # cross-family registry (experiments root)
-registry.record(result)                            # → root/<run_id>/run.json (legacy compat; Task 11)
 registry.promote(result.run_id)                    # → experiments/champion.json
 ```
 
@@ -182,6 +186,7 @@ A curated, tiered Numerai knowledge base with a deterministic reading path:
 
 - [docs/01-canon/](docs/01-canon/overview.md) — canonical tournament truth: data, scoring (CORR/MMC/BMC/FNC), submissions, staking
 - [docs/02-strategy/](docs/02-strategy/strategy-bible.md) — strategy bible, community wisdom, target-ensembling math
+- [docs/02-strategy/model-lifecycle.md](docs/02-strategy/model-lifecycle.md) — **how a model moves research → partial → full → staked** over the `experiments/` layout (workflow + lifecycle derivation)
 - [docs/03-reference/](docs/03-reference/numerai-tools.md) — `numerapi` and `numerai-tools` API references
 - [docs/04-research/](docs/04-research/research-program.md) — research program + consolidated research-ideas file (incl. neural-network directions), deep tabular-DL survey
 - [docs/05-notebooks/](docs/05-notebooks/) — onboarding notebooks (hello-numerai, neutralization, target ensembles, sunshine example)
