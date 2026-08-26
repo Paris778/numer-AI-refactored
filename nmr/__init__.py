@@ -264,7 +264,13 @@ from .scenarios import (
     ModelAllocation,
     ScenarioEngine,
 )
-from .scorecard import MetricCell, MetricScorecard, evaluate_model
+from .scorecard import (
+    CrossCheckResult,
+    MetricCell,
+    MetricScorecard,
+    evaluate_cross_check,
+    evaluate_model,
+)
 from .splitter import Fold, PurgedEraSplitter
 from .submission import (
     accept_promoted_artifact,
@@ -490,8 +496,10 @@ __all__ = [
     "adversarial_perturbation",
     "time_horizon_stability",
     "regime_conditioned_corr",
+    "CrossCheckResult",
     "MetricCell",
     "MetricScorecard",
+    "evaluate_cross_check",
     "evaluate_model",
     "RunResult",
     "ExperimentRunner",

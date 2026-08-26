@@ -21,7 +21,7 @@ from nmr.payout import (
     payout_series,
     simulate_overlapping_portfolio,
 )
-from nmr.scorecard import MetricScorecard, evaluate_model
+from nmr.scorecard import MetricScorecard, evaluate_cross_check, evaluate_model
 
 
 def _tiny_inputs() -> (
@@ -778,3 +778,33 @@ def test_degenerate_eras_are_surfaced_not_silent() -> None:
     assert score.corr.n_eras == 10  # degenerate era still counted, value 0.0
     frame = score.to_frame()
     assert frame.row(0, named=True)["n_degenerate_eras"] == 1
+
+
+def test_cross_check_result_shape() -> None:
+    """Cross-check output contract: scorecard + labeled per-era series + raw Sharpe.
+
+    ``synthetic_frames`` does not exist in this suite, so the payload comes from
+    the local ``_tiny_inputs`` builder (same shape, minus benchmarks).
+    """
+    predictions, meta_model, _benchmarks, features, targets = _tiny_inputs()
+    result = evaluate_cross_check(
+        predictions,
+        meta_model=meta_model,
+        features=features,
+        targets=targets,
+        horizon="20D",
+        main_target="target",
+        seed=42,
+    )
+    assert isinstance(result.scorecard, MetricScorecard)
+    assert set(result.per_era) == {"corr", "mmc", "fnc"}
+    for era_entry in result.per_era["corr"]:
+        assert set(era_entry) == {"era", "value"}
+    assert isinstance(result.raw_sharpe, float)
+    # raw Sharpe is the PLAIN per-era mean/std (not AC-adjusted) and the series
+    # must line up with the scorecard built from the same computation path.
+    corr_values = [era_entry["value"] for era_entry in result.per_era["corr"]]
+    assert result.raw_sharpe == pytest.approx(
+        float(np.mean(corr_values)) / float(np.std(corr_values, ddof=0))
+    )
+    assert len(result.per_era["corr"]) == result.scorecard.n_eras

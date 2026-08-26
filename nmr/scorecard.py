@@ -10,6 +10,7 @@ import json
 import logging
 import re
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -47,7 +48,13 @@ logger = logging.getLogger("nmr.scorecard")
 _MMC_DOWN_MIN_ERAS = 5
 MMC_DOWN_MIN_ERAS = _MMC_DOWN_MIN_ERAS  # public alias for cross-module use
 
-__all__ = ["MetricCell", "MetricScorecard", "evaluate_model"]
+__all__ = [
+    "MetricCell",
+    "MetricScorecard",
+    "CrossCheckResult",
+    "evaluate_model",
+    "evaluate_cross_check",
+]
 
 
 @dataclass(frozen=True)
@@ -271,6 +278,19 @@ class MetricScorecard:
         row[f"{name}_n_eras"] = cell.n_eras
 
 
+@dataclass(frozen=True)
+class CrossCheckResult:
+    """Cross-check evaluation: scorecard + labeled per-era series + raw Sharpe."""
+
+    scorecard: MetricScorecard
+    per_era: dict[str, list[dict[str, float | str]]]
+    raw_sharpe: float
+
+
+# Fixed replay constants (spec §7) — the cross-check never varies these.
+CROSSCHECK_N_TRIALS = 1
+
+
 def _sorted_numeric_keys(values: dict[str, float]) -> list[str]:
     """Sort per-era keys chronologically; non-numeric eras raise (fail loud).
 
@@ -357,6 +377,132 @@ def _infer_horizon_target_name(
     return None
 
 
+def _build_joined_base(
+    predictions: pl.DataFrame,
+    *,
+    meta_model: pl.DataFrame,
+    features: pl.DataFrame,
+    targets: pl.DataFrame,
+    era_col: str,
+    id_col: str,
+    pred_col: str,
+    meta_col: str,
+    main_target: str,
+) -> tuple[pl.DataFrame, list[str], list[str]]:
+    """Validate the four input frames and inner-join them into the evaluation
+    base — the shared construction path for ``evaluate_model`` and
+    ``evaluate_cross_check`` (single implementation, no duplicated math).
+
+    Returns ``(base, join_keys, feature_cols)``. The optional benchmark join
+    stays in ``evaluate_model`` — only it accepts benchmarks.
+    """
+    for name, frame in {
+        "predictions": predictions,
+        "meta_model": meta_model,
+        "features": features,
+        "targets": targets,
+    }.items():
+        if not isinstance(frame, pl.DataFrame):
+            raise ValueError(f"{name} must be a polars DataFrame")
+
+    if pred_col not in predictions.columns:
+        raise ValueError(f"Missing required columns: ['{pred_col}']")
+    if meta_col not in meta_model.columns:
+        raise ValueError(f"Missing required columns: ['{meta_col}']")
+    if main_target not in targets.columns:
+        raise ValueError(f"Missing required columns: ['{main_target}']")
+
+    join_keys = [era_col]
+    for frame in (predictions, meta_model, features, targets):
+        if era_col not in frame.columns:
+            raise ValueError(f"Missing required columns: ['{era_col}']")
+    if all(
+        id_col in frame.columns
+        for frame in (predictions, meta_model, features, targets)
+    ):
+        join_keys = [era_col, id_col]
+
+    base = (
+        predictions.select([*join_keys, pred_col])
+        .join(meta_model.select([*join_keys, meta_col]), on=join_keys, how="inner")
+        .join(targets, on=join_keys, how="inner")
+        .join(features, on=join_keys, how="inner")
+    )
+    if base.is_empty():
+        raise ValueError(
+            "No overlap rows after joining predictions, meta_model, targets, and features"
+        )
+
+    feature_cols = [c for c in features.columns if c not in set(join_keys)]
+    if not feature_cols:
+        raise ValueError("features must contain at least one feature column")
+    return base, join_keys, feature_cols
+
+
+def _compute_era_series(
+    evaluator: EvaluationEngine,
+    base: pl.DataFrame,
+    *,
+    pred_col: str,
+    meta_col: str,
+    target_col: str,
+    era_col: str,
+    feature_cols: Sequence[str],
+    mark: Callable[[str, float], None] | None = None,
+) -> tuple[dict[str, float], dict[str, float], dict[str, float]]:
+    """Per-era CORR/MMC/FNC series — the single computation path shared by
+    ``evaluate_model`` and ``evaluate_cross_check`` (no duplicated math).
+
+    ``mark`` is the caller's per-metric timing callback (``evaluate_model``'s
+    ``_mark`` instrumentation); the cross-check passes ``None``. Returns the
+    three series keyed by era label, in the engine's chronological order.
+    """
+
+    def _timed(step: str, func: Callable[[], dict[str, float]]) -> dict[str, float]:
+        t0 = time.perf_counter()
+        result = func()
+        if mark is not None:
+            mark(step, t0)
+        return result
+
+    corr_by_era = _timed(
+        "corr_by_era",
+        lambda: evaluator.per_era_corr(
+            base,
+            pred_col=pred_col,
+            target_col=target_col,
+            era_col=era_col,
+        ),
+    )
+    mmc_by_era = _timed(
+        "mmc_by_era",
+        lambda: evaluator.per_era_mmc(
+            base,
+            pred_col=pred_col,
+            meta_col=meta_col,
+            target_col=target_col,
+            era_col=era_col,
+        ),
+    )
+    fnc_by_era = _timed(
+        "fnc_by_era",
+        lambda: evaluator.per_era_fnc(
+            base,
+            pred_col=pred_col,
+            feature_cols=feature_cols,
+            target_col=target_col,
+            era_col=era_col,
+        ),
+    )
+    return corr_by_era, mmc_by_era, fnc_by_era
+
+
+def _plain_sharpe(values: Sequence[float]) -> float:
+    """Plain per-era Sharpe: mean / std (ddof=0) of the era values, NOT
+    AC-adjusted. Zero for a constant series (``era_series_stats`` semantics)."""
+    return era_series_stats(values).sharpe
+
+
 def evaluate_model(
     predictions: pl.DataFrame,
     *,
@@ -391,44 +537,19 @@ def evaluate_model(
     def _mark(name: str, started: float) -> None:
         metric_timing_seconds[name] = round(time.perf_counter() - started, 6)
 
-    for name, frame in {
-        "predictions": predictions,
-        "meta_model": meta_model,
-        "features": features,
-        "targets": targets,
-    }.items():
-        if not isinstance(frame, pl.DataFrame):
-            raise ValueError(f"{name} must be a polars DataFrame")
-
-    if pred_col not in predictions.columns:
-        raise ValueError(f"Missing required columns: ['{pred_col}']")
-    if meta_col not in meta_model.columns:
-        raise ValueError(f"Missing required columns: ['{meta_col}']")
-    if main_target not in targets.columns:
-        raise ValueError(f"Missing required columns: ['{main_target}']")
-
-    join_keys = [era_col]
-    for frame in (predictions, meta_model, features, targets):
-        if era_col not in frame.columns:
-            raise ValueError(f"Missing required columns: ['{era_col}']")
-    if all(
-        id_col in frame.columns
-        for frame in (predictions, meta_model, features, targets)
-    ):
-        join_keys = [era_col, id_col]
-
     t0 = time.perf_counter()
-    base = (
-        predictions.select([*join_keys, pred_col])
-        .join(meta_model.select([*join_keys, meta_col]), on=join_keys, how="inner")
-        .join(targets, on=join_keys, how="inner")
-        .join(features, on=join_keys, how="inner")
+    base, join_keys, feature_cols = _build_joined_base(
+        predictions,
+        meta_model=meta_model,
+        features=features,
+        targets=targets,
+        era_col=era_col,
+        id_col=id_col,
+        pred_col=pred_col,
+        meta_col=meta_col,
+        main_target=main_target,
     )
     _mark("join_base", t0)
-    if base.is_empty():
-        raise ValueError(
-            "No overlap rows after joining predictions, meta_model, targets, and features"
-        )
 
     bench_col = benchmark_col
     if benchmarks is not None:
@@ -450,29 +571,17 @@ def evaluate_model(
                 )
                 _mark("join_benchmark", t0)
 
-    feature_cols = [c for c in features.columns if c not in set(join_keys)]
-    if not feature_cols:
-        raise ValueError("features must contain at least one feature column")
-
     evaluator = EvaluationEngine(backend)
-    t0 = time.perf_counter()
-    corr_by_era = evaluator.per_era_corr(
-        base,
-        pred_col=pred_col,
-        target_col=main_target,
-        era_col=era_col,
-    )
-    _mark("corr_by_era", t0)
-
-    t0 = time.perf_counter()
-    mmc_by_era = evaluator.per_era_mmc(
+    corr_by_era, mmc_by_era, fnc_by_era = _compute_era_series(
+        evaluator,
         base,
         pred_col=pred_col,
         meta_col=meta_col,
         target_col=main_target,
         era_col=era_col,
+        feature_cols=feature_cols,
+        mark=_mark,
     )
-    _mark("mmc_by_era", t0)
 
     t0 = time.perf_counter()
     meta_corr_by_era = evaluator.per_era_corr(
@@ -517,16 +626,6 @@ def evaluate_model(
     else:
         turnover_reason = "id column unavailable"
     _mark("turnover", t0)
-
-    t0 = time.perf_counter()
-    fnc_by_era = evaluator.per_era_fnc(
-        base,
-        pred_col=pred_col,
-        feature_cols=feature_cols,
-        target_col=main_target,
-        era_col=era_col,
-    )
-    _mark("fnc_by_era", t0)
 
     t0 = time.perf_counter()
     payout = payout_report(
@@ -770,3 +869,72 @@ def evaluate_model(
         eval_total_seconds=eval_total_seconds,
         degenerate_eras=degenerate_eras,
     )
+
+
+def evaluate_cross_check(
+    predictions: pl.DataFrame,
+    *,
+    meta_model: pl.DataFrame,
+    features: pl.DataFrame,
+    targets: pl.DataFrame,
+    horizon: Horizon = "20D",
+    main_target: str = "target",
+    seed: int = 42,
+) -> CrossCheckResult:
+    """Era-grouped official-backend cross-check of a partial export.
+
+    Reuses the exact per-era computation path of ``evaluate_model`` (shared
+    internal helpers — no duplicated math) but returns the per-era series and
+    raw Sharpe the scorecard itself does not retain. Replay parameters are the
+    fixed ``CROSSCHECK_N_TRIALS`` constant plus ``evaluate_model`` defaults
+    (official backend forced; column names are ``evaluate_model``'s defaults).
+    """
+    base, _join_keys, feature_cols = _build_joined_base(
+        predictions,
+        meta_model=meta_model,
+        features=features,
+        targets=targets,
+        era_col="era",
+        id_col="id",
+        pred_col="prediction",
+        meta_col="numerai_meta_model",
+        main_target=main_target,
+    )
+    evaluator = EvaluationEngine("official")
+    corr_by_era, mmc_by_era, fnc_by_era = _compute_era_series(
+        evaluator,
+        base,
+        pred_col="prediction",
+        meta_col="numerai_meta_model",
+        target_col=main_target,
+        era_col="era",
+        feature_cols=feature_cols,
+    )
+    scorecard = evaluate_model(
+        predictions,
+        meta_model=meta_model,
+        benchmarks=None,
+        features=features,
+        targets=targets,
+        n_trials=CROSSCHECK_N_TRIALS,
+        seed=seed,
+        horizon=horizon,
+        main_target=main_target,
+        backend="official",
+    )
+    raw_sharpe = _plain_sharpe(list(corr_by_era.values()))
+    per_era = {
+        "corr": [
+            {"era": str(era), "value": float(value)}
+            for era, value in corr_by_era.items()
+        ],
+        "mmc": [
+            {"era": str(era), "value": float(value)}
+            for era, value in mmc_by_era.items()
+        ],
+        "fnc": [
+            {"era": str(era), "value": float(value)}
+            for era, value in fnc_by_era.items()
+        ],
+    }
+    return CrossCheckResult(scorecard=scorecard, per_era=per_era, raw_sharpe=raw_sharpe)
