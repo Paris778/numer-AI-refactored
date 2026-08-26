@@ -24,3 +24,17 @@ data/v5.3/validation_example_preds.csv
 
 # SDD scratch workspace (briefs, reports, ledger)
 .superpowers/sdd/
+
+# self-contained experiment layout: versioned metadata, ignored heavy files
+experiments/**
+!experiments/
+!experiments/**/
+!experiments/*/README.md
+!experiments/*/base_config.yaml
+!experiments/*/meta.json
+!experiments/*/runs/*/run.json
+!experiments/*/exports/**/export.json
+!experiments/*/exports/**/scorecard.json
+!experiments/*/exports/full/current.json
+!experiments/champion.json
+!experiments/**/.gitkeep
