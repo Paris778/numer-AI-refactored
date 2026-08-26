@@ -314,7 +314,7 @@ def test_neutralized_ic_series_parity_with_profile() -> None:
 
 
 def _evidence_environment(tmp_path: Path) -> tuple[Path, Path, Path]:
-    """Synthetic v0test data dir + registry with two recorded campaign runs."""
+    """Synthetic v0test data dir + experiments root with two recorded runs."""
     import numpy as np
 
     d = tmp_path / "data" / "v0test"
@@ -344,12 +344,12 @@ def _evidence_environment(tmp_path: Path) -> tuple[Path, Path, Path]:
             )
     pl.DataFrame(rows).write_parquet(d / "validation.parquet")
 
-    reg = tmp_path / "registry"
-    for run_id, pred_fn in (
-        ("a" * 64, lambda r: 0.7 * r["f1"]),                    # v2: linear only
-        ("b" * 64, lambda r: 0.7 * r["f1"] + 0.25 * r["f2"]),   # v3: + nonlinear-ish
+    exp = tmp_path / "experiments"
+    for slug, run_id, pred_fn in (
+        ("lgbm_v2", "a" * 64, lambda r: 0.7 * r["f1"]),                    # v2: linear only
+        ("lgbm_v3", "b" * 64, lambda r: 0.7 * r["f1"] + 0.25 * r["f2"]),   # v3: + nonlinear-ish
     ):
-        rd = reg / run_id
+        rd = exp / slug / "runs" / run_id
         rd.mkdir(parents=True)
         preds = pl.DataFrame(
             [
@@ -410,7 +410,7 @@ def _evidence_environment(tmp_path: Path) -> tuple[Path, Path, Path]:
         ),
         encoding="utf-8",
     )
-    return d.parent, reg, log
+    return d.parent, exp, log
 
 
 def test_campaign_evidence_assembles_variants_and_pairwise(
@@ -421,9 +421,9 @@ def test_campaign_evidence_assembles_variants_and_pairwise(
     from nmr.config import DataConfig
     from nmr.meta import campaign_evidence
 
-    data_root, reg, log = _evidence_environment(tmp_path)
+    data_root, exp, log = _evidence_environment(tmp_path)
     evidence = campaign_evidence(
-        log, reg, data=DataConfig(version="v0test", data_dir=data_root),
+        log, exp, data=DataConfig(version="v0test", data_dir=data_root),
         min_overlap_eras=2,
     )
 

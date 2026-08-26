@@ -14,6 +14,7 @@ from pathlib import Path
 
 import polars as pl
 
+from nmr.paths import EXPERIMENTS_ROOT
 from nmr.refresh import CURRENT_DATA_VERSION
 
 _META_SAMPLE_WARNING = (
@@ -300,7 +301,7 @@ def _artifact_map_section() -> list[str]:
             ],
         ),
         "",
-        "**Campaign & registry (the actual run results):**",
+        "**Campaigns & runs (the actual run results):**",
         "",
         _table(
             ["path", "contents"],
@@ -313,11 +314,11 @@ def _artifact_map_section() -> list[str]:
                 {"path": "artifacts/reports/dataset_analysis/campaign_parquets_meta.json",
                  "contents": "campaign-id guard for the §7.1 evidence cache (stale-cache "
                  "protection for the renderer)"},
-                {"path": "artifacts/registry/<run_id>/run.json",
+                {"path": "experiments/<slug>/runs/<run_id>/run.json",
                  "contents": "run manifest + scorecard + metrics (immutable record)"},
-                {"path": "artifacts/registry/<run_id>/validation_preds.parquet",
+                {"path": "experiments/<slug>/runs/<run_id>/validation_preds.parquet",
                  "contents": "per-era validation predictions — the input to campaign_evidence"},
-                {"path": "artifacts/registry/<run_id>/oof.parquet",
+                {"path": "experiments/<slug>/runs/<run_id>/oof.parquet",
                  "contents": "out-of-fold predictions"},
                 {"path": "artifacts/reports/benchmark_hierarchy_scorecard.csv",
                  "contents": "5-tier benchmark hierarchy scorecards (tier0..tier4); "
@@ -881,10 +882,14 @@ def main(argv: list[str] | None = None) -> int:
         type=Path,
         default=None,
         help="campaign log (artifacts/campaigns/<name>.json); when given, "
-        "section 7 renders per-variant validation evidence from the registry",
+        "section 7 renders per-variant validation evidence from the runs "
+        "recorded under the experiments layout",
     )
     parser.add_argument(
-        "--registry", type=Path, default=Path("artifacts") / "registry"
+        "--registry",
+        type=Path,
+        default=EXPERIMENTS_ROOT,
+        help="experiments root holding experiments/<slug>/runs/<run_id>/ records",
     )
     args = parser.parse_args(argv)
     d = args.dumps_dir

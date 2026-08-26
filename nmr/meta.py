@@ -475,7 +475,10 @@ def campaign_evidence(
     """Assemble validation evidence for every recorded run of a campaign.
 
     Reads the campaign log (``artifacts/campaigns/<name>.json``) and the
-    per-run registry payloads. For each recorded run: validation mean IC with
+    per-run records under ``experiments/<slug>/runs/<run_id>/`` — each
+    recorded run's 64-hex ``run_id`` is resolved across families via
+    :func:`nmr.registry._resolve_run_slug` (``registry_root`` is the
+    experiments root). For each recorded run: validation mean IC with
     the run scorecard's 95% block-bootstrap CI, IC Sharpe and max drawdown
     (scorecard), feature count and backend/device (manifest), and FNE at 100%
     neutralization against ``fne_reference_set`` (medium by default) with its
@@ -490,6 +493,7 @@ def campaign_evidence(
     from nmr.analysis import neutralized_ic_series
     from nmr.data import IngestionAgent
     from nmr.features import _per_era_pearson
+    from nmr.registry import _resolve_run_slug
 
     log_path = Path(campaign_log_path)
     payload = json.loads(log_path.read_text(encoding="utf-8"))
@@ -518,18 +522,22 @@ def campaign_evidence(
                  "error": err_msg if err_msg else f"status={entry.get('status')!r}"}
             )
             continue
-        run_json = Path(registry_root) / run_id / "run.json"
-        if not run_json.exists():
+        try:
+            slug = _resolve_run_slug(Path(registry_root), run_id)
+        except ValueError:
             variant_rows.append(
                 {"variant": label, "status": "recorded",
                  "error": f"run.json missing for {run_id}"}
             )
             continue
+        run_json = Path(registry_root) / slug / "runs" / run_id / "run.json"
         meta = json.loads(run_json.read_text(encoding="utf-8"))
         scorecard = meta.get("scorecard") or {}
         manifest = meta.get("manifest") or {}
         config = manifest.get("config") or {}
-        preds_path = Path(registry_root) / run_id / "validation_preds.parquet"
+        preds_path = (
+            Path(registry_root) / slug / "runs" / run_id / "validation_preds.parquet"
+        )
         if not preds_path.exists():
             variant_rows.append(
                 {"variant": label, "status": "recorded",

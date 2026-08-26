@@ -70,6 +70,30 @@ def _iter_run_records(root: Path):
                 )
 
 
+def _resolve_run_slug(root: Path, run_id: str) -> str:
+    """Resolve ``run_id``'s family slug under the experiments layout root.
+
+    Glob across families: 64-hex run_ids are unique (``run_id`` names the
+    record directory ``root/<slug>/runs/<run_id>/``). Raises ``ValueError``
+    when the record is absent or ambiguous. Single source of the scan —
+    shared by :meth:`RunRegistry._resolve_slug` and
+    ``nmr.meta.campaign_evidence`` (which holds a run_id but no slug).
+    """
+    matches: list[str] = []
+    for slug, rid, _ in _iter_run_records(root):
+        if rid == run_id:
+            matches.append(slug)
+    if not matches:
+        raise ValueError(f"run {run_id} not found under {root}")
+    unique = sorted(set(matches))
+    if len(unique) > 1:
+        raise ValueError(
+            f"run {run_id} is ambiguous: found under families {unique}; "
+            "pass slug explicitly"
+        )
+    return unique[0]
+
+
 class RunRegistry:
     """Cross-family run registry: global comparison + champion pointer only.
 
@@ -96,19 +120,7 @@ class RunRegistry:
         return experiment_store.read_run(slug, run_id)
 
     def _resolve_slug(self, run_id: str) -> str:
-        matches: list[str] = []
-        for slug, rid, _ in self._iter_run_records():
-            if rid == run_id:
-                matches.append(slug)
-        if not matches:
-            raise ValueError(f"run {run_id} not found under {self._root}")
-        unique = sorted(set(matches))
-        if len(unique) > 1:
-            raise ValueError(
-                f"run {run_id} is ambiguous: found under families {unique}; "
-                "pass slug explicitly"
-            )
-        return unique[0]
+        return _resolve_run_slug(self._root, run_id)
 
     def list(self) -> list[str]:
         return sorted(run_id for _, run_id, _ in self._iter_run_records())
