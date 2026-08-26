@@ -465,6 +465,23 @@ slug match; a `partial` export additionally requires `scorecard.json`.
 `derive_stage` is a total function over filesystem state returning
 `(lifecycle_stage, current_full_status)`.
 
+### Z. Experiment Persistence & Atomic Publication — `nmr/experiment_store.py`
+
+Write-path companion to §X/§Y: run persistence, family-scaffold creation, and
+atomic export publication. Consumes `nmr.paths` (layout) and
+`nmr._atomicio.atomic_write_text` (temp + fsync + replace). API:
+`ensure_family`, `record_run`, `read_run`, `stage_export`,
+`discard_staged_export`, `publish_staged_export`. `record_run` creates the
+family scaffold (`meta.json` + `base_config.yaml` + `README.md`) atomically
+with the first `run.json` (spec §2 family-creation rule); `base_config.yaml`
+is the NON-authoritative reference copy — the per-run `run.json` config is
+authoritative. Export slots are staged at `exports/<scope>/.tmp-<run_id>/` and
+published by a single `os.replace` directory rename into the immutable slot
+`exports/<scope>/<run_id>/`; discovery ignores `.tmp-` names. Re-publishing an
+existing slot raises `ValueError` (exports immutable — spec §6); staged
+residue is discarded, never half-published. `run_id` is regex-validated
+(`^[0-9a-f]{64}$`, path-traversal guard).
+
 ---
 
 ## Model Families & Full Versions (nmr/families.py)
