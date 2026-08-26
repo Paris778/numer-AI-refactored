@@ -6,6 +6,7 @@ are a thin control plane; all logic lives here and is covered by `tests/`.
 
 from __future__ import annotations
 
+from . import lifecycle, paths
 from .analysis import (
     FeatureCorrResult,
     SplitStats,
@@ -506,6 +507,8 @@ __all__ = [
     "validate_submission",
     "write_submission",
     "accept_promoted_artifact",
+    "lifecycle",
+    "paths",
     "__version__",
 ]
 __version__ = "0.1.0"

@@ -449,6 +449,22 @@ enters a canonical hash (the shared helpers take a config-provided
 `export_json_path`, `current_pointer_path`, `champion_path`,
 `shared_cache_dir`, `shared_reports_dir`.
 
+### Y. Experiment Lifecycle — `nmr/lifecycle.py`
+
+Read-only lifecycle derivation over the experiment layout (§X): export
+validity, total stage derivation, and deterministic ordering. Consumes
+`nmr.paths` (layout) and `nmr.deployment.load_predict` (hash-verified
+loadability as the export-validity predicate — trusted-source rule; imported
+lazily so importing this module stays light). API: `SCOPES`,
+`LIFECYCLE_STAGES`, `StakedRecord`, `ExportVersion`, `load_staked_record`,
+`valid_export`, `scan_valid_exports`, `current_full_status`, `derive_stage`,
+`sort_exports`. Six lifecycle stages in badge precedence: `uninitialized` →
+`research` → `partial` → `degraded` → `full` → `staked`. Export identity
+binding: slot-dir `run_id` == `export.json.promoted_from_run_id` == family
+slug match; a `partial` export additionally requires `scorecard.json`.
+`derive_stage` is a total function over filesystem state returning
+`(lifecycle_stage, current_full_status)`.
+
 ---
 
 ## Model Families & Full Versions (nmr/families.py)
@@ -518,6 +534,7 @@ data.py      ──> config (DataConfig)
 splitter.py  ──> config (SplitConfig)
 families.py  ──> config (REPO_ROOT)
 paths.py     ──> config (REPO_ROOT)
+lifecycle.py ──> paths, deployment (load_predict — export-validity predicate)
 evaluation.py──> _transforms (power_1_5, rank_gaussianize)
 ensemble.py  ──> _transforms (rank_gaussianize, rank_gaussianize_unit_variance)
 payout.py    ──> inference
