@@ -37,6 +37,7 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from nmr import paths
 from nmr._atomicio import atomic_write_text
 from nmr.benchmark import Tier4GateConfig, load_benchmark_file
 from nmr.config import ExperimentConfig, config_from_dict
@@ -425,8 +426,16 @@ def _full_history_frame(
 
 
 def resolve_champion_run_id(registry_dir: Path) -> str:
-    """Read the atomic ``champion.json`` pointer's run_id."""
-    champion_path = Path(registry_dir) / "champion.json"
+    """Read the atomic ``champion.json`` pointer's run_id.
+
+    Task 6/11 shim: ``RunRegistry.promote`` now writes the pointer at
+    ``paths.champion_path()`` (``experiments/champion.json``); the legacy
+    ``registry_dir/champion.json`` is honored when present. Task 11 removes
+    the legacy read and retargets ``promote_model.py``.
+    """
+    legacy = Path(registry_dir) / "champion.json"
+    primary = paths.champion_path()
+    champion_path = legacy if legacy.is_file() else primary
     if not champion_path.is_file():
         raise FileNotFoundError(f"no champion: {champion_path} missing")
     try:

@@ -613,9 +613,13 @@ def test_ram_guard_corrupt_estimate_skips(
     assert "unreadable RAM estimate" in caplog.text
 
 
-def test_resolve_champion_run_id(tmp_path: Path) -> None:
+def test_resolve_champion_run_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from nmr import paths
     from nmr.promote import resolve_champion_run_id
 
+    # Pin the fallback target (paths.champion_path) to tmp so the
+    # FileNotFoundError case never depends on the real experiments/ pointer.
+    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", tmp_path / "experiments")
     registry = tmp_path / "registry"
     registry.mkdir()
     with pytest.raises(FileNotFoundError, match="no champion"):
@@ -629,6 +633,35 @@ def test_resolve_champion_run_id(tmp_path: Path) -> None:
         resolve_champion_run_id(registry)
     champion.write_text(json.dumps({"run_id": _RID}), encoding="utf-8")
     assert resolve_champion_run_id(registry) == _RID
+
+
+def test_resolve_champion_run_id_falls_back_to_paths_pointer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Legacy ``registry_dir/champion.json`` absent → read the pointer where
+    ``RunRegistry.promote`` writes post-Task-6 (``paths.champion_path()`` =
+    ``experiments/champion.json``), validating its run_id as 64-hex."""
+    from nmr import paths
+    from nmr.promote import resolve_champion_run_id
+
+    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", tmp_path / "experiments")
+    champion = paths.champion_path()
+    champion.parent.mkdir(parents=True, exist_ok=True)
+    champion.write_text(
+        json.dumps({"run_id": _RID, "experiment_slug": "fam-a"}), encoding="utf-8"
+    )
+
+    registry = tmp_path / "registry"  # no legacy champion.json here
+    registry.mkdir()
+    assert resolve_champion_run_id(registry) == _RID
+
+    # The fallback still validates the 64-hex run_id.
+    champion.write_text(
+        json.dumps({"run_id": "not-hex", "experiment_slug": "fam-a"}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="no valid run_id"):
+        resolve_champion_run_id(registry)
 
 
 def test_promote_manifest_without_config_refused(tmp_path: Path) -> None:
