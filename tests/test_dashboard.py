@@ -1078,12 +1078,16 @@ def _write_export_slot(
     run_id: str,
     *,
     config: dict | None = None,
+    scorecard: dict | None = None,
 ) -> Path:
     """Write a VALID export slot at ``root/<family>/exports/<scope>/<run_id>``.
 
     Validity (``lifecycle.valid_export``): export.json identity binding plus a
     hash-verified loadable predict.pkl — ``serialize_predict`` writes the
-    sha256 sibling manifest so the loadability predicate holds.
+    sha256 sibling manifest so the loadability predicate holds. Partial slots
+    require ``scorecard.json``; ``scorecard`` supplies the cross-check record
+    (defaults to an empty schema stub whose missing ``scorecard`` block leaves
+    the unified metric cells null).
     """
     slot = root / family / "exports" / scope / run_id
     slot.mkdir(parents=True, exist_ok=True)
@@ -1111,7 +1115,11 @@ def _write_export_slot(
     (slot / "export.json").write_text(json.dumps(payload), encoding="utf-8")
     if scope == "partial":
         (slot / "scorecard.json").write_text(
-            json.dumps({"schema_version": 3}), encoding="utf-8"
+            json.dumps(
+                scorecard if scorecard is not None else {"schema_version": 3},
+                sort_keys=True,
+            ),
+            encoding="utf-8",
         )
     return slot
 
@@ -1348,6 +1356,77 @@ def test_partial_rows_not_evaluable(
     assert ranked_by_id["sample-run::partial::" + "a" * 64]["rank"] is None
 
 
+def _partial_scorecard() -> dict:
+    return {
+        "schema_version": 3,
+        "scope": "partial",
+        "scorecard": {
+            "corr": {"value": 0.11, "ci_low": 0.04, "ci_high": 0.18, "n_eras": 22},
+            "mmc": {"value": 0.09, "ci_low": -0.01, "ci_high": 0.19, "n_eras": 22},
+            "corr_sharpe_ac": {
+                "value": 0.62,
+                "ci_low": 0.4,
+                "ci_high": 0.84,
+                "n_eras": 22,
+            },
+            "fnc": 0.021,
+            "n_eras": 22,
+            "deflated_sharpe": 0.91,
+            "max_drawdown": 0.13,
+            "burn_rate": 0.5,
+        },
+    }
+
+
+def test_partial_row_carries_cross_check_metric_cells(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec §8 + §12 #15: a partial row's metric cells equal its slot's
+    scorecard.json values, yet it stays diagnostic (never ranked)."""
+    registry = tmp_path / "registry"
+    experiments = tmp_path / "experiments"
+    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", experiments)
+    run_id = "a" * 64
+    entry = _registry_entry(run_id)
+    entry["scorecard"]["mmc"] = 0.2
+    _write_registry(registry, [entry])
+    _write_family_meta(experiments, "sample-run")
+    _write_export_slot(
+        experiments,
+        "sample-run",
+        "partial",
+        run_id,
+        scorecard=_partial_scorecard(),
+    )
+    frame = dash.load_unified_leaderboard(
+        registry, benchmark_path=False, models_dir=experiments
+    )
+    rows = {r["model_id"]: r for r in frame.to_dicts()}
+    partial = rows[f"sample-run::partial::{run_id}"]
+    assert partial["source"] == "partial"
+    assert partial["corr"] == pytest.approx(0.11)
+    assert partial["corr_ci_low"] == pytest.approx(0.04)
+    assert partial["corr_ci_high"] == pytest.approx(0.18)
+    assert partial["corr_n_eras"] == 22
+    assert partial["mmc"] == pytest.approx(0.09)
+    # the mmc CI cells have no unified column — they render via the detail
+    assert partial["corr_sharpe_ac"] == pytest.approx(0.62)
+    assert partial["corr_sharpe_ac_ci_low"] == pytest.approx(0.4)
+    assert partial["corr_sharpe_ac_ci_high"] == pytest.approx(0.84)
+    assert partial["corr_sharpe_ac_n_eras"] == 22
+    assert partial["fnc"] == pytest.approx(0.021)
+    assert partial["n_eras"] == 22
+    assert partial["deflated_sharpe"] == pytest.approx(0.91)
+    assert partial["max_drawdown"] == pytest.approx(0.13)
+    assert partial["burn_rate"] == pytest.approx(0.5)
+    # cross-check metrics must never earn the partial row a rank
+    ranked = dash.rank_leaderboard(frame)
+    ranked_by_id = {r["model_id"]: r for r in ranked.to_dicts()}
+    assert ranked_by_id[run_id]["rank"] == 1
+    assert ranked_by_id[f"sample-run::partial::{run_id}"]["rank"] is None
+    assert ranked_by_id[f"sample-run::partial::{run_id}"]["cohort"] == "partial"
+
+
 def test_payload_carries_lifecycle_fields(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1467,17 +1546,20 @@ def test_gate_status_full_rows_stamped_full(tmp_path: Path) -> None:
 
 
 def test_evaluable_rows_predicate() -> None:
+    """EVALUABLE_ROWS (spec §8): trained + benchmark rows are evaluable;
+    diagnostic full/partial rows are not."""
     frame = pl.DataFrame(
         [
             {"model_id": "a", "source": "trained"},
             {"model_id": "b", "source": "benchmark"},
             {"model_id": "c::full", "source": "full"},
+            {"model_id": "d::partial", "source": "partial"},
         ],
         schema=dash.UNIFIED_SCHEMA,
         strict=False,
     )
     keep = frame.filter(dash.EVALUABLE_ROWS).get_column("model_id").to_list()
-    assert keep == ["a"]
+    assert keep == ["a", "b"]
 
 
 def test_dashboard_metric_specs_make_direction_and_default_explicit() -> None:
@@ -1685,6 +1767,53 @@ def test_load_model_detail_keeps_full_scorecard_fields(tmp_path: Path) -> None:
     assert detail["provenance"]["oof_device"] == "cpu"
 
 
+def test_load_model_detail_partial_renders_cross_check_metrics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec §8 + §12 #15: a partial row's detail carries the slot's cross-check
+    scorecard (flat-mapped onto the standard detail key convention)."""
+    registry = tmp_path / "registry"
+    experiments = tmp_path / "experiments"
+    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", experiments)
+    run_id = "a" * 64
+    _write_registry(registry, [_registry_entry(run_id)])
+    _write_family_meta(experiments, "sample-run")
+    _write_export_slot(
+        experiments,
+        "sample-run",
+        "partial",
+        run_id,
+        scorecard=_partial_scorecard(),
+    )
+    frame = dash.load_unified_leaderboard(
+        registry, benchmark_path=False, models_dir=experiments
+    )
+    partial_row = frame.filter(pl.col("source") == "partial").row(0, named=True)
+    detail = dash.load_model_detail(partial_row)
+
+    assert detail["source"] == "partial"
+    assert detail["cohort"] == "partial"
+    assert detail["reason"] is None
+    assert detail["evidence_ref"] == (
+        f"experiments/sample-run/exports/partial/{run_id}/scorecard.json"
+    )
+    assert detail["scorecard"]["corr"] == pytest.approx(0.11)
+    assert detail["scorecard"]["corr_ci_low"] == pytest.approx(0.04)
+    assert detail["scorecard"]["corr_ci_high"] == pytest.approx(0.18)
+    assert detail["scorecard"]["corr_n_eras"] == 22
+    assert detail["scorecard"]["mmc"] == pytest.approx(0.09)
+    assert detail["scorecard"]["mmc_ci_low"] == pytest.approx(-0.01)
+    assert detail["scorecard"]["mmc_ci_high"] == pytest.approx(0.19)
+    assert detail["scorecard"]["mmc_n_eras"] == 22
+    assert detail["scorecard"]["corr_sharpe_ac"] == pytest.approx(0.62)
+    assert detail["scorecard"]["corr_sharpe_ac_ci_low"] == pytest.approx(0.4)
+    assert detail["scorecard"]["corr_sharpe_ac_ci_high"] == pytest.approx(0.84)
+    assert detail["scorecard"]["fnc"] == pytest.approx(0.021)
+    assert detail["scorecard"]["deflated_sharpe"] == pytest.approx(0.91)
+    assert detail["scorecard"]["max_drawdown"] == pytest.approx(0.13)
+    assert detail["scorecard"]["burn_rate"] == pytest.approx(0.5)
+
+
 def _lb_row(
     model_id: str,
     source: str,
@@ -1734,15 +1863,18 @@ def test_generate_dashboard_row_html_full_chip() -> None:
     assert 'class="badge full">FULL</span>' in html_out
 
 
-def test_generate_dashboard_bar_input_excludes_full_rows() -> None:
+def test_generate_dashboard_bar_input_includes_benchmark_excludes_diagnostic_rows() -> None:
     rows = [
         _lb_row("a" * 64, "trained", "r1", 0.5),
+        _lb_row("bench_a", "benchmark", "ref", 0.78),
         _lb_row("brb1-xgb-v6::full", "full", "brb1-xgb-v6"),
+        _lb_row("brb1-xgb-v6::partial", "partial", "brb1-xgb-v6", 0.9),
     ]
     frame = pl.DataFrame(rows, schema=dash.UNIFIED_SCHEMA, strict=False)
     out = generate_dashboard._bar_input(frame, champion=None)
-    assert out.height == 1
-    assert out.get_column("label").to_list() == ["r1 · " + "a" * 8]
+    # benchmark rows are reference curves on the chart (EVALUABLE_ROWS);
+    # full/partial diagnostic rows never appear even with metric cells
+    assert out.get_column("label").to_list() == ["ref · bench_a", "r1 · " + "a" * 8]
 
 
 def test_dashboard_app_load_registry_frame_includes_full_sources(
@@ -1796,7 +1928,7 @@ def test_dashboard_app_shaped_leaderboard_pins_full_rows_first() -> None:
     assert "_is_full" not in pdf.columns
 
 
-def test_dashboard_app_robustness_matrix_excludes_full_rows() -> None:
+def test_dashboard_app_robustness_matrix_includes_benchmark_excludes_diagnostic_rows() -> None:
     from dashboard_ui import app
 
     rows = [
@@ -1814,6 +1946,19 @@ def test_dashboard_app_robustness_matrix_excludes_full_rows() -> None:
             "max_drawdown": 0.1,
         },
         {
+            "model_id": "bench_a",
+            "source": "benchmark",
+            "run_name": "ref",
+            "corr_sharpe_ac": 0.78,
+            "has_bmc": False,
+            "has_horizon": None,
+            "has_perturb": None,
+            "has_regime": None,
+            "max_feature_exposure": None,
+            "std_corr": None,
+            "max_drawdown": None,
+        },
+        {
             "model_id": "brb1-xgb-v6::full",
             "source": "full",
             "run_name": "brb1-xgb-v6",
@@ -1826,7 +1971,21 @@ def test_dashboard_app_robustness_matrix_excludes_full_rows() -> None:
             "std_corr": None,
             "max_drawdown": None,
         },
+        {
+            "model_id": "brb1-xgb-v6::partial",
+            "source": "partial",
+            "run_name": "brb1-xgb-v6",
+            "corr_sharpe_ac": 0.9,
+            "has_bmc": None,
+            "has_horizon": None,
+            "has_perturb": None,
+            "has_regime": None,
+            "max_feature_exposure": None,
+            "std_corr": None,
+            "max_drawdown": None,
+        },
     ]
     frame = pl.DataFrame(rows, schema=dash.UNIFIED_SCHEMA, strict=False)
     matrix = app.robustness_matrix(frame)
-    assert matrix.get_column("model_id").to_list() == ["a" * 64]
+    # benchmark reference curves participate; diagnostic full/partial do not
+    assert matrix.get_column("model_id").to_list() == ["a" * 64, "bench_a"]

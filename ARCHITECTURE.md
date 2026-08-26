@@ -538,11 +538,14 @@ Leaderboard integration (`nmr/dashboard.py`): `UNIFIED_SCHEMA` carries
 `stale`. `load_unified_leaderboard` is the Task-10 bridge: run records come
 from the legacy registry AND `experiments/<family>/runs/<run_id>/run.json`;
 exports come from `nmr.lifecycle.scan_valid_exports` — one row per VALID slot
-(`model_id = "<family>::<scope>::<run_id>"`, all metric cells null; dangling
-lineage warns but still renders). `evaluate_gate_status` stamps full rows
+(`model_id = "<family>::<scope>::<run_id>"`; full rows carry null metric
+cells, partial rows carry their cross-check cells mapped from the slot's
+`scorecard.json`; dangling lineage warns but still renders).
+`evaluate_gate_status` stamps full rows
 `FULL` and partial rows `PARTIAL` (never gated). `EVALUABLE_ROWS =
-pl.col("source").is_in(["trained", "trained_legacy"])` is the single
-chart-inclusion predicate — full + partial rows are diagnostic-only.
+~pl.col("source").is_in(["full", "partial"])` is the single chart-inclusion
+predicate — trained + benchmark rows are evaluable; full + partial rows are
+diagnostic-only (never ranked, never charted as candidates).
 
 ---
 

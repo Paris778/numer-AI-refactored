@@ -119,10 +119,11 @@ UNIFIED_SCHEMA = pl.Schema(
 )
 
 # Single predicate for every chart / candidate-selection path: rows that carry
-# validation metrics. Trained rows only — partial (train-only cross-check) and
-# full (in-sample metrics) rows are diagnostic and never ranked, and benchmark
-# tiers are reference curves, not candidates (Task 10).
-EVALUABLE_ROWS: pl.Expr = pl.col("source").is_in(["trained", "trained_legacy"])
+# validation metrics. Trained and benchmark rows are evaluable (reference
+# curves chart alongside candidates, spec §8); only diagnostic rows are
+# excluded — full (in-sample metrics) and partial (train-only cross-check)
+# are never ranked (Task 10).
+EVALUABLE_ROWS: pl.Expr = ~pl.col("source").is_in(["full", "partial"])
 
 
 @dataclass(frozen=True)
@@ -640,6 +641,20 @@ def load_model_detail(row: Mapping[str, Any]) -> dict[str, Any]:
             detail["reason"] = "full_manifest_unavailable"
         else:
             detail["scorecard"] = {}
+    elif source == "partial" and run_dir:
+        # Cross-check scorecard (spec §8 + §12 #15): the slot's own
+        # scorecard.json — flat-mapped onto the same detail key convention as
+        # trained rows so the cross-check metrics render on the family detail.
+        slot_dir = Path(str(run_dir))
+        family = str(row.get("family") or row.get("run_name") or "unknown")
+        detail["evidence_ref"] = (
+            f"experiments/{family}/exports/partial/{slot_dir.name}/scorecard.json"
+        )
+        cells = _partial_cross_check_cells(slot_dir)
+        if cells:
+            detail["scorecard"] = _compact_json_value(cells)
+        else:
+            detail["reason"] = "scorecard_unavailable"
     else:
         detail["scorecard"] = _compact_json_value(
             {
@@ -998,6 +1013,36 @@ def _registry_row(payload: dict[str, Any], run_file: Path) -> dict[str, Any]:
     }
 
 
+def _partial_cross_check_cells(slot_dir: Path) -> dict[str, Any]:
+    """Map a partial slot's cross-check ``scorecard.json`` onto metric cells.
+
+    Reads the versioned record written by ``promote`` (schema v3: a nested
+    ``scorecard`` block of MetricScorecard-shaped cells) and flattens exactly
+    the fields the cross-check defines — corr/mmc/corr_sharpe_ac cells (value,
+    ci bounds, n_eras), the fnc scalar, n_eras, deflated_sharpe, max_drawdown,
+    burn_rate — onto ``_ALL_SCORECARD_FIELDS``-style flat keys. An unreadable
+    or malformed record yields an empty mapping (the row stays all-None
+    diagnostic); slot validity already requires ``scorecard.json`` to exist.
+    """
+    payload = _read_json_mapping(slot_dir / "scorecard.json")
+    if payload is None:
+        return {}
+    scorecard = payload.get("scorecard")
+    if not isinstance(scorecard, dict):
+        return {}
+    cells: dict[str, Any] = {}
+    for metric in ("corr", "mmc", "corr_sharpe_ac"):
+        cell = scorecard.get(metric)
+        if isinstance(cell, dict):
+            for key in ("value", "ci_low", "ci_high", "n_eras"):
+                if cell.get(key) is not None:
+                    cells[f"{metric}_{key}" if key != "value" else metric] = cell[key]
+    for scalar in ("fnc", "n_eras", "deflated_sharpe", "max_drawdown", "burn_rate"):
+        if scorecard.get(scalar) is not None:
+            cells[scalar] = scorecard[scalar]
+    return cells
+
+
 def _export_row(
     version: lifecycle.ExportVersion, family: str, info: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1027,6 +1072,18 @@ def _export_row(
             "run_dir": str(version.slot_dir),
         }
     )
+    if version.scope == "partial":
+        # Cross-check metrics (spec §8 + §12 #15): partial rows carry their
+        # post-fit scorecard on the family detail but stay diagnostic-only.
+        # Only fields with a unified column land on the row (e.g. the mmc
+        # value, not its CI cells — those render via the detail).
+        row.update(
+            {
+                key: value
+                for key, value in _partial_cross_check_cells(version.slot_dir).items()
+                if key in UNIFIED_SCHEMA.names()
+            }
+        )
     return row
 
 
