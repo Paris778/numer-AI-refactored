@@ -140,7 +140,7 @@ streamlit run dashboard_app.py   # interactive Model Tournament (read-only; same
 
 # 5. Ship it: promote a run to a full version for Numerai Model Uploads
 .\.venv\Scripts\python rehearse_promotion.py --run-id <run_id> --family <family>   # truncated rehearsal first — proves the path, measures the RAM guard
-.\.venv\Scripts\python promote_model.py     --run-id <run_id> --family <family>   # → artifacts/models/<family>/full/<run_id>/predict.pkl
+.\.venv\Scripts\python promote_model.py     --run-id <run_id> --family <family>   # → experiments/<family>/exports/full/<run_id>/predict.pkl
 ```
 
 **The money path is Numerai Model Uploads.** `promote_model.py` trains a full version on train+validation and writes a cloudpickled `predict.pkl` that Numerai runs each round. Two gates protect it: the run must clear the tier-4 production thresholds (`--override-gate` records the failure in the artifact's own manifest), and the artifact's **raw** predictions must pass `numerai_tools` validation on real `live.parquet` — a promotion that fails contract validation is refused outright and cannot be overridden.

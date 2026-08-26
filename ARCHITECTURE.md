@@ -289,7 +289,7 @@ experiments/
     └── validation_preds.parquet  # [era, id, prediction] on validation eras,
                                   # only when evaluation.validation_scorecard
 
-artifacts/models/<family>/full/manifest.json  # promoted full-version marker (family == run.name; read-only via nmr/families.py)
+experiments/{slug}/exports/{scope}/{run_id}/export.json  # promoted full/partial record + atomic current.json pointer (read-only via nmr/families.py)
 ```
 
 All JSON writes: temp file in parent dir → fsync → `os.replace()`; the OOF parquet likewise writes temp + `os.replace` (no fsync). `list() -> list[str]` returns every run_id across families (sorted); `best(metric="corr_sharpe_ac") -> (run_id, slug) | None` picks the highest scorecard metric across families (runs lacking the metric are skipped); `promote(run_id, slug)` and `promote_if_better(run_id, slug, metric="corr_sharpe_ac") -> (Path, bool)` write `experiments/champion.json` atomically — `promote_if_better` promotes only when the candidate's scorecard metric strictly beats the champion's, honoring direction (`_SCORECARD_METRIC_DIRECTION`: `max_drawdown`/`std_corr` are lower-is-better); a scorecard-bearing candidate may displace a scorecard-less champion; a candidate lacking the metric or an unknown metric raises `ValueError`; `resolve_champion() -> (run_id, slug)` fails loud on a missing/dangling/corrupt pointer (never silently treats it as no champion). **Compat shims (removed in Task 11):** `record(RunResult)` keeps the legacy single-pool layout (`root/<run_id>/` — `tests/test_campaign.py` pins it; stub manifests carry no `config.run.name`); iteration and `promote`/`promote_if_better` additionally accept legacy rows (slug derived from `manifest.config.run.name` when a champion pointer needs one); `promote(run_id, slug=None)` / `promote_if_better(run_id, slug=None, ...)` resolve the slug by scanning the registry root (ambiguous/not-found ⇒ `ValueError`); `nmr/promote.py::resolve_champion_run_id` still reads the legacy pointer file. Champion writes are single-writer (CLI/runner entry points only — design spec §9).
@@ -501,14 +501,15 @@ immutable slot per promoted run at
 temp + fsync + `os.replace`) naming the active full slot — the pointer +
 valid slot record IS the marker. Writes live in `nmr/promote.py` (the
 promotion writer, Task 8+). The read-side discovery layer (`nmr/families.py`)
-is mid-plan compat: it still scans the legacy
-`artifacts/models/<family>/full/<run_id>/manifest.json` layout and is
-retargeted to the experiment layout in Task 9. Resolution is pointer-driven —
-a missing/corrupt/dangling `current.json` fails loud via `full_manifest_path`
+is a thin compatibility wrapper over `nmr/lifecycle` + `nmr/paths`: it
+re-exports `lifecycle.ExportVersion` as `FullVersion` and resolves the
+experiment layout. Resolution is pointer-driven — a missing/corrupt/dangling
+`current.json` fails loud via the deprecated `full_manifest_path` shim
 (listing `available_slots`) and yields `None` from the tolerant
-`load_full_version`/`scan_full_versions` scans. Slots are never selected by
-mtime. Old slots remain for rollback; repointing `current.json` is a
-deliberate write.
+`load_full_version`; `scan_full_versions` additionally surfaces degraded
+families (valid exports, no pointer) via their newest valid export. Slots are
+never selected by mtime. Old slots remain for rollback; repointing
+`current.json` is a deliberate write.
 
 Export record schema (`export.json`, per-slot):
 
@@ -524,15 +525,17 @@ Export record schema (`export.json`, per-slot):
 | `training_rows` / `training_era_range` | actual rows + `[min, max]` era range the artifact was fit on — a rehearsal (~68k rows on a subset) is distinguishable from a genuine full version (6.85M rows, `[0001..1231]`) without reading `config_normalizations` |
 | `tier4_gate_passed` / `tier4_receipts` / `override_used` / `config_normalizations` | promotion verdict block — always written by the writer; a failed-gate rehearsal artifact carries `tier4_gate_passed: false` in its own manifest |
 
-Public API: `full_manifest_path` (fail-loud pointer resolution),
-`available_slots`, `load_full_version`, `scan_full_versions`,
-`family_has_full_version`, `FullVersion`, constants `FAMILY_DIR_NAME` /
-`FULL_DIR_NAME` / `FULL_MANIFEST_NAME` / `CURRENT_POINTER_NAME` /
-`DEFAULT_MODELS_DIR`.
+Public API: `full_manifest_path` (deprecated fail-loud shim — removed in
+Task 11), `available_slots`, `load_full_version`, `scan_full_versions`,
+`family_has_full_version`, `FullVersion` (= `lifecycle.ExportVersion`),
+constants `FAMILY_DIR_NAME` / `FULL_DIR_NAME` / `FULL_MANIFEST_NAME` /
+`CURRENT_POINTER_NAME` / `DEFAULT_MODELS_DIR` (legacy, retained for call-site
+compat).
 
 Leaderboard integration (`nmr/dashboard.py`): `UNIFIED_SCHEMA` carries
 `family`, `training_scope` (`"research"` / `"full"`), `has_full_version`.
-`load_unified_leaderboard` scans `artifacts/models/` ONCE, stamps trained rows
+`load_unified_leaderboard` scans full exports ONCE (via
+`nmr.families.scan_full_versions`), stamps trained rows
 via set membership, and appends one `source="full"` row per valid manifest
 (`model_id = "<family>::full"`, all metric cells null — in-sample metrics are
 never shown as comparable OOF numbers). `evaluate_gate_status` stamps full
@@ -559,7 +562,7 @@ features.py   (leaf — stdlib/NumPy/Polars only)
 
 data.py      ──> config (DataConfig)
 splitter.py  ──> config (SplitConfig)
-families.py  ──> config (REPO_ROOT)
+families.py  ──> lifecycle, paths
 paths.py     ──> config (REPO_ROOT)
 lifecycle.py ──> paths, deployment (load_predict — export-validity predicate)
 evaluation.py──> _transforms (power_1_5, rank_gaussianize)
