@@ -27,10 +27,20 @@ from typing import Any
 import polars as pl
 from pydantic import BaseModel, Field
 
+from nmr import paths
 from nmr.config import REPO_ROOT
 from nmr.dashboard import load_benchmark_frame, load_unified_leaderboard
 
 logger = logging.getLogger(__name__)
+
+
+def _is_evaluable(source: str) -> bool:
+    """Evaluable-source predicate mirroring ``nmr.dashboard.EVALUABLE_ROWS``
+    (``~source.is_in(["full", "partial"])``): full (in-sample metrics) and
+    partial (train-only cross-check) rows are diagnostic-only — they stay in
+    the source list but are never counted evaluable. Benchmarks (reference
+    curves) count like the engine's predicate."""
+    return source not in ("full", "partial")
 
 
 def _profile_label(model_id: str) -> str | None:
@@ -114,9 +124,7 @@ class LeaderboardFrame(BaseModel):
         return LeaderboardFrame(
             rows=filtered,
             total_rows=len(filtered),
-            evaluable_rows=sum(
-                1 for r in filtered if r.source in ["trained", "trained_legacy"]
-            ),
+            evaluable_rows=sum(1 for r in filtered if _is_evaluable(r.source)),
             n_overlap_eras=self.n_overlap_eras,
             data_version=self.data_version,
         )
@@ -127,9 +135,7 @@ class LeaderboardFrame(BaseModel):
         return LeaderboardFrame(
             rows=filtered,
             total_rows=len(filtered),
-            evaluable_rows=sum(
-                1 for r in filtered if r.source in ["trained", "trained_legacy"]
-            ),
+            evaluable_rows=sum(1 for r in filtered if _is_evaluable(r.source)),
             n_overlap_eras=self.n_overlap_eras,
             data_version=self.data_version,
         )
@@ -140,9 +146,7 @@ class LeaderboardFrame(BaseModel):
         return LeaderboardFrame(
             rows=filtered,
             total_rows=len(filtered),
-            evaluable_rows=sum(
-                1 for r in filtered if r.source in ["trained", "trained_legacy"]
-            ),
+            evaluable_rows=sum(1 for r in filtered if _is_evaluable(r.source)),
             n_overlap_eras=self.n_overlap_eras,
             data_version=self.data_version,
         )
@@ -298,12 +302,12 @@ class DashboardDataService:
         """Initialize data service.
 
         Args:
-            registry_dir: Path to artifacts/registry (default: REPO_ROOT / artifacts / registry)
+            registry_dir: Path to the experiments root (default: nmr.paths.EXPERIMENTS_ROOT)
             benchmark_path: Path to benchmark CSV (default: auto-resolve)
             data_dir: Path to data/ directory (default: REPO_ROOT / data)
         """
         self.registry_dir = (
-            Path(registry_dir) if registry_dir else REPO_ROOT / "artifacts" / "registry"
+            Path(registry_dir) if registry_dir else paths.EXPERIMENTS_ROOT
         )
         self.benchmark_path = (
             Path(benchmark_path) if benchmark_path else self._resolve_benchmark_path()
@@ -364,12 +368,17 @@ class DashboardDataService:
 
         # Load from nmr.dashboard (engine)
         try:
-            # Load registry runs
+            # Load registry runs. The allowlist keeps every source the engine's
+            # unified leaderboard emits — full and partial rows are diagnostic
+            # (never evaluable) but must NOT be silently dropped from the list
+            # (final review I5).
             registry_frame = load_unified_leaderboard(
                 self.registry_dir, benchmark_path=False, models_dir=None
             )
             registry_frame = registry_frame.filter(
-                pl.col("source").is_in(["trained", "trained_legacy", "full"])
+                pl.col("source").is_in(
+                    ["trained", "trained_legacy", "full", "partial"]
+                )
             )
 
             # Load benchmarks if available
@@ -390,10 +399,9 @@ class DashboardDataService:
                 merged = pl.concat([registry_frame, benchmark_frame], how="vertical")
                 rows = self._polars_to_pydantic_rows(merged)
 
-            # Count evaluable rows (trained only, not full-version)
-            evaluable_count = sum(
-                1 for r in rows if r.source in ["trained", "trained_legacy"]
-            )
+            # Count evaluable rows (engine EVALUABLE_ROWS semantics: full and
+            # partial are diagnostic-only, never evaluable).
+            evaluable_count = sum(1 for r in rows if _is_evaluable(r.source))
 
             # Get n_overlap_eras from any row
             n_eras = None

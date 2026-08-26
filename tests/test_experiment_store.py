@@ -28,6 +28,22 @@ def test_record_run_creates_scaffold_and_run(tmp_path, monkeypatch):
     assert json.loads(p.read_text())["scorecard"] == {}
 
 
+def test_record_run_immutable_after_first_write(tmp_path, monkeypatch):
+    """Spec §2: runs are immutable once recorded — re-recording the same
+    run_id with a DIFFERENT payload raises; the identical payload stays
+    idempotent."""
+    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", tmp_path / "experiments")
+    run_id = "a" * 64
+    path = experiment_store.record_run("fam-a", run_id, {"scorecard": {}})
+    with pytest.raises(ValueError, match="immutable"):
+        experiment_store.record_run("fam-a", run_id, {"scorecard": {"corr": 0.5}})
+    # The original record is untouched by the refused overwrite.
+    assert json.loads(path.read_text(encoding="utf-8"))["scorecard"] == {}
+    # Byte-identical re-record stays idempotent.
+    again = experiment_store.record_run("fam-a", run_id, {"scorecard": {}})
+    assert again == path
+
+
 def _result(run_id: str, *, with_validation_preds: bool = False) -> RunResult:
     oof = pl.DataFrame({"id": ["a", "b"], "era": ["1", "1"], "prediction": [0.1, 0.9]})
     return RunResult(

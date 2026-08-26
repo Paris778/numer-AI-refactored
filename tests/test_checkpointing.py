@@ -189,6 +189,66 @@ def test_checkpoint_manifest_roundtrip():
     }
 
 
+def test_checkpoint_manifest_carries_rebuild_identity_fields():
+    """Spec §3.1: the checkpoint manifest gains data_fingerprint + environment
+    when the caller (the runner) provides them — the same values run.json
+    persists, so resume refuses on data-snapshot or environment drift."""
+    manifest = checkpoint_manifest(
+        "cpu", data_fingerprint="d" * 64, environment="numpy==1.0"
+    )
+    assert manifest == {
+        "code_sha256": fitting_code_sha256(),
+        "device": "cpu",
+        "data_fingerprint": "d" * 64,
+        "environment": "numpy==1.0",
+    }
+
+
+def test_verify_checkpoint_manifest_data_fingerprint_mismatch_raises(tmp_path):
+    """Spec §3.1 rebuild-refusal: a checkpoint manifest recording a different
+    data snapshot must refuse resume with delete-to-refit guidance."""
+    manifest_path = tmp_path / "manifest.json"
+    manifest = checkpoint_manifest(
+        "cpu", data_fingerprint="d" * 64, environment="numpy==1.0"
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="data_fingerprint"):
+        verify_checkpoint_manifest(
+            manifest_path,
+            "cpu",
+            data_fingerprint="e" * 64,
+            environment="numpy==1.0",
+        )
+
+
+def test_verify_checkpoint_manifest_environment_mismatch_raises(tmp_path):
+    """Spec §3.1 rebuild-refusal: a checkpoint manifest recording a different
+    dependency environment must refuse resume."""
+    manifest_path = tmp_path / "manifest.json"
+    manifest = checkpoint_manifest(
+        "cpu", data_fingerprint="d" * 64, environment="numpy==1.0"
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="environment"):
+        verify_checkpoint_manifest(
+            manifest_path,
+            "cpu",
+            data_fingerprint="d" * 64,
+            environment="numpy==2.0",
+        )
+
+
+def test_verify_checkpoint_manifest_missing_identity_fields_refuses(tmp_path):
+    """A legacy code+device-only manifest (no data_fingerprint/environment)
+    must refuse when the caller guards those terms — never resume vacuously."""
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(checkpoint_manifest("cpu")), encoding="utf-8")
+    with pytest.raises(ValueError, match="data_fingerprint"):
+        verify_checkpoint_manifest(
+            manifest_path, "cpu", data_fingerprint="d" * 64, environment="env"
+        )
+
+
 def test_verify_checkpoint_manifest_accepts_matching_manifest(tmp_path):
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(

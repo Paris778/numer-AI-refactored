@@ -873,6 +873,10 @@ def test_deploy_checkpoints_written_and_mixed_resume_bit_for_bit(tmp_path, caplo
     manifest = json.loads((ckpt_root / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["device"] == "cpu"  # train_full_history is CPU-only by design
     assert len(manifest["code_sha256"]) == 64
+    # Rebuild-identity terms (spec §3.1) mirror run.json's data_fingerprint
+    # and environment fields.
+    assert len(manifest["data_fingerprint"]) == 64
+    assert manifest["environment"]
     expected = load_predict(first.artifact.path)(live)
 
     (ckpt_root / "target_alt.pkl").unlink()  # delete exactly ONE target
@@ -927,6 +931,20 @@ def test_deploy_checkpoint_device_exact_mismatch_on_refit_raises(tmp_path) -> No
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     (ckpt_root / "target.pkl").unlink()
     with pytest.raises(ValueError, match="device"):
+        ExperimentRunner(_config(tmp_path)).run(deploy=True)
+
+
+def test_deploy_checkpoint_data_fingerprint_mismatch_raises(tmp_path) -> None:
+    """Rebuild identity (spec §3.1): a deploy manifest recording a different
+    data snapshot refuses resume at entry — never silently reuses stale pkls."""
+    cfg = _config(tmp_path)
+    first = ExperimentRunner(cfg).run(deploy=True)
+    ckpt_root = paths.run_dir(cfg.run.name, first.run_id) / "deploy_checkpoints"
+    manifest_path = ckpt_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["data_fingerprint"] = "f" * 64
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="data_fingerprint"):
         ExperimentRunner(_config(tmp_path)).run(deploy=True)
 
 
@@ -1053,6 +1071,8 @@ def test_validation_checkpoints_mixed_resume_bit_for_bit(tmp_path, caplog) -> No
     manifest = json.loads((ckpt_root / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["device"] == "cpu"  # full-history deploy fits are CPU-only
     assert len(manifest["code_sha256"]) == 64
+    assert len(manifest["data_fingerprint"]) == 64  # rebuild identity (spec §3.1)
+    assert manifest["environment"]
     expected = first.validation_predictions
 
     (ckpt_root / "preds_batch_00.parquet").unlink()  # delete exactly ONE batch
@@ -1109,6 +1129,21 @@ def test_validation_checkpoint_device_exact_mismatch_on_resume_raises(tmp_path) 
     fold_path = next((run_dir / "oof_checkpoints" / "target").glob("fold_*.parquet"))
     fold_path.unlink()
     with pytest.raises(ValueError, match="device"):
+        ExperimentRunner(cfg).run(deploy=False)
+
+
+def test_validation_checkpoint_data_fingerprint_mismatch_raises(tmp_path) -> None:
+    """Rebuild identity (spec §3.1): a validation manifest recording a
+    different data snapshot refuses resume — never silently replays batches
+    from a different data snapshot."""
+    cfg = _validation_checkpoint_config(tmp_path)
+    first = ExperimentRunner(cfg).run(deploy=False)
+    ckpt_root = paths.run_dir(cfg.run.name, first.run_id) / "validation_checkpoints"
+    manifest_path = ckpt_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["data_fingerprint"] = "f" * 64
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="data_fingerprint"):
         ExperimentRunner(cfg).run(deploy=False)
 
 

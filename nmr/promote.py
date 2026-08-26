@@ -567,7 +567,11 @@ def promote_full_version(
             "a slot (prefer a new run)"
         )
     pointer = paths.current_pointer_path(family)
-    if scope == "full":
+    # A rehearsal never touches current.json — skip the repoint-guard entirely
+    # (the writer below only writes the pointer for non-rehearsals; the guard
+    # here must mirror that, or a rehearsal into a family with a genuine full
+    # pointer would demand force=True for a write it never performs).
+    if scope == "full" and not rehearsal:
         if pointer.is_file():
             try:
                 current = json.loads(pointer.read_text(encoding="utf-8"))
@@ -965,6 +969,34 @@ def measure_full_history_peak(
     )
 
 
+def _pointer_references_rehearsal(family: str) -> bool:
+    """True when ``current.json`` points at a full export slot whose
+    ``export.json`` marks the artifact ``rehearsal: true``.
+
+    The rehearsal pointer-removal rule (review directive 2026-08-18 + final
+    review I4): only a pointer to a REHEARSAL slot is stale — an artifact
+    trained on the truncated subset must not be readable as the deployed full
+    version at a glance. A pointer to a GENUINE full export must survive a
+    rehearsal, or the family silently drops from ``full`` to ``degraded``
+    (lifecycle reads the pointer: ``current_full_status`` reports 'degraded'
+    when a valid full slot exists but the pointer is missing/dangling).
+    """
+    pointer = paths.current_pointer_path(family)
+    try:
+        payload = json.loads(pointer.read_text(encoding="utf-8"))
+        run_id = payload.get("run_id") if isinstance(payload, dict) else None
+    except (json.JSONDecodeError, OSError):
+        return False
+    if not isinstance(run_id, str):
+        return False
+    export_json = paths.export_dir(family, "full", run_id) / "export.json"
+    try:
+        record = json.loads(export_json.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    return bool(record.get("rehearsal", False))
+
+
 def rehearse_promotion(
     run_id: str,
     family: str,
@@ -1028,13 +1060,18 @@ def rehearse_promotion(
             os.environ["NMR_FULL_HISTORY_SPAWN_MIN_BYTES"] = old_threshold
 
     # A rehearsal is never the family's current full version: the writer does
-    # not repoint current.json, and any stale pointer is removed (review
-    # directive 2026-08-18 — an artifact trained on the truncated subset must
-    # not be readable as the deployed full version at a glance).
-    pointer = paths.current_pointer_path(family)
-    if pointer.exists():
-        pointer.unlink()
-        logger.info("[rehearse] removed stale current.json pointer (rehearsal is not a full version)")
+    # not repoint current.json, and a pointer that references a REHEARSAL slot
+    # is removed (review directive 2026-08-18 — an artifact trained on the
+    # truncated subset must not be readable as the deployed full version at a
+    # glance). A pointer to a GENUINE full export is preserved (final review
+    # I4) — unlinking it would silently drop the family from 'full' to
+    # 'degraded' (lifecycle.current_full_status).
+    if _pointer_references_rehearsal(family):
+        paths.current_pointer_path(family).unlink()
+        logger.info(
+            "[rehearse] removed stale current.json pointer "
+            "(rehearsal is not a full version)"
+        )
 
     # The RAM estimate must land where the promotion guard reads it
     # (paths.shared_reports_dir(config.run.artifacts_dir) — shared-reports

@@ -131,6 +131,8 @@ def _predict_validation_era_batches(
     *,
     validation_checkpoint_dir: Path | None = None,
     checkpoint_device: str | None = None,
+    data_fingerprint: str | None = None,
+    environment: str | None = None,
 ) -> pl.DataFrame:
     """Checkpoint-aware variant of ``_predict_in_era_batches``.
 
@@ -142,11 +144,13 @@ def _predict_validation_era_batches(
     checkpoint-coverage-extension). The root ``manifest.json`` follows the
     OOF/deploy identity discipline: verified at entry (code exact-compare
     always; device exact-compare when ``checkpoint_device`` is known, schema
-    check otherwise) and verified/initialized again at the first computed
-    batch — initializing requires a known device (a predict never resolves
-    one), so a None device there raises loudly; ``run()`` passes the
-    orchestrator's post-fit ``resolved_device``. The final ``evaluate_model``
-    scorecard call is NOT checkpointed (single call, no clean granularity).
+    check otherwise; the rebuild-identity terms — ``data_fingerprint`` and
+    ``environment``, spec §3.1 — exact-compared when provided) and
+    verified/initialized again at the first computed batch — initializing
+    requires a known device (a predict never resolves one), so a None device
+    there raises loudly; ``run()`` passes the orchestrator's post-fit
+    ``resolved_device``. The final ``evaluate_model`` scorecard call is NOT
+    checkpointed (single call, no clean granularity).
     """
     if val_df.is_empty():
         return val_df.select(["era", "id"]).with_columns(
@@ -163,6 +167,8 @@ def _predict_validation_era_batches(
                 manifest_path,
                 checkpoint_device,
                 checkpoint_kind="validation_checkpoints",
+                data_fingerprint=data_fingerprint,
+                environment=environment,
             )
         else:
             ensure_no_torn_tree(
@@ -203,6 +209,8 @@ def _predict_validation_era_batches(
                     manifest_path,
                     checkpoint_device,
                     checkpoint_kind="validation_checkpoints",
+                    data_fingerprint=data_fingerprint,
+                    environment=environment,
                 )
             else:
                 if checkpoint_device is None:
@@ -215,7 +223,12 @@ def _predict_validation_era_batches(
                     )
                 write_bytes_atomic(
                     json.dumps(
-                        checkpoint_manifest(checkpoint_device), sort_keys=True
+                        checkpoint_manifest(
+                            checkpoint_device,
+                            data_fingerprint=data_fingerprint,
+                            environment=environment,
+                        ),
+                        sort_keys=True,
                     ).encode("utf-8"),
                     manifest_path,
                 )
@@ -254,6 +267,10 @@ class ExperimentRunner:
         # never drift from the run-id data term (a re-computation at run() time
         # could differ if the data files change between construction and run).
         self._data_fingerprint = _data_fingerprint(config)
+        # The portable environment identity (pinned package versions, no paths
+        # or timestamps) — computed once so run.json and every checkpoint
+        # manifest record the same value (spec §3.1).
+        self._environment = _portable_environment()
         self._run_id = self._compute_run_id(
             config, data_fingerprint=self._data_fingerprint
         )
@@ -309,6 +326,8 @@ class ExperimentRunner:
             splitter=splitter,
             model_orchestrator=model_orchestrator,
             checkpoint_dir=(run_dir / "oof_checkpoints"),
+            data_fingerprint=self._data_fingerprint,
+            environment=self._environment,
         )
 
         joined = train_df.select(["id", "era", main_target, *feature_cols]).join(
@@ -414,6 +433,8 @@ class ExperimentRunner:
                 proportion=neutralization_proportion,
                 data=self._config.data,
                 deploy_checkpoint_dir=(run_dir / "deploy_checkpoints"),
+                data_fingerprint=self._data_fingerprint,
+                environment=self._environment,
             )
 
         scorecard = None
@@ -430,6 +451,8 @@ class ExperimentRunner:
                         if model_orchestrator.resolved_device is not None
                         else None
                     ),
+                    data_fingerprint=self._data_fingerprint,
+                    environment=self._environment,
                 )
             )
             logger.info("[run] validation scorecard ready: corr_sharpe_ac=%.5f",
@@ -464,7 +487,7 @@ class ExperimentRunner:
             # device (post-fit resolved_device, config fallback).
             "data_fingerprint": self._data_fingerprint,
             "code_fingerprint": _compute_code_fingerprint(),
-            "environment": _portable_environment(),
+            "environment": self._environment,
             "pipeline_device": str(self._config.model.device),
             "oof_device": str(
                 model_orchestrator.resolved_device or self._config.model.device
@@ -497,6 +520,8 @@ class ExperimentRunner:
         splitter: PurgedEraSplitter,
         model_orchestrator: ModelOrchestrator,
         checkpoint_dir: Path | None = None,
+        data_fingerprint: str | None = None,
+        environment: str | None = None,
     ) -> pl.DataFrame:
         """Delegate to the shared OOF implementation (C10, audit SEV-2 #5).
 
@@ -505,7 +530,9 @@ class ExperimentRunner:
         ``nmr._oof.train_multi_target_oof`` and this method only adds
         run-scoped logging. The run-scoped ``checkpoint_dir`` routes the
         shared helper to its checkpoint-aware path (fold parts persisted and
-        replayed on resume — spec 2026-08-20-oof-checkpoint-resume).
+        replayed on resume — spec 2026-08-20-oof-checkpoint-resume); the
+        rebuild-identity terms (spec §3.1) are recorded in the checkpoint
+        manifest so a data-snapshot or environment drift refuses resume.
         """
         targets = self._config.data.targets
         logger.info(
@@ -519,6 +546,8 @@ class ExperimentRunner:
             splitter=splitter,
             targets=targets,
             checkpoint_dir=checkpoint_dir,
+            data_fingerprint=data_fingerprint,
+            environment=environment,
         )
         logger.info(
             "[train_multi_target_oof] stacked OOF complete in %.1fs (shape: %s)",
@@ -534,6 +563,8 @@ class ExperimentRunner:
         feature_cols: Sequence[str],
         validation_checkpoint_dir: Path | None = None,
         checkpoint_device: str | None = None,
+        data_fingerprint: str | None = None,
+        environment: str | None = None,
     ) -> tuple[MetricScorecard, pl.DataFrame, int]:
         data = self._config.data
         agent = IngestionAgent(data)
@@ -591,6 +622,8 @@ class ExperimentRunner:
             _VAL_PREDICT_ERA_BATCH,
             validation_checkpoint_dir=validation_checkpoint_dir,
             checkpoint_device=checkpoint_device,
+            data_fingerprint=data_fingerprint,
+            environment=environment,
         )
         scorecard = evaluate_model(
             preds,
@@ -760,6 +793,8 @@ def _build_deploy_pipeline(
     data: DataConfig,
     deploy_checkpoint_dir: Path | None = None,
     include_validation: bool = False,
+    data_fingerprint: str | None = None,
+    environment: str | None = None,
 ) -> tuple[Callable[[pd.DataFrame], pd.DataFrame], dict[str, object]]:
     """Train per-target full-history models ONCE and return (predict, model_meta).
 
@@ -781,8 +816,10 @@ def _build_deploy_pipeline(
     resume instead of refit — per-target deploy-fit checkpoints (spec
     2026-08-23-checkpoint-coverage-extension). The checkpoint root carries a
     ``manifest.json`` with the same code+device identity discipline as the
-    OOF checkpoints; the recorded device is the orchestrator's post-fit
-    ``resolved_device`` at the FIRST fitted target (deploy fits are CPU-only).
+    OOF checkpoints, plus the rebuild-identity terms (``data_fingerprint``
+    and ``environment``, spec §3.1) when the caller provides them; the
+    recorded device is the orchestrator's post-fit ``resolved_device`` at the
+    FIRST fitted target (deploy fits are CPU-only).
     """
     logger.info("[build_deploy_pipeline] training full-history models (CPU-only)")
     trained: dict[str, object] = {}
@@ -803,6 +840,8 @@ def _build_deploy_pipeline(
                 manifest_path,
                 None,
                 checkpoint_kind="deploy_checkpoints",
+                data_fingerprint=data_fingerprint,
+                environment=environment,
             )
         else:
             # PINNED DECISION (mirrors the OOF path): the manifest is written
@@ -849,11 +888,17 @@ def _build_deploy_pipeline(
                         manifest_path,
                         resolved_device,
                         checkpoint_kind="deploy_checkpoints",
+                        data_fingerprint=data_fingerprint,
+                        environment=environment,
                     )
                 else:
                     write_bytes_atomic(
                         json.dumps(
-                            checkpoint_manifest(resolved_device),
+                            checkpoint_manifest(
+                                resolved_device,
+                                data_fingerprint=data_fingerprint,
+                                environment=environment,
+                            ),
                             sort_keys=True,
                         ).encode("utf-8"),
                         manifest_path,

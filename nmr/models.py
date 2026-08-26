@@ -240,6 +240,8 @@ class ModelOrchestrator:
         splitter: PurgedEraSplitter,
         era_col: str = "era",
         checkpoint_dir: Path | None = None,
+        data_fingerprint: str | None = None,
+        environment: str | None = None,
     ) -> tuple[list[object | None], list[pl.DataFrame]]:
         """Shared fold loop: fit or load each fold; (models, oof_parts).
 
@@ -247,7 +249,9 @@ class ModelOrchestrator:
         None entries). With a checkpoint dir, existing fold parquets are loaded
         (models entry None — the OOF-only caller discards models) and new folds
         are fitted then atomically persisted. The checkpoint root carries a
-        manifest.json with code+device identity; a mismatch raises.
+        manifest.json with code+device identity plus the rebuild-identity
+        terms (``data_fingerprint``/``environment``, spec §3.1) when the
+        caller provides them; a mismatch raises.
         """
         # Local import: nmr._oof imports nmr.models at module top, so a
         # module-level import here would be circular.
@@ -269,7 +273,12 @@ class ModelOrchestrator:
         manifest_written = False
         if manifest_path is not None:
             if manifest_path.exists():
-                verify_checkpoint_manifest(manifest_path, self.resolved_device)
+                verify_checkpoint_manifest(
+                    manifest_path,
+                    self.resolved_device,
+                    data_fingerprint=data_fingerprint,
+                    environment=environment,
+                )
             else:
                 # PINNED DECISION (review): the manifest is written at the FIRST
                 # fitted fold, never here — resolved_device is None until a fit
@@ -326,12 +335,19 @@ class ModelOrchestrator:
                         resolved_device = str(self.resolved_device)
                         if manifest_path.exists():
                             verify_checkpoint_manifest(
-                                manifest_path, resolved_device
+                                manifest_path,
+                                resolved_device,
+                                data_fingerprint=data_fingerprint,
+                                environment=environment,
                             )
                         else:
                             write_bytes_atomic(
                                 json.dumps(
-                                    checkpoint_manifest(resolved_device),
+                                    checkpoint_manifest(
+                                        resolved_device,
+                                        data_fingerprint=data_fingerprint,
+                                        environment=environment,
+                                    ),
                                     sort_keys=True,
                                 ).encode("utf-8"),
                                 manifest_path,
@@ -375,15 +391,20 @@ class ModelOrchestrator:
         splitter: PurgedEraSplitter,
         era_col: str = "era",
         checkpoint_dir: Path,
+        data_fingerprint: str | None = None,
+        environment: str | None = None,
     ) -> pl.DataFrame:
         """Checkpoint-aware OOF training; returns OOF only (models discarded).
 
         See the checkpoint spec (2026-08-20-oof-checkpoint-resume) for the
-        resume contract and code/device identity rules.
+        resume contract and code/device identity rules, and spec §3.1 for the
+        rebuild-identity terms (``data_fingerprint``/``environment``) recorded
+        in the manifest when provided.
         """
         _, oof_parts = self._cv_fold_parts(
             df, feature_cols=feature_cols, target_col=target_col,
             splitter=splitter, era_col=era_col, checkpoint_dir=checkpoint_dir,
+            data_fingerprint=data_fingerprint, environment=environment,
         )
         oof = pl.concat(oof_parts, how="vertical")
         logger.info(

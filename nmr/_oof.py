@@ -61,27 +61,50 @@ def fitting_code_sha256() -> str:
     return digest.hexdigest()
 
 
-def checkpoint_manifest(device: str) -> dict[str, str]:
-    """Identity manifest for a checkpoint root: code sha256 + fit device."""
-    return {"code_sha256": fitting_code_sha256(), "device": device}
+def checkpoint_manifest(
+    device: str,
+    *,
+    data_fingerprint: str | None = None,
+    environment: str | None = None,
+) -> dict[str, str]:
+    """Identity manifest for a checkpoint root: code sha256 + fit device, plus
+    the rebuild-identity terms (spec §3.1) — ``data_fingerprint`` and the
+    portable ``environment`` — when the caller knows them (the runner always
+    does; direct unit callers may omit them). Fields are present only when
+    provided, so callers without the runner's identity context keep the legacy
+    code+device form.
+    """
+    manifest: dict[str, str] = {"code_sha256": fitting_code_sha256(), "device": device}
+    if data_fingerprint is not None:
+        manifest["data_fingerprint"] = data_fingerprint
+    if environment is not None:
+        manifest["environment"] = environment
+    return manifest
 
 
 def verify_checkpoint_manifest(
     manifest_path: Path,
     current_device: str | None,
     *,
+    data_fingerprint: str | None = None,
+    environment: str | None = None,
     checkpoint_kind: str = "oof_checkpoints",
 ) -> None:
-    """Verify an existing manifest: code exact-compare, device three-way.
+    """Verify an existing manifest: code exact-compare, device three-way,
+    rebuild-identity (data/environment) exact-compare.
 
     Code identity is exact-compared always. The device guard compares exactly
     when ``current_device`` is known (post-fit reuse); when it is None (a
     fresh orchestrator, device unknown pre-fit) the stored device must be a
     real fit device (``_KNOWN_RESOLVED_DEVICES``) — anything else is rejected
-    loudly, never accepted vacuously. Mismatches raise ``ValueError`` with
-    delete-to-refit guidance. ``checkpoint_kind`` names the checkpoint stage
-    in the error text (``oof_checkpoints``, ``deploy_checkpoints``,
-    ``validation_checkpoints``).
+    loudly, never accepted vacuously. The rebuild-identity guards (spec §3.1)
+    exact-compare ``data_fingerprint`` and ``environment`` when the current
+    values are provided (the runner always provides them); a stored manifest
+    missing a guarded field is treated as a mismatch — refuse loudly, never
+    resume a checkpoint whose data snapshot or dependency environment drifted.
+    Mismatches raise ``ValueError`` with delete-to-refit guidance.
+    ``checkpoint_kind`` names the checkpoint stage in the error text
+    (``oof_checkpoints``, ``deploy_checkpoints``, ``validation_checkpoints``).
     """
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
     if stored.get("code_sha256") != fitting_code_sha256():
@@ -89,6 +112,19 @@ def verify_checkpoint_manifest(
             f"{checkpoint_kind} code_sha256 mismatch: fitting code changed "
             f"since the checkpoints were written ({manifest_path}). "
             f"Delete the {checkpoint_kind} directory to force a full refit."
+        )
+    if data_fingerprint is not None and stored.get("data_fingerprint") != data_fingerprint:
+        raise ValueError(
+            f"{checkpoint_kind} data_fingerprint mismatch: the data snapshot "
+            f"changed since the checkpoints were written ({manifest_path}). "
+            f"Delete the {checkpoint_kind} directory to force a full refit."
+        )
+    if environment is not None and stored.get("environment") != environment:
+        raise ValueError(
+            f"{checkpoint_kind} environment mismatch: the dependency "
+            f"environment changed since the checkpoints were written "
+            f"({manifest_path}). Delete the {checkpoint_kind} directory to "
+            f"force a full refit."
         )
     stored_device = stored.get("device")
     if current_device is not None:
@@ -155,6 +191,8 @@ def train_multi_target_oof(
     splitter: PurgedEraSplitter,
     targets: Sequence[str],
     checkpoint_dir: Path | None = None,
+    data_fingerprint: str | None = None,
+    environment: str | None = None,
 ) -> pl.DataFrame:
     """Train per-target cross-validated OOF and stack the predictions.
 
@@ -166,7 +204,10 @@ def train_multi_target_oof(
     With ``checkpoint_dir`` set, each target routes to the checkpoint-aware
     OOF-only path (``train_oof_with_checkpoints``): existing fold parquets
     are loaded instead of refit, missing folds are fitted and persisted
-    atomically. Without it, the legacy ``train_cross_validation`` path runs
+    atomically. ``data_fingerprint`` and ``environment`` are the rebuild-
+    identity terms (spec §3.1) recorded in the checkpoint manifest — the
+    runner passes them; callers without them keep the legacy code+device
+    manifest. Without it, the legacy ``train_cross_validation`` path runs
     unchanged (spec 2026-08-20-oof-checkpoint-resume).
     """
     stacked: pl.DataFrame | None = None
@@ -179,6 +220,8 @@ def train_multi_target_oof(
                 splitter=splitter,
                 era_col="era",
                 checkpoint_dir=checkpoint_dir,
+                data_fingerprint=data_fingerprint,
+                environment=environment,
             )
         else:
             result = modeler.train_cross_validation(

@@ -59,7 +59,13 @@ def ensure_family(slug: str, *, display_name: str, base_config: dict[str, Any]) 
 
 
 def record_run(slug: str, run_id: str, payload: dict[str, Any]) -> Path:
-    """Persist run.json (atomic) — creating the family scaffold on first run."""
+    """Persist run.json (atomic) — creating the family scaffold on first run.
+
+    Runs are immutable once recorded (spec §2): re-recording an existing
+    run.json with a DIFFERENT payload raises ``ValueError``; re-recording the
+    byte-identical payload stays idempotent (the canonical JSON is simply
+    rewritten).
+    """
     _validate_run_id(run_id)
     display_name = str((payload.get("manifest") or {}).get("display_name") or slug)
     base_config = (payload.get("manifest") or {}).get("config") or {}
@@ -67,7 +73,13 @@ def record_run(slug: str, run_id: str, payload: dict[str, Any]) -> Path:
     run_dir = paths.run_dir(slug, run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     target = paths.run_json_path(slug, run_id)
-    atomic_write_text(target, json.dumps(payload, sort_keys=True))
+    canonical = json.dumps(payload, sort_keys=True)
+    if target.is_file() and target.read_text(encoding="utf-8") != canonical:
+        raise ValueError(
+            f"run {run_id!r} already recorded with a different payload "
+            f"({target}); runs are immutable once recorded"
+        )
+    atomic_write_text(target, canonical)
     return target
 
 

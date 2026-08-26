@@ -46,9 +46,9 @@ def test_real_data_gate_import_surface() -> None:
     assert callable(real_data_gate.main)
 
 
-from dashboard_ui import (
+from dashboard_ui import (  # noqa: E402  (lazy: streamlit is heavy at module load)
     app as dashboard_app,
-)  # noqa: E402  (lazy: streamlit is heavy at module load)
+)
 
 
 def _registry_entry(run_id: str, *, scorecard: bool = True) -> dict:

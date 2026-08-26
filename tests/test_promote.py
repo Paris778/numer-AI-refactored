@@ -744,17 +744,25 @@ def test_rehearse_restores_env_and_removes_stale_pointer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The env override is restored to its prior value and a stale current.json
-    left by an earlier rehearsal is removed (a rehearsal is never the full version)."""
+    that references a REHEARSAL slot is removed (a rehearsal is never the full
+    version — final review I4: only rehearsal-slot pointers are unlinked)."""
     monkeypatch.setenv("NMR_FULL_HISTORY_SPAWN_MIN_BYTES", "7777")
     data = _make_data(tmp_path / "data")
-    _write_registry(stored_config=_stored_config_dict(data))
+    _write_registry(stored_config=_stored_config_dict(data), run_id=_RID)
+    # A prior rehearsal published a rehearsal slot; the stale pointer still
+    # references it.
+    slot = paths.export_dir("brb1-lgbm-v6", "full", _RID)
+    slot.mkdir(parents=True, exist_ok=True)
+    (slot / "export.json").write_text(
+        json.dumps({"rehearsal": True}), encoding="utf-8"
+    )
     pointer = paths.current_pointer_path("brb1-lgbm-v6")
     pointer.parent.mkdir(parents=True, exist_ok=True)
-    pointer.write_text(
-        json.dumps({"run_id": "c" * 64}), encoding="utf-8"
-    )
+    pointer.write_text(json.dumps({"run_id": _RID}), encoding="utf-8")
+    other = "b" * 64
+    _write_registry(stored_config=_stored_config_dict(data), run_id=other)
     result = rehearse_promotion(
-        _RID,
+        other,
         "brb1-lgbm-v6",
         rehearsal_data_root=tmp_path / "rehearsal",
         train_eras=6,
@@ -763,6 +771,30 @@ def test_rehearse_restores_env_and_removes_stale_pointer(
     assert result.acceptance_passed is True
     assert os.environ["NMR_FULL_HISTORY_SPAWN_MIN_BYTES"] == "7777"
     assert not pointer.exists()
+
+
+def test_rehearse_preserves_genuine_full_pointer(tmp_path: Path) -> None:
+    """Final review I4: rehearsing in a family with a REAL full export must
+    leave the genuine current.json untouched — the family stays 'full' instead
+    of silently dropping to 'degraded' (the regression: the rehearsal path
+    unlinked the pointer unconditionally)."""
+    data = _make_data(tmp_path / "data")
+    _write_registry(stored_config=_stored_config_dict(data), run_id=_RID)
+    promote_full_version(_RID, "brb1-lgbm-v6")  # genuine full export + pointer
+    assert lifecycle.current_full_status("brb1-lgbm-v6") == "full"
+    other = "b" * 64
+    _write_registry(stored_config=_stored_config_dict(data), run_id=other)
+    rehearse_promotion(
+        other,
+        "brb1-lgbm-v6",
+        rehearsal_data_root=tmp_path / "rehearsal",
+        train_eras=6,
+        validation_eras=6,
+    )
+    pointer = paths.current_pointer_path("brb1-lgbm-v6")
+    assert pointer.is_file()
+    assert json.loads(pointer.read_text(encoding="utf-8"))["run_id"] == _RID
+    assert lifecycle.current_full_status("brb1-lgbm-v6") == "full"
 
 
 def test_rehearse_manifest_without_config_refused(tmp_path: Path) -> None:
