@@ -48,13 +48,14 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     config_paths = [Path(p) for p in args.config]
-    # RunRegistry.__init__ creates its root directory, so defer construction
-    # out of --dry-run: dry-run must not write anything (no registry dir).
+    # Defer construction out of --dry-run: dry-run must not touch the registry
+    # root. (Task 11 retargets the root to the experiments layout; the
+    # registry root arg is currently only used for run discovery.)
     registry: RunRegistry | None = None
     existing: set[str] = set()
     if not args.dry_run:
         registry = RunRegistry(args.registry)
-        existing = {entry["run_id"] for entry in registry.list()}
+        existing = set(registry.list())
 
     runs: list[CampaignRun] = []
     failed = 0

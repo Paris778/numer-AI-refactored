@@ -150,14 +150,14 @@ The Model Tournament ranks trained runs and benchmark tiers on the same validati
 Library usage:
 
 ```python
-from nmr import ExperimentRunner, RunRegistry, load_config
+from nmr import ExperimentRunner, RunRegistry, load_config, paths
 
 cfg = load_config("configs/first_model.yaml")
 result = ExperimentRunner(cfg).run(deploy=True)   # RunResult(run_id, oof, metrics, artifact, manifest)
 
-registry = RunRegistry(cfg.run.artifacts_dir / "registry")
-registry.record(result)
-registry.promote(result.run_id)                   # → artifacts/registry/champion.json
+registry = RunRegistry(paths.EXPERIMENTS_ROOT)     # cross-family registry (experiments root)
+registry.record(result)                            # → root/<run_id>/run.json (legacy compat; Task 11)
+registry.promote(result.run_id)                    # → experiments/champion.json
 ```
 
 ---

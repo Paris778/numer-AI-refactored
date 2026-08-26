@@ -30,7 +30,7 @@ These four files obey a strict **Single Source of Truth (SSOT) hierarchy**. One 
 
 ## 1. Agent Identity & Mission
 
-You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (1111 collected tests, sole functional gate) + `ruff check` (lint gate, `ruff.toml` E/F/I/UP @120, pinned in `requirements-dev.txt`). Both enforced by CI (`.github/workflows/ci.yml`).
+You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (1121 collected tests, sole functional gate) + `ruff check` (lint gate, `ruff.toml` E/F/I/UP @120, pinned in `requirements-dev.txt`). Both enforced by CI (`.github/workflows/ci.yml`).
 
 Your mission:
 
@@ -138,7 +138,7 @@ When modifying or generating code, enforce these seven invariants:
 | model backends / presets | `nmr/models.py` — `ModelOrchestrator`, `_CANONICAL_PRESETS` |
 | ensembling / weight learning | `nmr/ensemble.py` — `Ensembler` |
 | End-to-end pipeline | `nmr/runner.py` — `ExperimentRunner.run()` stage order |
-| run storage / promotion | `nmr/registry.py` — `RunRegistry`, `champion.json` |
+| cross-family comparison / champion pointer | `nmr/registry.py` — `RunRegistry` (iterates `experiments/*/runs/*/run.json`; atomic `champion.json` = `{run_id, experiment_slug, promoted_at}`) |
 | submission build/validation | `nmr/submission.py` |
 | deployment artifact format | `nmr/deployment.py` — `serialize_predict` / `load_predict` |
 | statistical machinery (bootstrap, DSR) | `nmr/inference.py` |
@@ -188,7 +188,7 @@ Four gates, in order of rigor — **exact commands live only in [`CONTRIBUTING.m
 
 1. **Fast gate** — `ruff check .` + full `pytest -q` after every meaningful change.
 2. **Targeted subsets** while iterating — oracle parity (`tests/test_parity.py` + `tests/test_risk_parity.py`) and determinism hashes (`tests/test_benchmark_hierarchy.py`).
-3. **Pre-sign-off gate** (mandatory before delivering work) — full 1111-test collection plus the real-data benchmark smoke (`benchmark_runner.py --fast-mode` → `artifacts/reports/benchmark_hierarchy_scorecard_smoke.csv` + `benchmark_gate_report_smoke.csv`).
+3. **Pre-sign-off gate** (mandatory before delivering work) — full 1121-test collection plus the real-data benchmark smoke (`benchmark_runner.py --fast-mode` → `artifacts/reports/benchmark_hierarchy_scorecard_smoke.csv` + `benchmark_gate_report_smoke.csv`).
 4. **End-of-session gate (mandatory)** — before stopping or handing off for review, run the linter and functional gate on the final state: `ruff check .` + `pytest -q`. Never end a session with unverified changes; report actual results, including skips or pre-existing failures.
 
 Real-data tests require the `data/v5.3/` parquet assets (see [`README.md`](README.md#data-assets)). If they are missing, report which tests were skipped — never claim full verification. CI (`.github/workflows/ci.yml`) enforces the fast gate on every push/PR (see [`CONTRIBUTING.md`](CONTRIBUTING.md#testing--verification)).
@@ -261,7 +261,7 @@ mutmut is fork-based; Windows refused (#397). Linux CI only (`.github/workflows/
 The V1 repo is mined for logic only. Never import from it, never modify it, never add it to any path.
 
 ### Stale era-range manifest fields in pre-rebuild registry rows (2026-08-14)
-ALL 29 current registry rows predate the rebuild: their `manifest.scoring_eras` (`0461..0574`) and `manifest.weight_learning_eras` (`0119..0460`) are the old window while their `validation_preds.parquet` covers the refreshed one — zero overlap between manifest lists and parquet eras is the tell (`ARCHITECTURE.md` §N). Never use those fields as "what this run was scored on" — trust the scorecard `*_n_eras` cells and the stored parquet. Registry files stay immutable: document, never backfill.
+RETIRED (2026-08-26): the 29 pre-rebuild `artifacts/registry/` rows are gone — the `experiments/` layout starts clean by design (design spec §14). History: those rows' `manifest.scoring_eras`/`weight_learning_eras` were the old window while their `validation_preds.parquet` covered the refreshed one — zero overlap was the tell. Never use era-range manifest fields as "what this run was scored on" — trust the scorecard `*_n_eras` cells and the stored parquet. Registry files stay immutable: document, never backfill.
 
 ### Dashboard window drifts on data refresh
 The standardized comparison window = meta overlap; refresh shifts it — regenerate `artifacts/dashboard.html` after every `refresh_data.py` run (definition + regeneration rule: `ARCHITECTURE.md` §W).

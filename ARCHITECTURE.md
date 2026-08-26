@@ -34,9 +34,9 @@ ExperimentConfig
 +----------------------------------------------------------------+
      |
      v  RunResult(run_id, oof, metrics, artifact, manifest)
-RunRegistry.record() ──> artifacts/registry/{run_id}/{run.json, oof.parquet, validation_preds.parquet?}
-RunRegistry.promote() ─> artifacts/registry/champion.json   (atomic pointer)
-RunRegistry.promote_if_better() ─> champion.json  (guarded: scorecard metric + direction)
+RunRegistry.record() ──> root/{run_id}/{run.json, oof.parquet, validation_preds.parquet?}   (legacy compat layout; removed Task 11)
+RunRegistry.promote() ─> experiments/champion.json   (atomic pointer {run_id, experiment_slug, promoted_at})
+RunRegistry.promote_if_better() ─> experiments/champion.json  (cross-family, guarded: scorecard metric + direction)
      |
      v
 generate_dashboard.py (thin wrapper) ─> dashboard_ui.report ─> artifacts/dashboard.html  (executive report — offline single-file vanilla HTML/CSS/SVG, < 112 KiB)
@@ -276,12 +276,12 @@ Fleet scorecards join `canonical_scorecards_bytes`. Spec:
 
 **`nmr/runner.py`** — stage order in §1 diagram. `RunResult(run_id, oof, metrics, artifact, manifest, scorecard=None, validation_predictions=None)`. `run_id` = SHA256 of `{config (data_dir/artifacts_dir/supplemental_feature_sets paths stripped; when supplemental_feature_sets is configured, a supplemental_feature_sets_sha256 of the resolved file's CRLF-normalized contents is included — identical files at different roots hash identically, and editing the file changes run identity), data_version, data_fingerprint, code_fingerprint, environment_fingerprint}` where code fingerprint = SHA256 over sorted `nmr/*.py` names+contents and environment = Python + versions of numpy/polars/pandas/lightgbm/xgboost/optuna (plus `catboost` when `model.backend == "catboost"` — config-aware, §G/§S). **data_fingerprint** (B1, 2026-08-18) = SHA256 over per-file snapshots of `train.parquet` + `validation.parquet` (+ `meta_model.parquet`/`validation_benchmark_models.parquet` when `evaluation.validation_scorecard` — config-aware): `{name, footer schema, footer row count, era min, era max, era count}` + `features.json` content SHA256; byte size excluded from the hash (cache key only, cached under `artifacts/cache/`); detection limits documented (restated feature values within unchanged schema/row-count/era-stats are NOT detected); missing data files raise (run_id requires the data snapshot). The run_id scheme bumped once on 2026-08-18 (data term + optuna): future run_ids differ from pre-bump legacy rows; registry rows stay immutable. Ensemble weights are learned on the validation eras of folds `0..K-2` via `EnsembleConfig.method`; when `n_folds < 2` they fall back to uniform `1/n_components` with a logged warning. OOF metrics are computed on the **final fold's** validation eras only (`scoring_eras`), so the OOF scorecard carries no in-sample weight-fitting bias; the returned OOF frame itself still spans every fold. The manifest records `weights`, `weight_learning_eras`, `scoring_eras`, and `summary_metrics` (OOF aggregates for each requested non-MMC metric). The deploy pipeline is built **at most once** per run, when `deploy or evaluation.validation_scorecard` (`_build_deploy_pipeline`: per-target all-eras CPU-only models + rank-gaussianize + learned weights + neutralize; no `splitter`), and that single closure is shared by the validation stage and the deploy block — never retrained. The **validation stage** (`_run_validation_stage`) loads `validation.parquet` plus `meta_model.parquet` (required — missing ⇒ `FileNotFoundError`) and `validation_benchmark_models.parquet` (optional — BMC/horizon disabled when absent), with target columns = config targets ∪ `main_target` ∪ **every `target`/`target_*` column in the validation schema** (so horizon target pairs reach the scorecard’s inference — loading only config targets silently disabled horizon stability on every runner scorecard), drops the first `split.purge_eras` validation eras (20D-target overlap), scores the shared pipeline, and produces a full `MetricScorecard` with `benchmark_col` = first non-join benchmark column (same convention as `benchmark_runner`); the run manifest records `validation_purge_dropped_first_eras`. Then `_serialize_predict_artifact(predict_fn, model_meta, artifact_path)` serializes (never retrains) to `artifacts/runs/{run_id}/predict.pkl` + manifest. The artifact's `models` metadata carries `targets`/`weights`/`proportion`/`geometry="all_eras"`/`device="cpu"`/`feature_names`; the run manifest adds `pipeline_device="cpu"`.
 
-**`nmr/registry.py`** — `RunRegistry(root)`:
+**`nmr/registry.py`** — cross-family `RunRegistry(root)` — **comparison + champion pointer only** (run persistence lives in `nmr/experiment_store.py`, §Z). Runs live under the experiments root:
 
 ```
-artifacts/registry/
-├── champion.json                 # {"run_id": "<sha256 hex>"}  (atomic pointer)
-└── {run_id}/
+experiments/
+├── champion.json                 # {"run_id", "experiment_slug", "promoted_at"}  (atomic pointer)
+└── {slug}/runs/{run_id}/
     ├── run.json                  # {run_id, metrics{mean,std,sharpe,max_drawdown},
     │                             #  manifest, scorecard{flat scalars}|null, oof_path,
     │                             #  artifact_path|null, artifact_manifest|null}
@@ -292,7 +292,10 @@ artifacts/registry/
 artifacts/models/<family>/full/manifest.json  # promoted full-version marker (family == run.name; read-only via nmr/families.py)
 ```
 
-All JSON writes: temp file in parent dir → fsync → `os.replace()`; the OOF parquet likewise writes temp + `os.replace` (no fsync). `record(result)` writes OOF then run.json; when `result.scorecard` is present, run.json carries a `scorecard` block of flat scalar keys per `MetricScorecard.to_frame()` (values filtered to drop `timing_*`/`quality_metric*` keys). **Registry quirk (do not trust the era-range manifest fields on pre-rebuild rows):** every registry row recorded before the 2026-08-14 rebuild (all 29 rows as of 2026-08-16) carries training-time era lists in its manifest — `scoring_eras` = `0461..0574`, `weight_learning_eras` = `0119..0460` — while its `validation_preds.parquet` was regenerated on the refreshed window (18 rows: `0583..1231`; 11 rows: `1000..1231`). **Zero overlap between the manifest lists and the parquet eras is the tell.** The stored scorecard (86-era meta overlap, `*_n_eras` cells) and the parquet agree — only the manifest provenance is stale. Never use `scoring_eras`/`weight_learning_eras` to infer "what this run was scored on"; use the scorecard cells and the parquet itself. The rebuild's own log is `artifacts/campaigns/rebuild_v53_step2.log`. Registry files stay immutable: document, never backfill. `best(metric="sharpe")` validates the metric against `MetricSummary` fields (`mean`, `std`, `sharpe`, `max_drawdown`; unknown ⇒ `ValueError`) and returns the max with a run_id tiebreak (deterministic); `list()` sorts by (mtime, run_id) — stable. `promote(run_id)` regex-validates `[0-9a-f]{64}` (path-traversal guard), validates existence, then atomically rewrites champion.json. `promote_if_better(run_id, metric="corr_sharpe_ac") -> tuple[Path, bool]` promotes only when the candidate's scorecard metric strictly beats the champion's, honoring direction (`_SCORECARD_METRIC_DIRECTION`: `max_drawdown`/`std_corr` are lower-is-better); a scorecard-bearing candidate may displace a scorecard-less (legacy) champion; legacy candidates (no scorecard) and unknown metrics raise `ValueError`; a missing/corrupted champion pointer is treated as no champion.
+All JSON writes: temp file in parent dir → fsync → `os.replace()`; the OOF parquet likewise writes temp + `os.replace` (no fsync). `list() -> list[str]` returns every run_id across families (sorted); `best(metric="corr_sharpe_ac") -> (run_id, slug) | None` picks the highest scorecard metric across families (runs lacking the metric are skipped); `promote(run_id, slug)` and `promote_if_better(run_id, slug, metric="corr_sharpe_ac") -> (Path, bool)` write `experiments/champion.json` atomically — `promote_if_better` promotes only when the candidate's scorecard metric strictly beats the champion's, honoring direction (`_SCORECARD_METRIC_DIRECTION`: `max_drawdown`/`std_corr` are lower-is-better); a scorecard-bearing candidate may displace a scorecard-less champion; a candidate lacking the metric or an unknown metric raises `ValueError`; `resolve_champion() -> (run_id, slug)` fails loud on a missing/dangling/corrupt pointer (never silently treats it as no champion). **Compat shims (removed in Task 11):** `record(RunResult)` keeps the legacy single-pool layout (`root/<run_id>/` — `tests/test_campaign.py` pins it; stub manifests carry no `config.run.name`); iteration and `promote`/`promote_if_better` additionally accept legacy rows (slug derived from `manifest.config.run.name` when a champion pointer needs one); `promote(run_id, slug=None)` / `promote_if_better(run_id, slug=None, ...)` resolve the slug by scanning the registry root (ambiguous/not-found ⇒ `ValueError`); `nmr/promote.py::resolve_champion_run_id` still reads the legacy pointer file. Champion writes are single-writer (CLI/runner entry points only — design spec §9).
+
+**Retired (2026-08-26):** the pre-rebuild `artifacts/registry/<run_id>/` rows are gone (clean slate by design — design spec §14); their era-range manifest quirk is historical — never trust era-range manifest fields for "what this run was scored on"; use scorecard `*_n_eras` cells and the stored parquet. Registry files stay immutable: document, never backfill.
+
 
 **`nmr/submission.py`** — `build_submission(predictions, *, id_col="id", pred_col="prediction")`: validates id non-null/unique and predictions finite, converts to open-interval percentile ranks via `tie_kept_rank`, casts (`id` Utf8, `prediction` Float64), sorts by id. `validate_submission(submission, *, live_ids)`: delegates to `numerai_tools.submissions.validate_submission_numerai`, raises `ValueError` listing first 5 extra/missing ids. `write_submission` → CSV.
 
@@ -570,7 +573,7 @@ benchmark.py ──> ensemble, features, models, risk, scorecard
 benchmark_fleet.py ──> benchmark, ensemble, features, models, risk, scorecard
 meta.py      ──> analysis, config, data, evaluation, features, inference
 runner.py    ──> _oof, _transforms, config, data, deployment, ensemble, evaluation, models, risk, scorecard, splitter
-registry.py  ──> _atomicio, runner (RunResult)
+registry.py  ──> _atomicio, experiment_store, paths, runner (RunResult)
 dashboard.py ──> benchmark, config, ensemble, evaluation, families, payout, scorecard
 explainers.py ──> dashboard_ui.service (read-only dynamic model labels)
 scenarios.py  ──> payout, evaluation (allocation scenario research helpers)
@@ -613,7 +616,7 @@ missing. `--live-only` skips expanding files. Writes are atomic via `_atomicio`.
 | Trigger | Module / entry | Execution target |
 |---|---|---|
 | Run an experiment | `nmr.runner.ExperimentRunner.run(deploy=...)` | Full pipeline §1 |
-| Record / promote a run | `nmr.registry.RunRegistry.record / best / promote / promote_if_better` | `artifacts/registry/` |
+| Compare / promote across families | `nmr.registry.RunRegistry.list / best / promote / promote_if_better` | `experiments/*/runs/*/run.json` + `experiments/champion.json` |
 | Score a prediction set | `nmr.scorecard.evaluate_model` | `MetricScorecard` |
 | Benchmark everything | `python benchmark_runner.py [--fast-mode] --output artifacts/reports/benchmark_hierarchy_scorecard.csv` | `artifacts/reports/benchmark_hierarchy_scorecard.csv` + `benchmark_gate_report.csv` |
 | First-model train + promote | `python train_first_model.py` | registry + champion |
