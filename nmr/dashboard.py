@@ -256,6 +256,42 @@ def rank_map_by_metric(leaderboard: pl.DataFrame) -> dict[str, dict[str, int]]:
     return result
 
 
+def _strict_beats_by_metric(leaderboard: pl.DataFrame) -> dict[str, list[str]]:
+    """Return trained IDs whose full-precision metric strictly beats its benchmark."""
+    rows = leaderboard.to_dicts()
+    result: dict[str, list[str]] = {}
+    for spec in DASHBOARD_METRICS:
+        benchmarks = [
+            row
+            for row in rows
+            if dashboard_cohort(row) == "benchmark"
+            and _finite_metric_value(row, spec.name) is not None
+        ]
+        if not benchmarks:
+            result[spec.name] = []
+            continue
+        benchmark = min(
+            benchmarks,
+            key=lambda row: _dashboard_sort_key(row, spec.name, spec.higher_is_better),
+        )
+        benchmark_value = _finite_metric_value(benchmark, spec.name)
+        assert benchmark_value is not None
+        winners = []
+        for row in rows:
+            value = _finite_metric_value(row, spec.name)
+            if dashboard_cohort(row) != "trained" or value is None:
+                continue
+            beats = (
+                value > benchmark_value
+                if spec.higher_is_better
+                else value < benchmark_value
+            )
+            if beats:
+                winners.append(str(row.get("model_id") or ""))
+        result[spec.name] = sorted(winners)
+    return result
+
+
 def _best_cohort_row(
     rows: Sequence[Mapping[str, Any]], cohort: str, metric: str, higher_is_better: bool
 ) -> dict[str, Any] | None:
@@ -457,28 +493,28 @@ _DETAIL_PROVENANCE_FIELDS = (
     "timestamp",
 )
 _ROW_FIELDS = (
-    "model_id",
     "run_name",
-    "source",
     "cohort",
-    "type_marker",
     "family",
     "backend",
     "preset",
     "feature_set",
     "feature_subset",
     "targets",
-    "n_targets",
-    "rank",
     "neutralization_proportion",
     "oof_device",
-    "benchmark_tier",
     "status",
     "champion",
     "values",
     "ci",
     "robustness",
 )
+_ROW_VALUE_SCALE = 1_000_000
+
+
+def _scaled_row_value(value: Any) -> int | None:
+    numeric = _finite_metric_value({"value": value}, "value")
+    return None if numeric is None else int(round(numeric * _ROW_VALUE_SCALE))
 
 
 def _read_json_mapping(path: Path) -> dict[str, Any] | None:
@@ -500,6 +536,10 @@ def _compact_json_value(value: Any, *, digits: int = 6) -> Any:
     if isinstance(value, float):
         return round(value, digits) if np.isfinite(value) else None
     return value
+
+
+def _sparse_payload_values(values: Sequence[Any]) -> list[list[Any]]:
+    return [[index, value] for index, value in enumerate(values) if value is not None]
 
 
 def _detail_provenance(manifest: Mapping[str, Any]) -> dict[str, Any]:
@@ -610,6 +650,7 @@ def build_tournament_payload(
     ranked = rank_leaderboard(leaderboard, metric=DEFAULT_RANK_METRIC)
     rank_map = rank_map_by_metric(leaderboard)
     rows: list[dict[str, Any]] = []
+    model_ids: list[str] = []
     details: list[Any] = []
     rank_values: list[list[int | None]] = []
     landscape: list[dict[str, Any]] = []
@@ -621,28 +662,25 @@ def build_tournament_payload(
             "CAPITAL READY",
         )
         item: dict[str, Any] = {
-            "model_id": model_id,
             "run_name": row.get("run_name"),
-            "source": row.get("source"),
             "cohort": cohort,
-            "type_marker": cohort,
             "family": row.get("family"),
             "backend": row.get("backend"),
             "preset": row.get("preset"),
             "feature_set": row.get("feature_set"),
             "feature_subset": row.get("feature_subset"),
             "targets": row.get("targets"),
-            "n_targets": row.get("n_targets"),
             "neutralization_proportion": row.get("neutralization_proportion"),
             "oof_device": row.get("oof_device"),
-            "benchmark_tier": row.get("tier"),
             "status": row.get("status"),
             "champion": champion,
-            "rank": row.get("rank"),
-            "values": [row.get(spec.name) for spec in DASHBOARD_METRICS],
+            "values": [
+                _scaled_row_value(row.get(spec.name)) for spec in DASHBOARD_METRICS
+            ],
             "ci": [
-                row.get(key)
-                for key in ("corr_sharpe_ac_ci_low", "corr_sharpe_ac_ci_high", "n_eras")
+                _scaled_row_value(row.get("corr_sharpe_ac_ci_low")),
+                _scaled_row_value(row.get("corr_sharpe_ac_ci_high")),
+                row.get("n_eras"),
             ],
             "robustness": {
                 "has_bmc": row.get("has_bmc"),
@@ -653,19 +691,27 @@ def build_tournament_payload(
         }
         item = _compact_json_value(item)
         rows.append(item)
+        model_ids.append(model_id)
         detail = load_model_detail(row)
         details.append(
             [
-                _compact_json_value(
-                    [detail["scorecard"].get(key) for key in _DETAIL_SCORECARD_FIELDS],
-                    digits=4,
+                _sparse_payload_values(
+                    _compact_json_value(
+                        [
+                            detail["scorecard"].get(key)
+                            for key in _DETAIL_SCORECARD_FIELDS
+                        ],
+                        digits=4,
+                    )
                 ),
-                _compact_json_value(
-                    [
-                        detail["provenance"].get(key)
-                        for key in _DETAIL_PROVENANCE_FIELDS
-                    ],
-                    digits=4,
+                _sparse_payload_values(
+                    _compact_json_value(
+                        [
+                            detail["provenance"].get(key)
+                            for key in _DETAIL_PROVENANCE_FIELDS
+                        ],
+                        digits=4,
+                    )
                 ),
                 detail["evidence_ref"] if row.get("source") == "full" else None,
                 detail["reason"],
@@ -715,10 +761,13 @@ def build_tournament_payload(
             for spec in DASHBOARD_METRICS
         ],
         "cohorts": ["all", "trained", "heuristic", "benchmark"],
+        "model_ids": model_ids,
         "row_fields": list(_ROW_FIELDS),
         "rows": [[row.get(field) for field in _ROW_FIELDS] for row in rows],
         "details": details,
         "metric_fields": [spec.name for spec in DASHBOARD_METRICS],
+        "row_value_scale": _ROW_VALUE_SCALE,
+        "strict_beats": _strict_beats_by_metric(leaderboard),
         "ci_fields": ["corr_sharpe_ac_ci_low", "corr_sharpe_ac_ci_high", "n_eras"],
         "scorecard_fields": list(_DETAIL_SCORECARD_FIELDS),
         "provenance_fields": list(_DETAIL_PROVENANCE_FIELDS),
@@ -799,8 +848,8 @@ def load_benchmark_frame(benchmark_path: Path) -> pl.DataFrame:
                 "corr_sharpe_ac_ci_low": row.get("corr_sharpe_ac_ci_low"),
                 "corr_sharpe_ac_ci_high": row.get("corr_sharpe_ac_ci_high"),
                 "corr_sharpe_ac_n_eras": row.get("corr_sharpe_ac_n_eras"),
-                "std_corr": row.get("std_corr", 0.0),
-                "max_drawdown": row.get("max_drawdown", 0.0),
+                "std_corr": row.get("std_corr"),
+                "max_drawdown": row.get("max_drawdown"),
                 "deflated_sharpe": row.get("deflated_sharpe"),
                 "fnc": row.get("fnc"),
                 "mmc": row.get("mmc"),
@@ -890,23 +939,19 @@ def load_unified_leaderboard(
                 "targets": ", ".join(data_cfg.get("targets", [])),
                 "neutralization_proportion": risk_cfg.get("neutralization_proportion"),
                 "oof_device": manifest.get("oof_device"),
-                "corr": float(
-                    sc_corr if sc_corr is not None else metrics.get("mean", 0.0)
-                ),
+                "corr": sc_corr if sc_corr is not None else metrics.get("mean"),
                 "corr_ci_low": scorecard.get("corr_ci_low"),
                 "corr_ci_high": scorecard.get("corr_ci_high"),
                 "corr_n_eras": scorecard.get("corr_n_eras"),
-                "corr_sharpe_ac": float(
-                    sc_sharpe if sc_sharpe is not None else metrics.get("sharpe", 0.0)
+                "corr_sharpe_ac": (
+                    sc_sharpe if sc_sharpe is not None else metrics.get("sharpe")
                 ),
                 "corr_sharpe_ac_ci_low": scorecard.get("corr_sharpe_ac_ci_low"),
                 "corr_sharpe_ac_ci_high": scorecard.get("corr_sharpe_ac_ci_high"),
                 "corr_sharpe_ac_n_eras": scorecard.get("corr_sharpe_ac_n_eras"),
-                "std_corr": float(
-                    sc_std if sc_std is not None else metrics.get("std", 0.0)
-                ),
-                "max_drawdown": float(
-                    sc_dd if sc_dd is not None else metrics.get("max_drawdown", 0.0)
+                "std_corr": sc_std if sc_std is not None else metrics.get("std"),
+                "max_drawdown": (
+                    sc_dd if sc_dd is not None else metrics.get("max_drawdown")
                 ),
                 "deflated_sharpe": scorecard.get("deflated_sharpe"),
                 "fnc": scorecard.get("fnc"),
@@ -1317,11 +1362,33 @@ def _series_label(registry_dir: Path, run_id: str) -> str:
 _METRIC_NAMES = ("payout", "corr20", "mmc20", "corr60", "mmc60", "bmc", "cwmm")
 
 
-def _cumulative_from_standard(standard: list[float], *, payout: bool) -> list[float]:
-    values = np.asarray(standard, dtype=float)
-    if payout:
-        return [float(v) for v in np.cumprod(1.0 + values)]
-    return [float(v) for v in np.cumsum(values)]
+def _cumulative_from_standard(
+    standard: Sequence[float | None], *, payout: bool
+) -> list[float | None]:
+    result: list[float | None] = []
+    accumulator = 1.0 if payout else 0.0
+    available = True
+    for value in standard:
+        if not available or value is None or not np.isfinite(value):
+            result.append(None)
+            available = False
+            continue
+        accumulator = accumulator * (1.0 + value) if payout else accumulator + value
+        result.append(float(accumulator))
+    return result
+
+
+def _align_era_values(
+    axis: Sequence[str], values: Mapping[str, float]
+) -> list[float | None]:
+    return [
+        (
+            float(value)
+            if (value := values.get(era)) is not None and np.isfinite(value)
+            else None
+        )
+        for era in axis
+    ]
 
 
 def extract_multimetric_timeseries(
@@ -1336,8 +1403,8 @@ def extract_multimetric_timeseries(
     Payout is anchored to main_target="target" (decision #19); correlation
     metrics use cumsum, payout uses cumprod (decision #9); the tier-4 BMC is
     short-circuited to zeros (decision #11); an absent benchmark frame or a
-    model sharing no era with the meta window zero-fills its bmc/cwmm slices
-    and skips its payout slice with warnings (decision #23). Every tier-4
+    model sharing no era with the meta window leaves its unavailable bmc/cwmm
+    slices as null and skips its payout slice with warnings (decision #23). Every tier-4
     reference column (first = the gated capital line, the BMC benchmark for
     other models) is rendered as a reference curve. Never raises on missing
     assets — returns the empty payload.
@@ -1358,7 +1425,7 @@ def extract_multimetric_timeseries(
     mask = [bool(meta_corr[era] < 0.0) for era in axis]
 
     metrics: dict[str, dict] = {name: {} for name in _METRIC_NAMES}
-    drawdowns: dict[str, list[float]] = {}
+    drawdowns: dict[str, list[float | None]] = {}
 
     ref_set = set(tier4_columns)
     primary_ref = tier4_columns[0] if tier4_columns else None
@@ -1396,15 +1463,21 @@ def extract_multimetric_timeseries(
         if set(corr_t) & set(mmc_t):
             pay = payout_series(corr_t, mmc_t)
             clipped_by_era = dict(zip(pay.eras, pay.clipped))
-            standard = [float(clipped_by_era.get(era, 0.0)) for era in axis]
+            standard = _align_era_values(axis, clipped_by_era)
             metrics["payout"][model_id] = {
                 "standard": standard,
                 "cumulative": _cumulative_from_standard(standard, payout=True),
                 "label": label,
             }
-            wealth = np.asarray(metrics["payout"][model_id]["cumulative"], dtype=float)
-            peak = np.maximum.accumulate(wealth)
-            drawdowns[model_id] = [float(v) for v in wealth / peak - 1.0]
+            wealth = metrics["payout"][model_id]["cumulative"]
+            peak = float("-inf")
+            drawdowns[model_id] = []
+            for value in wealth:
+                if value is None:
+                    drawdowns[model_id].append(None)
+                    continue
+                peak = max(peak, value)
+                drawdowns[model_id].append(value / peak - 1.0 if peak > 0.0 else 0.0)
         else:
             logger.warning(
                 "nmr.dashboard: %s shares no eras with the meta window; "
@@ -1431,7 +1504,7 @@ def extract_multimetric_timeseries(
                     meta_col="numerai_meta_model",
                     target_col=target_col,
                 )
-            aligned = [float(per.get(era, 0.0)) for era in axis]
+            aligned = _align_era_values(axis, per)
             metrics[name][model_id] = {
                 "standard": aligned,
                 "cumulative": _cumulative_from_standard(aligned, payout=False),
@@ -1439,7 +1512,8 @@ def extract_multimetric_timeseries(
             }
 
         if model_id in ref_set:
-            zeros = [0.0 for _ in axis]
+            observed_eras = set(joined.get_column("era").to_list())
+            zeros = [0.0 if era in observed_eras else None for era in axis]
             metrics["bmc"][model_id] = {
                 "standard": zeros,
                 "cumulative": zeros,
@@ -1449,7 +1523,7 @@ def extract_multimetric_timeseries(
             joined_b = joined.join(lookups.benchmarks, on=["era", "id"], how="inner")
             if lookups.benchmarks.height > 0 and joined_b.height > 0:
                 # reporting path relaxes the evaluation vacuity gate (real meta
-                # window satisfies 20 anyway); alignment below zero-fills missing eras
+                # window satisfies 20 anyway); absent eras remain unavailable
                 per_bmc = engine.per_era_bmc(
                     joined_b,
                     pred_col="prediction",
@@ -1457,7 +1531,7 @@ def extract_multimetric_timeseries(
                     target_col="target",
                     min_overlap_eras=1,
                 )
-                aligned = [float(per_bmc.get(era, 0.0)) for era in axis]
+                aligned = _align_era_values(axis, per_bmc)
                 metrics["bmc"][model_id] = {
                     "standard": aligned,
                     "cumulative": _cumulative_from_standard(aligned, payout=False),
@@ -1466,52 +1540,49 @@ def extract_multimetric_timeseries(
             else:
                 if lookups.benchmarks.height == 0:
                     logger.warning(
-                        "nmr.dashboard: benchmark models absent at %s; bmc zeroed",
+                        "nmr.dashboard: benchmark models absent at %s; bmc unavailable",
                         data_dir,
                     )
                 else:
                     logger.warning(
                         "nmr.dashboard: %s shares no eras with the benchmark "
-                        "window; bmc zeroed",
+                        "window; bmc unavailable",
                         model_id,
                     )
-                zeros = [0.0 for _ in axis]
+                unavailable = [None for _ in axis]
                 metrics["bmc"][model_id] = {
-                    "standard": zeros,
-                    "cumulative": zeros,
+                    "standard": unavailable,
+                    "cumulative": unavailable,
                     "label": label,
                 }
         else:
-            # no primary reference configured — zero-fill BMC (nothing to
-            # benchmark against); the other metric slices still render
-            zeros = [0.0 for _ in axis]
+            # no primary reference configured — BMC is unavailable
             metrics["bmc"][model_id] = {
-                "standard": zeros,
-                "cumulative": zeros,
+                "standard": [None for _ in axis],
+                "cumulative": [None for _ in axis],
                 "label": label,
             }
 
         if joined.height > 0:
             # reporting path relaxes the evaluation vacuity gate (real meta window
-            # satisfies 20 anyway); alignment below zero-fills missing eras
+            # satisfies 20 anyway); absent eras remain unavailable
             per_cwmm = engine.per_era_cwmm(
                 joined,
                 pred_col="prediction",
                 meta_col="numerai_meta_model",
                 min_overlap_eras=1,
             )
-            aligned = [float(per_cwmm.get(era, 0.0)) for era in axis]
+            aligned = _align_era_values(axis, per_cwmm)
             metrics["cwmm"][model_id] = {
                 "standard": aligned,
                 "cumulative": _cumulative_from_standard(aligned, payout=False),
                 "label": label,
             }
         else:
-            # zero-overlap model: cwmm renders zero-filled (decision #23)
-            zeros = [0.0 for _ in axis]
+            # zero-overlap model: CWMM is unavailable
             metrics["cwmm"][model_id] = {
-                "standard": zeros,
-                "cumulative": zeros,
+                "standard": [None for _ in axis],
+                "cumulative": [None for _ in axis],
                 "label": label,
             }
 

@@ -1,6 +1,8 @@
 # Design Spec: Executive Model Performance Report (HTML)
 
-> Status: APPROVED (director disposition 2026-08-16). Implementation authorized across all sections.
+> **Historical record:** Superseded by `2026-08-18-vanilla-dashboard-design.md`; the Plotly architecture and unbounded artifact target below are no longer active.
+
+> Status: Historical; superseded. Implementation details below are retained for audit history.
 > Scope: new pure data engine `nmr/dashboard.py` + top-level chart layer `dashboard_charts.py`; rewrite of `generate_dashboard.py` (HTML primary); rewiring of `dashboard_app.py` (Streamlit) onto the shared engine; new `tests/test_dashboard.py`.
 
 ## 1. Mission

@@ -65,17 +65,17 @@
 	</label>
 	<span id="rank-direction" class="direction-note"></span>
 	<div class="cohort-filter" role="group" aria-label="Cohort">
-		<button type="button" class="cohort-button active" data-cohort="all">All</button>
-		<button type="button" class="cohort-button" data-cohort="trained">Trained</button>
-		<button type="button" class="cohort-button" data-cohort="heuristic">Heuristic</button>
-		<button type="button" class="cohort-button" data-cohort="benchmark">Benchmark</button>
+		<button type="button" class="cohort-button active" data-cohort="all" aria-pressed="true">All</button>
+		<button type="button" class="cohort-button" data-cohort="trained" aria-pressed="false">Trained</button>
+		<button type="button" class="cohort-button" data-cohort="heuristic" aria-pressed="false">Heuristic</button>
+		<button type="button" class="cohort-button" data-cohort="benchmark" aria-pressed="false">Benchmark</button>
 	</div>
 	<span class="toolbar-label">Quick views</span>
 	<div class="shortcut-group" role="group" aria-label="Shortcuts">
-		<button type="button" class="shortcut-button" data-shortcut="top10">Top 10</button>
-		<button type="button" class="shortcut-button" data-shortcut="beats">Beats benchmarks</button>
-		<button type="button" class="shortcut-button" data-shortcut="robust">Most robust</button>
-		<button type="button" class="shortcut-button disabled" data-shortcut="new" disabled title="No comparable prior snapshot">New since last run</button>
+		<button type="button" class="shortcut-button" data-shortcut="top10" aria-pressed="false">Top 10</button>
+		<button type="button" class="shortcut-button" data-shortcut="beats" aria-pressed="false">Beats benchmarks</button>
+		<button type="button" class="shortcut-button" data-shortcut="robust" aria-pressed="false">Most robust</button>
+		<button type="button" class="shortcut-button disabled" data-shortcut="new" aria-pressed="false" disabled title="No comparable prior snapshot">New since last run</button>
 	</div>
 </section>
 
@@ -96,11 +96,11 @@
 <section id="diagnostics" class="analysis-grid" aria-label="Model analysis">
 	<div class="analysis-panel">
 		<div class="panel-heading"><p class="eyebrow">LANDSCAPE</p><h2>Model landscape</h2><span>CORR &times; MMC</span></div>
-		<div class="chart-box"><svg id="landscape-svg" viewBox="0 0 760 360" role="img" aria-label="Model landscape scatter plot"></svg></div>
+		<div class="chart-box interactive-chart"><svg id="landscape-svg" viewBox="0 0 760 360" role="img" aria-label="Model landscape scatter plot"></svg><div id="landscape-legend" class="timeseries-legend" aria-label="Landscape cohort legend"></div><div id="landscape-tooltip" class="chart-tooltip tooltip" hidden></div></div>
 	</div>
 	<div class="analysis-panel">
 		<div class="panel-heading"><p class="eyebrow">SELECTED MODEL</p><h2>Metric profile</h2><span id="profile-label">Select a row</span></div>
-		<div class="chart-box"><svg id="profile-svg" viewBox="0 0 760 360" role="img" aria-label="Selected model metric profile"></svg></div>
+		<div class="chart-box interactive-chart"><svg id="profile-svg" viewBox="0 0 760 360" role="img" aria-label="Selected model metric profile"></svg><div id="profile-tooltip" class="chart-tooltip tooltip" hidden></div></div>
 	</div>
 </section>
 
@@ -116,9 +116,9 @@
 	{{ DRAWDOWN_SVG }}
 </section>
 
-<aside id="model-drawer" class="model-drawer" hidden aria-labelledby="drawer-title">
+<aside id="model-drawer" class="model-drawer" hidden role="dialog" aria-modal="true" aria-labelledby="drawer-title">
 	<div class="drawer-backdrop" data-drawer-close></div>
-	<div class="drawer-panel">
+	<div class="drawer-panel" tabindex="-1">
 		<button type="button" class="drawer-close" data-drawer-close aria-label="Close model dossier">Close</button>
 		<div id="model-dossier"></div>
 	</div>

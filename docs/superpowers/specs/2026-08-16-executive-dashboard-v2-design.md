@@ -1,6 +1,8 @@
 # Design Spec: Executive Dashboard v2 — Multi-Metric Trajectory & Signal Diversification
 
-> Status: APPROVED (director disposition 2026-08-16, amended after two review rounds). Implementation authorized across all sections.
+> **Historical record:** Superseded by `2026-08-18-vanilla-dashboard-design.md`; the Plotly architecture below is no longer active.
+
+> Status: Historical; superseded. Implementation details below are retained for audit history.
 > Scope: in-place evolution of the shipped v1.0 executive dashboard (`nmr/dashboard.py`, `dashboard_charts.py`, `generate_dashboard.py`, `tests/test_dashboard.py`). Supersedes the v1 spec (`2026-08-16-executive-dashboard-design.md`) for everything it covers; the v1 file stays as the historical record.
 
 ## 1. Mission

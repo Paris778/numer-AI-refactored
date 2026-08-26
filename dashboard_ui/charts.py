@@ -9,6 +9,8 @@ here is mirrored client-side by ``static/app.js`` and covered by
 
 from __future__ import annotations
 
+import base64
+import struct
 from collections.abc import Mapping, Sequence
 from typing import Any
 
@@ -27,13 +29,39 @@ __all__ = [
 
 _ZERO_SPAN_EPS = 1e-12
 _PAYLOAD_ROUND = 6
+_SERIES_SCALE = 1_000_000
+_SERIES_MISSING = -(2**31)
+_SERIES_MAX = 2**31 - 1
+
+
+def _finite_float(value: Any) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if np.isfinite(numeric) else None
+
+
+def _pack_series(values: Sequence[Any]) -> str:
+    packed = bytearray()
+    for value in values:
+        numeric = _finite_float(value)
+        if numeric is None:
+            scaled = _SERIES_MISSING
+        else:
+            scaled = int(round(numeric * _SERIES_SCALE))
+            if scaled <= _SERIES_MISSING or scaled > _SERIES_MAX:
+                raise ValueError("timeseries value is outside the packed integer range")
+        packed.extend(struct.pack("<i", scaled))
+    return base64.b64encode(packed).decode("ascii")
 
 
 def _round6(value: Any) -> Any:
     """Round payload floats to 6 decimals (display precision is 4) — keeps the
-    data node honest while fitting the < 100 KB artifact gate (amendment)."""
+    data node honest while fitting the report artifact budget."""
     if isinstance(value, (float, np.floating)):
-        return round(float(value), _PAYLOAD_ROUND)
+        numeric = _finite_float(value)
+        return None if numeric is None else round(numeric, _PAYLOAD_ROUND)
     return value
 
 
@@ -53,19 +81,14 @@ def compact_timeseries_payload(
         )
         for model_id in model_ids
     ]
-    scale = 1_000_000
     return {
         "model_ids": model_ids,
         "labels": labels,
-        "scale": scale,
+        "scale": _SERIES_SCALE,
+        "series_encoding": "int32-le-base64-v1",
         "series": {
             metric: [
-                [
-                    None if value is None else int(round(float(value) * scale))
-                    for value in (
-                        metrics[metric].get(model_id, {}).get("standard") or []
-                    )
-                ]
+                _pack_series(metrics[metric].get(model_id, {}).get("standard") or [])
                 for model_id in model_ids
             ]
             for metric in sorted(metrics)
@@ -75,7 +98,13 @@ def compact_timeseries_payload(
 
 def global_y_range(*series: Sequence[float]) -> tuple[float, float]:
     """Global min/max across all series (shared axis); (0.0, 1.0) when empty."""
-    values = [v for s in series for v in s]
+    values = [
+        numeric
+        for s in series
+        if s
+        for v in s
+        if (numeric := _finite_float(v)) is not None
+    ]
     if not values:
         return (0.0, 1.0)
     return (float(min(values)), float(max(values)))
@@ -95,7 +124,7 @@ def _resolve_range(
 
 
 def data_to_svg_path(
-    values: Sequence[float],
+    values: Sequence[float | None],
     *,
     width: float,
     height: float,
@@ -115,16 +144,22 @@ def data_to_svg_path(
     inner_w = width - pad_left - pad_right
     inner_h = height - pad_top - pad_bottom
     denom = max(1, len(values) - 1)
-    points = []
-    for i, v in enumerate(values):
+    commands: list[str] = []
+    open_segment = False
+    for i, value in enumerate(values):
+        numeric = _finite_float(value)
+        if numeric is None:
+            open_segment = False
+            continue
         x = pad_left + (i / denom) * inner_w
-        y = pad_top + (1.0 - (v - lo) / span) * inner_h
-        points.append(f"{x:.1f},{y:.1f}")
-    return "M " + " L ".join(points)
+        y = pad_top + (1.0 - (numeric - lo) / span) * inner_h
+        commands.append(f"{'L' if open_segment else 'M'} {x:.1f},{y:.1f}")
+        open_segment = True
+    return " ".join(commands)
 
 
 def svg_area_path(
-    values: Sequence[float],
+    values: Sequence[float | None],
     *,
     width: float,
     height: float,
@@ -138,34 +173,108 @@ def svg_area_path(
         return ""
     lo, hi = _resolve_range(values, y_min, y_max)
     span = hi - lo
-    line = data_to_svg_path(
-        values, width=width, height=height, y_min=lo, y_max=hi, pad=pad
-    )
     pad_top, pad_right, pad_bottom, pad_left = pad
     inner_h = height - pad_top - pad_bottom
     inner_w = width - pad_left - pad_right
     y_base = pad_top + (1.0 - (y_baseline - lo) / span) * inner_h
     denom = max(1, len(values) - 1)
-    x0 = pad_left
-    x_n = pad_left + ((len(values) - 1) / denom) * inner_w
-    return f"{line} L {x_n:.1f},{y_base:.1f} L {x0:.1f},{y_base:.1f} Z"
+    parts: list[str] = []
+    segment: list[tuple[int, float]] = []
+    for index, value in enumerate(values):
+        numeric = _finite_float(value)
+        if numeric is None:
+            if segment:
+                parts.append(
+                    _area_segment(
+                        segment,
+                        y_min=lo,
+                        y_max=hi,
+                        y_base=y_base,
+                        inner_w=inner_w,
+                        inner_h=inner_h,
+                        pad_left=pad_left,
+                        pad_top=pad_top,
+                        denom=denom,
+                    )
+                )
+                segment = []
+            continue
+        segment.append((index, numeric))
+    if segment:
+        parts.append(
+            _area_segment(
+                segment,
+                y_min=lo,
+                y_max=hi,
+                y_base=y_base,
+                inner_w=inner_w,
+                inner_h=inner_h,
+                pad_left=pad_left,
+                pad_top=pad_top,
+                denom=denom,
+            )
+        )
+    return " ".join(parts)
 
 
-def cumulative_series(standard: Sequence[float], *, payout: bool) -> list[float]:
+def _area_segment(
+    segment: Sequence[tuple[int, float]],
+    *,
+    y_min: float,
+    y_max: float,
+    y_base: float,
+    inner_w: float,
+    inner_h: float,
+    pad_left: float,
+    pad_top: float,
+    denom: int,
+) -> str:
+    points = []
+    for index, value in segment:
+        x = pad_left + (index / denom) * inner_w
+        y = pad_top + (1.0 - (value - y_min) / (y_max - y_min)) * inner_h
+        points.append(f"{x:.1f},{y:.1f}")
+    first_x = pad_left + (segment[0][0] / denom) * inner_w
+    last_x = pad_left + (segment[-1][0] / denom) * inner_w
+    return (
+        "M "
+        + " L ".join(points)
+        + f" L {last_x:.1f},{y_base:.1f} L {first_x:.1f},{y_base:.1f} Z"
+    )
+
+
+def cumulative_series(
+    standard: Sequence[float | None], *, payout: bool
+) -> list[float | None]:
     """cumprod(1+r) for payout, cumsum(rho) for correlations (spec decision #9)."""
-    values = np.asarray(standard, dtype=float)
-    if payout:
-        return [float(v) for v in np.cumprod(1.0 + values)]
-    return [float(v) for v in np.cumsum(values)]
+    result: list[float | None] = []
+    accumulator = 1.0 if payout else 0.0
+    available = True
+    for value in standard:
+        numeric = _finite_float(value)
+        if not available or numeric is None:
+            result.append(None)
+            available = False
+            continue
+        accumulator = accumulator * (1.0 + numeric) if payout else accumulator + numeric
+        result.append(float(accumulator))
+    return result
 
 
-def drawdown_series(cumulative: Sequence[float]) -> list[float]:
+def drawdown_series(cumulative: Sequence[float | None]) -> list[float | None]:
     """wealth/peak - 1 (peak = running maximum); 0.0 when peak <= 0 (degenerate)."""
-    wealth = np.asarray(cumulative, dtype=float)
-    peak = np.maximum.accumulate(wealth)
-    safe_peak = np.where(peak > 0.0, peak, np.nan)
-    ratio = np.where(peak > 0.0, wealth / safe_peak - 1.0, 0.0)
-    return [float(v) for v in ratio]
+    result: list[float | None] = []
+    peak = float("-inf")
+    available = True
+    for value in cumulative:
+        numeric = _finite_float(value)
+        if not available or numeric is None:
+            result.append(None)
+            available = False
+            continue
+        peak = max(peak, numeric)
+        result.append(float(numeric / peak - 1.0) if peak > 0.0 else 0.0)
+    return result
 
 
 def build_dashboard_payload(

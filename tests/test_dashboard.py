@@ -124,11 +124,12 @@ def test_load_benchmark_frame_full_and_minimal(tmp_path: Path) -> None:
 
     minimal = _write_benchmark_csv(
         tmp_path,
-        "model_id,corr,corr_sharpe_ac,std_corr,max_drawdown,strategy_group\n"
-        "bench_a,0.05,0.5,0.3,0.2,linear\n",
+        "model_id,corr,corr_sharpe_ac,strategy_group\n" "bench_a,0.05,0.5,linear\n",
     )
     row = dash.load_benchmark_frame(minimal).row(0, named=True)
     assert row["corr_sharpe_ac_ci_low"] is None
+    assert row["std_corr"] is None
+    assert row["max_drawdown"] is None
     assert row["fnc"] is None
     assert row["has_bmc"] is False
 
@@ -209,6 +210,19 @@ def test_load_unified_leaderboard_registry_only(tmp_path: Path) -> None:
     assert rows["b" * 64]["source"] == "trained_legacy"
     assert rows["b" * 64]["corr"] == 0.1  # legacy falls back to metrics.mean
     assert rows["a" * 64]["cagr_1y"] == 1.5  # stored capital block carried through
+
+    incomplete = _registry_entry("c" * 64, scorecard=False)
+    incomplete["metrics"] = {}
+    incomplete_dir = tmp_path / "incomplete"
+    _write_registry(incomplete_dir, [incomplete])
+    incomplete_frame = dash.load_unified_leaderboard(
+        incomplete_dir, benchmark_path=False, models_dir=incomplete_dir / "models"
+    )
+    incomplete_row = incomplete_frame.row(0, named=True)
+    assert incomplete_row["corr"] is None
+    assert incomplete_row["corr_sharpe_ac"] is None
+    assert incomplete_row["std_corr"] is None
+    assert incomplete_row["max_drawdown"] is None
 
 
 def test_load_unified_leaderboard_zero_scorecard_value_not_legacy(
@@ -634,10 +648,34 @@ def test_multimetric_payout_aligned_when_model_misses_an_era(tmp_path: Path) -> 
     )
     payout = payload["metrics"]["payout"]["e" * 64]
     assert len(payout["standard"]) == 3  # aligned 1:1 with the axis
-    assert payout["standard"][1] == 0.0  # missing era zero-filled
+    assert payout["standard"][1] is None  # missing era remains unavailable
+    assert payout["cumulative"] == pytest.approx([1.05, None, None])
+    assert payload["drawdowns"]["e" * 64] == [0.0, None, None]
     assert len(payload["drawdowns"]["e" * 64]) == 3
     for name in ("corr20", "mmc20", "corr60", "mmc60", "bmc", "cwmm"):
         assert len(payload["metrics"][name]["e" * 64]["standard"]) == 3
+
+
+def test_multimetric_reference_bmc_preserves_missing_eras(tmp_path: Path) -> None:
+    _write_registry(tmp_path, [_registry_entry("f" * 64)])
+    data = _synthetic_v2_data_dir(tmp_path)
+    benchmark_path = data / "validation_benchmark_models.parquet"
+    benchmarks = pl.read_parquet(benchmark_path).filter(pl.col("era") != "0002")
+    benchmarks.write_parquet(benchmark_path)
+
+    payload = dash.extract_multimetric_timeseries(
+        tmp_path,
+        data,
+        run_ids=[],
+        include_tier4_ref=True,
+        tier4_columns=("v53_lgbm_ender60",),
+    )
+
+    assert payload["metrics"]["bmc"]["v53_lgbm_ender60"]["standard"] == [
+        0.0,
+        None,
+        0.0,
+    ]
 
 
 def test_multimetric_timeseries_benchmarks_absent_degrades(
@@ -651,7 +689,7 @@ def test_multimetric_timeseries_benchmarks_absent_degrades(
             tmp_path, data, run_ids=["a" * 64], include_tier4_ref=True
         )
     # no benchmark parquet -> tier-4 reference dropped; every model slice still
-    # renders, with BMC zero-filled (degrade, never raise — decision #23)
+    # renders, with BMC unavailable (degrade, never raise — decision #23)
     assert set(payload["metrics"]) == {
         "payout",
         "corr20",
@@ -666,14 +704,10 @@ def test_multimetric_timeseries_benchmarks_absent_degrades(
         series = payload["metrics"][name]["a" * 64]
         assert len(series["standard"]) == 3
         assert len(series["cumulative"]) == 3
-    assert payload["metrics"]["bmc"]["a" * 64]["standard"] == pytest.approx(
-        [0.0, 0.0, 0.0], abs=1e-12
-    )
-    assert payload["metrics"]["bmc"]["a" * 64]["cumulative"] == pytest.approx(
-        [0.0, 0.0, 0.0], abs=1e-12
-    )
+    assert payload["metrics"]["bmc"]["a" * 64]["standard"] == [None, None, None]
+    assert payload["metrics"]["bmc"]["a" * 64]["cumulative"] == [None, None, None]
     assert "a" * 64 in payload["drawdowns"]
-    assert "bmc zeroed" in caplog.text
+    assert "bmc unavailable" in caplog.text
 
 
 _REAL_VALIDATION = Path("data/v5.3/validation.parquet")
@@ -1325,17 +1359,41 @@ def test_tournament_payload_contains_ranked_rows_details_and_offline_metadata(
     }
     row_map = [dict(zip(payload["row_fields"], row)) for row in payload["rows"]]
     assert [row["cohort"] for row in row_map] == ["trained", "heuristic"]
-    assert row_map[0]["rank"] == 1
+    assert payload["model_ids"] == [trained_id, "simple_baseline"]
+    assert payload["rank_values"][0][payload["metric_fields"].index("mmc")] == 1
     assert row_map[0]["champion"] is True
     trained_index = next(
-        i for i, row in enumerate(row_map) if row["model_id"] == trained_id
+        i for i, model_id in enumerate(payload["model_ids"]) if model_id == trained_id
     )
     corr_index = payload["metric_fields"].index("corr")
-    assert row_map[trained_index]["values"][corr_index] == 0.12
+    assert payload["row_value_scale"] == 1_000_000
+    assert row_map[trained_index]["values"][corr_index] == 120_000
+    assert payload["strict_beats"]["mmc"] == []
     seed_index = payload["provenance_fields"].index("seed")
-    assert payload["details"][trained_index][1][seed_index] is None
-    assert row_map[1]["benchmark_tier"] == 1
+    provenance_pairs = payload["details"][trained_index][1]
+    assert all(pair[0] != seed_index for pair in provenance_pairs)
     assert payload["advantage"]["vs_heuristic"]["absolute_edge"] == pytest.approx(0.18)
+
+
+def test_tournament_payload_keeps_sub_micro_ranks_distinct() -> None:
+    frame = pl.DataFrame(
+        [
+            {"model_id": "a", "source": "trained", "mmc": 0.1000004},
+            {"model_id": "b", "source": "trained", "mmc": 0.1},
+            {"model_id": "benchmark", "source": "benchmark", "tier": 4, "mmc": 0.1},
+        ],
+        schema=dash.UNIFIED_SCHEMA,
+        strict=False,
+    )
+
+    payload = dash.build_tournament_payload(frame)
+    mmc_index = payload["metric_fields"].index("mmc")
+    row_map = [dict(zip(payload["row_fields"], row)) for row in payload["rows"]]
+
+    assert payload["model_ids"] == ["a", "b", "benchmark"]
+    assert [payload["rank_values"][index][mmc_index] for index in range(3)] == [1, 2, 3]
+    assert [row["values"][mmc_index] for row in row_map] == [100_000, 100_000, 100_000]
+    assert payload["strict_beats"]["mmc"] == ["a"]
 
 
 def test_tournament_payload_is_deterministic_and_does_not_expose_run_paths(

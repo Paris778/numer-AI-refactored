@@ -5,7 +5,7 @@
 > [ARCHITECTURE.md](ARCHITECTURE.md) §W. This file is retained as historical
 > planning context; its proposed component/scenario layers are not active.
 
-**Status:** 🔴 PLANNING PHASE  
+**Status:** Historical; superseded
 **Objective:** Deliver a world-class, production-grade dashboard that **immediately answers: "Where should my capital go?"**  
 **Scope:** Complete architectural redesign of `dashboard_ui/` + data layer improvements in `nmr/dashboard.py`  
 **Timeline:** Full refactor delivered in one session with zero technical debt carryover.

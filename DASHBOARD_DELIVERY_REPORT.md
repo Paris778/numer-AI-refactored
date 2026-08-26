@@ -1,6 +1,10 @@
 # 🏆 Numerai Top Performers Dashboard — DELIVERY REPORT
 
-**Date:** 2026-08-25 | **Status:** LIVE ✅ | **App running at:** http://localhost:8502
+> **Historical record:** This report describes the retired four-tab dashboard and
+> is superseded by [DASHBOARD_DELIVERY_SUMMARY.md](DASHBOARD_DELIVERY_SUMMARY.md),
+> which documents the current offline Model Tournament renderer and verification state.
+
+**Date:** 2026-08-25 | **Status:** Historical; superseded
 
 ---
 

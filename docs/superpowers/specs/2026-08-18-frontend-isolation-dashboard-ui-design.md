@@ -1,7 +1,7 @@
 # Front-End Isolation — `dashboard_ui/` Package — Design
 
 **Date:** 2026-08-18
-**Status:** Approved for implementation
+**Status:** Historical; superseded by `2026-08-18-vanilla-dashboard-design.md`
 **Branch:** `feature/frontend-isolation` (based on `main` @ `d4b14f8`)
 **Audience:** Portfolio Manager / Director of Investing & autonomous LLM coding agents
 
@@ -230,9 +230,9 @@ embedded once, no CDN).
 
 ## 10. Out of Scope / Follow-Ups
 
-- **Drop Plotly → from-scratch HTML/CSS/SVG renderer** (report target < 100 KB): separate
-  workstream; this refactor is the prerequisite that makes it tractable (assets already
-  split; `dashboard_ui/` is the home).
+- **Drop Plotly → from-scratch HTML/CSS/SVG renderer** (report target < 112 KiB): completed
+  by the superseding vanilla-dashboard workstream; this document remains as the original
+  isolation record (assets are now split and `dashboard_ui/` is the home).
 - Any change to `nmr/dashboard.py` engine behavior or schemas.
 - Streamlit visual redesign.
 - Deleting the historical v1/v2 specs and plans (they remain as records).

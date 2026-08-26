@@ -1,10 +1,12 @@
 # Pure Vanilla HTML/CSS/SVG Executive Dashboard — Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+>
+> **Historical record:** This plan documents the original implementation sequence and estimates. It is superseded by the approved design specification and the current repository contracts in `AGENTS.md`, `ARCHITECTURE.md`, and `CONTRIBUTING.md`; its original size and test-count estimates are not active release requirements.
 
-**Goal:** Eliminate Plotly from the repository and replace the executive dashboard's presentation layer with an isolated, zero-dependency Vanilla HTML/CSS/SVG front-end that compiles `artifacts/dashboard.html` at < 100 KB.
+**Goal:** Eliminate Plotly from the repository and replace the executive dashboard's presentation layer with an isolated, zero-runtime-dependency Vanilla HTML/CSS/SVG front-end that compiles `artifacts/dashboard.html` under the current documented artifact budget.
 
-**Architecture:** `nmr/dashboard.py` stays the untouched analytical engine (plotly-free already). `dashboard_ui/charts.py` gains pure, pytest-tested SVG geometry reference functions (`data_to_svg_path`, `svg_area_path`, `cumulative_series`, `drawdown_series`, `global_y_range`) and a payload builder emitting a standard-only, metric-first JSON contract. `dashboard_ui/static/` holds the raw assets (`layout.html`, `style.css`, `app.js`); `app.js` mirrors the geometry client-side and renders the five chart sections. `dashboard_ui/report.py` is the compiler (template + inlined assets + `#dashboard-data` node). `dashboard_ui/app.py` keeps the Streamlit app but drops `plotly.express` for native `st.*` charts.
+**Architecture:** `nmr/dashboard.py` remains the renderer-neutral analytical engine (plotly-free already). `dashboard_ui/charts.py` gains pure, pytest-tested SVG geometry reference functions (`data_to_svg_path`, `svg_area_path`, `cumulative_series`, `drawdown_series`, `global_y_range`) and a payload builder emitting a standard-only, metric-first JSON contract. `dashboard_ui/static/` holds the raw assets (`layout.html`, `style.css`, `app.js`); `app.js` mirrors the geometry client-side and renders the five chart sections. `dashboard_ui/report.py` is the compiler (template + inlined assets + `#dashboard-data` node). `dashboard_ui/app.py` keeps the Streamlit app but drops `plotly.express` for native `st.*` charts.
 
 **Tech Stack:** Python 3.11+, Polars, NumPy, pytest, ruff; vanilla HTML/CSS/JS (no Plotly, no node, no CDN).
 
@@ -12,10 +14,8 @@
 
 ## Global Constraints
 
-- `nmr/dashboard.py` and `nmr/` are **untouched** by this work — no edits, no new imports.
-- Every commit must pass the **full suite**: `.\.venv\Scripts\python -m ruff check .` AND `.\.venv\Scripts\python -m pytest -q` (818 tests today; the count changes as tests are added/pruned).
-- **Test-count claims must be updated in the same commit that changes the collected count.** After any test-count change run `.\.venv\Scripts\python -m pytest --collect-only -q | tail -1`, read the `N tests collected` number, and update exactly these claims to match: `AGENTS.md:33` (`pytest (818 tests, ...)`), `AGENTS.md:197` (`full 818-test suite`), `CONTRIBUTING.md:30` (`green 818-test`). `tests/test_docs_hygiene.py::test_docs_test_count_matches_suite` enforces this.
-- No `plotly` string may remain anywhere except historical `docs/superpowers/specs/2026-08-16-*.md` documents. Final audit: `grep -ri plotly` across `dashboard_ui/ tests/ configs/ requirements.txt` and the root `*.py` scripts must return nothing.
+- The current release contract is `nmr/dashboard.py` renderer-neutral alignment, a 112 KiB report budget, and 1,099 collected tests; see the active repository documents above rather than these historical task estimates.
+- No `plotly` runtime dependency or visual renderer may remain in the active dashboard surface. Build-time Terser/CleanCSS commands are documented in `CONTRIBUTING.md`.
 - `artifacts/dashboard.html` is gitignored (`artifacts/**`) — regenerating it never creates a diff; do not `git add` it.
 - Windows venv: always `./.venv/Scripts/python -m ...` (never the `Scripts/pip` shim). Run the full suite in the foreground; if it auto-backgrounds, wait on it via `TaskOutput block=true`.
 - ruff: E/F/I/UP, line length 120 (`ruff.toml`).
@@ -193,7 +193,7 @@ _PAYLOAD_ROUND = 6
 
 def _round6(value: Any) -> Any:
     """Round payload floats to 6 decimals (display precision is 4) — keeps the
-    data node honest while fitting the < 100 KB artifact gate (amendment)."""
+    data node honest while fitting the 112 KiB artifact budget (amendment)."""
     if isinstance(value, (int, float, np.floating)):
         return round(float(value), _PAYLOAD_ROUND)
     return value
@@ -1180,7 +1180,7 @@ def test_build_html_empty_payload_placeholder_message() -> None:
 
 
 def test_technical_entries_summary_only(tmp_path: Path) -> None:
-    # < 100 KB gate: the audit accordion must carry config summaries, not
+    # < 112 KiB budget: the audit accordion must carry config summaries, not
     # full run.json dumps (~25 KB per run; 29 runs = ~715 KB measured)
     _write_registry(tmp_path, [_registry_entry("c" * 64)])
     entries = report._technical_entries(tmp_path)
@@ -1238,7 +1238,7 @@ Expected: FAIL — `report._build_html` / `report._table_html` do not exist with
 Thin control plane only: data comes from ``nmr.dashboard``, payload/geometry
 from ``dashboard_ui.charts``, raw assets from ``dashboard_ui.static``. No
 metric math here. The output is a single self-contained HTML file (vanilla
-CSS + JS, no Plotly, no CDN, < 100 KB) that runs offline from ``file://``.
+CSS + JS, no Plotly, no CDN, < 112 KiB) that runs offline from ``file://``.
 """
 
 from __future__ import annotations
@@ -1472,7 +1472,7 @@ def _row_html(row: dict) -> str:
 def _technical_entries(registry_dir: Path) -> list[dict]:
     """Per-run config summaries for the audit accordion (bounded size).
 
-    Full ``run.json`` dumps (~25 KB per run) blow the < 100 KB artifact gate
+    Full ``run.json`` dumps (~25 KB per run) exceed the 112 KiB artifact budget
     (measured: 29 runs = ~715 KB), so the accordion carries the curated config
     summary only; the immutable full payload lives in the registry.
     """
@@ -1767,7 +1767,7 @@ _PAYLOAD_ROUND = 6
 
 def _round6(value: Any) -> Any:
     """Round payload floats to 6 decimals (display precision is 4) — keeps the
-    data node honest while fitting the < 100 KB artifact gate (amendment)."""
+    data node honest while fitting the 112 KiB artifact budget (amendment)."""
     if isinstance(value, (int, float, np.floating)):
         return round(float(value), _PAYLOAD_ROUND)
     return value
@@ -2168,13 +2168,13 @@ Streamlit (interactive dashboard — imported only in `dashboard_ui/app.py` and 
 ```
 
 2. Executive-dashboard toolkit row (line 143): replace the spec pointer `docs/superpowers/specs/2026-08-16-executive-dashboard-design.md` with `docs/superpowers/specs/2026-08-18-vanilla-dashboard-design.md`.
-3. The two test-count claims (line 33 `pytest (818 tests, ...)`, line 197 `full 818-test suite`): set to the collected count (from the Task 4 step 5 sync; will be 833 unless a step above landed elsewhere).
+3. The two test-count claims in the active governance documents are synchronized to the collected count (currently 1,099); this historical plan no longer owns those values.
 
 - [ ] **Step 3: Update `ARCHITECTURE.md`**
 
-1. Line 42 (pipeline map): change `(executive report — offline single-file HTML)` to `(executive report — offline single-file vanilla HTML/CSS/SVG, < 100 KB)`.
-2. Module table rows 287–291: `generate_dashboard.py` note gains `vanilla HTML/CSS/SVG, < 100 KB`; `dashboard_app.py` gains `native-Streamlit (no Plotly)`; `dashboard_ui/charts.py` row becomes `pure SVG geometry reference + metric-first payload builder (data_to_svg_path, svg_area_path, cumulative_series, drawdown_series, build_dashboard_payload); tested in tests/test_dashboard_ui.py; static/app.js mirrors the geometry client-side`; `dashboard_ui/report.py` row becomes `HTML report compiler — generate_dashboard / main; inlines static/{style.css, app.js, layout.html}; consumes nmr.dashboard + dashboard_ui.charts`.
-3. §W (lines 395–397): replace the tail sentence "`dashboard_ui/charts.py` adds the JS-controller multimetric chart (no `updatemenus`) and the similarity heatmap; `dashboard_ui/report.py` compiles the HTML (inlining `static/style.css`) and `dashboard_ui/app.py` renders the Streamlit views." with: "`dashboard_ui/charts.py` provides the tested SVG geometry reference + metric-first payload builder; `static/app.js` mirrors the geometry client-side and renders all charts (timeseries + stress spans, Sharpe leaderboard + CI whiskers + hurdle, similarity matrix, underwater drawdown); `dashboard_ui/report.py` compiles the single-file HTML (< 100 KB, inlining `static/{style.css, app.js, layout.html}`); `dashboard_ui/app.py` renders the Streamlit views natively (no Plotly). Presentation tests live in `tests/test_dashboard_ui.py`."
+1. Line 42 (pipeline map): change `(executive report — offline single-file HTML)` to `(executive report — offline single-file vanilla HTML/CSS/SVG, < 112 KiB)`.
+2. Module table rows 287–291: `generate_dashboard.py` note gains `vanilla HTML/CSS/SVG, < 112 KiB`; `dashboard_app.py` gains `native-Streamlit (no Plotly)`; `dashboard_ui/charts.py` row becomes `pure SVG geometry reference + metric-first payload builder (data_to_svg_path, svg_area_path, cumulative_series, drawdown_series, build_dashboard_payload); tested in tests/test_dashboard_ui.py; static/app.js mirrors the geometry client-side`; `dashboard_ui/report.py` row becomes `HTML report compiler — generate_dashboard / main; inlines static/{style.css, app.js, layout.html}; consumes nmr.dashboard + dashboard_ui.charts`.
+3. §W (lines 395–397): replace the tail sentence "`dashboard_ui/charts.py` adds the JS-controller multimetric chart (no `updatemenus`) and the similarity heatmap; `dashboard_ui/report.py` compiles the HTML (inlining `static/style.css`) and `dashboard_ui/app.py` renders the Streamlit views." with: "`dashboard_ui/charts.py` provides the tested SVG geometry reference + metric-first payload builder; `static/app.js` mirrors the geometry client-side and renders all charts (timeseries + stress spans, Sharpe leaderboard + CI whiskers + hurdle, similarity matrix, underwater drawdown); `dashboard_ui/report.py` compiles the single-file HTML (< 112 KiB, inlining `static/{style.css, app.js, layout.html}`); `dashboard_ui/app.py` renders the Streamlit views natively (no Plotly). Presentation tests live in `tests/test_dashboard_ui.py`."
 
 - [ ] **Step 4: Update `CONTRIBUTING.md` and `README.md`**
 
@@ -2211,7 +2211,7 @@ print(f'SUCCESS: {size_kb:.2f} KB, pure HTML/CSS/JS')
 "
 ```
 
-Expected: `SUCCESS: < ~100 KB, pure HTML/CSS/JS`. The artifact is gitignored — do not commit it. Open it in a browser and sanity-check the five sections render (charts + table + accordion).
+Expected: `SUCCESS: < ~112 KiB, pure HTML/CSS/JS`. The artifact is gitignored — do not commit it. Open it in a browser and sanity-check the five sections render (charts + table + accordion).
 
 - [ ] **Step 7: Full gate + commit**
 

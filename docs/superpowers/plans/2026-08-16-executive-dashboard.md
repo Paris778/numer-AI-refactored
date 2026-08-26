@@ -1,5 +1,9 @@
 # Executive Model Performance Report — Implementation Plan
 
+> **Historical record:** Superseded by `2026-08-18-vanilla-dashboard-design.md`; the original Plotly architecture and implementation steps below are retained only for audit history.
+
+> **Historical record:** Superseded by `2026-08-18-vanilla-dashboard-design.md`; the original Plotly architecture and implementation steps below are retained only for audit history.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Build a self-contained, offline HTML performance report (`artifacts/dashboard.html`) for the portfolio owner, driven by a new pure engine `nmr/dashboard.py`, a plotly chart layer `dashboard_charts.py`, a rewritten `generate_dashboard.py`, and a rewired `dashboard_app.py`.

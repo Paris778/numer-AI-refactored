@@ -1,8 +1,12 @@
 # SESSION COMPLETION REPORT — Dashboard Refactor (2026-08-24)
 
-**Status:** Phase 2 Complete | Phase 1 ✅ Verified  
-**Delivery:** Production-ready foundation for world-class dashboard  
-**Test Results:** 39/39 Tests Passing ✅
+> **Historical record:** This phase report describes the retired dashboard foundation
+> and its original 39-test scope. It is superseded by [DASHBOARD_DELIVERY_SUMMARY.md](DASHBOARD_DELIVERY_SUMMARY.md),
+> which records the current Model Tournament implementation and verification state.
+
+**Status:** Historical; superseded
+**Delivery:** Retired dashboard foundation
+**Test Results:** 39/39 tests passed in the original phase scope
 
 ---
 
@@ -346,5 +350,5 @@ tests/test_dashboard_charts_components.py (19 tests)
 
 **Prepared by:** AI Agent (Principal Frontend/Data Architect)  
 **Date:** 2026-08-24 Session End  
-**Confidence:** 100% (all claims verified by tests + end-to-end execution)  
+**Confidence:** Historical phase assessment only; see the current delivery summary for verified release confidence.
 **Recommended Next Step:** Phase 3 (Scenario Engine) — this is where the dashboard becomes "world-class"

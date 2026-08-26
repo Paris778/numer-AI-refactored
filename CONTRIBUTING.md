@@ -27,7 +27,7 @@ All code must follow the eight non-negotiable principles in [`AGENTS.md`](AGENTS
 ### Dependency pinning policy
 
 All direct dependencies in `requirements.txt` are exact-pinned (`==x.y.z`) to the
-versions in the verified venv (1093 tests currently collected; the real-data
+versions in the verified venv (1099 tests currently collected; the real-data
 parity fixtures may be environment-sensitive) after the 2026-08-19/20
 coverage-hardening + parity-depth + mutation-gate work). Upgrading a pin is a deliberate act, never a casual `pip install -U`:
 
@@ -68,6 +68,15 @@ Run the full gate after every change (from the repo root):
 ```
 
 CI (`.github/workflows/ci.yml`) runs `ruff check .` + `pytest -q` on Python 3.12 for every push/PR; real-data tests self-skip without `data/v5.3/`.
+
+When `dashboard_ui/static/app.js` or `style.css` changes, regenerate the committed
+production assets and offline report with the pinned tooling:
+
+```powershell
+npx --yes terser@5.50.0 dashboard_ui/static/app.js --compress passes=3 --mangle toplevel --format comments=false -o dashboard_ui/static/app.min.js
+npx --yes clean-css-cli@5.6.3 -O2 dashboard_ui/static/style.css -o dashboard_ui/static/style.min.css
+.\.venv\Scripts\python generate_dashboard.py
+```
 
 **End-of-session requirement:** at the end of a coding session (before stopping or handing off for review), re-run `ruff check .` and `pytest -q` on the final state and confirm both are clean. A session is not finished while the linter or test suite is dirty.
 

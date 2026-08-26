@@ -1,5 +1,9 @@
 # Executive Dashboard v2 — Multi-Metric Trajectory & Signal Diversification — Implementation Plan
 
+> **Historical record:** Superseded by `2026-08-18-vanilla-dashboard-design.md`; the original Plotly architecture and implementation steps below are retained only for audit history.
+
+> **Historical record:** Superseded by `2026-08-18-vanilla-dashboard-design.md`; the original Plotly architecture and implementation steps below are retained only for audit history.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Evolve the shipped executive report (`artifacts/dashboard.html`) with a 7-metric interactive trajectory chart (embedded vanilla-JS controller) and a pairwise signal-similarity matrix with diversification badge and ensemble-Sharpe card.

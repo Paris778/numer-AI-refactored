@@ -1,5 +1,9 @@
 # Front-End Isolation (`dashboard_ui/`) Implementation Plan
 
+> **Historical record:** Superseded by `2026-08-18-vanilla-dashboard-design.md` and the current repository contracts in `AGENTS.md`, `ARCHITECTURE.md`, and `CONTRIBUTING.md`. The original Plotly architecture and test-count estimates below are not active guidance.
+
+> **Historical record:** Superseded by `2026-08-18-vanilla-dashboard-design.md` and the current repository contracts in `AGENTS.md`, `ARCHITECTURE.md`, and `CONTRIBUTING.md`. The original Plotly architecture and 816-test estimate below are not active guidance.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Consolidate all presentation code into one dedicated top-level `dashboard_ui/` package (`charts.py`, `report.py`, `app.py` + `static/{style.css, app.js}`), turn the two entry scripts into thin wrappers, delete `dashboard_charts.py`, and re-point the SSOT docs — with byte-identical rendered output.

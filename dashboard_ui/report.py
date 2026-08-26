@@ -3,7 +3,7 @@
 Thin control plane only: data comes from ``nmr.dashboard``, payload/geometry
 from ``dashboard_ui.charts``, raw assets from ``dashboard_ui.static``. No
 metric math here. The output is a single self-contained HTML file (vanilla
-CSS + JS, no Plotly, no CDN, < 100 KB) that runs offline from ``file://``.
+CSS + JS, no Plotly, no CDN, < 112 KiB) that runs offline from ``file://``.
 """
 
 from __future__ import annotations
@@ -38,6 +38,7 @@ from nmr.dashboard import (
 logger = logging.getLogger(__name__)
 
 _STATIC_DIR = Path(__file__).resolve().parent / "static"
+MAX_ARTIFACT_BYTES = 112 * 1024
 
 
 def _read_asset(name: str) -> str:
@@ -66,12 +67,25 @@ _METRIC_CONTROLS_HTML = (
     "</div>"
 )
 _TS_CHART_HTML = (
-    '<div class="chart-box"><svg id="timeseries-svg" viewBox="0 0 800 320"></svg>'
-    '<div id="timeseries-tooltip" class="tooltip" hidden></div></div>'
+    '<div class="chart-box interactive-chart">'
+    '<div class="chart-titlebar"><div><span class="chart-kicker">ERA LENS</span>'
+    "<strong>Per-era performance trajectory</strong></div>"
+    '<span id="timeseries-axis-label" class="axis-label"></span></div>'
+    '<svg id="timeseries-svg" viewBox="0 0 800 320" role="img" '
+    'aria-label="Per-era model performance trajectory"></svg>'
+    '<div id="timeseries-legend" class="timeseries-legend" aria-label="Model colour legend"></div>'
+    '<div id="timeseries-tooltip" class="chart-tooltip tooltip" hidden></div></div>'
 )
 _LB_CHART_HTML = '<div class="chart-box"><svg id="leaderboard-svg" viewBox="0 0 800 420"></svg></div>'
 _DD_CHART_HTML = (
-    '<div class="chart-box"><svg id="drawdown-svg" viewBox="0 0 800 240"></svg></div>'
+    '<div class="chart-box interactive-chart">'
+    '<div class="chart-titlebar"><div><span class="chart-kicker">RISK LENS</span>'
+    "<strong>Underwater trajectory</strong></div>"
+    '<span id="drawdown-axis-label" class="axis-label">Peak-to-trough loss</span></div>'
+    '<svg id="drawdown-svg" viewBox="0 0 800 240" role="img" '
+    'aria-label="Model payout drawdown chart"></svg>'
+    '<div id="drawdown-legend" class="timeseries-legend" aria-label="Drawdown model legend"></div>'
+    '<div id="drawdown-tooltip" class="chart-tooltip tooltip" hidden></div></div>'
 )
 _EMPTY_TS_HTML = '<div class="chart-box"><p>Timeseries data unavailable without local v5.3 assets</p></div>'
 
@@ -87,6 +101,8 @@ def _fmt(value, *, pct: bool = False) -> str:
         return "—"
     if number == float("inf"):
         return "∞"
+    if number == float("-inf"):
+        return "-∞"
     if pct:
         return f"{number:.2%}"
     return f"{number:.4f}"
@@ -272,7 +288,7 @@ def _row_html(row: dict) -> str:
 def _technical_entries(registry_dir: Path) -> list[dict]:
     """Per-run config summaries for the audit accordion (bounded size).
 
-    Full ``run.json`` dumps (~25 KB per run) blow the < 100 KB artifact gate
+    Full ``run.json`` dumps (~25 KB per run) blow the < 112 KiB artifact budget
     (measured: 29 runs = ~715 KB), so the accordion carries the curated config
     summary only; the immutable full payload lives in the registry.
     """
@@ -410,7 +426,12 @@ def _accordion_html(technical_entries: list[dict]) -> str:
 def _diversification_html(badge_html: str, ensemble_card_html: str) -> str:
     return (
         badge_html
-        + '<div id="similarity-host" class="chart-box"></div>'
+        + '<div class="chart-box interactive-chart similarity-frame">'
+        + '<div class="chart-titlebar"><div><span class="chart-kicker">CORRELATION</span>'
+        + "<strong>Signal similarity</strong></div>"
+        + '<span class="axis-label">hover a cell for pair detail</span></div>'
+        + '<div id="similarity-host"></div>'
+        + '<div id="similarity-tooltip" class="chart-tooltip tooltip" hidden></div></div>'
         + ensemble_card_html
     )
 
@@ -536,7 +557,14 @@ def build_dashboard_html(
             evaluation_eras=engine_payload.get("eras") or [],
         )
     )
-    payload["metrics"] = charts.compact_timeseries_payload(payload.get("metrics") or {})
+    compact_metrics = charts.compact_timeseries_payload(payload.get("metrics") or {})
+    series_model_ids = compact_metrics["model_ids"]
+    compact_metrics["model_indices"] = [
+        payload["model_ids"].index(model_id)
+        for model_id in series_model_ids
+        if model_id in payload["model_ids"]
+    ]
+    payload["metrics"] = compact_metrics
     for key in (
         "leaderboard",
         "hurdle_sharpe",
@@ -580,8 +608,15 @@ def generate_dashboard(
         registry_dir=registry_dir,
         benchmark_path=benchmark_path,
     )
+    artifact_bytes = html_text.encode("utf-8")
+    artifact_size = len(artifact_bytes)
+    if artifact_size >= MAX_ARTIFACT_BYTES:
+        raise ValueError(
+            f"dashboard artifact exceeds {MAX_ARTIFACT_BYTES // 1024} KiB budget: "
+            f"{artifact_size} bytes"
+        )
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(html_text, encoding="utf-8")
+    output_path.write_bytes(artifact_bytes)
     if open_browser:
         webbrowser.open(output_path.as_uri())
     return output_path

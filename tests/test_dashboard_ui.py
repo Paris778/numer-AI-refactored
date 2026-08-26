@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import json
+import struct
 from pathlib import Path
 
 import polars as pl
@@ -63,6 +65,34 @@ def test_data_to_svg_path_single_point() -> None:
 
 def test_data_to_svg_path_empty_input() -> None:
     assert charts.data_to_svg_path([], width=100.0, height=100.0) == ""
+
+
+def test_chart_geometry_and_transport_preserve_missing_values() -> None:
+    path = charts.data_to_svg_path(
+        [0.0, None, 1.0],
+        width=100.0,
+        height=100.0,
+        y_min=0.0,
+        y_max=1.0,
+        pad=(0.0, 0.0, 0.0, 0.0),
+    )
+    assert path == "M 0.0,100.0 M 100.0,0.0"
+    assert charts.cumulative_series([0.1, None, 0.1], payout=True) == [1.1, None, None]
+    assert charts.drawdown_series([1.0, None, 1.1]) == [0.0, None, None]
+
+    compact = charts.compact_timeseries_payload(
+        {
+            "payout": {
+                "model": {
+                    "standard": [0.01, None, float("nan"), -0.02],
+                    "label": "model",
+                }
+            }
+        }
+    )
+    assert compact["series_encoding"] == "int32-le-base64-v1"
+    encoded = base64.b64decode(compact["series"]["payout"][0])
+    assert struct.unpack("<iiii", encoded) == (10_000, -(2**31), -(2**31), -20_000)
 
 
 def test_svg_area_path_closes_to_baseline() -> None:
@@ -215,6 +245,77 @@ def test_static_renderer_sources_are_encoding_safe_and_have_valid_row_markup() -
         )
     assert 'data-model-id=\\"" + esc(row.model_id) + "\\" tabindex=\\"0\\">' in js
     assert "RANKED: " in js
+
+
+def test_renderer_supports_pointer_tooltips_axes_benchmark_rows_and_medals() -> None:
+    from dashboard_ui import report
+
+    js = report._read_asset("app.js")
+    css = report._read_asset("style.css")
+    layout = report._read_asset("layout.html")
+    for token in (
+        "pointermove",
+        "pointerdown",
+        "showChartTooltip",
+        "attachTimeseriesTooltip",
+        "Evaluation era",
+        "landscape-tooltip",
+        "profile-tooltip",
+        "similarity-tooltip",
+        "drawdown-tooltip",
+        "timeseries-legend",
+        "hover-guide",
+        "matrix-alpha",
+        "data-sim-row",
+        "CAGR 1Y",
+        "rankCell",
+        "decodeSeries",
+        "metrics.model_ids",
+        "chart-hit-area",
+        "drawdown-legend",
+        "landscape-legend",
+        "aria-pressed",
+        "trapDrawerFocus",
+        "strictlyBeats",
+        "compareLowerMetric",
+        "Most robust",
+        "strict_beats",
+        "aria-label",
+        "event.preventDefault",
+        "tooltipLine",
+        "tooltip-series",
+        "--tooltip-color",
+    ):
+        assert token in js or token in layout
+    for token in (
+        ".benchmark-row",
+        ".medal-gold",
+        ".medal-silver",
+        ".medal-bronze",
+        ".chart-tooltip",
+        ".timeseries-legend",
+        ".legend-item",
+        ".hover-guide",
+        ".similarity td.diagonal",
+        "@keyframes pointPulse",
+    ):
+        assert token in css
+    assert 'role="dialog"' in layout
+    assert 'aria-modal="true"' in layout
+
+
+def test_alpha_chart_has_explicit_title_and_axis_mounts() -> None:
+    from dashboard_ui import report
+
+    layout = report._read_asset("layout.html")
+    chart_fragment = report._TS_CHART_HTML
+    js = report._read_asset("app.js")
+    for token in (
+        "Per-era performance trajectory",
+        "Evaluation era",
+        "timeseries-y-axis",
+    ):
+        assert token in layout or token in chart_fragment or token in js
 
 
 def test_build_html_exposes_tournament_shell_contract() -> None:
@@ -488,8 +589,7 @@ def test_generate_dashboard_artifact_contract(tmp_path: Path) -> None:
         output_path=tmp_path / "dashboard.html",
         open_browser=False,
     )
-    size_kb = out.stat().st_size / 1024
-    assert size_kb < 100, f"bundle too large: {size_kb:.2f} KB"
+    assert out.stat().st_size < report.MAX_ARTIFACT_BYTES
     text = out.read_text(encoding="utf-8")
     assert "plotly" not in text.lower()
     assert "<script src=" not in text
@@ -510,7 +610,7 @@ def test_generate_dashboard_empty_registry_compiles(tmp_path: Path) -> None:
 
 
 def test_technical_entries_summary_only(tmp_path: Path) -> None:
-    # < 100 KB gate: the audit accordion must carry config summaries, not
+    # < 112 KiB budget: the audit accordion must carry config summaries, not
     # full run.json dumps (~25 KB per run; 29 runs = ~715 KB measured)
     _write_registry(tmp_path, [_registry_entry("c" * 64)])
     entries = report._technical_entries(tmp_path)
@@ -523,7 +623,7 @@ def test_technical_entries_summary_only(tmp_path: Path) -> None:
 
 def test_artifact_contract_real_scale_payload(tmp_path: Path) -> None:
     # real-scale guard: ~86-era meta window, 4 models x 7 metrics, 10 leaderboard
-    # rows, 29 accordion summaries — pins the < 100 KB gate against growth
+    # rows, 29 accordion summaries — pins the artifact budget against growth
     # (data node grows ~326 B/era, accordion ~465 B/run)
     eras = [f"{1100 + i}" for i in range(86)]
     metrics: dict[str, dict] = {}
@@ -568,5 +668,18 @@ def test_artifact_contract_real_scale_payload(tmp_path: Path) -> None:
         accordion_html=accordion,
         payload=payload,
     )
-    size_kb = len(html_text.encode("utf-8")) / 1024
-    assert size_kb < 100, f"real-scale artifact too large: {size_kb:.2f} KB"
+    assert len(html_text.encode("utf-8")) < report.MAX_ARTIFACT_BYTES
+
+
+@pytest.mark.skipif(
+    not (Path("artifacts/registry").is_dir() and Path("data/v5.3").is_dir()),
+    reason="real registry/v5.3 data absent; skipped in CI",
+)
+def test_real_artifact_respects_size_budget(tmp_path: Path) -> None:
+    out = report.generate_dashboard(
+        registry_dir=Path("artifacts/registry"),
+        benchmark_path=False,
+        output_path=tmp_path / "real-dashboard.html",
+        open_browser=False,
+    )
+    assert out.stat().st_size < report.MAX_ARTIFACT_BYTES

@@ -1,19 +1,19 @@
 # Pure Vanilla HTML/CSS/SVG Executive Dashboard — Design Spec
 
-> **Date:** 2026-08-18 · **Status:** Approved for implementation
-> **Supersedes:** the Plotly embedding portions of `2026-08-16-executive-dashboard-design.md` and `2026-08-16-executive-dashboard-v2-design.md` (historical records, unchanged). The `nmr/dashboard.py` engine contract is preserved verbatim; only the presentation layer is replaced.
+> **Date:** 2026-08-18 · **Status:** Implemented; current contract
+> **Supersedes:** the Plotly embedding portions of `2026-08-16-executive-dashboard-design.md` and `2026-08-16-executive-dashboard-v2-design.md` (historical records). The `nmr/dashboard.py` engine remains renderer-neutral; presentation and missing-data alignment are implemented here.
 
 ---
 
 ## 1. Mission
 
-Completely eliminate Plotly (the Python package, the `get_plotlyjs()` bundle embed, and every legacy charting wrapper) from the repository. Replace the executive dashboard's presentation layer with an isolated, zero-dependency Vanilla HTML/CSS/SVG front-end that compiles into `artifacts/dashboard.html` at **< 100 KB** — double-clickable offline, deterministic, and with all chart geometry math covered by pytest.
+Completely eliminate Plotly (the Python package, the `get_plotlyjs()` bundle embed, and every legacy charting wrapper) from the repository. Replace the executive dashboard's presentation layer with an isolated, zero-runtime-dependency Vanilla HTML/CSS/SVG front-end that compiles into `artifacts/dashboard.html` at **< 112 KiB** — double-clickable offline, deterministic, and with all chart geometry math covered by pytest.
 
 ## 2. Non-Negotiable Invariants
 
-1. **Zero external visual dependencies.** No `plotly` import anywhere (code *and* tests); no CDN `<script src>` tags; no npm/Node toolchains; no bundled charting libraries. `plotly==6.6.0` is removed from `requirements.txt` in the same commit that stops importing it.
+1. **Zero external visual dependencies at runtime.** No `plotly` import anywhere (code *and* tests); no CDN `<script src>` tags; no bundled charting libraries. The pinned Terser and CleanCSS commands in `CONTRIBUTING.md` are build-time asset tooling only. `plotly==6.6.0` is removed from `requirements.txt` in the same commit that stops importing it.
 2. **Double-clickable `file://` portability.** `artifacts/dashboard.html` runs standalone: single file, inline CSS + JS, no network requests, no CORS restrictions, no server.
-3. **Front-end isolation.** All raw web assets (HTML scaffold, CSS, JS) live in `dashboard_ui/static/`; presentation logic lives in `dashboard_ui/`. `nmr/` never imports plotly/streamlit (unchanged) and `nmr/dashboard.py` is **untouched** by this work.
+3. **Front-end isolation.** All raw web assets (HTML scaffold, CSS, JS) live in `dashboard_ui/static/`; presentation logic lives in `dashboard_ui/`. `nmr/` never imports plotly/streamlit; `nmr/dashboard.py` owns the renderer-neutral alignment contract consumed here.
 4. **Tested boundary.** Every metric/formula stays in `nmr/` (unchanged). Chart geometry math has a pure Python reference implementation in `dashboard_ui/charts.py` that pytest asserts against; `app.js` mirrors the same algorithms client-side (the repo has no JS test runner — decision #7).
 5. **Deterministic artifacts.** No wall-clock timestamps, no absolute paths, sorted-key JSON, fixed templates and static assets ⇒ byte-identical output for identical registry/data state.
 6. **Hard gates.** Every commit passes `ruff check .` + `pytest -q`. Test count claims in `AGENTS.md` (two places) and `CONTRIBUTING.md` are updated in the same commit that changes the collected count (`tests/test_docs_hygiene.py` enforces this).
@@ -48,7 +48,7 @@ tests/
 
 - #1 **Front-end home:** extend the existing `dashboard_ui/` package. The just-merged isolation refactor already placed all presentation code there; a parallel `templates/dashboard/` would split the front-end across two homes. The spec's `templates/dashboard/` alternative is rejected in favor of `dashboard_ui/static/` as the raw-assets location.
 - #2 **Streamlit survives, natively.** The interactive research view stays (documented tool), rewritten without Plotly: `st.bar_chart`, `st.scatter_chart`, and a pandas `Styler.background_gradient` heatmap in `st.dataframe`. `streamlit` remains a pinned user-granted dependency; `plotly` is removed.
-- #3 **`nmr/dashboard.py` untouched.** It already emits plotly-free raw data (eras, metrics, drawdowns, matrix, gate status, KPIs). Presentation geometry is not an engine concern.
+- #3 **`nmr/dashboard.py` remains renderer-neutral.** It emits plotly-free raw data (eras, metrics, drawdowns, matrix, gate status, KPIs); absent aligned eras remain unavailable rather than being coerced to zero. Presentation geometry is not an engine concern.
 - #4 **Test split:** `tests/test_dashboard.py` shrinks to engine-only tests; new `tests/test_dashboard_ui.py` owns all presentation-layer tests (geometry reference math, payload contract, HTML compiler, artifact contract). Net count change synced to docs in the same commit.
 
 ## 4. Data Payload Contract (`dashboard-data`)
@@ -77,7 +77,7 @@ tests/
 **Rules:**
 
 - **Metric-first hierarchy.** `metrics` is keyed `metrics[metric_name][run_id]`, **identical to `nmr.dashboard.extract_multimetric_timeseries` output — `build_dashboard_payload` performs no key regrouping**, so `app.js` indexes `payload.metrics[currentMetric][model_id]` (this is also what the v2 controller already does; the review's initial model-first sketch was inverted and is rejected).
-- **Standard arrays only.** Cumulative series and drawdowns are *derived client-side* (decision #7) — this halves the payload and is what keeps the total artifact under the **< 100 KB** hard gate.
+- **Standard arrays only.** Cumulative series and drawdowns are *derived client-side* (decision #7); production transport packs standard arrays as deterministic signed-32-bit base64 with an explicit missing sentinel.
 - **Derivation rules:** payout cumulative = `cumprod(1 + r_t)`; correlation-family cumulative = `cumsum(rho_t)`; drawdown = `wealth / peak - 1` (peak = `np.maximum.accumulate`). The Python reference (`cumulative_series`, `drawdown_series`) is asserted against `nmr.dashboard._cumulative_from_standard` in tests (parity, decision #8).
 - Serialization: `sort_keys=True`, `allow_nan=False` (fail loud on non-finite), `</` → `<\/` escaping. No wall-clock fields, no absolute paths.
 - Empty registry / missing v5.3 assets degrade to the existing empty-payload shape; charts render the "Timeseries data unavailable without local v5.3 assets" placeholder (never raise).
@@ -121,7 +121,7 @@ $$y_i = \text{pad}_{\text{top}} + \left(1 - \frac{v_i - y_{\min}}{y_{\max} - y_{
 
 `layout.html` holds the semantic scaffold with the spec's placeholders: `{{ KPI_CARDS }}`, `{{ METRIC_CONTROLS }}`, `{{ TIMESERIES_SVG }}`, `{{ LEADERBOARD_SVG }}`, `{{ DIVERSIFICATION_SECTION }}`, `{{ DECISION_TABLE }}`, `{{ DRAWDOWN_SVG }}`, `{{ AUDIT_ACCORDION }}`, `{{ INLINE_DATA_SCRIPT }}`.
 
-`report.py` compiles: formats the template, inlines `style.css` + `app.js`, injects the `dashboard-data` node, and server-renders the deterministic slots — KPI cards, decision table rows (badges, `gate-fail` tinting, `FULL` chips, group headers: Champion → Promoted Full → Fleet → Benchmark), diversification badge + ensemble card, technical accordion. All existing pure helpers (`_kpi_cards`, `_table_rows`, `_row_html`, `_technical_entries`, `_diversification_stats`, `_ensemble_sharpe`) are preserved as-is. The five report sections are preserved 1:1. **Amendment (2026-08-18):** the technical accordion carries per-run config summaries instead of full `run.json` dumps — full dumps (~25 KB/run, 29 runs ≈ 715 KB) blew the < 100 KB artifact gate; the immutable full payload remains in the registry.
+`report.py` compiles: formats the template, inlines `style.css` + `app.js`, injects the `dashboard-data` node, and server-renders the deterministic slots — KPI cards, decision table rows (badges, `gate-fail` tinting, `FULL` chips, group headers: Champion → Promoted Full → Fleet → Benchmark), diversification badge + ensemble card, technical accordion. All existing pure helpers (`_kpi_cards`, `_table_rows`, `_row_html`, `_technical_entries`, `_diversification_stats`, `_ensemble_sharpe`) are preserved as-is. The five report sections are preserved 1:1. **Amendment (2026-08-18):** the technical accordion carries per-run config summaries instead of full `run.json` dumps — full dumps (~25 KB/run, 29 runs ≈ 715 KB) exceed the 112 KiB artifact budget; the immutable full payload remains in the registry.
 
 **Portable asset resolution (P0):** static assets are anchored to the module location — `_STATIC_DIR = Path(__file__).resolve().parent / "static"` — so the compiler works from any CWD (this pattern already exists in `report.py`/`charts.py`; it is retained and made explicit in the new compiler).
 
@@ -153,7 +153,7 @@ Unchanged engine tests: payload extraction, gate status, capital reconcile, simi
    - Global-y-range helper: min/max computed across all series of a metric.
 2. **Payload contract:** `build_dashboard_payload` emits the exact schema; **metric-first parity** — payload `metrics` keys equal the engine's `extract_multimetric_timeseries` metric keys with per-model entries intact; leaderboard/similarity/hurdle/ensemble fields present; sorted-key JSON round-trips through the data node.
 3. **HTML compiler:** `_build_html`/`generate_dashboard()` output contains the five section headings, `id="dashboard-data"`, `class="badge"` pills, `gate-fail` tinting, group headers; escapes hostile strings (`<script>`, `"><img onerror>`); byte-deterministic across two calls; compiles when invoked from a different CWD (asset anchoring).
-4. **Artifact contract (hard gate):** `generate_dashboard()` writes the file; `size < 100 KB`; zero occurrences of `plotly` (case-insensitive); no `<script src=`; `id="dashboard-data"` present; report still compiles with an empty registry and with missing v5.3 assets.
+4. **Artifact contract (hard gate):** `generate_dashboard()` writes the file; `size < 112 KiB` enforced by `dashboard_ui.report.MAX_ARTIFACT_BYTES`; zero occurrences of `plotly` (case-insensitive); no `<script src=`; `id="dashboard-data"` present; report still compiles with an empty registry and with missing v5.3 assets.
 
 ### `tests/test_scripts.py`
 
@@ -164,7 +164,7 @@ Streamlit pure-helper tests unchanged; add the no-plotly-import guard for `dashb
 - `requirements.txt`: remove `plotly==6.6.0`.
 - **Plotly removal audit (P1):** after the rewrite, `grep -ri "plotly"` across the tree — the string may appear only in historical `docs/superpowers/` specs; **zero** imports or references in `dashboard_ui/`, `tests/`, `configs/`, and root scripts. (Pre-rewrite audit: references exist only in `tests/test_dashboard.py`, `dashboard_ui/{charts,app,report}.py`, and `requirements.txt` — all rewritten by this work; nothing in `tests/test_parity.py`, `tests/test_scripts.py`, or config files.)
 - `AGENTS.md`: dependency-exception line drops Plotly (keeps Streamlit, re-pointed at the native `dashboard_ui/app.py`); executive-dashboard toolkit row re-pointed at the new spec; test-count claims (two places) updated to the new collected count.
-- `ARCHITECTURE.md`: §W and the module table rows for `dashboard_ui/charts.py` / `report.py` / `app.py` — vanilla SVG rendering, native Streamlit, `< 100 KB` budget, `tests/test_dashboard_ui.py`.
+- `ARCHITECTURE.md`: §W and the module table rows for `dashboard_ui/charts.py` / `report.py` / `app.py` — vanilla SVG rendering, native Streamlit, `< 112 KiB` budget, `tests/test_dashboard_ui.py`.
 - `CONTRIBUTING.md`: test-count claim updated.
 - Old specs (`2026-08-16-executive-dashboard*.md`) remain as historical records; this spec supersedes their presentation decisions.
 
