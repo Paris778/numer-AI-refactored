@@ -1344,7 +1344,7 @@ git commit -m "refactor(families): wrapper over lifecycle; retarget meta/submiss
 def test_payload_carries_lifecycle(tmp_path, monkeypatch, synthetic_registry_with_export):
     payload = dash.build_tournament_payload(tmp_path / "experiments")
     family_row = next(r for r in payload["rows"] if r["family"] == "fam1")
-    assert family_row["lifecycle_stage"] in dash_lifecycle_stages()
+    assert family_row["lifecycle_stage"] in lifecycle.LIFECYCLE_STAGES
     assert family_row["display_name"]  # from meta.json
     partial_rows = [r for r in payload["rows"] if "::partial::" in r["model_id"]]
     assert partial_rows and all(r["source"] == "partial" for r in partial_rows)
