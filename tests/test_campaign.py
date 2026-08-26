@@ -107,10 +107,12 @@ def _stub_run(tmp_path, monkeypatch) -> None:
     # above only serves run_campaign's dedupe lookup. Stub both, or a
     # data-absent checkout (CI, containers) fails fingerprinting in __init__
     # and these tests pass locally only because data/v5.3 exists on disk.
+    # **kwargs absorbs the data_fingerprint kwarg the constructor now passes
+    # (Task 7: the run-id data term is computed once in __init__ and reused).
     monkeypatch.setattr(
         ExperimentRunner,
         "_compute_run_id",
-        staticmethod(lambda config: "a" * 64),
+        staticmethod(lambda config, **_: "a" * 64),
     )
 
 
@@ -246,7 +248,7 @@ def test_run_campaign_same_config_twice_dedupes_in_single_invocation(tmp_path, m
     monkeypatch.setattr(
         ExperimentRunner,
         "_compute_run_id",
-        staticmethod(lambda config: "a" * 64),
+        staticmethod(lambda config, **_: "a" * 64),
     )
     registry_dir = tmp_path / "registry"
     campaigns_dir = tmp_path / "campaigns"

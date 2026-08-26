@@ -30,7 +30,7 @@ These four files obey a strict **Single Source of Truth (SSOT) hierarchy**. One 
 
 ## 1. Agent Identity & Mission
 
-You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (1121 collected tests, sole functional gate) + `ruff check` (lint gate, `ruff.toml` E/F/I/UP @120, pinned in `requirements-dev.txt`). Both enforced by CI (`.github/workflows/ci.yml`).
+You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (1125 collected tests, sole functional gate) + `ruff check` (lint gate, `ruff.toml` E/F/I/UP @120, pinned in `requirements-dev.txt`). Both enforced by CI (`.github/workflows/ci.yml`).
 
 Your mission:
 
@@ -188,7 +188,7 @@ Four gates, in order of rigor — **exact commands live only in [`CONTRIBUTING.m
 
 1. **Fast gate** — `ruff check .` + full `pytest -q` after every meaningful change.
 2. **Targeted subsets** while iterating — oracle parity (`tests/test_parity.py` + `tests/test_risk_parity.py`) and determinism hashes (`tests/test_benchmark_hierarchy.py`).
-3. **Pre-sign-off gate** (mandatory before delivering work) — full 1121-test collection plus the real-data benchmark smoke (`benchmark_runner.py --fast-mode` → `artifacts/reports/benchmark_hierarchy_scorecard_smoke.csv` + `benchmark_gate_report_smoke.csv`).
+3. **Pre-sign-off gate** (mandatory before delivering work) — full 1125-test collection plus the real-data benchmark smoke (`benchmark_runner.py --fast-mode` → `artifacts/reports/benchmark_hierarchy_scorecard_smoke.csv` + `benchmark_gate_report_smoke.csv`).
 4. **End-of-session gate (mandatory)** — before stopping or handing off for review, run the linter and functional gate on the final state: `ruff check .` + `pytest -q`. Never end a session with unverified changes; report actual results, including skips or pre-existing failures.
 
 Real-data tests require the `data/v5.3/` parquet assets (see [`README.md`](README.md#data-assets)). If they are missing, report which tests were skipped — never claim full verification. CI (`.github/workflows/ci.yml`) enforces the fast gate on every push/PR (see [`CONTRIBUTING.md`](CONTRIBUTING.md#testing--verification)).
@@ -267,7 +267,7 @@ RETIRED (2026-08-26): the 29 pre-rebuild `artifacts/registry/` rows are gone —
 The standardized comparison window = meta overlap; refresh shifts it — regenerate `artifacts/dashboard.html` after every `refresh_data.py` run (definition + regeneration rule: `ARCHITECTURE.md` §W).
 
 ### OOF fold checkpoints (2026-08-20); deploy + validation checkpoints (2026-08-23)
-`ExperimentRunner` persists per-fold OOF parts under `artifacts/runs/<run_id>/oof_checkpoints/<target>/fold_NN.parquet` + a `manifest.json` recording code identity (SHA-256 of `nmr/models.py` + `nmr/splitter.py` + `nmr/runner.py`) and fit device. Resume loads existing folds; any code/device mismatch raises — delete the directory to force a full refit (never silently reuse stale OOF). The same identity-manifest discipline now covers the deploy fits (`deploy_checkpoints/<target>.pkl`) and the validation era-batch predicts (`validation_checkpoints/preds_batch_NN.parquet`); the final `evaluate_model` scorecard call stays uncheckpointed. Checkpoints are deleted with their run dir; clearing `artifacts/runs/` remains ask-first.
+`ExperimentRunner` persists per-fold OOF parts under `experiments/<slug>/runs/<run_id>/oof_checkpoints/<target>/fold_NN.parquet` + a `manifest.json` recording code identity (SHA-256 of `nmr/models.py` + `nmr/splitter.py` + `nmr/runner.py`) and fit device. Resume loads existing folds; any code/device mismatch raises — delete the directory to force a full refit (never silently reuse stale OOF). The same identity-manifest discipline now covers the deploy fits (`deploy_checkpoints/<target>.pkl`) and the validation era-batch predicts (`validation_checkpoints/preds_batch_NN.parquet`); the final `evaluate_model` scorecard call stays uncheckpointed. Checkpoints are deleted with their run dir; clearing `experiments/*/runs/` remains ask-first.
 
 ### Thread-pool caps must run at process start (2026-08-23)
 Heavy CLIs (`benchmark_runner.py`, `run_campaign.py`, `analyze_dataset.py`, `train_first_model.py`, `promote_model.py`, `rehearse_promotion.py`) call `nmr.hardware.apply_thread_limits()` as their first executable statement: it sets `POLARS_MAX_THREADS` / `OMP_NUM_THREADS` / `OPENBLAS_NUM_THREADS` / `MKL_NUM_THREADS` (env `NMR_MAX_THREADS`, default min(8, cores); user-set values win; invalid env raises). Never add imports before that call.
@@ -290,5 +290,5 @@ Heavy CLIs (`benchmark_runner.py`, `run_campaign.py`, `analyze_dataset.py`, `tra
 - 🚫 **Prohibited Commands:** Never execute `git push --force`, `git reset --hard` (without explicit user instruction), or recursive deletes on `data/`, `artifacts/registry/`, or `docs/`. Never delete `data/v5.3/` parquet assets — they are multi-GB local downloads not recoverable from git.
 - 🚫 **Environment Protection:** Never read, output, or write raw secret values (`.env`, numerapi keys) to logs or files.
 - ⏱️ **Execution Timeouts:** Full-preset training (`standard`/`deep`, 20k–30k trees) can run for hours. For verification use the `fast` preset, `--fast-mode` on the benchmark runner, or truncated era windows. If a command exceeds 300 seconds unexpectedly, terminate and inspect output.
-- 🧹 **Artifact Hygiene:** `artifacts/cache/`, `artifacts/runs/`, and `artifacts/registry/` are machine-generated. Clearing the neutralization cache is safe (it repopulates); clearing the registry destroys run history — ask first.
+- 🧹 **Artifact Hygiene:** `artifacts/cache/`, `experiments/*/runs/`, and `artifacts/registry/` are machine-generated. Clearing the neutralization cache is safe (it repopulates); clearing the registry destroys run history — ask first.
 </execution_safeguards>

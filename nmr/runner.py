@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 
-from nmr import _transforms
+from nmr import _transforms, paths
 from nmr._oof import (
     checkpoint_manifest,
     ensure_no_torn_tree,
@@ -249,7 +249,14 @@ class RunResult:
 class ExperimentRunner:
     def __init__(self, config: ExperimentConfig):
         self._config = config
-        self._run_id = self._compute_run_id(config)
+        # Rebuild identity (spec §3.1): persist the EXACT data fingerprint that
+        # enters the run_id hash. Computed once here so the manifest field can
+        # never drift from the run-id data term (a re-computation at run() time
+        # could differ if the data files change between construction and run).
+        self._data_fingerprint = _data_fingerprint(config)
+        self._run_id = self._compute_run_id(
+            config, data_fingerprint=self._data_fingerprint
+        )
 
     def run(self, *, deploy: bool = False) -> RunResult:
         requested_metrics = set(self._config.evaluation.metrics)
@@ -261,6 +268,10 @@ class ExperimentRunner:
             )
         logger.info("[run] starting experiment run_id=%s", self._run_id)
         set_global_seeds(self._config.run.seed)
+        # Experiment layout (spec §3): every runner output lives under
+        # experiments/<slug>/runs/<run_id>/; the slug is the validated run name.
+        slug = paths.validate_slug(self._config.run.name)
+        run_dir = paths.run_dir(slug, self._run_id)
 
         agent = IngestionAgent(self._config.data)
         feature_cols = agent.features(self._config.data.resolved_feature_set)
@@ -297,12 +308,7 @@ class ExperimentRunner:
             feature_cols=feature_cols,
             splitter=splitter,
             model_orchestrator=model_orchestrator,
-            checkpoint_dir=(
-                self._config.run.artifacts_dir
-                / "runs"
-                / self._run_id
-                / "oof_checkpoints"
-            ),
+            checkpoint_dir=(run_dir / "oof_checkpoints"),
         )
 
         joined = train_df.select(["id", "era", main_target, *feature_cols]).join(
@@ -407,12 +413,7 @@ class ExperimentRunner:
                 weights=weights,
                 proportion=neutralization_proportion,
                 data=self._config.data,
-                deploy_checkpoint_dir=(
-                    self._config.run.artifacts_dir
-                    / "runs"
-                    / self._run_id
-                    / "deploy_checkpoints"
-                ),
+                deploy_checkpoint_dir=(run_dir / "deploy_checkpoints"),
             )
 
         scorecard = None
@@ -423,12 +424,7 @@ class ExperimentRunner:
                 self._run_validation_stage(
                     predict_fn=pipeline[0],
                     feature_cols=feature_cols,
-                    validation_checkpoint_dir=(
-                        self._config.run.artifacts_dir
-                        / "runs"
-                        / self._run_id
-                        / "validation_checkpoints"
-                    ),
+                    validation_checkpoint_dir=(run_dir / "validation_checkpoints"),
                     checkpoint_device=(
                         str(model_orchestrator.resolved_device)
                         if model_orchestrator.resolved_device is not None
@@ -446,9 +442,7 @@ class ExperimentRunner:
             artifact = _serialize_predict_artifact(
                 predict_fn=pipeline[0],
                 model_meta=pipeline[1],
-                artifact_path=(
-                    self._config.run.artifacts_dir / "runs" / self._run_id / "predict.pkl"
-                ),
+                artifact_path=(run_dir / "predict.pkl"),
             )
             logger.info("[run] artifact written to %s", artifact.path)
 
@@ -463,8 +457,18 @@ class ExperimentRunner:
             "weight_learning_eras": weight_learning_eras,
             "scoring_eras": scoring_eras,
             "summary_metrics": summary_metrics,
-            "pipeline_device": self._config.model.device,
-            "oof_device": model_orchestrator.resolved_device,
+            # Rebuild identity (spec §3.1): data_fingerprint is the SAME value
+            # hashed into the run_id (computed once in __init__); code
+            # fingerprint/environment are the portable helpers (no paths);
+            # pipeline_device is the config knob, oof_device the actual fit
+            # device (post-fit resolved_device, config fallback).
+            "data_fingerprint": self._data_fingerprint,
+            "code_fingerprint": _compute_code_fingerprint(),
+            "environment": _portable_environment(),
+            "pipeline_device": str(self._config.model.device),
+            "oof_device": str(
+                model_orchestrator.resolved_device or self._config.model.device
+            ),
             # Present for every run whose validation/deploy closure ends with
             # the per-era (0,1) tie_kept_rank step. Absent in pre-fix legacy
             # rows: their max_feature_exposure was measured on unranked
@@ -472,8 +476,6 @@ class ExperimentRunner:
             # values (dashboard/meta null it with a documented reason).
             "scorecard_prediction_scale": "percentile_rank",
             "metrics": dataclasses.asdict(metrics),
-            "code_fingerprint": self._code_fingerprint(),
-            "environment": self._environment_fingerprint(self._config.model.backend),
             "validation_purge_dropped_first_eras": validation_purge,
         }
 
@@ -620,10 +622,15 @@ class ExperimentRunner:
         return scorecard, preds, purge
 
     @staticmethod
-    def _compute_run_id(config: ExperimentConfig) -> str:
+    def _compute_run_id(
+        config: ExperimentConfig, data_fingerprint: str | None = None
+    ) -> str:
         config_payload = _to_jsonable(dataclasses.asdict(config))
         _strip_path_dependent_fields(config_payload)
         supp_path = config.data.supplemental_feature_sets
+        if data_fingerprint is None:
+            # Public compute_run_id() path: derive the data snapshot here.
+            data_fingerprint = _data_fingerprint(config)
         payload: dict[str, Any] = {
             "config": config_payload,
             "data_version": config.data.version,
@@ -632,7 +639,7 @@ class ExperimentRunner:
             # content) — not the literal version string. Same config + same
             # data snapshot + same code + same env ⇒ same run_id, enforced on
             # the data term. See _data_fingerprint for detection limits.
-            "data_fingerprint": _data_fingerprint(config),
+            "data_fingerprint": data_fingerprint,
             "code_fingerprint": ExperimentRunner._code_fingerprint(),
             "environment": ExperimentRunner._environment_fingerprint(config.model.backend),
         }
@@ -669,16 +676,13 @@ class ExperimentRunner:
     def _code_fingerprint(package_dir: Path | None = None) -> str:
         """SHA256 over sorted ``nmr/*.py`` names+contents.
 
+        Delegates to the module-level :func:`_compute_code_fingerprint` — the
+        run manifest and the run-id code term always share one implementation.
         Line endings are normalized (CRLF -> LF) before hashing so a Windows
         checkout (autocrlf) and a POSIX checkout of the same commit produce
         the same fingerprint — otherwise run_ids diverge across machines.
         """
-        package_dir = package_dir or Path(__file__).resolve().parent
-        digest = hashlib.sha256()
-        for path in sorted(package_dir.glob("*.py")):
-            digest.update(path.name.encode("utf-8"))
-            digest.update(path.read_bytes().replace(b"\r\n", b"\n"))
-        return digest.hexdigest()
+        return _compute_code_fingerprint(package_dir)
 
     @staticmethod
     def _environment_fingerprint(backend: str | None = None) -> dict[str, Any]:
@@ -699,6 +703,50 @@ class ExperimentRunner:
             "python_version": platform.python_version(),
             "packages": packages,
         }
+
+
+def _compute_code_fingerprint(package_dir: Path | None = None) -> str:
+    """Portable SHA-256 over the nmr package sources (no paths, no timestamps).
+
+    Canonical rebuild-identity code fingerprint (spec §3.1): sorted
+    ``nmr/*.py`` file names + contents, with line endings normalized (CRLF ->
+    LF) so a Windows checkout (autocrlf) and a POSIX checkout of the same
+    commit hash identically. The run-id code term
+    (``ExperimentRunner._code_fingerprint``) and the persisted manifest field
+    both delegate here, so they can never drift apart. Note this is the
+    full-package identity — distinct from ``nmr/_oof.fitting_code_sha256``,
+    which covers only the fitting-code subset for checkpoint manifests.
+    """
+    package_dir = package_dir or Path(__file__).resolve().parent
+    digest = hashlib.sha256()
+    for path in sorted(package_dir.glob("*.py")):
+        digest.update(path.name.encode("utf-8"))
+        digest.update(path.read_bytes().replace(b"\r\n", b"\n"))
+    return digest.hexdigest()
+
+
+def _portable_environment() -> str:
+    """Normalized dependency identity — pinned package names + versions only.
+
+    Rebuild identity (spec §3.1): a sorted ``name==version`` list over the
+    requirements.txt pins (numpy, polars, lightgbm, xgboost, catboost, scipy,
+    numerai-tools, cloudpickle), with no paths or timestamps. Unlike the
+    run-id environment term (``ExperimentRunner._environment_fingerprint`` —
+    config-aware and dict-shaped for byte-compat with legacy run_ids), this is
+    the human-verifiable manifest record.
+    """
+    names = (
+        "numpy",
+        "polars",
+        "lightgbm",
+        "xgboost",
+        "catboost",
+        "scipy",
+        "numerai-tools",
+        "cloudpickle",
+    )
+    parts = [f"{name}=={_package_version(name)}" for name in names]
+    return ",".join(sorted(parts))
 
 
 def _build_deploy_pipeline(

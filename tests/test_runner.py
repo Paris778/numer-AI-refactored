@@ -9,6 +9,7 @@ import pandas as pd
 import polars as pl
 import pytest
 
+from nmr import paths
 from nmr.config import (
     DataConfig,
     EvalConfig,
@@ -22,6 +23,16 @@ from nmr.deployment import load_predict
 from nmr.models import ModelOrchestrator
 from nmr.runner import ExperimentRunner
 from nmr.splitter import PurgedEraSplitter
+
+
+@pytest.fixture(autouse=True)
+def _isolated_experiments_root(tmp_path, monkeypatch) -> None:
+    """Route runner outputs into a per-test experiments dir (never the repo root).
+
+    Task 7: the runner writes under ``paths.run_dir(slug, run_id)`` = the module
+    EXPERIMENTS_ROOT; tests must never touch (or pollute) the real repo root.
+    """
+    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", tmp_path / "experiments")
 
 
 def _build_train_frame() -> pl.DataFrame:
@@ -615,14 +626,18 @@ run:
         encoding="utf-8",
     )
 
-    def _run_script(artifacts_dir) -> str:
+    def _run_script(artifacts_dir, experiments_root) -> str:
         code = f"""
 import dataclasses
 import hashlib
 import json
+from pathlib import Path
 
+import nmr.paths as nmr_paths
 from nmr.config import ExperimentConfig, RunConfig, load_config
 from nmr.runner import ExperimentRunner
+
+nmr_paths.EXPERIMENTS_ROOT = Path({str(experiments_root)!r})
 
 cfg = load_config({str(tmp_path / "config.yaml")!r})
 cfg = ExperimentConfig(
@@ -658,10 +673,12 @@ print(
             [sys.executable, "-c", code], capture_output=True, text=True, check=True
         ).stdout.strip()
 
-    # Distinct artifact dirs per process (the path is stripped from run_id;
-    # path-independence is covered by the dedicated run_id tests above).
-    run1 = _run_script(tmp_path / "artifacts_a")
-    run2 = _run_script(tmp_path / "artifacts_b")
+    # Distinct artifact dirs AND distinct experiments roots per process
+    # (both are stripped from run_id; path-independence is covered by the
+    # dedicated run_id tests above). Shared checkpoints would resume instead
+    # of fit, and the [fit] progress prints would differ across stdout.
+    run1 = _run_script(tmp_path / "artifacts_a", tmp_path / "exp_a")
+    run2 = _run_script(tmp_path / "artifacts_b", tmp_path / "exp_b")
     assert run1 == run2
 
 
@@ -821,8 +838,9 @@ def test_runner_writes_and_reuses_oof_checkpoints(tmp_path, caplog) -> None:
     """Runner wiring: OOF folds are checkpointed under the run dir and a
     second run over the same config+data (same run_id) resumes them
     bit-for-bit instead of refitting (spec 2026-08-20-oof-checkpoint-resume)."""
-    result1 = ExperimentRunner(_config(tmp_path)).run(deploy=False)
-    ckpt_root = tmp_path / "artifacts" / "runs" / result1.run_id / "oof_checkpoints"
+    cfg = _config(tmp_path)
+    result1 = ExperimentRunner(cfg).run(deploy=False)
+    ckpt_root = paths.run_dir(cfg.run.name, result1.run_id) / "oof_checkpoints"
     assert (ckpt_root / "manifest.json").exists()
     assert sorted(p.name for p in (ckpt_root / "target").glob("fold_*.parquet"))
     caplog.clear()
@@ -844,8 +862,9 @@ def test_deploy_checkpoints_written_and_mixed_resume_bit_for_bit(tmp_path, caplo
         index=[f"id_{i}" for i in range(6)],
     )
 
-    first = ExperimentRunner(_config(tmp_path)).run(deploy=True)
-    ckpt_root = tmp_path / "artifacts" / "runs" / first.run_id / "deploy_checkpoints"
+    cfg = _config(tmp_path)
+    first = ExperimentRunner(cfg).run(deploy=True)
+    ckpt_root = paths.run_dir(cfg.run.name, first.run_id) / "deploy_checkpoints"
     assert (ckpt_root / "manifest.json").exists()
     assert sorted(p.name for p in ckpt_root.glob("*.pkl")) == [
         "target.pkl",
@@ -869,8 +888,9 @@ def test_deploy_checkpoints_written_and_mixed_resume_bit_for_bit(tmp_path, caplo
 
 def test_deploy_checkpoint_code_mismatch_raises(tmp_path) -> None:
     """Deploy manifest identity: a changed fitting-code sha must fail loudly."""
-    first = ExperimentRunner(_config(tmp_path)).run(deploy=True)
-    ckpt_root = tmp_path / "artifacts" / "runs" / first.run_id / "deploy_checkpoints"
+    cfg = _config(tmp_path)
+    first = ExperimentRunner(cfg).run(deploy=True)
+    ckpt_root = paths.run_dir(cfg.run.name, first.run_id) / "deploy_checkpoints"
     manifest_path = ckpt_root / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["code_sha256"] = "0" * 64
@@ -882,8 +902,9 @@ def test_deploy_checkpoint_code_mismatch_raises(tmp_path) -> None:
 def test_deploy_checkpoint_unknown_device_raises(tmp_path) -> None:
     """Deploy manifest identity: a device outside the known fit devices is
     rejected loudly even while the device is unresolved at resume entry."""
-    first = ExperimentRunner(_config(tmp_path)).run(deploy=True)
-    ckpt_root = tmp_path / "artifacts" / "runs" / first.run_id / "deploy_checkpoints"
+    cfg = _config(tmp_path)
+    first = ExperimentRunner(cfg).run(deploy=True)
+    ckpt_root = paths.run_dir(cfg.run.name, first.run_id) / "deploy_checkpoints"
     manifest_path = ckpt_root / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["device"] = "totally_different_device"
@@ -897,8 +918,9 @@ def test_deploy_checkpoint_device_exact_mismatch_on_refit_raises(tmp_path) -> No
     (the device is only known post-fit): a stored 'gpu' device (deploy fits
     are CPU-only) must fail the exact compare when a missing .pkl forces a
     refit, instead of passing vacuously on the all-loaded path."""
-    first = ExperimentRunner(_config(tmp_path)).run(deploy=True)
-    ckpt_root = tmp_path / "artifacts" / "runs" / first.run_id / "deploy_checkpoints"
+    cfg = _config(tmp_path)
+    first = ExperimentRunner(cfg).run(deploy=True)
+    ckpt_root = paths.run_dir(cfg.run.name, first.run_id) / "deploy_checkpoints"
     manifest_path = ckpt_root / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["device"] = "gpu"
@@ -910,8 +932,9 @@ def test_deploy_checkpoint_device_exact_mismatch_on_refit_raises(tmp_path) -> No
 
 def test_deploy_checkpoint_torn_tree_raises(tmp_path) -> None:
     """Pickled models without a manifest.json are an inconsistent state."""
-    first = ExperimentRunner(_config(tmp_path)).run(deploy=True)
-    ckpt_root = tmp_path / "artifacts" / "runs" / first.run_id / "deploy_checkpoints"
+    cfg = _config(tmp_path)
+    first = ExperimentRunner(cfg).run(deploy=True)
+    ckpt_root = paths.run_dir(cfg.run.name, first.run_id) / "deploy_checkpoints"
     (ckpt_root / "manifest.json").unlink()
     with pytest.raises(ValueError, match="no manifest.json"):
         ExperimentRunner(_config(tmp_path)).run(deploy=True)
@@ -920,8 +943,9 @@ def test_deploy_checkpoint_torn_tree_raises(tmp_path) -> None:
 def test_deploy_checkpoint_corrupt_pkl_raises(tmp_path) -> None:
     """A corrupted pickled model must fail loudly with the path, never
     silently refit or produce garbage predictions."""
-    first = ExperimentRunner(_config(tmp_path)).run(deploy=True)
-    ckpt_root = tmp_path / "artifacts" / "runs" / first.run_id / "deploy_checkpoints"
+    cfg = _config(tmp_path)
+    first = ExperimentRunner(cfg).run(deploy=True)
+    ckpt_root = paths.run_dir(cfg.run.name, first.run_id) / "deploy_checkpoints"
     (ckpt_root / "target.pkl").write_bytes(b"garbage")
     with pytest.raises(ValueError, match="corrupt deploy checkpoint"):
         ExperimentRunner(_config(tmp_path)).run(deploy=True)
@@ -930,8 +954,9 @@ def test_deploy_checkpoint_corrupt_pkl_raises(tmp_path) -> None:
 def test_deploy_checkpoint_dir_only_created_when_pipeline_built(tmp_path) -> None:
     """The deploy checkpoint dir is created only when the deploy pipeline is
     built (deploy=True or validation_scorecard=True)."""
-    result = ExperimentRunner(_config(tmp_path)).run(deploy=False)
-    run_dir = tmp_path / "artifacts" / "runs" / result.run_id
+    cfg = _config(tmp_path)
+    result = ExperimentRunner(cfg).run(deploy=False)
+    run_dir = paths.run_dir(cfg.run.name, result.run_id)
     assert (run_dir / "oof_checkpoints").exists()
     assert not (run_dir / "deploy_checkpoints").exists()
 
@@ -1019,7 +1044,7 @@ def test_validation_checkpoints_mixed_resume_bit_for_bit(tmp_path, caplog) -> No
     )
 
     first = ExperimentRunner(cfg).run(deploy=False)
-    ckpt_root = tmp_path / "artifacts" / "runs" / first.run_id / "validation_checkpoints"
+    ckpt_root = paths.run_dir(cfg.run.name, first.run_id) / "validation_checkpoints"
     assert (ckpt_root / "manifest.json").exists()
     assert sorted(p.name for p in ckpt_root.glob("preds_batch_*.parquet")) == [
         "preds_batch_00.parquet",
@@ -1045,7 +1070,7 @@ def test_validation_checkpoint_code_mismatch_raises(tmp_path) -> None:
     """Validation manifest identity: a changed fitting-code sha must fail loudly."""
     cfg = _validation_checkpoint_config(tmp_path)
     first = ExperimentRunner(cfg).run(deploy=False)
-    ckpt_root = tmp_path / "artifacts" / "runs" / first.run_id / "validation_checkpoints"
+    ckpt_root = paths.run_dir(cfg.run.name, first.run_id) / "validation_checkpoints"
     manifest_path = ckpt_root / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["code_sha256"] = "0" * 64
@@ -1059,7 +1084,7 @@ def test_validation_checkpoint_unknown_device_raises(tmp_path) -> None:
     rejected loudly even while the device is unresolved at resume entry."""
     cfg = _validation_checkpoint_config(tmp_path)
     first = ExperimentRunner(cfg).run(deploy=False)
-    ckpt_root = tmp_path / "artifacts" / "runs" / first.run_id / "validation_checkpoints"
+    ckpt_root = paths.run_dir(cfg.run.name, first.run_id) / "validation_checkpoints"
     manifest_path = ckpt_root / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["device"] = "totally_different_device"
@@ -1074,7 +1099,7 @@ def test_validation_checkpoint_device_exact_mismatch_on_resume_raises(tmp_path) 
     resume must fail the exact compare instead of passing vacuously."""
     cfg = _validation_checkpoint_config(tmp_path)  # device pinned to "cpu"
     first = ExperimentRunner(cfg).run(deploy=False)
-    run_dir = tmp_path / "artifacts" / "runs" / first.run_id
+    run_dir = paths.run_dir(cfg.run.name, first.run_id)
     manifest_path = run_dir / "validation_checkpoints" / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["device"] = "gpu"
@@ -1091,7 +1116,7 @@ def test_validation_checkpoint_torn_tree_raises(tmp_path) -> None:
     """Prediction batches without a manifest.json are an inconsistent state."""
     cfg = _validation_checkpoint_config(tmp_path)
     first = ExperimentRunner(cfg).run(deploy=False)
-    ckpt_root = tmp_path / "artifacts" / "runs" / first.run_id / "validation_checkpoints"
+    ckpt_root = paths.run_dir(cfg.run.name, first.run_id) / "validation_checkpoints"
     (ckpt_root / "manifest.json").unlink()
     with pytest.raises(ValueError, match="no manifest.json"):
         ExperimentRunner(cfg).run(deploy=False)
@@ -1102,7 +1127,7 @@ def test_validation_checkpoint_corrupt_batch_raises(tmp_path) -> None:
     silently repredict or produce garbage."""
     cfg = _validation_checkpoint_config(tmp_path)
     first = ExperimentRunner(cfg).run(deploy=False)
-    ckpt_root = tmp_path / "artifacts" / "runs" / first.run_id / "validation_checkpoints"
+    ckpt_root = paths.run_dir(cfg.run.name, first.run_id) / "validation_checkpoints"
     (ckpt_root / "preds_batch_00.parquet").write_bytes(b"garbage")
     with pytest.raises(ValueError, match="corrupt validation checkpoint"):
         ExperimentRunner(cfg).run(deploy=False)
@@ -1111,7 +1136,8 @@ def test_validation_checkpoint_corrupt_batch_raises(tmp_path) -> None:
 def test_validation_checkpoint_dir_only_created_when_stage_runs(tmp_path) -> None:
     """The validation checkpoint dir is created only when the validation
     scorecard stage runs (evaluation.validation_scorecard=true)."""
-    result = ExperimentRunner(_config(tmp_path)).run(deploy=False)
-    run_dir = tmp_path / "artifacts" / "runs" / result.run_id
+    cfg = _config(tmp_path)
+    result = ExperimentRunner(cfg).run(deploy=False)
+    run_dir = paths.run_dir(cfg.run.name, result.run_id)
     assert (run_dir / "oof_checkpoints").exists()
     assert not (run_dir / "validation_checkpoints").exists()
