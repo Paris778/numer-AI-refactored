@@ -69,10 +69,16 @@ class TestModelProfile:
 
         service = DashboardDataService()
         lb = service.load_leaderboard()
-        if not lb.rows:
-            pytest.skip("No registry models available")
+        # Profile building needs registry metadata (a run record); a
+        # benchmark-only leaderboard (e.g. smoke CSVs present, registry
+        # empty) cannot produce a profile — target registry-backed rows.
+        registry_rows = [
+            row for row in lb.rows if row.source in ("trained", "trained_legacy", "full")
+        ]
+        if not registry_rows:
+            pytest.skip("No registry-backed models available")
 
-        first_id = lb.rows[0].model_id
+        first_id = registry_rows[0].model_id
         profile = get_model_profile(first_id)
         assert profile is not None
         assert profile.model_id == first_id
