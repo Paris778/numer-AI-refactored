@@ -8,11 +8,13 @@ import itertools
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import polars as pl
 
+from nmr import paths
 from nmr._oof import train_multi_target_oof
 from nmr.config import ExperimentConfig, set_global_seeds
 from nmr.data import IngestionAgent
@@ -113,11 +115,12 @@ def neutralization_frontier(
     era_col: str = "era",
     pred_col: str = "prediction",
     backend: str = "custom",
+    cache_dir: Path | None = None,
 ) -> NeutralizationFrontier:
     if not proportions:
         raise ValueError("proportions must contain at least one value")
 
-    risk_engine = NeutralizationEngine()
+    risk_engine = NeutralizationEngine(cache_dir=cache_dir)
     evaluator = EvaluationEngine(backend)
     metrics: list[MetricSummary] = []
     normalized_props = [float(p) for p in proportions]
@@ -334,7 +337,8 @@ def _held_out_metric_full(
         out_col="prediction",
     )
     neutralized = NeutralizationEngine(
-        max_cache_bytes=config.risk.cache_max_bytes
+        cache_dir=paths.shared_cache_dir(config.run.artifacts_dir) / "neutralization",
+        max_cache_bytes=config.risk.cache_max_bytes,
     ).neutralize(
         blended,
         pred_col="prediction",

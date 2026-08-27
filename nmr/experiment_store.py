@@ -5,11 +5,14 @@
 and published by a single directory rename; discovery ignores ``.tmp-`` names.
 ``record_run_result`` is the script-facing recorder: it persists the run's
 parquet outputs (``oof.parquet`` + ``validation_preds.parquet`` when the
-validation scorecard ran) alongside the run.json built by ``record_run``.
+validation scorecard ran) alongside the run.json built by ``record_run`` —
+the run-immutability preflight runs BEFORE any artifact write, so a rejected
+re-record never mutates the heavy parquets.
 """
 from __future__ import annotations
 
 import dataclasses
+import io
 import json
 import logging
 import os
@@ -21,7 +24,7 @@ from typing import TYPE_CHECKING, Any
 import polars as pl
 
 from nmr import paths
-from nmr._atomicio import atomic_write_text
+from nmr._atomicio import atomic_write_bytes, atomic_write_text
 
 if TYPE_CHECKING:
     from nmr.runner import RunResult
@@ -58,6 +61,22 @@ def ensure_family(slug: str, *, display_name: str, base_config: dict[str, Any]) 
     return _write_scaffold(slug, display_name=display_name, base_config=base_config)
 
 
+def _check_run_immutable(slug: str, run_id: str, canonical: str, target: Path) -> None:
+    """Raise when run.json exists with a payload different from ``canonical``.
+
+    The single immutability predicate for run records (spec §2): re-recording
+    an existing run.json with a DIFFERENT payload raises ``ValueError``; the
+    byte-identical payload stays idempotent. Shared by ``record_run`` and the
+    ``record_run_result`` preflight so a rejected re-record raises before any
+    artifact write.
+    """
+    if target.is_file() and target.read_text(encoding="utf-8") != canonical:
+        raise ValueError(
+            f"run {run_id!r} already recorded with a different payload "
+            f"({target}); runs are immutable once recorded"
+        )
+
+
 def record_run(slug: str, run_id: str, payload: dict[str, Any]) -> Path:
     """Persist run.json (atomic) — creating the family scaffold on first run.
 
@@ -74,11 +93,7 @@ def record_run(slug: str, run_id: str, payload: dict[str, Any]) -> Path:
     run_dir.mkdir(parents=True, exist_ok=True)
     target = paths.run_json_path(slug, run_id)
     canonical = json.dumps(payload, sort_keys=True)
-    if target.is_file() and target.read_text(encoding="utf-8") != canonical:
-        raise ValueError(
-            f"run {run_id!r} already recorded with a different payload "
-            f"({target}); runs are immutable once recorded"
-        )
+    _check_run_immutable(slug, run_id, canonical, target)
     atomic_write_text(target, canonical)
     return target
 
@@ -91,14 +106,17 @@ def read_run(slug: str, run_id: str) -> dict[str, Any]:
 
 
 def _write_parquet_atomic(path: Path, frame: pl.DataFrame) -> None:
-    """Write a parquet frame via temp file + os.replace (no fsync)."""
-    tmp = path.with_name(f"{path.name}.tmp.{os.getpid()}")
-    try:
-        frame.write_parquet(tmp)
-        os.replace(tmp, path)
-    finally:
-        if tmp.exists():
-            tmp.unlink()
+    """Serialize ``frame`` to parquet bytes and write them atomically.
+
+    The run-artifact frame writer: bytes go through
+    ``nmr._atomicio.atomic_write_bytes`` (temp file + fsync + os.replace) —
+    the same atomic-bytes contract as the checkpoint frame writer
+    (``nmr._oof.write_frame_atomic``), never ``write_parquet`` directly to
+    the final path.
+    """
+    buffer = io.BytesIO()
+    frame.write_parquet(buffer)
+    atomic_write_bytes(path, buffer.getvalue())
 
 
 def _result_payload(result: RunResult) -> dict[str, Any]:
@@ -133,12 +151,21 @@ def record_run_result(slug: str, result: RunResult) -> Path:
     Persists ``oof.parquet`` and (when the validation scorecard ran)
     ``validation_preds.parquet`` atomically, then writes ``run.json`` via
     :func:`record_run` — the parquets land before the record marker so a
-    partial failure never leaves a run.json without its artifacts. Returns
-    the run directory (the script-facing analogue of the retired
+    partial failure never leaves a run.json without its artifacts. The
+    run-immutability check runs FIRST (:func:`_check_run_immutable`): a
+    re-record whose payload differs from the recorded run.json raises before
+    any artifact write, so a rejected re-record never mutates the heavy
+    parquets (the byte-identical same-payload re-record stays idempotent).
+    Returns the run directory (the script-facing analogue of the retired
     ``registry.record``). ``slug`` is the family slug (``config.run.name``).
     """
     paths.validate_slug(slug)
     _validate_run_id(result.run_id)
+    payload = _result_payload(result)
+    _check_run_immutable(
+        slug, result.run_id, json.dumps(payload, sort_keys=True),
+        paths.run_json_path(slug, result.run_id),
+    )
     run_dir = paths.run_dir(slug, result.run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     _write_parquet_atomic(run_dir / "oof.parquet", result.oof)
@@ -146,7 +173,7 @@ def record_run_result(slug: str, result: RunResult) -> Path:
         _write_parquet_atomic(
             run_dir / "validation_preds.parquet", result.validation_predictions
         )
-    record_run(slug, result.run_id, _result_payload(result))
+    record_run(slug, result.run_id, payload)
     return run_dir
 
 

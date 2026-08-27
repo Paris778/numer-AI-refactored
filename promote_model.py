@@ -2,12 +2,15 @@
 
 Trains the full version (train+validation) for an experiments-layout run and
 publishes it under ``experiments/<family>/exports/<scope>/<run_id>/`` with
-the atomic ``current.json`` pointer. The promotion run is a REHEARSAL unless
-the user explicitly uploads the artifact — see the printed instructions.
+the atomic ``current.json`` pointer (``scope="full"``), or publishes the
+train-only partial export with a post-fit cross-check ``scorecard.json``
+(``scope="train_only"`` — never touches ``current.json``). The promotion run
+is a REHEARSAL unless the user explicitly uploads the artifact — see the
+printed instructions.
 
 Usage:
-    python promote_model.py --run-id <64-hex> --family <family> [--override-gate] [--force]
-    python promote_model.py --champion --family <family> [--override-gate]
+    python promote_model.py --run-id <64-hex> --family <family> [--override-gate] [--force] [--scope train_only|full]
+    python promote_model.py --champion --family <family> [--override-gate] [--scope train_only|full]
 """
 
 # ruff: noqa: E402 — apply_thread_limits() must run before the imports below:
@@ -57,7 +60,16 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="overwrite an existing slot / repoint current.json",
+        help="repoint current.json to a different existing slot",
+    )
+    parser.add_argument(
+        "--scope",
+        choices=("train_only", "full"),
+        default="full",
+        help="promotion scope: 'full' (default) trains on train+validation and "
+        "repoints current.json; 'train_only' publishes the partial export "
+        "with a post-fit cross-check scorecard.json and never touches "
+        "current.json",
     )
     return parser
 
@@ -82,8 +94,9 @@ def main(argv: list[str] | None = None) -> int:
         args.family,
         override_gate=args.override_gate,
         force=args.force,
+        scope=args.scope,
     )
-    print(f"\npublished full version: {result.artifact_path}")
+    print(f"\npublished {result.scope} promotion: {result.artifact_path}")
     print(f"manifest: {result.manifest_path}")
     print(
         f"tier4_gate_passed: {result.tier4_gate_passed}  "

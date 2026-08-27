@@ -44,14 +44,20 @@ def test_record_run_immutable_after_first_write(tmp_path, monkeypatch):
     assert again == path
 
 
-def _result(run_id: str, *, with_validation_preds: bool = False) -> RunResult:
+def _result(
+    run_id: str, *, with_validation_preds: bool = False, manifest=None
+) -> RunResult:
     oof = pl.DataFrame({"id": ["a", "b"], "era": ["1", "1"], "prediction": [0.1, 0.9]})
     return RunResult(
         run_id=run_id,
         oof=oof,
         metrics=MetricSummary(mean=0.1, std=0.2, sharpe=0.5, max_drawdown=0.05),
         artifact=None,
-        manifest={"config": {"run": {"name": "fam-a"}}, "oof_device": "cpu"},
+        manifest=(
+            {"config": {"run": {"name": "fam-a"}}, "oof_device": "cpu"}
+            if manifest is None
+            else manifest
+        ),
         validation_predictions=(
             pl.DataFrame({"era": ["0575", "0575"], "id": ["x", "y"], "prediction": [0.2, 0.8]})
             if with_validation_preds
@@ -85,6 +91,35 @@ def test_record_run_result_is_idempotent(tmp_path, monkeypatch) -> None:
     original = (run_dir / "run.json").read_text(encoding="utf-8")
     assert experiment_store.record_run_result("fam-a", result) == run_dir
     assert (run_dir / "run.json").read_text(encoding="utf-8") == original
+
+
+def test_record_run_result_rejected_rerecord_leaves_run_dir_byte_identical(
+    tmp_path, monkeypatch
+) -> None:
+    """A re-record with a DIFFERENT payload raises BEFORE any artifact write —
+    every existing file in the run dir stays byte-identical."""
+    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", tmp_path / "experiments")
+    first = _result("a" * 64, with_validation_preds=True)
+    run_dir = experiment_store.record_run_result("fam-a", first)
+    before = {
+        path.relative_to(run_dir): path.read_bytes()
+        for path in sorted(run_dir.rglob("*"))
+        if path.is_file()
+    }
+    assert before, "run dir should contain files before the rejected re-record"
+    different = _result(
+        "a" * 64,
+        with_validation_preds=True,
+        manifest={"config": {"run": {"name": "fam-a"}}, "oof_device": "gpu"},
+    )
+    with pytest.raises(ValueError, match="immutable"):
+        experiment_store.record_run_result("fam-a", different)
+    after = {
+        path.relative_to(run_dir): path.read_bytes()
+        for path in sorted(run_dir.rglob("*"))
+        if path.is_file()
+    }
+    assert after == before
 
 
 def test_record_run_result_rejects_bad_slug_and_run_id(tmp_path, monkeypatch) -> None:

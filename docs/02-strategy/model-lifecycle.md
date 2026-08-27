@@ -68,7 +68,7 @@ research → partial → upload → compare → full → stake
    + `validation_preds.parquet`), with the rebuild-identity fields (§4). The
    scorecard here is the *research* scorecard — CV OOF on the final fold's
    validation eras.
-2. **Partial** — the promotion writer `promote_full_version(run_id, family, scope="train_only")` (a library call; the CLIs currently promote `scope="full"` only): a **train-only** fit (never opens
+2. **Partial** — the promotion writer `promote_full_version(run_id, family, scope="train_only")` (a library call; `promote_model.py` exposes it as `--scope train_only`, default `full`): a **train-only** fit (never opens
    `validation.parquet` during the fit) published as the immutable slot
    `exports/partial/<run_id>/` plus a post-fit **cross-check** `scorecard.json`
    scored on validation eras through the official backend (`evaluate_cross_check`).
@@ -200,6 +200,12 @@ current tree can reproduce it.
   processes, never hand-edited). The read-compare-write in
   `promote_if_better` is not atomic; the single-writer invariant is the
   contract. All pointer writes are temp + fsync + `os.replace`.
+- **Pointer-write failure leaves a recoverable `degraded` family.** Promotion
+  is a two-write act: the full slot publishes first, then `current.json` is
+  repointed. If the pointer write fails after the slot publishes, the family
+  shows `degraded` (valid full export, dangling pointer); recover by
+  re-running promotion with `--force` to repoint `current.json` at the
+  existing slot — never delete the slot.
 - **Upload and stake are manual acts.** Lifecycle validity (`valid_export`)
   does **not** imply Numerai upload acceptance — `accept_promoted_artifact`
   (raw output vs the official validator) remains the pre-upload gate, and the

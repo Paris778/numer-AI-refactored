@@ -378,7 +378,11 @@ class ExperimentRunner:
         )
         neutralization_proportion = self._config.risk.neutralization_proportion
         neutralized = NeutralizationEngine(
-            max_cache_bytes=self._config.risk.cache_max_bytes
+            cache_dir=(
+                paths.shared_cache_dir(self._config.run.artifacts_dir)
+                / "neutralization"
+            ),
+            max_cache_bytes=self._config.risk.cache_max_bytes,
         ).neutralize(
             blended,
             pred_col="prediction",
