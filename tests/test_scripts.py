@@ -393,6 +393,32 @@ def test_promote_model_missing_champion_fails_loud(tmp_path, monkeypatch) -> Non
         promote_model._resolve_champion_run_id()
 
 
+def test_promote_model_champion_family_mismatch_raises(
+    tmp_path, monkeypatch
+) -> None:
+    """SECONDARY 6: with --champion the pointer's experiment_slug is
+    authoritative for promotion — a user-supplied --family that disagrees is
+    a clear error, never a silent promotion under another family."""
+    import promote_model
+    from nmr import experiment_store
+    from nmr.registry import RunRegistry
+
+    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", tmp_path / "experiments")
+    experiment_store.record_run("champ-fam", "a" * 64, {"scorecard": {}})
+    RunRegistry(paths.EXPERIMENTS_ROOT).promote("a" * 64, "champ-fam")
+
+    # --champion + a wrong --family raises before any promotion.
+    with pytest.raises(ValueError, match="does not match the champion's family"):
+        promote_model.main(
+            ["--champion", "--family", "other-fam", "--override-gate"]
+        )
+
+    # --champion + the matching --family resolves the champion run + slug.
+    run_id, slug = promote_model._resolve_champion()
+    assert run_id == "a" * 64
+    assert slug == "champ-fam"
+
+
 def test_promote_and_rehearse_clis_reject_legacy_dir_args() -> None:
     # Task 11: models_dir/registry_dir are gone from the promotion CLIs.
     import promote_model

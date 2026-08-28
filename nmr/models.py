@@ -248,16 +248,21 @@ class ModelOrchestrator:
         ``checkpoint_dir=None`` = the legacy fit-everything path (models has no
         None entries). With a checkpoint dir, existing fold parquets are loaded
         (models entry None — the OOF-only caller discards models) and new folds
-        are fitted then atomically persisted. The checkpoint root carries a
-        manifest.json with code+device identity plus the rebuild-identity
-        terms (``data_fingerprint``/``environment``, spec §3.1) when the
-        caller provides them; a mismatch raises.
+        are fitted then atomically persisted. Each target's manifest.json sits
+        in its own subdir (``<checkpoint_dir>/<target>/manifest.json``) with
+        code+device identity, the rebuild-identity terms
+        (``data_fingerprint``/``environment``, spec §3.1), and the fit-identity
+        terms (``target_col``/``feature_fingerprint``/``splitter_fingerprint``,
+        2026-08-26 review SECONDARY 1) when the caller provides them; a
+        mismatch raises.
         """
         # Local import: nmr._oof imports nmr.models at module top, so a
         # module-level import here would be circular.
         from nmr._oof import (
             checkpoint_manifest,
             ensure_no_torn_tree,
+            feature_list_fingerprint,
+            splitter_geometry_fingerprint,
             verify_checkpoint_manifest,
             write_bytes_atomic,
             write_frame_atomic,
@@ -269,7 +274,21 @@ class ModelOrchestrator:
         oof_parts: list[pl.DataFrame] = []
         seen_val_eras: set[str] = set()
 
-        manifest_path = checkpoint_dir / "manifest.json" if checkpoint_dir else None
+        # Per-TARGET manifest (2026-08-26 review, SECONDARY 1): the checkpoint
+        # root is shared across targets, so the target binding must live next
+        # to its own fold parquets — a target dir copied from another target
+        # carries the source target's manifest and refuses resume on target
+        # mismatch instead of silently reusing the wrong target's folds. The
+        # manifest also binds the feature list and the splitter's fold
+        # boundaries (canonical fingerprints), recorded with the rebuild
+        # identity terms (spec §3.1) when the caller provides them.
+        manifest_path = (
+            checkpoint_dir / target_col / "manifest.json" if checkpoint_dir else None
+        )
+        feature_fp = feature_list_fingerprint(feature_cols)
+        splitter_fp = splitter_geometry_fingerprint(
+            splitter, df.get_column(era_col).to_list()
+        )
         manifest_written = False
         if manifest_path is not None:
             if manifest_path.exists():
@@ -278,6 +297,9 @@ class ModelOrchestrator:
                     self.resolved_device,
                     data_fingerprint=data_fingerprint,
                     environment=environment,
+                    target_col=target_col,
+                    feature_fingerprint=feature_fp,
+                    splitter_fingerprint=splitter_fp,
                 )
             else:
                 # PINNED DECISION (review): the manifest is written at the FIRST
@@ -339,6 +361,9 @@ class ModelOrchestrator:
                                 resolved_device,
                                 data_fingerprint=data_fingerprint,
                                 environment=environment,
+                                target_col=target_col,
+                                feature_fingerprint=feature_fp,
+                                splitter_fingerprint=splitter_fp,
                             )
                         else:
                             write_bytes_atomic(
@@ -347,6 +372,9 @@ class ModelOrchestrator:
                                         resolved_device,
                                         data_fingerprint=data_fingerprint,
                                         environment=environment,
+                                        target_col=target_col,
+                                        feature_fingerprint=feature_fp,
+                                        splitter_fingerprint=splitter_fp,
                                     ),
                                     sort_keys=True,
                                 ).encode("utf-8"),

@@ -31,14 +31,21 @@ from nmr.registry import RunRegistry
 logger = logging.getLogger("promote_model")
 
 
-def _resolve_champion_run_id() -> str:
-    """Run id of the current champion — the atomic experiments-root pointer."""
+def _resolve_champion() -> tuple[str, str]:
+    """``(run_id, experiment_slug)`` of the current champion — the atomic
+    experiments-root pointer (the slug is required: a bare run_id no longer
+    locates the run in the layout)."""
     champion = RunRegistry(paths.EXPERIMENTS_ROOT).resolve_champion()
     if champion is None:
         raise FileNotFoundError(
             f"no champion: {paths.champion_path()} missing — promote a run first"
         )
-    return champion[0]
+    return champion
+
+
+def _resolve_champion_run_id() -> str:
+    """Run id of the current champion (legacy single-value accessor)."""
+    return _resolve_champion()[0]
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -86,12 +93,25 @@ def main(argv: list[str] | None = None) -> int:
         _build_parser().error("provide exactly one of --run-id or --champion")
 
     run_id = args.run_id
+    family = args.family
     if args.champion:
-        run_id = _resolve_champion_run_id()
+        # The champion pointer is authoritative for BOTH facts: its run_id AND
+        # its experiment_slug. A user-supplied --family that disagrees is a
+        # clear error — never promote the champion's run under another family
+        # (2026-08-26 review, SECONDARY 6).
+        champion_run_id, champion_slug = _resolve_champion()
+        run_id = champion_run_id
+        if family != champion_slug:
+            raise ValueError(
+                f"--family {family!r} does not match the champion's family "
+                f"{champion_slug!r} (from {paths.champion_path()}); promoting "
+                f"the champion requires --family {champion_slug!r}"
+            )
+        family = champion_slug
 
     result = promote_full_version(
         run_id,
-        args.family,
+        family,
         override_gate=args.override_gate,
         force=args.force,
         scope=args.scope,

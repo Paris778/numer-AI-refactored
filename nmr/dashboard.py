@@ -1091,7 +1091,6 @@ def _export_row(
 
 def _scan_experiment_families(
     experiments_root: Path,
-    legacy_run_ids: set[str],
 ) -> tuple[dict[str, dict[str, Any]], set[str], list[dict[str, Any]]]:
     """Iterate ``experiments/<family>/`` for exports + family metadata.
 
@@ -1099,9 +1098,11 @@ def _scan_experiment_families(
     display facts (display_name, lifecycle stage from ``derive_stage``, stale
     flag), the set of families with a genuine (non-rehearsal) full version,
     and one unified row per VALID export slot (``family::<scope>::<run_id>``).
-    Exports whose ``run_id`` has no run record — neither in the legacy registry
-    nor ``experiments/<family>/runs/<run_id>/run.json`` — warn (dangling
-    lineage) but still render.
+    Orphan exports (slots whose run_id has no run record in
+    ``experiments/<family>/runs/<run_id>/run.json``) are rejected UPSTREAM by
+    ``lifecycle.valid_export`` (2026-08-26 review, BLOCKING 2 — identity
+    binding requires the run record to exist and agree) — they are never
+    render-valid here.
     """
     family_info: dict[str, dict[str, Any]] = {}
     promoted_families: set[str] = set()
@@ -1142,18 +1143,6 @@ def _scan_experiment_families(
         if full_versions:
             promoted_families.add(family)
         for version in [*full_versions, *partial_versions]:
-            if (
-                version.run_id not in legacy_run_ids
-                and not (family_dir / "runs" / version.run_id / "run.json").is_file()
-            ):
-                logger.warning(
-                    "nmr.dashboard: family %s %s export %s lineage dangling "
-                    "(run_id %s has no run record)",
-                    family,
-                    version.scope,
-                    version.run_id[:8],
-                    version.run_id,
-                )
             export_rows.append(_export_row(version, family, info))
     return family_info, promoted_families, export_rows
 
@@ -1198,7 +1187,7 @@ def load_unified_leaderboard(
 
     # 2) experiments layout: family metadata + export slots (full/partial)
     family_info, promoted_families, export_rows = _scan_experiment_families(
-        experiments_root, legacy_run_ids
+        experiments_root
     )
     rows.extend(export_rows)
 

@@ -97,13 +97,22 @@ def test_record_run_result_rejected_rerecord_leaves_run_dir_byte_identical(
     tmp_path, monkeypatch
 ) -> None:
     """A re-record with a DIFFERENT payload raises BEFORE any artifact write —
-    every existing file in the run dir stays byte-identical."""
+    every existing file in the run dir stays byte-identical, AND the family
+    scaffold (meta.json / base_config.yaml / README.md) is not mutated by the
+    rejected payload (2026-08-26 review, SECONDARY 7: the immutability
+    preflight runs before the scaffold is written)."""
     monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", tmp_path / "experiments")
     first = _result("a" * 64, with_validation_preds=True)
     run_dir = experiment_store.record_run_result("fam-a", first)
+    family_dir = paths.experiment_dir("fam-a")
     before = {
         path.relative_to(run_dir): path.read_bytes()
         for path in sorted(run_dir.rglob("*"))
+        if path.is_file()
+    }
+    scaffold_before = {
+        path.relative_to(family_dir): path.read_bytes()
+        for path in sorted(family_dir.rglob("*"))
         if path.is_file()
     }
     assert before, "run dir should contain files before the rejected re-record"
@@ -119,7 +128,13 @@ def test_record_run_result_rejected_rerecord_leaves_run_dir_byte_identical(
         for path in sorted(run_dir.rglob("*"))
         if path.is_file()
     }
+    scaffold_after = {
+        path.relative_to(family_dir): path.read_bytes()
+        for path in sorted(family_dir.rglob("*"))
+        if path.is_file()
+    }
     assert after == before
+    assert scaffold_after == scaffold_before
 
 
 def test_record_run_result_rejects_bad_slug_and_run_id(tmp_path, monkeypatch) -> None:

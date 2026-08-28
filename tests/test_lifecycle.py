@@ -18,7 +18,8 @@ def _isolated_experiments_root(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", tmp_path / "experiments")
 
 
-def _write_export(slug, scope, run_id, *, training_scope=None, sha=None, meta_json=None):
+def _write_export(slug, scope, run_id, *, training_scope=None, sha=None, meta_json=None,
+                  write_run_record: bool = True):
     slot = paths.export_dir(slug, scope, run_id)
     slot.mkdir(parents=True, exist_ok=True)
     # Write a real deploy artifact: valid_export()'s validity predicate calls
@@ -39,6 +40,18 @@ def _write_export(slug, scope, run_id, *, training_scope=None, sha=None, meta_js
         (slot / "scorecard.json").write_text(json.dumps({"schema_version": 3}))
     if meta_json is not None:
         paths.experiment_dir(slug).joinpath("meta.json").write_text(json.dumps(meta_json))
+    # Identity binding (2026-08-26 review, BLOCKING 2): valid_export requires
+    # the run record to exist and agree — write it unless the test is
+    # deliberately constructing an orphan.
+    if write_run_record:
+        run_dir = paths.run_dir(slug, run_id)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "run.json").write_text(
+            json.dumps(
+                {"run_id": run_id, "manifest": {"config": {"run": {"name": slug}}}}
+            ),
+            encoding="utf-8",
+        )
     return slot
 
 
@@ -96,3 +109,67 @@ def test_sort_exports_deterministic():
                        tier4_gate_passed=None, rehearsal=False)
     got = lifecycle.sort_exports([e1, e2, e3])
     assert [e.run_id for e in got] == ["a" * 64, "b" * 64, "c" * 64]
+
+
+def test_orphan_export_without_run_record_invalid():
+    """BLOCKING 2: an export without its run record is an orphan — invalid,
+    never render-valid; the run record must exist AND agree."""
+    slot = _write_export("orphan-fam", "full", "a" * 64, write_run_record=False)
+    assert lifecycle.valid_export("orphan-fam", "full", "a" * 64) is None
+    assert lifecycle.scan_valid_exports("orphan-fam", "full") == []
+    # With the run record present, the same slot is valid.
+    _write_export("orphan-fam", "full", "a" * 64, write_run_record=True)
+    assert lifecycle.valid_export("orphan-fam", "full", "a" * 64) is not None
+    assert slot is not None
+
+
+def test_run_record_identity_mismatch_invalid():
+    """BLOCKING 2: run.json whose run_id disagrees with the slot run_id, or
+    whose manifest run.name disagrees with the family, invalidates the slot."""
+    slot = _write_export("fam-mismatch", "full", "a" * 64)
+    run_dir = paths.run_dir("fam-mismatch", "a" * 64)
+    (run_dir / "run.json").write_text(
+        json.dumps({"run_id": "b" * 64, "manifest": {"config": {"run": {"name": "fam-mismatch"}}}}),
+        encoding="utf-8",
+    )
+    assert lifecycle.valid_export("fam-mismatch", "full", "a" * 64) is None
+    # run.name disagrees with the family slug.
+    (run_dir / "run.json").write_text(
+        json.dumps({"run_id": "a" * 64, "manifest": {"config": {"run": {"name": "other-fam"}}}}),
+        encoding="utf-8",
+    )
+    assert lifecycle.valid_export("fam-mismatch", "full", "a" * 64) is None
+    # run.name absent is tolerated; agreement restores validity.
+    (run_dir / "run.json").write_text(
+        json.dumps({"run_id": "a" * 64, "manifest": {"config": {"run": {}}}}),
+        encoding="utf-8",
+    )
+    assert lifecycle.valid_export("fam-mismatch", "full", "a" * 64) is not None
+    assert slot is not None
+
+
+def test_scan_survives_malformed_numeric_metadata():
+    """SECONDARY 3: a slot with NaN (or non-numeric) training_rows is INVALID
+    and scan_valid_exports still returns the other valid slots — one
+    malformed export never aborts the total scan."""
+    _write_export("fam-scan", "full", "a" * 64)
+    bad = _write_export("fam-scan", "full", "b" * 64)
+    payload = json.loads((bad / "export.json").read_text(encoding="utf-8"))
+    payload["training_rows"] = float("nan")  # serializes as NaN JSON literal
+    (bad / "export.json").write_text(json.dumps(payload), encoding="utf-8")
+    assert lifecycle.valid_export("fam-scan", "full", "b" * 64) is None
+    found = lifecycle.scan_valid_exports("fam-scan", "full")
+    assert [v.run_id for v in found] == ["a" * 64]
+
+    # Non-numeric string training_rows is malformed too — invalid, scan intact.
+    payload["training_rows"] = "not-a-number"
+    (bad / "export.json").write_text(json.dumps(payload), encoding="utf-8")
+    assert lifecycle.valid_export("fam-scan", "full", "b" * 64) is None
+    assert [v.run_id for v in lifecycle.scan_valid_exports("fam-scan", "full")] == ["a" * 64]
+
+    # Malformed era range likewise invalidates only that slot.
+    payload["training_rows"] = 100
+    payload["training_era_range"] = [float("nan"), 10]
+    (bad / "export.json").write_text(json.dumps(payload), encoding="utf-8")
+    assert lifecycle.valid_export("fam-scan", "full", "b" * 64) is None
+    assert [v.run_id for v in lifecycle.scan_valid_exports("fam-scan", "full")] == ["a" * 64]

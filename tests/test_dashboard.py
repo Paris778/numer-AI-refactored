@@ -1079,6 +1079,7 @@ def _write_export_slot(
     *,
     config: dict | None = None,
     scorecard: dict | None = None,
+    write_run_record: bool = True,
 ) -> Path:
     """Write a VALID export slot at ``root/<family>/exports/<scope>/<run_id>``.
 
@@ -1087,7 +1088,9 @@ def _write_export_slot(
     sha256 sibling manifest so the loadability predicate holds. Partial slots
     require ``scorecard.json``; ``scorecard`` supplies the cross-check record
     (defaults to an empty schema stub whose missing ``scorecard`` block leaves
-    the unified metric cells null).
+    the unified metric cells null). A run record is written by default
+    (identity binding, 2026-08-26 review BLOCKING 2) — pass
+    ``write_run_record=False`` to construct an orphan.
     """
     slot = root / family / "exports" / scope / run_id
     slot.mkdir(parents=True, exist_ok=True)
@@ -1120,6 +1123,16 @@ def _write_export_slot(
                 sort_keys=True,
             ),
             encoding="utf-8",
+        )
+    if write_run_record:
+        _write_experiments_run(
+            root,
+            family,
+            {
+                "run_id": run_id,
+                "manifest": {"config": {"run": {"name": family}}},
+                "scorecard": {},
+            },
         )
     return slot
 
@@ -1239,23 +1252,28 @@ def test_load_unified_leaderboard_missing_models_dir(tmp_path: Path) -> None:
     assert frame.row(0, named=True)["has_full_version"] is False
 
 
-def test_load_unified_leaderboard_dangling_lineage_warns(
+def test_load_unified_leaderboard_orphan_export_rejected(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """BLOCKING 2: an export whose run_id has no run record is an orphan —
+    rejected upstream by lifecycle.valid_export, never render-valid (the old
+    behavior warned but still rendered)."""
     registry = tmp_path / "registry"
     experiments = tmp_path / "experiments"
     monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", experiments)
     _write_registry(registry, [_registry_entry("a" * 64)])
     _write_family_meta(experiments, "orphan-family")
-    _write_export_slot(experiments, "orphan-family", "full", "f" * 64)
-    with caplog.at_level(logging.WARNING, logger="nmr.dashboard"):
-        frame = dash.load_unified_leaderboard(registry, benchmark_path=False)
-    assert "orphan-family" in caplog.text  # dangling lineage warned
+    _write_export_slot(
+        experiments, "orphan-family", "full", "f" * 64, write_run_record=False
+    )
+    frame = dash.load_unified_leaderboard(registry, benchmark_path=False)
     rows = {r["model_id"]: r for r in frame.to_dicts()}
-    assert "orphan-family::full::" + "f" * 64 in rows  # still rendered
-    assert rows["orphan-family::full::" + "f" * 64]["lifecycle_stage"] == "degraded"
+    assert "orphan-family::full::" + "f" * 64 not in rows  # rejected, not rendered
+    # The family has no valid exports -> the orphan slot does not produce a
+    # degraded/full row; it simply does not exist in the unified frame.
+    assert "orphan-family" not in " ".join(rows.keys())
 
 
 def test_unified_schema_has_lifecycle_columns() -> None:

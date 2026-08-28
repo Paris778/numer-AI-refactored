@@ -513,20 +513,31 @@ def build_dashboard_html(
     *,
     registry_dir: Path | None = None,
     benchmark_path: Path | None | bool = None,
+    data_dir: Path | None = None,
+    gate_path: Path | None = None,
 ) -> str:
-    """Build the deterministic dashboard document without writing it."""
+    """Build the deterministic dashboard document without writing it.
+
+    ``data_dir`` / ``gate_path`` override the repo-default data version dir
+    and tier-4 gate YAML when a custom registry root is supplied (2026-08-26
+    review, SECONDARY 5): the report must never silently read the repo
+    defaults through a caller-supplied root — the roots propagate from the
+    caller.
+    """
     registry_dir = (
         Path(registry_dir) if registry_dir is not None else DEFAULT_REGISTRY_DIR
     )
+    data_dir = Path(data_dir) if data_dir is not None else DEFAULT_DATA_DIR
+    gate_path = Path(gate_path) if gate_path is not None else DEFAULT_GATE_PATH
 
     leaderboard = load_unified_leaderboard(registry_dir, benchmark_path=benchmark_path)
-    leaderboard = reconcile_capital_metrics(leaderboard, DEFAULT_DATA_DIR)
+    leaderboard = reconcile_capital_metrics(leaderboard, data_dir)
     statuses = evaluate_gate_status(
-        leaderboard, DEFAULT_GATE_PATH, registry_dir / "champion.json"
+        leaderboard, gate_path, registry_dir / "champion.json"
     )
     leaderboard = leaderboard.join(statuses, on="model_id", how="left")
 
-    gate_cfg = load_benchmark_file(DEFAULT_GATE_PATH)
+    gate_cfg = load_benchmark_file(gate_path)
     assert gate_cfg.reference_column is not None
     # All official tier-4 reference columns render as curves; the gated
     # capital line (reference_column) comes first and owns the BMC benchmark.
@@ -544,7 +555,7 @@ def build_dashboard_html(
     )
     engine_payload = extract_multimetric_timeseries(
         registry_dir,
-        DEFAULT_DATA_DIR,
+        data_dir,
         run_ids=top3_ids,
         include_tier4_ref=True,
         tier4_columns=tier4_columns,
@@ -557,7 +568,7 @@ def build_dashboard_html(
     )
     labels, _sim_ids, matrix, stress = extract_pairwise_similarity_matrix(
         registry_dir,
-        DEFAULT_DATA_DIR,
+        data_dir,
         run_ids=top5_ids,
         include_tier4_ref=True,
         tier4_column=tier4_column,
@@ -622,6 +633,8 @@ def generate_dashboard(
     *,
     registry_dir: Path | None = None,
     benchmark_path: Path | None | bool = None,
+    data_dir: Path | None = None,
+    gate_path: Path | None = None,
     output_path: Path | None = None,
     open_browser: bool = True,
 ) -> Path:
@@ -634,6 +647,8 @@ def generate_dashboard(
     html_text = build_dashboard_html(
         registry_dir=registry_dir,
         benchmark_path=benchmark_path,
+        data_dir=data_dir,
+        gate_path=gate_path,
     )
     artifact_bytes = html_text.encode("utf-8")
     artifact_size = len(artifact_bytes)

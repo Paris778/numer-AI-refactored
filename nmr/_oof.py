@@ -34,6 +34,8 @@ __all__ = [
     "ensure_no_torn_tree",
     "write_frame_atomic",
     "write_bytes_atomic",
+    "feature_list_fingerprint",
+    "splitter_geometry_fingerprint",
 ]
 
 _CODE_IDENTITY_FILES = ("nmr/models.py", "nmr/splitter.py", "nmr/runner.py")
@@ -61,24 +63,65 @@ def fitting_code_sha256() -> str:
     return digest.hexdigest()
 
 
+def feature_list_fingerprint(feature_cols: Sequence[str]) -> str:
+    """SHA-256 over the sorted feature names — a canonical feature-schema
+    fingerprint recorded in checkpoint manifests (2026-08-26 review, SECONDARY
+    1): a checkpoint tree written for one feature list must refuse resume for
+    a different one (order-independent — sorting makes the fingerprint
+    canonical)."""
+    canonical = ",".join(sorted(feature_cols))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def splitter_geometry_fingerprint(
+    splitter: PurgedEraSplitter, eras: Sequence[str]
+) -> str:
+    """SHA-256 over the splitter's canonical fold boundaries.
+
+    ``splitter.split(eras)`` yields the exact per-fold train/val era tuples
+    (the splitter is the sole fold authority — ``nmr.splitter.PurgedEraSplitter``
+    exposes ``split`` and ``purge_eras``); a canonical string of those
+    boundaries hashed binds a checkpoint to the fold geometry that produced it.
+    A resume against different fold boundaries refuses (no silent reuse of
+    folds from another geometry).
+    """
+    folds = splitter.split(list(eras))
+    canonical = "|".join(
+        f"{fold.index}:{','.join(fold.train_eras)};{','.join(fold.val_eras)}"
+        for fold in folds
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def checkpoint_manifest(
     device: str,
     *,
     data_fingerprint: str | None = None,
     environment: str | None = None,
+    target_col: str | None = None,
+    feature_fingerprint: str | None = None,
+    splitter_fingerprint: str | None = None,
 ) -> dict[str, str]:
     """Identity manifest for a checkpoint root: code sha256 + fit device, plus
     the rebuild-identity terms (spec §3.1) — ``data_fingerprint`` and the
-    portable ``environment`` — when the caller knows them (the runner always
-    does; direct unit callers may omit them). Fields are present only when
-    provided, so callers without the runner's identity context keep the legacy
-    code+device form.
+    portable ``environment`` — and the fit-identity terms (2026-08-26 review,
+    SECONDARY 1) — ``target_col``, the canonical feature-list fingerprint, and
+    the splitter-geometry fingerprint — when the caller knows them (the runner
+    always does; direct unit callers may omit them). Fields are present only
+    when provided, so callers without the runner's identity context keep the
+    legacy code+device form.
     """
     manifest: dict[str, str] = {"code_sha256": fitting_code_sha256(), "device": device}
     if data_fingerprint is not None:
         manifest["data_fingerprint"] = data_fingerprint
     if environment is not None:
         manifest["environment"] = environment
+    if target_col is not None:
+        manifest["target_col"] = target_col
+    if feature_fingerprint is not None:
+        manifest["feature_fingerprint"] = feature_fingerprint
+    if splitter_fingerprint is not None:
+        manifest["splitter_fingerprint"] = splitter_fingerprint
     return manifest
 
 
@@ -88,10 +131,14 @@ def verify_checkpoint_manifest(
     *,
     data_fingerprint: str | None = None,
     environment: str | None = None,
+    target_col: str | None = None,
+    feature_fingerprint: str | None = None,
+    splitter_fingerprint: str | None = None,
     checkpoint_kind: str = "oof_checkpoints",
 ) -> None:
     """Verify an existing manifest: code exact-compare, device three-way,
-    rebuild-identity (data/environment) exact-compare.
+    rebuild-identity (data/environment) exact-compare, fit-identity
+    (target/features/splitter) exact-compare.
 
     Code identity is exact-compared always. The device guard compares exactly
     when ``current_device`` is known (post-fit reuse); when it is None (a
@@ -102,9 +149,14 @@ def verify_checkpoint_manifest(
     values are provided (the runner always provides them); a stored manifest
     missing a guarded field is treated as a mismatch — refuse loudly, never
     resume a checkpoint whose data snapshot or dependency environment drifted.
-    Mismatches raise ``ValueError`` with delete-to-refit guidance.
-    ``checkpoint_kind`` names the checkpoint stage in the error text
-    (``oof_checkpoints``, ``deploy_checkpoints``, ``validation_checkpoints``).
+    The fit-identity guards (2026-08-26 review, SECONDARY 1) exact-compare
+    ``target_col``, ``feature_fingerprint``, and ``splitter_fingerprint`` when
+    provided — a checkpoint dir copied from another target (or fitted on
+    another feature list / fold geometry) refuses resume instead of silently
+    reusing the wrong target's folds. Mismatches raise ``ValueError`` with
+    delete-to-refit guidance. ``checkpoint_kind`` names the checkpoint stage
+    in the error text (``oof_checkpoints``, ``deploy_checkpoints``,
+    ``validation_checkpoints``).
     """
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
     if stored.get("code_sha256") != fitting_code_sha256():
@@ -123,6 +175,32 @@ def verify_checkpoint_manifest(
         raise ValueError(
             f"{checkpoint_kind} environment mismatch: the dependency "
             f"environment changed since the checkpoints were written "
+            f"({manifest_path}). Delete the {checkpoint_kind} directory to "
+            f"force a full refit."
+        )
+    if target_col is not None and stored.get("target_col") != target_col:
+        raise ValueError(
+            f"{checkpoint_kind} target mismatch: checkpoints were fitted for "
+            f"target {stored.get('target_col')!r}, current target is "
+            f"{target_col!r} ({manifest_path}). Delete the {checkpoint_kind} "
+            f"directory to force a full refit."
+        )
+    if (
+        feature_fingerprint is not None
+        and stored.get("feature_fingerprint") != feature_fingerprint
+    ):
+        raise ValueError(
+            f"{checkpoint_kind} feature-list mismatch: the feature schema "
+            f"changed since the checkpoints were written ({manifest_path}). "
+            f"Delete the {checkpoint_kind} directory to force a full refit."
+        )
+    if (
+        splitter_fingerprint is not None
+        and stored.get("splitter_fingerprint") != splitter_fingerprint
+    ):
+        raise ValueError(
+            f"{checkpoint_kind} splitter-geometry mismatch: the fold "
+            f"boundaries changed since the checkpoints were written "
             f"({manifest_path}). Delete the {checkpoint_kind} directory to "
             f"force a full refit."
         )

@@ -20,9 +20,11 @@ import pandas as pd
 import polars as pl
 
 from nmr import _transforms, paths
+from nmr._atomicio import atomic_write_text
 from nmr._oof import (
     checkpoint_manifest,
     ensure_no_torn_tree,
+    feature_list_fingerprint,
     train_multi_target_oof,
     verify_checkpoint_manifest,
     write_bytes_atomic,
@@ -145,7 +147,9 @@ def _predict_validation_era_batches(
     OOF/deploy identity discipline: verified at entry (code exact-compare
     always; device exact-compare when ``checkpoint_device`` is known, schema
     check otherwise; the rebuild-identity terms — ``data_fingerprint`` and
-    ``environment``, spec §3.1 — exact-compared when provided) and
+    ``environment``, spec §3.1 — and the fit-identity feature-list
+    fingerprint, 2026-08-26 review SECONDARY 1 — exact-compared when
+    provided) and
     verified/initialized again at the first computed batch — initializing
     requires a known device (a predict never resolves one), so a None device
     there raises loudly; ``run()`` passes the orchestrator's post-fit
@@ -156,6 +160,7 @@ def _predict_validation_era_batches(
         return val_df.select(["era", "id"]).with_columns(
             pl.Series("prediction", [], dtype=pl.Float64)
         )
+    feature_fp = feature_list_fingerprint(feature_cols)
     manifest_path = (
         validation_checkpoint_dir / "manifest.json"
         if validation_checkpoint_dir is not None
@@ -169,6 +174,7 @@ def _predict_validation_era_batches(
                 checkpoint_kind="validation_checkpoints",
                 data_fingerprint=data_fingerprint,
                 environment=environment,
+                feature_fingerprint=feature_fp,
             )
         else:
             ensure_no_torn_tree(
@@ -211,6 +217,7 @@ def _predict_validation_era_batches(
                     checkpoint_kind="validation_checkpoints",
                     data_fingerprint=data_fingerprint,
                     environment=environment,
+                    feature_fingerprint=feature_fp,
                 )
             else:
                 if checkpoint_device is None:
@@ -227,6 +234,7 @@ def _predict_validation_era_batches(
                             checkpoint_device,
                             data_fingerprint=data_fingerprint,
                             environment=environment,
+                            feature_fingerprint=feature_fp,
                         ),
                         sort_keys=True,
                     ).encode("utf-8"),
@@ -818,52 +826,65 @@ def _build_deploy_pipeline(
     passes None), each fitted model is persisted with cloudpickle to
     ``<deploy_checkpoint_dir>/<target>.pkl`` (atomic write) and replayed on
     resume instead of refit — per-target deploy-fit checkpoints (spec
-    2026-08-23-checkpoint-coverage-extension). The checkpoint root carries a
-    ``manifest.json`` with the same code+device identity discipline as the
-    OOF checkpoints, plus the rebuild-identity terms (``data_fingerprint``
-    and ``environment``, spec §3.1) when the caller provides them; the
-    recorded device is the orchestrator's post-fit ``resolved_device`` at the
-    FIRST fitted target (deploy fits are CPU-only).
+    2026-08-23-checkpoint-coverage-extension). Each target carries a sibling
+    identity manifest ``<target>.manifest.json`` (2026-08-26 review, SECONDARY
+    1) with the code+device discipline, the rebuild-identity terms
+    (``data_fingerprint`` and ``environment``, spec §3.1), and the fit-identity
+    terms (``target_col`` + the canonical feature-list fingerprint) — a
+    pickled model copied from another target (or fitted on another feature
+    list) refuses resume instead of being silently reused. The recorded device
+    is the orchestrator's post-fit ``resolved_device`` at the FIRST fitted
+    target (deploy fits are CPU-only).
     """
     logger.info("[build_deploy_pipeline] training full-history models (CPU-only)")
     trained: dict[str, object] = {}
-    manifest_path = (
-        deploy_checkpoint_dir / "manifest.json"
-        if deploy_checkpoint_dir is not None
-        else None
+    deploy_root = (
+        Path(deploy_checkpoint_dir) if deploy_checkpoint_dir is not None else None
     )
-    manifest_written = False
-    if manifest_path is not None:
-        if manifest_path.exists():
+    feature_fp = feature_list_fingerprint(feature_cols)
+    if deploy_root is not None:
+        # Torn-tree guard (per-target identity): a pickled model without its
+        # sibling identity manifest is an inconsistent state — never load it
+        # silently. The manifest is verified at the per-target load below.
+        if deploy_root.is_dir():
+            for pkl in sorted(deploy_root.glob("*.pkl")):
+                if not (deploy_root / f"{pkl.stem}.manifest.json").is_file():
+                    raise ValueError(
+                        f"deploy_checkpoints tree has {pkl.name} but no "
+                        f"manifest.json ({deploy_root / (pkl.stem + '.manifest.json')}) "
+                        f"— inconsistent state. Delete the deploy_checkpoints "
+                        f"directory to force a full refit."
+                    )
+    for target in target_cols:
+        pkl_path = (
+            deploy_root / f"{target}.pkl" if deploy_root is not None else None
+        )
+        per_target_manifest = (
+            deploy_root / f"{target}.manifest.json"
+            if deploy_root is not None
+            else None
+        )
+        if pkl_path is not None and pkl_path.exists():
+            if per_target_manifest is None or not per_target_manifest.is_file():
+                raise ValueError(
+                    f"deploy checkpoint {pkl_path} has no manifest.json "
+                    f"(identity binding) — refusing to load it. Delete the "
+                    f"deploy_checkpoints directory to force a full refit."
+                )
             # current_device=None: the orchestrator's resolved_device at this
             # point belongs to the CV stage — a different identity. The deploy
             # manifest records the deploy fit's device (CPU-only), which is
             # exact-checked post-fit at the first fitted target below; the
             # schema check here still rejects unknown stored devices.
             verify_checkpoint_manifest(
-                manifest_path,
+                per_target_manifest,
                 None,
                 checkpoint_kind="deploy_checkpoints",
                 data_fingerprint=data_fingerprint,
                 environment=environment,
+                target_col=target,
+                feature_fingerprint=feature_fp,
             )
-        else:
-            # PINNED DECISION (mirrors the OOF path): the manifest is written
-            # at the FIRST fitted target, never here — resolved_device is None
-            # until a fit completes, and an early write would record "None",
-            # making the device guard pass vacuously on resume.
-            ensure_no_torn_tree(
-                manifest_path,
-                checkpoint_kind="deploy_checkpoints",
-                part_glob="*.pkl",
-            )
-    for target in target_cols:
-        pkl_path = (
-            deploy_checkpoint_dir / f"{target}.pkl"
-            if deploy_checkpoint_dir is not None
-            else None
-        )
-        if pkl_path is not None and pkl_path.exists():
             try:
                 trained[target] = cloudpickle.loads(pkl_path.read_bytes())
             except Exception as exc:
@@ -885,29 +906,38 @@ def _build_deploy_pipeline(
             include_validation=include_validation,
         )
         if pkl_path is not None:
-            if not manifest_written:
-                resolved_device = str(orchestrator.resolved_device)
-                if manifest_path is not None and manifest_path.exists():
-                    verify_checkpoint_manifest(
-                        manifest_path,
+            # PINNED DECISION (mirrors the OOF path): the authoritative exact
+            # device compare runs here, at the first refitted target — the
+            # device is only known post-fit. A stored manifest for this target
+            # (e.g. a crash between the two writes below, or an edited device)
+            # is verified before the new manifest/pkl are written.
+            resolved_device = str(orchestrator.resolved_device)
+            if per_target_manifest is not None and per_target_manifest.exists():
+                verify_checkpoint_manifest(
+                    per_target_manifest,
+                    resolved_device,
+                    checkpoint_kind="deploy_checkpoints",
+                    data_fingerprint=data_fingerprint,
+                    environment=environment,
+                    target_col=target,
+                    feature_fingerprint=feature_fp,
+                )
+            # Identity manifest FIRST, then the pkl — a crash between the two
+            # writes leaves a manifest without a pkl (safe: refit) instead of
+            # a pkl without a manifest (torn, refused loudly).
+            write_bytes_atomic(
+                json.dumps(
+                    checkpoint_manifest(
                         resolved_device,
-                        checkpoint_kind="deploy_checkpoints",
                         data_fingerprint=data_fingerprint,
                         environment=environment,
-                    )
-                else:
-                    write_bytes_atomic(
-                        json.dumps(
-                            checkpoint_manifest(
-                                resolved_device,
-                                data_fingerprint=data_fingerprint,
-                                environment=environment,
-                            ),
-                            sort_keys=True,
-                        ).encode("utf-8"),
-                        manifest_path,
-                    )
-                manifest_written = True
+                        target_col=target,
+                        feature_fingerprint=feature_fp,
+                    ),
+                    sort_keys=True,
+                ).encode("utf-8"),
+                per_target_manifest,
+            )
             write_bytes_atomic(cloudpickle.dumps(trained[target]), pkl_path)
     ordered_features = list(feature_cols)
     target_order = list(target_cols)
@@ -1086,10 +1116,12 @@ def _data_fingerprint(config: ExperimentConfig) -> str:
     fingerprint = hashlib.sha256(
         json.dumps(records, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
-    cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text(
+    # Atomic write (2026-08-26 review, SECONDARY 7): the cache is shared
+    # machine state — a torn write must never leave a half-written fingerprint
+    # that a later run reads as valid.
+    atomic_write_text(
+        cache_path,
         json.dumps({"key": key, "fingerprint": fingerprint}, sort_keys=True),
-        encoding="utf-8",
     )
     return fingerprint
 

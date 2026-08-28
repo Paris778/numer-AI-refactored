@@ -82,9 +82,26 @@ def _read_export_json(slot_dir: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _read_run_record(family: str, run_id: str) -> dict[str, Any] | None:
+    """Read ``experiments/<family>/runs/<run_id>/run.json``; None when absent
+    or malformed (identity binding: an export is valid only when its run
+    record exists and agrees — a slot without a run record is an orphan)."""
+    p = paths.run_json_path(family, run_id)
+    if not p.is_file():
+        return None
+    try:
+        payload = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
 def valid_export(family: str, scope: str, run_id: str) -> ExportVersion | None:
     """Validate one export slot; None on any violation. Identity binding: slot
-    dir run_id == manifest.promoted_from_run_id == family slug match."""
+    dir run_id == manifest.promoted_from_run_id == family slug match, AND the
+    run record is present and agrees (``run.json`` payload ``run_id`` == slot
+    run_id, and its manifest config ``run.name``, when present, == family). An
+    export without a run record is an orphan — invalid, never render-valid."""
     if scope not in SCOPES:
         return None
     slot_dir = paths.export_dir(family, scope, run_id)
@@ -97,6 +114,18 @@ def valid_export(family: str, scope: str, run_id: str) -> ExportVersion | None:
         return None
     training_scope = payload.get("training_scope")
     if training_scope != scope:
+        return None
+    # Run-record identity binding (2026-08-26 review, BLOCKING 2): the slot is
+    # valid only when its immutable run record exists and agrees on identity.
+    run_payload = _read_run_record(family, run_id)
+    if run_payload is None:
+        return None
+    if run_payload.get("run_id") != run_id:
+        return None
+    run_name = (
+        ((run_payload.get("manifest") or {}).get("config") or {}).get("run") or {}
+    ).get("name")
+    if run_name is not None and run_name != family:
         return None
     pkl = slot_dir / "predict.pkl"
     sibling = slot_dir / "predict.pkl.manifest.json"
@@ -118,16 +147,17 @@ def valid_export(family: str, scope: str, run_id: str) -> ExportVersion | None:
     if scope == "partial" and not (slot_dir / "scorecard.json").is_file():
         return None
     era_range = payload.get("training_era_range")
-    training_rows = (
-        int(payload["training_rows"])
-        if isinstance(payload.get("training_rows"), (int, float))
-        else None
-    )
-    parsed_era_range = (
-        (int(era_range[0]), int(era_range[1]))
-        if isinstance(era_range, list) and len(era_range) == 2
-        else None
-    )
+    # Malformed numeric metadata invalidates the slot (never aborts a scan —
+    # the caller's conversion exceptions are contained here).
+    try:
+        training_rows = None
+        if "training_rows" in payload and payload["training_rows"] is not None:
+            training_rows = int(payload["training_rows"])
+        parsed_era_range = None
+        if isinstance(era_range, list) and len(era_range) == 2:
+            parsed_era_range = (int(era_range[0]), int(era_range[1]))
+    except (TypeError, ValueError):
+        return None
     return ExportVersion(
         family=family, scope=scope, run_id=run_id, slot_dir=slot_dir,
         training_scope=str(training_scope),
@@ -151,11 +181,17 @@ def _sha256_of(path: Path) -> str:
 
 def scan_valid_exports(family: str, scope: str) -> list[ExportVersion]:
     """All VALID exports of one scope for a family, sorted (deterministic)."""
-    base = paths.export_dir(family, scope, "x").parent  # .../exports/<scope>
+    if scope not in SCOPES:
+        return []
+    base = paths.experiment_dir(family) / "exports" / scope
     if not base.is_dir():
         return []
     found = []
     for entry in sorted(base.iterdir()):
+        # Non-hex names are never run_ids — skip them (paths.export_dir would
+        # refuse; the total scan must survive a stray directory).
+        if not paths.RID_RE.fullmatch(entry.name):
+            continue
         if entry.is_dir() and not entry.name.startswith(".tmp-"):
             version = valid_export(family, scope, entry.name)
             if version is not None:

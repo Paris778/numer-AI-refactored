@@ -83,17 +83,19 @@ def record_run(slug: str, run_id: str, payload: dict[str, Any]) -> Path:
     Runs are immutable once recorded (spec §2): re-recording an existing
     run.json with a DIFFERENT payload raises ``ValueError``; re-recording the
     byte-identical payload stays idempotent (the canonical JSON is simply
-    rewritten).
+    rewritten). The immutability preflight runs BEFORE the scaffold is
+    written (2026-08-26 review, SECONDARY 7): a rejected re-record must leave
+    the tree byte-identical — the rejected payload's display_name/base_config
+    must never leak into a fresh scaffold.
     """
     _validate_run_id(run_id)
     display_name = str((payload.get("manifest") or {}).get("display_name") or slug)
     base_config = (payload.get("manifest") or {}).get("config") or {}
-    _write_scaffold(slug, display_name=display_name, base_config=base_config)
-    run_dir = paths.run_dir(slug, run_id)
-    run_dir.mkdir(parents=True, exist_ok=True)
     target = paths.run_json_path(slug, run_id)
     canonical = json.dumps(payload, sort_keys=True)
     _check_run_immutable(slug, run_id, canonical, target)
+    _write_scaffold(slug, display_name=display_name, base_config=base_config)
+    target.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(target, canonical)
     return target
 

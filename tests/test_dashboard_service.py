@@ -169,6 +169,87 @@ class TestLeaderboardFrame:
 class TestDashboardDataService:
     """Test DashboardDataService data loading and caching."""
 
+    def test_leaderboard_lifecycle_fields_round_trip(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """SECONDARY 5: the engine emits the lifecycle contract per family —
+        display_name / lifecycle_stage / current_full_status / stale must
+        round-trip through LeaderboardRowModel."""
+        from nmr import experiment_store, paths
+        from nmr.deployment import serialize_predict
+
+        experiments = tmp_path / "experiments"
+        monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", experiments)
+        run_id = "a" * 64
+        experiment_store.record_run(
+            "brb1-xgb-v6",
+            run_id,
+            {
+                "run_id": run_id,
+                "manifest": {
+                    "config": {
+                        "run": {"name": "brb1-xgb-v6"},
+                        "data": {"feature_set": "medium"},
+                        "model": {"backend": "lightgbm", "preset": "fast"},
+                    },
+                    "oof_device": "cpu",
+                },
+                "scorecard": {"corr": 0.05},
+            },
+        )
+        # A valid full export + pointer (identity binding needs the run record
+        # above).
+        slot = paths.export_dir("brb1-xgb-v6", "full", run_id)
+        slot.mkdir(parents=True, exist_ok=True)
+
+        def dummy_predict(live_features, live_benchmark_models=None):
+            return live_features
+
+        serialize_predict(dummy_predict, path=slot / "predict.pkl", feature_names=["f1"])
+        (slot / "export.json").write_text(
+            json.dumps(
+                {
+                    "family": "brb1-xgb-v6",
+                    "training_scope": "full",
+                    "promoted_from_run_id": run_id,
+                    "promoted_at": "2026-08-26T10:00:00+00:00",
+                    "config": {"run": {"name": "brb1-xgb-v6"}},
+                }
+            ),
+            encoding="utf-8",
+        )
+        paths.current_pointer_path("brb1-xgb-v6").write_text(
+            json.dumps({"run_id": run_id}), encoding="utf-8"
+        )
+
+        service = DashboardDataService(
+            registry_dir=experiments,
+            benchmark_path=tmp_path / "no_benchmark.csv",
+        )
+        leaderboard = service.load_leaderboard()
+        rows = {r.model_id: r for r in leaderboard.rows}
+        trained = rows[run_id]
+        assert trained.family == "brb1-xgb-v6"
+        assert trained.display_name == "brb1-xgb-v6"
+        assert trained.lifecycle_stage == "full"
+        assert trained.current_full_status == "full"
+        assert trained.stale is False
+        assert trained.has_full_version is True
+        full_id = f"brb1-xgb-v6::full::{run_id}"
+        assert full_id in rows
+        assert rows[full_id].lifecycle_stage == "full"
+        assert rows[full_id].current_full_status == "full"
+
+        # The fields survive the Pydantic JSON round-trip (serialization
+        # contract for the HTML/Streamlit hosts).
+        restored = LeaderboardFrame.model_validate_json(
+            leaderboard.model_dump_json()
+        )
+        restored_row = next(r for r in restored.rows if r.model_id == run_id)
+        assert restored_row.lifecycle_stage == "full"
+        assert restored_row.current_full_status == "full"
+        assert restored_row.display_name == "brb1-xgb-v6"
+
     @pytest.fixture
     def temp_registry_dir(self) -> Path:
         """Temporary registry directory with sample run.json."""

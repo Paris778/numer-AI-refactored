@@ -121,7 +121,10 @@ def test_code_mismatch_raises(tmp_path):
     train = _synthetic_train()
     ckpt = tmp_path / "ckpt"
     _run(ckpt, train)
-    manifest_path = ckpt / "manifest.json"
+    # The manifest is PER-TARGET (2026-08-26 review SECONDARY 1): it sits
+    # next to its own fold parquets under <ckpt>/<target>/.
+    manifest_path = ckpt / "target" / "manifest.json"
+    assert manifest_path.is_file()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["code_sha256"] = "0" * 64
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -133,7 +136,7 @@ def test_device_mismatch_raises(tmp_path):
     train = _synthetic_train()
     ckpt = tmp_path / "ckpt"
     _run(ckpt, train)
-    manifest_path = ckpt / "manifest.json"
+    manifest_path = ckpt / "target" / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["device"] = "totally_different_device"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -145,7 +148,7 @@ def test_parts_without_manifest_raise(tmp_path):
     train = _synthetic_train()
     ckpt = tmp_path / "ckpt"
     _run(ckpt, train)
-    (ckpt / "manifest.json").unlink()  # simulate a torn tree
+    (ckpt / "target" / "manifest.json").unlink()  # simulate a torn tree
     with pytest.raises(ValueError, match="no manifest.json"):
         _run(ckpt, train)
 
@@ -202,6 +205,31 @@ def test_checkpoint_manifest_carries_rebuild_identity_fields():
         "data_fingerprint": "d" * 64,
         "environment": "numpy==1.0",
     }
+
+
+def test_checkpoint_manifest_carries_fit_identity_fields():
+    """2026-08-26 review SECONDARY 1: the manifest records the fit identity —
+    target_col, the canonical feature-list fingerprint, and the
+    splitter-geometry fingerprint — when the caller provides them."""
+    from nmr._oof import feature_list_fingerprint, splitter_geometry_fingerprint
+
+    train = _synthetic_train()
+    feature_fp = feature_list_fingerprint(["f2", "f1"])  # order-independent
+    splitter_fp = splitter_geometry_fingerprint(_splitter(), train["era"].to_list())
+    manifest = checkpoint_manifest(
+        "cpu",
+        target_col="target",
+        feature_fingerprint=feature_fp,
+        splitter_fingerprint=splitter_fp,
+    )
+    assert manifest["target_col"] == "target"
+    assert manifest["feature_fingerprint"] == feature_fp
+    assert manifest["splitter_fingerprint"] == splitter_fp
+    assert len(manifest["feature_fingerprint"]) == 64
+    assert len(manifest["splitter_fingerprint"]) == 64
+    # Order independence: the same feature set in a different order hashes
+    # identically.
+    assert feature_list_fingerprint(["f1", "f2"]) == feature_fp
 
 
 def test_verify_checkpoint_manifest_data_fingerprint_mismatch_raises(tmp_path):
@@ -308,3 +336,107 @@ def test_write_frame_and_bytes_atomic_leave_no_temp_files(tmp_path):
         p.name for p in tmp_path.iterdir() if ".tmp." in p.name or p.name.endswith(".part")
     ]
     assert not leftovers, f"atomic write left temp files behind: {leftovers}"
+
+
+# --- Fit-identity guards (2026-08-26 review, SECONDARY 1) -----------------
+
+
+def _write_fit_identity_manifest(tmp_path: Path) -> Path:
+    from nmr._oof import feature_list_fingerprint, splitter_geometry_fingerprint
+
+    train = _synthetic_train()
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            checkpoint_manifest(
+                "cpu",
+                target_col="target",
+                feature_fingerprint=feature_list_fingerprint(["f1", "f2"]),
+                splitter_fingerprint=splitter_geometry_fingerprint(
+                    _splitter(), train["era"].to_list()
+                ),
+            )
+        ),
+        encoding="utf-8",
+    )
+    return manifest_path
+
+
+def test_verify_checkpoint_manifest_target_mismatch_raises(tmp_path):
+    manifest_path = _write_fit_identity_manifest(tmp_path)
+    with pytest.raises(ValueError, match="target mismatch"):
+        verify_checkpoint_manifest(
+            manifest_path, "cpu", target_col="target_ender_20"
+        )
+    verify_checkpoint_manifest(manifest_path, "cpu", target_col="target")  # agrees
+
+
+def test_verify_checkpoint_manifest_feature_mismatch_raises(tmp_path):
+    from nmr._oof import feature_list_fingerprint
+
+    manifest_path = _write_fit_identity_manifest(tmp_path)
+    with pytest.raises(ValueError, match="feature-list mismatch"):
+        verify_checkpoint_manifest(
+            manifest_path, "cpu", feature_fingerprint=feature_list_fingerprint(["f1"])
+        )
+    verify_checkpoint_manifest(
+        manifest_path, "cpu", feature_fingerprint=feature_list_fingerprint(["f1", "f2"])
+    )
+
+
+def test_verify_checkpoint_manifest_splitter_mismatch_raises(tmp_path):
+    from nmr._oof import splitter_geometry_fingerprint
+
+    manifest_path = _write_fit_identity_manifest(tmp_path)
+    other_splitter = PurgedEraSplitter(
+        SplitConfig(scheme="walk_forward", n_folds=4, purge_eras=1)
+    )
+    train = _synthetic_train()
+    with pytest.raises(ValueError, match="splitter-geometry mismatch"):
+        verify_checkpoint_manifest(
+            manifest_path,
+            "cpu",
+            splitter_fingerprint=splitter_geometry_fingerprint(
+                other_splitter, train["era"].to_list()
+            ),
+        )
+    verify_checkpoint_manifest(
+        manifest_path,
+        "cpu",
+        splitter_fingerprint=splitter_geometry_fingerprint(
+            _splitter(), train["era"].to_list()
+        ),
+    )
+
+
+def test_verify_checkpoint_manifest_missing_fit_identity_fields_refuses(tmp_path):
+    """A legacy manifest without the fit-identity fields must refuse when the
+    caller guards them — never resume vacuously."""
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(checkpoint_manifest("cpu")), encoding="utf-8")
+    with pytest.raises(ValueError, match="target mismatch"):
+        verify_checkpoint_manifest(manifest_path, "cpu", target_col="target")
+
+
+def test_copied_target_dir_refused_for_different_target(tmp_path):
+    """2026-08-26 review SECONDARY 1: copying a target's checkpoint dir onto
+    another target name and fitting a DIFFERENT target with the SAME
+    code/data/device identity is REFUSED — the copied manifest records the
+    source target, and the target-mismatch guard rejects resume instead of
+    silently reusing another target's folds."""
+    import shutil
+
+    train = _synthetic_train()
+    ckpt = tmp_path / "ckpt"
+    _run(ckpt, train)  # fits targets ["target", "target_ender_20"]
+
+    # Copy target's fold dir (with its manifest) onto the OTHER target name.
+    shutil.rmtree(ckpt / "target_ender_20")
+    shutil.copytree(ckpt / "target", ckpt / "target_ender_20")
+    with pytest.raises(ValueError, match="target mismatch"):
+        _run(ckpt, train)
+
+    # The un-tampered target still resumes cleanly (code/data/device identity
+    # intact) — only the copied dir is refused.
+    shutil.rmtree(ckpt / "target_ender_20")
+    _run(ckpt, train)

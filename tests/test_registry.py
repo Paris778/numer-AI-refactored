@@ -273,3 +273,85 @@ def test_champion_pointer_write_is_atomic(
         registry.promote("a" * 64, "fam-a")
 
     assert paths.champion_path().read_text(encoding="utf-8") == stable
+
+
+def test_registry_isolated_root_stays_within_root(tmp_path, monkeypatch) -> None:
+    """BLOCKING 4: a RunRegistry over a custom root lists/promotes/resolves
+    ENTIRELY within that root — no file appears under the global
+    EXPERIMENTS_ROOT (the registry must not delegate to paths.* globals)."""
+    global_root = tmp_path / "global_experiments"
+    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", global_root)
+    root = tmp_path / "iso_experiments"
+    reg = RunRegistry(root)
+
+    run_id = "a" * 64
+    run_dir = root / "fam-iso" / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "manifest": {"config": {"run": {"name": "fam-iso"}}},
+                "scorecard": {"corr_sharpe_ac": 0.9},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert reg.list() == [run_id]
+    assert reg.best() == (run_id, "fam-iso")
+    path = reg.promote(run_id, "fam-iso")
+    assert path == root / "champion.json"
+    assert reg.resolve_champion() == (run_id, "fam-iso")
+
+    # Nothing leaked into the global experiments root (not even the lock file).
+    assert not global_root.exists()
+    # The lock file lives beside the pointer, inside the isolated root.
+    assert (root / "champion.json.lock").is_file()
+
+
+def _race_promote_if_better(root: str, run_id: str, slug: str) -> None:
+    """Multiprocessing target: one champion compare-and-promote attempt."""
+    from nmr.registry import RunRegistry
+
+    RunRegistry(root).promote_if_better(run_id, slug)
+
+
+def test_promote_if_better_concurrent_processes_serialize(tmp_path) -> None:
+    """BLOCKING 3: N processes calling promote_if_better concurrently with
+    different scorecard values must serialize on the champion lock — the final
+    champion is the BEST value (without the lock, a read-compare-write race
+    lets the last writer win, which may be any value)."""
+    import multiprocessing as mp
+
+    root = tmp_path / "experiments"
+    values = {
+        "a" * 64: 0.3,
+        "b" * 64: 0.7,
+        "c" * 64: 0.5,
+        "d" * 64: 0.95,
+        "e" * 64: 0.1,
+    }
+    for run_id, value in values.items():
+        run_dir = root / "fam" / "runs" / run_id
+        run_dir.mkdir(parents=True)
+        (run_dir / "run.json").write_text(
+            json.dumps({"run_id": run_id, "scorecard": {"corr_sharpe_ac": value}}),
+            encoding="utf-8",
+        )
+
+    ctx = mp.get_context("spawn")
+    processes = [
+        ctx.Process(target=_race_promote_if_better, args=(str(root), rid, "fam"))
+        for rid in values
+    ]
+    for proc in processes:
+        proc.start()
+    for proc in processes:
+        proc.join()
+    assert all(proc.exitcode == 0 for proc in processes)
+
+    champion = json.loads((root / "champion.json").read_text(encoding="utf-8"))
+    best_id = max(values, key=values.get)
+    assert champion["run_id"] == best_id
+    assert champion["experiment_slug"] == "fam"

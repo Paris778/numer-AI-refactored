@@ -117,8 +117,11 @@ def test_runner_outputs_under_experiment(tmp_path, monkeypatch) -> None:
 
     slug = paths.validate_slug(cfg.run.name)
     run_dir = paths.run_dir(slug, result.run_id)
-    assert (run_dir / "oof_checkpoints" / "manifest.json").is_file()
-    assert (run_dir / "deploy_checkpoints" / "manifest.json").is_file()
+    # Per-target identity manifests (2026-08-26 review SECONDARY 1): the OOF
+    # manifest sits next to its folds, the deploy manifests next to their pkls,
+    # the validation manifest stays at the root.
+    assert (run_dir / "oof_checkpoints" / "target" / "manifest.json").is_file()
+    assert (run_dir / "deploy_checkpoints" / "target.manifest.json").is_file()
     assert (run_dir / "validation_checkpoints" / "manifest.json").is_file()
     assert (run_dir / "predict.pkl").is_file()
     assert (run_dir / "predict.pkl.manifest.json").is_file()

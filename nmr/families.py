@@ -62,7 +62,7 @@ def available_slots(models_dir: Path, family: str) -> list[str]:
     ``models_dir`` is accepted for call-site compatibility; the layout is
     ``paths.EXPERIMENTS_ROOT``.
     """
-    base = paths.export_dir(family, "full", "x").parent
+    base = paths.experiment_dir(family) / "exports" / "full"
     if not base.is_dir():
         return []
     return sorted(
@@ -75,28 +75,41 @@ def available_slots(models_dir: Path, family: str) -> list[str]:
 def load_full_version(models_dir: Path, family: str) -> FullVersion | None:
     """Load and validate the family's CURRENT full-version export, or None.
 
-    None when no valid full export exists, the ``current.json`` pointer is
-    missing/dangling/corrupt (a degraded family), or the pointed slot fails
-    ``lifecycle.valid_export``. ``models_dir`` is accepted for call-site
+    None unless ``current_full_status(family) == "full"`` — the pointer must
+    resolve to a valid full slot; a missing/dangling/corrupt pointer (a
+    degraded family) returns None, never a newest-slot guess (2026-08-26
+    review, SECONDARY 4: pointer-driven semantics — no mtime guessing). The
+    pointed slot must also pass ``lifecycle.valid_export`` (identity binding
+    incl. the run record). ``models_dir`` is accepted for call-site
     compatibility; the layout is ``paths.EXPERIMENTS_ROOT``.
     """
     if lifecycle.current_full_status(family) != "full":
         return None
-    pointer = json.loads(paths.current_pointer_path(family).read_text(encoding="utf-8"))
-    return lifecycle.valid_export(family, "full", pointer["run_id"])
+    try:
+        pointer = json.loads(
+            paths.current_pointer_path(family).read_text(encoding="utf-8")
+        )
+    except (json.JSONDecodeError, OSError):
+        return None
+    run_id = pointer.get("run_id") if isinstance(pointer, dict) else None
+    if not isinstance(run_id, str):
+        return None
+    return lifecycle.valid_export(family, "full", run_id)
 
 
 def scan_full_versions(models_dir: Path) -> dict[str, FullVersion]:
-    """Return ``{family: FullVersion}`` for every family with a GENUINE full version.
+    """Return ``{family: FullVersion}`` for every family whose ``current.json``
+    resolves to a VALID non-rehearsal full export.
 
-    Each family's entry is its pointer'd current export (``load_full_version``),
-    falling back to the newest valid export when the pointer is missing or
-    dangling (a degraded family). Rehearsal artifacts (``rehearsal: true``) are
-    excluded: they are D7 truncated-subset artifacts, never the family's current
-    full version, and must not drive ``has_full_version`` or the dashboard's
-    FULL stamp. They remain discoverable via ``available_slots`` and the slot
-    record itself. ``models_dir`` is accepted for call-site compatibility; the
-    layout is ``paths.EXPERIMENTS_ROOT``.
+    Each family's entry is its pointer'd current export (``load_full_version``)
+    — strictly pointer-driven: a degraded family (valid full slots exist but
+    the pointer is missing/dangling) is ABSENT, never guessed by newest slot
+    (2026-08-26 review, SECONDARY 4). Rehearsal artifacts (``rehearsal: true``)
+    are excluded: they are D7 truncated-subset artifacts, never the family's
+    current full version, and must not drive ``has_full_version`` or the
+    dashboard's FULL stamp. They remain discoverable via ``available_slots``
+    and the slot record itself. ``models_dir`` is accepted for call-site
+    compatibility; the layout is ``paths.EXPERIMENTS_ROOT``.
     """
     base = paths.EXPERIMENTS_ROOT
     if not base.is_dir():
@@ -107,15 +120,6 @@ def scan_full_versions(models_dir: Path) -> dict[str, FullVersion]:
             continue
         family = entry.name
         version = load_full_version(models_dir, family)
-        if version is None:
-            version = next(
-                (
-                    v
-                    for v in lifecycle.scan_valid_exports(family, "full")
-                    if not v.rehearsal
-                ),
-                None,
-            )
         if version is not None and not version.rehearsal:
             found[family] = version
     return found

@@ -152,10 +152,10 @@ Per-era pseudo-inverse cache: key = SHA256 of `{era, sorted feature_cols, row_co
 - Fold leakage-safety re-asserted at train time (`_assert_fold_is_leakage_safe(fold, purge_eras=...)`): before fitting each fold it enforces no era reuse, non-empty sides, strict time-ordering, and `min(val) − max(train) > purge_eras` (gap ≤ `purge_eras` ⇒ `ValueError`).
 - `_fit_predict_fold` drops null/non-finite target rows from the train slice before fitting (logged dropped count; `ValueError` if nothing remains).
 - OOF-CV is GPU-first for lightgbm/xgboost with automatic CPU fallback: LightGBM via `device_type="gpu"`, XGBoost (>= 3.0) via `device="cuda"` + `tree_method="hist"` (`gpu_hist` was removed in 3.x and raises `Invalid Input`). A failed device attempt is logged with `type(exc).__name__` + message (only backend errors — `ValueError`/`TypeError`/`LightGBMError`/`XGBoostError`/`CatBoostError` — trigger fallback; anything else fails loudly), and `resolved_device` records which device actually fit (`"gpu"`/`"cpu"`, `None` before the first successful fit). `model.device` (`auto` | `gpu` | `cpu`, default `auto`) controls CV/experimentation: `gpu` returns only the GPU candidate (a failure raises — no silent fallback), `cpu` never attempts GPU. The run manifest records the config device as `pipeline_device` and the actual fit device as `oof_device`. CatBoost is CPU-only by design — it never attempts a GPU candidate (see below). `train_full_history` is CPU-only by design.
-- **Checkpoints & resume (specs 2026-08-20-oof-checkpoint-resume, 2026-08-23-checkpoint-coverage-extension):** three stages checkpoint under `experiments/<slug>/runs/<run_id>/` — `oof_checkpoints/` (CV fold parts), `deploy_checkpoints/` (per-target pickled full-history models), `validation_checkpoints/` (per-era-batch prediction frames). Each root carries a `manifest.json` recording `code_sha256` (SHA-256 of `nmr/models.py` + `nmr/splitter.py` + `nmr/runner.py` source bytes — run_id binds config and data, never code) and `device` (the post-fit `resolved_device`), written atomically at the **first completed unit** (the device is only known post-fit, so an earlier write would record a vacuous `None`). A code/device mismatch, a torn tree (parts without `manifest.json`), or a corrupt part raises `ValueError` with "delete the directory" guidance — never silently reuse stale checkpoints. Shared helpers live in `nmr/_oof.py` (`fitting_code_sha256`, `checkpoint_manifest`, `verify_checkpoint_manifest`, `ensure_no_torn_tree`, `write_frame_atomic`, `write_bytes_atomic`); all writes go through `nmr/_atomicio.py::atomic_write_bytes` (frames serialized to parquet bytes first; never `write_parquet` to the final path). Retention: deleted with the run dir; concurrent duplicate run_ids are unsupported.
-  - **OOF folds (2026-08-20):** `train_oof_with_checkpoints(df, *, feature_cols, target_col, splitter, era_col="era", checkpoint_dir) -> pl.DataFrame` — checkpoint-aware OOF-only fold loop over `oof_checkpoints/<target>/fold_NN.parquet`; `train_cross_validation` delegates to the same private `_cv_fold_parts` loop (`checkpoint_dir=None` — every fold fitted), while the checkpoint path loads existing fold parts (models discarded, never exposed). `nmr/_oof.py::train_multi_target_oof(..., checkpoint_dir=None)` routes each target here when set; `ExperimentRunner.run()` passes `experiments/<slug>/runs/<run_id>/oof_checkpoints`. The mixed load+refit resume is bit-for-bit identical to a fresh fit (tested); fold-disjointness is still enforced.
-  - **Deploy fits (2026-08-23):** `_build_deploy_pipeline(..., deploy_checkpoint_dir=None)` persists each fitted full-history model with cloudpickle to `deploy_checkpoints/<target>.pkl` right after its fit; a resume loads present targets instead of refitting (the predict closure is rebuilt from the loaded model — cheap and deterministic). The recorded device is the post-fit `resolved_device` (`"cpu"` — full-history fits are CPU-only).
-  - **Validation predicts (2026-08-23):** `_run_validation_stage(..., validation_checkpoint_dir=None, checkpoint_device=None)` predicts through the checkpoint-aware `_predict_validation_era_batches` — identical era-batch boundaries to `_predict_in_era_batches` (shared `_era_batch_frames` helper, `_VAL_PREDICT_ERA_BATCH`), persisting each batch to `validation_checkpoints/preds_batch_NN.parquet`; a resume loads present batches and predicts missing ones (byte-identical, tested). `run()` passes `checkpoint_device=str(orchestrator.resolved_device)` — the deploy fits that precede the stage resolve it; a `None` device at manifest init raises loudly (a predict never resolves one). The final `evaluate_model` scorecard call is NOT checkpointed (single call, no clean granularity).
+- **Checkpoints & resume (specs 2026-08-20-oof-checkpoint-resume, 2026-08-23-checkpoint-coverage-extension):** three stages checkpoint under `experiments/<slug>/runs/<run_id>/` — `oof_checkpoints/` (CV fold parts), `deploy_checkpoints/` (per-target pickled full-history models), `validation_checkpoints/` (per-era-batch prediction frames). Each unit's `manifest.json` records `code_sha256` (SHA-256 of `nmr/models.py` + `nmr/splitter.py` + `nmr/runner.py` source bytes — run_id binds config and data, never code), `device` (the post-fit `resolved_device`), the rebuild-identity terms `data_fingerprint`/`environment` (spec §3.1), and the fit-identity terms `target_col` / canonical feature-list fingerprint / splitter-geometry fingerprint (2026-08-26 review SECONDARY 1 — a checkpoint tree copied from another target, feature list, or fold geometry refuses resume instead of silently reusing wrong folds), written atomically at the **first completed unit** (the device is only known post-fit, so an earlier write would record a vacuous `None`). The OOF and deploy manifests are PER-TARGET (next to their folds/pkls — a shared root manifest cannot bind multi-target fits); the validation manifest sits at the root. A code/device/identity mismatch, a torn tree (parts without `manifest.json`), or a corrupt part raises `ValueError` with "delete the directory" guidance — never silently reuse stale checkpoints. Shared helpers live in `nmr/_oof.py` (`fitting_code_sha256`, `feature_list_fingerprint`, `splitter_geometry_fingerprint`, `checkpoint_manifest`, `verify_checkpoint_manifest`, `ensure_no_torn_tree`, `write_frame_atomic`, `write_bytes_atomic`); all writes go through `nmr/_atomicio.py::atomic_write_bytes` (frames serialized to parquet bytes first; never `write_parquet` to the final path). Retention: deleted with the run dir; concurrent duplicate run_ids are unsupported.
+  - **OOF folds (2026-08-20):** `train_oof_with_checkpoints(df, *, feature_cols, target_col, splitter, era_col="era", checkpoint_dir) -> pl.DataFrame` — checkpoint-aware OOF-only fold loop over `oof_checkpoints/<target>/fold_NN.parquet` with a per-target manifest at `oof_checkpoints/<target>/manifest.json`; `train_cross_validation` delegates to the same private `_cv_fold_parts` loop (`checkpoint_dir=None` — every fold fitted), while the checkpoint path loads existing fold parts (models discarded, never exposed). `nmr/_oof.py::train_multi_target_oof(..., checkpoint_dir=None)` routes each target here when set; `ExperimentRunner.run()` passes `experiments/<slug>/runs/<run_id>/oof_checkpoints`. The mixed load+refit resume is bit-for-bit identical to a fresh fit (tested); fold-disjointness is still enforced.
+  - **Deploy fits (2026-08-23):** `_build_deploy_pipeline(..., deploy_checkpoint_dir=None)` persists each fitted full-history model with cloudpickle to `deploy_checkpoints/<target>.pkl` right after its fit, with a sibling identity manifest `deploy_checkpoints/<target>.manifest.json` (manifest-first ordering — a crash leaves a manifest without a pkl, safe to refit, never a pkl without identity); a resume loads present targets instead of refitting (the predict closure is rebuilt from the loaded model — cheap and deterministic). The recorded device is the post-fit `resolved_device` (`"cpu"` — full-history fits are CPU-only).
+  - **Validation predicts (2026-08-23):** `_run_validation_stage(..., validation_checkpoint_dir=None, checkpoint_device=None)` predicts through the checkpoint-aware `_predict_validation_era_batches` — identical era-batch boundaries to `_predict_in_era_batches` (shared `_era_batch_frames` helper, `_VAL_PREDICT_ERA_BATCH`), persisting each batch to `validation_checkpoints/preds_batch_NN.parquet` (root manifest also records the canonical feature-list fingerprint — 2026-08-26 review SECONDARY 1); a resume loads present batches and predicts missing ones (byte-identical, tested). `run()` passes `checkpoint_device=str(orchestrator.resolved_device)` — the deploy fits that precede the stage resolve it; a `None` device at manifest init raises loudly (a predict never resolves one). The final `evaluate_model` scorecard call is NOT checkpointed (single call, no clean granularity).
 
 Canonical presets (`_CANONICAL_PRESETS`, mirroring Numerai's published benchmark params):
 
@@ -305,7 +305,7 @@ Family records (`README.md`, `base_config.yaml`, `meta.json`, `runs/*/run.json`,
 reconstructable artifacts (parquet, `predict.pkl` + sibling manifests,
 checkpoints) are git-ignored (tree kept alive by `.gitkeep`).
 
-All JSON writes: temp file in parent dir → fsync → `os.replace()`; the OOF parquet likewise writes via `nmr._atomicio.atomic_write_bytes` (temp + fsync + `os.replace`). Recording goes through `experiment_store.record_run_result(slug, result)` (parquets + run.json, §Z); `list() -> list[str]` returns every run_id across families (sorted); `best(metric="corr_sharpe_ac") -> (run_id, slug) | None` picks the highest scorecard metric across families (runs lacking the metric are skipped); `promote(run_id, slug=None)` and `promote_if_better(run_id, slug=None, metric="corr_sharpe_ac") -> (Path, bool)` write `experiments/champion.json` atomically — a `None` slug is resolved by scanning the experiments layout (ambiguous/not-found ⇒ `ValueError`); `promote_if_better` promotes only when the candidate's scorecard metric strictly beats the champion's, honoring direction (`_SCORECARD_METRIC_DIRECTION`: `max_drawdown`/`std_corr` are lower-is-better); a scorecard-bearing candidate may displace a scorecard-less champion; a candidate lacking the metric or an unknown metric raises `ValueError`; `resolve_champion() -> (run_id, slug)` fails loud on a missing/dangling/corrupt pointer (never silently treats it as no champion). Champion writes are single-writer (CLI/runner entry points only — design spec §9).
+All JSON writes: temp file in parent dir → fsync → `os.replace()`; the OOF parquet likewise writes via `nmr._atomicio.atomic_write_bytes` (temp + fsync + `os.replace`). Recording goes through `experiment_store.record_run_result(slug, result)` (parquets + run.json, §Z); `list() -> list[str]` returns every run_id across families (sorted); `best(metric="corr_sharpe_ac") -> (run_id, slug) | None` picks the highest scorecard metric across families (runs lacking the metric are skipped); `promote(run_id, slug=None)` and `promote_if_better(run_id, slug=None, metric="corr_sharpe_ac") -> (Path, bool)` write `experiments/champion.json` atomically — a `None` slug is resolved by scanning the experiments layout (ambiguous/not-found ⇒ `ValueError`); `promote_if_better` promotes only when the candidate's scorecard metric strictly beats the champion's, honoring direction (`_SCORECARD_METRIC_DIRECTION`: `max_drawdown`/`std_corr` are lower-is-better); a scorecard-bearing candidate may displace a scorecard-less champion; a candidate lacking the metric or an unknown metric raises `ValueError`; `resolve_champion() -> (run_id, slug)` fails loud on a missing/dangling/corrupt pointer (never silently treats it as no champion). Every `RunRegistry` read and write is rooted at the registry's own root (run records at `<root>/<slug>/runs/<run_id>/run.json`, champion at `<root>/champion.json` — 2026-08-26 review BLOCKING 4, never the module-global paths). Champion writes are single-writer, ENFORCED: the `promote_if_better` read-compare-write is serialized by an inter-process advisory lock on `<root>/champion.json.lock` (`nmr/_filelock.py` — `msvcrt.locking`/`fcntl.flock`, 30 s timeout, clear error on expiry; design spec §9, 2026-08-26 review BLOCKING 3).
 
 **Retired (2026-08-26):** the pre-rebuild `artifacts/registry/<run_id>/` rows are gone (clean slate by design — design spec §14); their era-range manifest quirk is historical — never trust era-range manifest fields for "what this run was scored on"; use scorecard `*_n_eras` cells and the stored parquet. Registry files stay immutable: document, never backfill.
 
@@ -477,7 +477,13 @@ lazily so importing this module stays light). API: `SCOPES`,
 `sort_exports`. Six lifecycle stages in badge precedence: `uninitialized` →
 `research` → `partial` → `degraded` → `full` → `staked`. Export identity
 binding: slot-dir `run_id` == `export.json.promoted_from_run_id` == family
-slug match; a `partial` export additionally requires `scorecard.json`.
+slug match AND the run record is present and agrees (`experiments/<family>/
+runs/<run_id>/run.json` exists, its payload `run_id` equals the slot run_id,
+and its manifest config `run.name`, when present, equals the family — a slot
+without a run record is an orphan, invalid — 2026-08-26 review BLOCKING 2); a
+`partial` export additionally requires `scorecard.json`. Malformed numeric
+metadata (e.g. `training_rows: NaN`) invalidates that slot and is contained —
+one bad export never aborts a scan (2026-08-26 review SECONDARY 3).
 `derive_stage` is a total function over filesystem state returning
 `(lifecycle_stage, current_full_status)`.
 
@@ -526,13 +532,17 @@ is a thin compatibility wrapper over `nmr/lifecycle` + `nmr/paths`: it
 re-exports `lifecycle.ExportVersion` as `FullVersion` and resolves the
 experiment layout. Resolution is pointer-driven — a missing/corrupt/dangling
 `current.json` yields `None` from the tolerant
-`load_full_version`; `scan_full_versions` additionally surfaces degraded
-families (valid exports, no pointer) via their newest valid export. Slots are
-never selected by mtime. Old slots remain for rollback; repointing
+`load_full_version`; `scan_full_versions` is strictly pointer-driven too —
+a degraded family (valid exports, no pointer) is ABSENT, never guessed by
+newest slot (2026-08-26 review SECONDARY 4: no newest-slot guessing; the
+family must not read as having a *current* full version when degraded). Slots
+are never selected by mtime. Old slots remain for rollback; repointing
 `current.json` is a deliberate write. If the pointer write fails after the
 slot publishes, the family shows `degraded` (valid full export, dangling
-pointer); recover by re-running promotion with `--force` to repoint
-`current.json` at the existing slot — never delete the slot.
+pointer); recovery is EXECUTABLE — re-running promotion with `--force`
+repoints `current.json` at the existing VALID slot (validated via
+`lifecycle.valid_export`; the slot is never refit, republished, or
+overwritten — 2026-08-26 review BLOCKING 1), never delete the slot.
 
 Export record schema (`export.json`, per-slot):
 
@@ -540,7 +550,7 @@ Export record schema (`export.json`, per-slot):
 |---|---|
 | `family` | equals the directory name (lowercase `^[a-z0-9_-]+$`) |
 | `training_scope` | `"full"` for full exports; `"partial"` for `train_only` (partial) exports — never `"train_only"` |
-| `promoted_from_run_id` | non-empty registry run id (dangling lineage warns, never invalidates) |
+| `promoted_from_run_id` | equals the slot-dir run_id (identity binding); the slot is valid only when its run record `experiments/<family>/runs/<run_id>/run.json` exists and agrees — an orphan export (no run record) is invalid (2026-08-26 review BLOCKING 2) |
 | `promoted_at` | display metadata only — never in a canonical hash |
 | `artifact_path` | non-empty relative path — no leading `/`, no drive letter, no `..`; resolved against the manifest's own slot dir; file must exist (hollow promotions rejected) |
 | `config` | snapshot of the promoted research config |
@@ -563,7 +573,8 @@ layout (`experiments/<family>/runs/<run_id>/run.json` — the legacy
 exports come from `nmr.lifecycle.scan_valid_exports` — one row per VALID slot
 (`model_id = "<family>::<scope>::<run_id>"`; full rows carry null metric
 cells, partial rows carry their cross-check cells mapped from the slot's
-`scorecard.json`; dangling lineage warns but still renders).
+`scorecard.json`; orphan exports (no run record) are rejected upstream by
+`lifecycle.valid_export` — never render-valid (2026-08-26 review BLOCKING 2)).
 `evaluate_gate_status` stamps full rows
 `FULL` and partial rows `PARTIAL` (never gated). `EVALUABLE_ROWS =
 ~pl.col("source").is_in(["full", "partial"])` is the single chart-inclusion
@@ -610,8 +621,9 @@ opt.py       ──> config (ExperimentConfig), inference, models (resolve_model
 benchmark.py ──> ensemble, features, models, risk, scorecard
 benchmark_fleet.py ──> benchmark, ensemble, features, models, risk, scorecard
 meta.py      ──> analysis, config, data, evaluation, features, inference
-runner.py    ──> _oof, _transforms, config, data, deployment, ensemble, evaluation, models, risk, scorecard, splitter
-registry.py  ──> _atomicio, experiment_store, paths, runner (RunResult)
+runner.py    ──> _atomicio (atomic fingerprint cache), _oof, _transforms, config, data, deployment, ensemble, evaluation, models, risk, scorecard, splitter
+registry.py  ──> _atomicio, _filelock (champion read-compare-write lock), paths, runner (RunResult)
+_filelock.py (leaf — stdlib-only advisory file lock: msvcrt/fcntl)
 dashboard.py ──> benchmark, config, ensemble, evaluation, lifecycle, paths, payout, scorecard
 explainers.py ──> dashboard_ui.service (read-only dynamic model labels)
 scenarios.py  ──> payout, evaluation (allocation scenario research helpers)

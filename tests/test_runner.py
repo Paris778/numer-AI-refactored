@@ -841,7 +841,9 @@ def test_runner_writes_and_reuses_oof_checkpoints(tmp_path, caplog) -> None:
     cfg = _config(tmp_path)
     result1 = ExperimentRunner(cfg).run(deploy=False)
     ckpt_root = paths.run_dir(cfg.run.name, result1.run_id) / "oof_checkpoints"
-    assert (ckpt_root / "manifest.json").exists()
+    # The OOF manifest is PER-TARGET (2026-08-26 review SECONDARY 1): it sits
+    # next to its own fold parquets.
+    assert (ckpt_root / "target" / "manifest.json").exists()
     assert sorted(p.name for p in (ckpt_root / "target").glob("fold_*.parquet"))
     caplog.clear()
     with caplog.at_level("INFO", logger="nmr.models"):
@@ -865,14 +867,23 @@ def test_deploy_checkpoints_written_and_mixed_resume_bit_for_bit(tmp_path, caplo
     cfg = _config(tmp_path)
     first = ExperimentRunner(cfg).run(deploy=True)
     ckpt_root = paths.run_dir(cfg.run.name, first.run_id) / "deploy_checkpoints"
-    assert (ckpt_root / "manifest.json").exists()
+    # Each pickled model carries a sibling identity manifest (2026-08-26
+    # review SECONDARY 1).
     assert sorted(p.name for p in ckpt_root.glob("*.pkl")) == [
         "target.pkl",
         "target_alt.pkl",
     ]
-    manifest = json.loads((ckpt_root / "manifest.json").read_text(encoding="utf-8"))
+    assert sorted(p.name for p in ckpt_root.glob("*.manifest.json")) == [
+        "target.manifest.json",
+        "target_alt.manifest.json",
+    ]
+    manifest = json.loads(
+        (ckpt_root / "target.manifest.json").read_text(encoding="utf-8")
+    )
     assert manifest["device"] == "cpu"  # train_full_history is CPU-only by design
     assert len(manifest["code_sha256"]) == 64
+    assert manifest["target_col"] == "target"
+    assert len(manifest["feature_fingerprint"]) == 64
     # Rebuild-identity terms (spec §3.1) mirror run.json's data_fingerprint
     # and environment fields.
     assert len(manifest["data_fingerprint"]) == 64
@@ -895,7 +906,7 @@ def test_deploy_checkpoint_code_mismatch_raises(tmp_path) -> None:
     cfg = _config(tmp_path)
     first = ExperimentRunner(cfg).run(deploy=True)
     ckpt_root = paths.run_dir(cfg.run.name, first.run_id) / "deploy_checkpoints"
-    manifest_path = ckpt_root / "manifest.json"
+    manifest_path = ckpt_root / "target.manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["code_sha256"] = "0" * 64
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -909,7 +920,7 @@ def test_deploy_checkpoint_unknown_device_raises(tmp_path) -> None:
     cfg = _config(tmp_path)
     first = ExperimentRunner(cfg).run(deploy=True)
     ckpt_root = paths.run_dir(cfg.run.name, first.run_id) / "deploy_checkpoints"
-    manifest_path = ckpt_root / "manifest.json"
+    manifest_path = ckpt_root / "target.manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["device"] = "totally_different_device"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -925,7 +936,7 @@ def test_deploy_checkpoint_device_exact_mismatch_on_refit_raises(tmp_path) -> No
     cfg = _config(tmp_path)
     first = ExperimentRunner(cfg).run(deploy=True)
     ckpt_root = paths.run_dir(cfg.run.name, first.run_id) / "deploy_checkpoints"
-    manifest_path = ckpt_root / "manifest.json"
+    manifest_path = ckpt_root / "target.manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["device"] = "gpu"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -940,7 +951,7 @@ def test_deploy_checkpoint_data_fingerprint_mismatch_raises(tmp_path) -> None:
     cfg = _config(tmp_path)
     first = ExperimentRunner(cfg).run(deploy=True)
     ckpt_root = paths.run_dir(cfg.run.name, first.run_id) / "deploy_checkpoints"
-    manifest_path = ckpt_root / "manifest.json"
+    manifest_path = ckpt_root / "target.manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["data_fingerprint"] = "f" * 64
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
@@ -949,11 +960,12 @@ def test_deploy_checkpoint_data_fingerprint_mismatch_raises(tmp_path) -> None:
 
 
 def test_deploy_checkpoint_torn_tree_raises(tmp_path) -> None:
-    """Pickled models without a manifest.json are an inconsistent state."""
+    """Pickled models without their sibling identity manifest are an
+    inconsistent state (2026-08-26 review SECONDARY 1: per-target manifests)."""
     cfg = _config(tmp_path)
     first = ExperimentRunner(cfg).run(deploy=True)
     ckpt_root = paths.run_dir(cfg.run.name, first.run_id) / "deploy_checkpoints"
-    (ckpt_root / "manifest.json").unlink()
+    (ckpt_root / "target.manifest.json").unlink()
     with pytest.raises(ValueError, match="no manifest.json"):
         ExperimentRunner(_config(tmp_path)).run(deploy=True)
 

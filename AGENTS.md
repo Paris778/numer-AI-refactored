@@ -30,7 +30,7 @@ These four files obey a strict **Single Source of Truth (SSOT) hierarchy**. One 
 
 ## 1. Agent Identity & Mission
 
-You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (1154 collected tests, sole functional gate) + `ruff check` (lint gate, `ruff.toml` E/F/I/UP @120, pinned in `requirements-dev.txt`). Both enforced by CI (`.github/workflows/ci.yml`).
+You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (1174 collected tests, sole functional gate) + `ruff check` (lint gate, `ruff.toml` E/F/I/UP @120, pinned in `requirements-dev.txt`). Both enforced by CI (`.github/workflows/ci.yml`).
 
 Your mission:
 
@@ -188,7 +188,7 @@ Four gates, in order of rigor — **exact commands live only in [`CONTRIBUTING.m
 
 1. **Fast gate** — `ruff check .` + full `pytest -q` after every meaningful change.
 2. **Targeted subsets** while iterating — oracle parity (`tests/test_parity.py` + `tests/test_risk_parity.py`) and determinism hashes (`tests/test_benchmark_hierarchy.py`).
-3. **Pre-sign-off gate** (mandatory before delivering work) — full 1155-test collection plus the real-data benchmark smoke (`benchmark_runner.py --fast-mode` → `artifacts/reports/benchmark_hierarchy_scorecard.csv` + `benchmark_gate_report.csv`).
+3. **Pre-sign-off gate** (mandatory before delivering work) — full 1174-test collection plus the real-data benchmark smoke (`benchmark_runner.py --fast-mode` → `artifacts/reports/benchmark_hierarchy_scorecard.csv` + `benchmark_gate_report.csv`).
 4. **End-of-session gate (mandatory)** — before stopping or handing off for review, run the linter and functional gate on the final state: `ruff check .` + `pytest -q`. Never end a session with unverified changes; report actual results, including skips or pre-existing failures.
 
 Real-data tests require the `data/v5.3/` parquet assets (see [`README.md`](README.md#data-assets)). If they are missing, report which tests were skipped — never claim full verification. CI (`.github/workflows/ci.yml`) enforces the fast gate on every push/PR (see [`CONTRIBUTING.md`](CONTRIBUTING.md#testing--verification)).
@@ -261,19 +261,19 @@ mutmut is fork-based; Windows refused (#397). Linux CI only (`.github/workflows/
 The V1 repo is mined for logic only. Never import from it, never modify it, never add it to any path.
 
 ### Era-range manifest fields are not the scoring window (2026-08-14; retired 2026-08-26)
-Never use `manifest.scoring_eras`/`weight_learning_eras` as "what this run was scored on" — trust the scorecard `*_n_eras` cells and the stored parquet (the pre-rebuild rows are gone; `experiments/` starts clean by design). Registry files stay immutable: document, never backfill.
+Never use `manifest.scoring_eras`/`weight_learning_eras` as "what this run was scored on" — trust the scorecard `*_n_eras` cells and the stored parquet. Registry files stay immutable: document, never backfill.
 
 ### Junction/worktree deletion hazard (2026-08-26)
 Never junction `artifacts/` or `experiments/` into scratch worktrees — `git worktree remove` recurses through junctions and deletes the real directory (the 2026-08-26 registry-loss incident).
 
 ### Single-writer champion invariant (2026-08-26)
-`experiments/champion.json` and `exports/*/full/current.json` are written only from CLI/runner entry points — never from concurrent processes or hand-edits (the read-compare-write is not atomic; design spec §9).
+`experiments/champion.json` and `exports/*/full/current.json` are written only from CLI/runner entry points — never hand-edited (the read-compare-write is serialized by the `champion.json.lock` file lock; spec §9).
 
 ### Dashboard window drifts on data refresh
 The standardized comparison window = meta overlap; refresh shifts it — regenerate `artifacts/dashboard.html` after every `refresh_data.py` run (definition + regeneration rule: `ARCHITECTURE.md` §W).
 
 ### OOF fold checkpoints (2026-08-20); deploy + validation checkpoints (2026-08-23)
-`ExperimentRunner` persists per-fold OOF parts under `experiments/<slug>/runs/<run_id>/oof_checkpoints/<target>/fold_NN.parquet` + a `manifest.json` recording code identity (SHA-256 of `nmr/models.py` + `nmr/splitter.py` + `nmr/runner.py`) and fit device. Resume loads existing folds; any code/device mismatch raises — delete the directory to force a full refit (never silently reuse stale OOF). The same identity-manifest discipline now covers the deploy fits (`deploy_checkpoints/<target>.pkl`) and the validation era-batch predicts (`validation_checkpoints/preds_batch_NN.parquet`); the final `evaluate_model` scorecard call stays uncheckpointed. Checkpoints are deleted with their run dir; clearing `experiments/*/runs/` remains ask-first.
+`ExperimentRunner` persists per-fold OOF parts under `experiments/<slug>/runs/<run_id>/oof_checkpoints/<target>/fold_NN.parquet` + a per-target `manifest.json` (2026-08-26: also binds target/feature/splitter identity) recording code identity (SHA-256 of `nmr/models.py` + `nmr/splitter.py` + `nmr/runner.py`) and fit device. Resume loads existing folds; any code/device/identity mismatch raises — delete the directory to force a full refit (never silently reuse stale OOF). The same discipline covers the deploy fits (`deploy_checkpoints/<target>.pkl` + sibling `<target>.manifest.json`) and validation (`validation_checkpoints/preds_batch_NN.parquet`); the final `evaluate_model` scorecard call stays uncheckpointed. Checkpoints are deleted with their run dir; clearing `experiments/*/runs/` remains ask-first.
 
 ### Thread-pool caps must run at process start (2026-08-23)
 Heavy CLIs (`benchmark_runner.py`, `run_campaign.py`, `analyze_dataset.py`, `train_first_model.py`, `promote_model.py`, `rehearse_promotion.py`) call `nmr.hardware.apply_thread_limits()` as their first executable statement: it sets `POLARS_MAX_THREADS` / `OMP_NUM_THREADS` / `OPENBLAS_NUM_THREADS` / `MKL_NUM_THREADS` (env `NMR_MAX_THREADS`, default min(8, cores); user-set values win; invalid env raises). Never add imports before that call.

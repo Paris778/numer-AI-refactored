@@ -30,8 +30,14 @@ the directory slug, `promoted_from_run_id` equals the slot-dir `run_id`, and
 and its sibling `predict.pkl.manifest.json` are present and the SHA256 agrees;
 `load_predict()` succeeds (hash-verified loadability — trusted-source rule);
 and a `partial` slot additionally requires `scorecard.json`. Identity binding is
-strict: slot-dir `run_id` == `promoted_from_run_id` == family slug — a copied or
-mislabeled slot fails the predicate.
+strict: slot-dir `run_id` == `promoted_from_run_id` == family slug, AND the
+**run record is present and agrees** — `experiments/<family>/runs/<run_id>/
+run.json` must exist, its payload `run_id` must equal the slot `run_id`, and its
+manifest config `run.name` (when present) must equal the family (2026-08-26
+review, BLOCKING 2). An export without a run record is an **orphan** — invalid,
+never render-valid; a copied or mislabeled slot fails the predicate. Malformed
+numeric metadata (`training_rows: NaN`, non-numeric strings) invalidates that
+slot and is contained — one bad export never aborts a scan (SECONDARY 3).
 
 **Badge precedence:** `staked` > `full` > `degraded` > `partial` > `research` >
 `uninitialized`. The badge is the highest valid stage the filesystem supports;
@@ -190,22 +196,28 @@ current tree can reproduce it.
 - **Exports are immutable.** A slot is published by a single atomic directory
   rename from `exports/<scope>/.tmp-<run_id>/`; a half-written slot never
   appears. Promoting an already-present `exports/<scope>/<run_id>/` raises
-  `ValueError` **before any write**, regardless of `force` — a new promotion
+  `ValueError` **before any write** with `force=False` — a new promotion
   means a new run, a new slot. Old slots remain for rollback; repointing
   `current.json` is a deliberate write.
-- **`force=True` only repoints `current.json`** at a different existing full
-  slot (or repairs a dangling pointer) — it never overwrites or replaces a slot.
-- **Single-writer champion.** `experiments/champion.json` and `current.json`
-  are written only from CLI/runner entry points (never from concurrent
-  processes, never hand-edited). The read-compare-write in
-  `promote_if_better` is not atomic; the single-writer invariant is the
-  contract. All pointer writes are temp + fsync + `os.replace`.
-- **Pointer-write failure leaves a recoverable `degraded` family.** Promotion
-  is a two-write act: the full slot publishes first, then `current.json` is
+- **`force=True` executes the pointer-repair recovery.** Against an existing
+  VALID full slot it validates the slot (`lifecycle.valid_export`) and writes
+  ONLY `current.json` — no refit, no republish, the slot is never overwritten
+  (2026-08-26 review, BLOCKING 1). Against an INVALID existing slot it
+  refuses; with `force=False` the existing-slot rejection stands.
+- **Single-writer champion, enforced.** `experiments/champion.json` and
+  `current.json` are written only from CLI/runner entry points (never
+  hand-edited). The read-compare-write in `promote_if_better` is serialized by
+  an inter-process advisory lock on `<root>/champion.json.lock`
+  (`nmr/_filelock.py` — `msvcrt.locking`/`fcntl.flock`, 30 s timeout, clear
+  error on expiry): concurrent writers serialize, so the final champion is the
+  best value (2026-08-26 review, BLOCKING 3). All pointer writes are
+  temp + fsync + `os.replace`.
+- **Pointer-write failure is recoverable — executably.** Promotion is a
+  two-write act: the full slot publishes first, then `current.json` is
   repointed. If the pointer write fails after the slot publishes, the family
-  shows `degraded` (valid full export, dangling pointer); recover by
-  re-running promotion with `--force` to repoint `current.json` at the
-  existing slot — never delete the slot.
+  shows `degraded` (valid full export, dangling pointer); re-run promotion
+  with `--force` and the writer validates the existing slot and repoints
+  `current.json` at it — no refit, never delete the slot.
 - **Upload and stake are manual acts.** Lifecycle validity (`valid_export`)
   does **not** imply Numerai upload acceptance — `accept_promoted_artifact`
   (raw output vs the official validator) remains the pre-upload gate, and the

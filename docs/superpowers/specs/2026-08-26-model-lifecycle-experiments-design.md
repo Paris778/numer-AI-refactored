@@ -132,17 +132,22 @@ Stages derived from filesystem state; the derivation is a **total function** —
 
 **`staked` never hides a broken pointer** (audit): the payload carries **both** facts — `lifecycle_stage` (precedence result) **and** `current_full_status` (`full` / `degraded` / `none`). A `staked` + `degraded` combination is rendered explicitly.
 
-**Export identity binding** (audit, blocker): a slot is valid only when **all** identities agree:
+**Export identity binding** (audit, blocker; run-record binding tightened 2026-08-26 3rd review BLOCKING 2): a slot is valid only when **all** identities agree:
 
 ```
 pointer.run_id == slot dir run_id  (current.json → exports/full/<run_id>/)
 manifest.promoted_from_run_id == slot dir run_id
 export.json.family == directory slug
-run.json.run_id == slot dir run_id          (the promoted run, when present)
+run.json.run_id == slot dir run_id          (the promoted run — MUST be present and agree)
 run.json manifest family == directory slug
 ```
 
-A copied/mislabeled slot fails the predicate (no silent mismatch).
+A copied/mislabeled slot fails the predicate (no silent mismatch); an export
+whose run record is missing is an **orphan** — invalid, never render-valid
+(2026-08-26 3rd review BLOCKING 2: `run.json` must exist under
+`experiments/<family>/runs/<run_id>/`; its payload `run_id` must equal the
+slot run_id; its manifest config `run.name`, when present, must equal the
+family).
 
 **Export validity predicate** (used by discovery and dashboard):
 
@@ -150,7 +155,9 @@ A copied/mislabeled slot fails the predicate (no silent mismatch).
 valid(export) ⇔ export.json present AND training_scope == dir scope ("partial"|"full")
   AND predict.pkl present AND predict.pkl.manifest.json present
   AND sha256(predict.pkl) == sibling manifest value AND load_predict() succeeds
-  AND identity binding (§5 above) holds
+  AND identity binding (§5 above) holds — run record MUST be present and agree
+  AND numeric metadata well-formed (malformed training_rows/era range ⇒ invalid;
+      a bad slot never aborts a scan — 2026-08-26 3rd review SECONDARY 3)
   AND (scope == partial ⇒ scorecard.json present)
 ```
 
@@ -180,7 +187,7 @@ valid(export) ⇔ export.json present AND training_scope == dir scope ("partial"
 
 **Publication atomicity:** the export slot is staged at `exports/<scope>/.tmp-<run_id>/` (predict.pkl + sibling manifest + export.json + scorecard.json), then **atomically renamed** into place as `exports/<scope>/<run_id>/` — one directory rename; discovery ignores `.tmp-`-prefixed entries. Failure at any point (fit, gate, scoring) discards the temp dir and reports failure — a half-written slot never appears.
 
-**Re-promotion (audit, money-path blocker):** exports are immutable — promoting an already-present `exports/<scope>/<run_id>/` slot raises `ValueError` before any write. `force=True` is retained **only** for repointing `current.json` at a *different existing* full slot (or repairing a dangling pointer) — it never overwrites or replaces an immutable slot. Windows directory replacement (rename onto an existing dir fails) is therefore never exercised on slots: staging → rename targets an absent path.
+**Re-promotion (audit, money-path blocker; recovery executable 2026-08-26 3rd review BLOCKING 1):** exports are immutable — promoting an already-present `exports/<scope>/<run_id>/` slot raises `ValueError` before any write. `force=True` is retained for repointing `current.json`: with an existing VALID full slot it enters the **pointer-repair recovery** path — the existing slot is validated via the export-validity predicate and ONLY `current.json` is written (no refit, no republish, the slot is never overwritten or replaced). This makes the documented failure recovery executable: if the pointer write fails after the slot publishes, the family reads `degraded`; re-running with `force=True` repoints the pointer at the already-valid slot. `force=True` against an INVALID existing slot refuses (never points at garbage); with `force=False` the existing-slot rejection stands. Windows directory replacement (rename onto an existing dir fails) is therefore never exercised on slots: staging → rename targets an absent path.
 
 ## 7. Cross-check scoring contract (resolves B5, B2-round-3, B3-round-3 — executable)
 
@@ -224,7 +231,7 @@ Unified schema gains `display_name` + `lifecycle_stage` + `current_full_status`;
   - `nmr/families.py` — compatibility-facing discovery wrapper, delegating validity/lifecycle to `nmr/lifecycle.py`.
 - `run.artifacts_dir` is **repurposed**: shared machine cache only — default `REPO_ROOT / "artifacts"`; `artifacts/cache/` (fingerprint cache, neutralization cache), `artifacts/reports/` (RAM curve/estimate, benchmark scorecards), `artifacts/campaigns/` stay under it. It **no longer determines run/export output location**. Stored value stays stripped from run-id payloads.
 - **Retarget list:** `nmr/registry.py`, `nmr/runner.py`, `nmr/promote.py`, `nmr/families.py`, `nmr/dashboard.py`, `nmr/meta.py`, `nmr/submission.py`, `dashboard_ui/app.py`, `dashboard_ui/report.py`, `train_first_model.py`, `run_campaign.py`, `promote_model.py`, `rehearse_promotion.py`, `generate_dashboard.py`.
-- **Champion concurrency (audit):** `promote_if_better`'s read-compare-write is **not** atomic; the spec adopts a **single-writer operational invariant** — registry pointer writes happen only from CLI/runner entry points, never from concurrent processes — documented in AGENTS.md. (A lock/CAS is out of scope; the invariant is the contract.)
+- **Champion concurrency (audit; enforced 2026-08-26 3rd review BLOCKING 3):** `promote_if_better`'s read-compare-write is serialized by an **inter-process advisory lock** on `<root>/champion.json.lock` (`nmr/_filelock.py` — Windows `msvcrt.locking` / POSIX `fcntl.flock`, non-blocking + poll, documented 30 s timeout, clear error on expiry). N concurrent writers serialize, so the final champion is the best value, never a stale last-write-wins race. The single-writer operational invariant (registry pointer writes happen only from CLI/runner entry points) remains documented — it is now ENFORCED by the lock. Every `RunRegistry` read/write is rooted at its own root (`<root>/<slug>/runs/<run_id>/run.json`, `<root>/champion.json`, the lock beside it — 2026-08-26 3rd review BLOCKING 4: never module-global `paths.*`), so an isolated-root registry cannot leak into the repo tree.
 
 ## 10. Champion (resolves B3-round-1)
 
@@ -253,7 +260,10 @@ Precise acceptance claim: **under identical code identity, configurations differ
 13. **Retarget**: every test referencing `artifacts/registry`, `artifacts/runs`, `artifacts/models` moves to the `experiments/` layout.
 14. **Champion**: promote/promote_if_better write `{run_id, experiment_slug, promoted_at}`; cross-family iteration validates slug; dangling pointer fails loud.
 15. **Partial non-ranking** (audit): partial rows carry cross-check metrics on the family detail but are excluded from leaderboard ranking (`EVALUABLE_ROWS`).
-16. **Re-promotion rejection** (audit): promoting an existing slot raises before any write; `force=True` repoints `current.json` only, never replaces a slot.
+16. **Re-promotion rejection + recovery** (audit; BLOCKING 1): promoting an existing slot raises before any write with `force=False`; `force=True` against an existing VALID full slot repoints `current.json` only (never replaces a slot) — asserted via an injected pointer-write failure (slot published, pointer missing, `degraded`) followed by `force=True` returning the family to `full`, and via a different-run_id repoint that never refits; `force=True` against an INVALID existing slot refuses.
+17. **Export lineage required** (BLOCKING 2): an export without a run record is an orphan — `valid_export` returns None, `scan_valid_exports` omits it, the dashboard never renders it; a run record whose `run_id` disagrees (or whose manifest `run.name` disagrees when present) invalidates the slot.
+18. **Champion race serialization** (BLOCKING 3): N processes calling `promote_if_better` concurrently with different scorecard values — the final champion is the BEST value (the lock serializes the read-compare-write).
+19. **Registry root isolation** (BLOCKING 4): a registry over a temp root lists/promotes/resolves entirely within that root — no file appears under the global `EXPERIMENTS_ROOT`.
 
 ## 13. Files
 
@@ -271,4 +281,3 @@ Precise acceptance claim: **under identical code identity, configurations differ
 - Re-creating the promising models from the 2026-08-26 roster (a separate campaign; the roster snapshot lives in `artifacts/dashboard.html` + `/tmp/model_roster.csv`).
 - Changing run-id hashing, metric formulas, or the official-backend parity contract.
 - External artifact store / cloud backup for heavy files (reproducibility scoped to "while original inputs remain available"; §3.1 makes the boundary verifiable).
-- Champion comparison locking/CAS (single-writer invariant is the contract, §9).

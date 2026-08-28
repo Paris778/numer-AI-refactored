@@ -315,11 +315,11 @@ def test_promote_overwrite_and_repoint_guards(tmp_path: Path) -> None:
     promote_full_version(
         _RID, "brb1-lgbm-v6"
     )
-    # Same slot again: immutable — refused even with force (a slot is never
+    # Same slot again WITHOUT force: immutable — refused (a slot is never
     # overwritten; force only gates repointing current.json).
     with pytest.raises(ValueError, match="already exists"):
         promote_full_version(
-            _RID, "brb1-lgbm-v6", force=True,
+            _RID, "brb1-lgbm-v6"
         )
     # A second run repointing current.json away: refused without force.
     other = "b" * 64
@@ -336,6 +336,94 @@ def test_promote_overwrite_and_repoint_guards(tmp_path: Path) -> None:
         paths.current_pointer_path("brb1-lgbm-v6").read_text(encoding="utf-8")
     )
     assert pointer["run_id"] == other
+
+
+def test_promote_force_recovery_repoints_existing_valid_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BLOCKING 1 (b): force=True against an existing VALID slot for a
+    DIFFERENT run_id repoints the pointer to that slot WITHOUT refitting (the
+    fit path is never entered — asserted via the spy) — the slot is
+    immutable, the pointer is repaired."""
+    data = _make_data(tmp_path / "data")
+    _write_registry(stored_config=_stored_config_dict(data), run_id=_RID)
+    promote_full_version(_RID, "brb1-lgbm-v6")  # slot A + pointer A
+    other = "b" * 64
+    _write_registry(stored_config=_stored_config_dict(data), run_id=other)
+    promote_full_version(other, "brb1-lgbm-v6", force=True)  # slot B + pointer B
+
+    def _must_not_fit(*args, **kwargs):
+        raise AssertionError("recovery must not refit")
+
+    monkeypatch.setattr("nmr.promote._build_deploy_pipeline", _must_not_fit)
+    result = promote_full_version(_RID, "brb1-lgbm-v6", force=True)
+    pointer = json.loads(
+        paths.current_pointer_path("brb1-lgbm-v6").read_text(encoding="utf-8")
+    )
+    assert pointer["run_id"] == _RID
+    assert result.artifact_path == paths.export_dir("brb1-lgbm-v6", "full", _RID) / "predict.pkl"
+    # The slot itself is untouched (immutability preserved).
+    assert lifecycle.valid_export("brb1-lgbm-v6", "full", _RID) is not None
+    assert lifecycle.current_full_status("brb1-lgbm-v6") == "full"
+
+
+def test_promote_pointer_write_failure_recoverable_via_force(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """BLOCKING 1 (a): a promotion whose current.json pointer write fails
+    leaves the slot published + pointer missing (the family reads 'degraded');
+    re-running with force=True repoints the pointer at the existing valid slot
+    and the family returns to 'full' — the documented recovery is executable."""
+    data = _make_data(tmp_path / "data")
+    _write_registry(stored_config=_stored_config_dict(data), run_id=_RID)
+
+    import nmr.promote as promote_module
+
+    original_atomic_write_text = promote_module.atomic_write_text
+
+    def _fail_pointer_write(path, text, *, encoding="utf-8"):
+        if Path(path).name == "current.json":
+            raise OSError("simulated pointer-write failure")
+        return original_atomic_write_text(path, text, encoding=encoding)
+
+    # Patch the promotion writer's own atomic_write_text binding so the
+    # pointer write (and only that) fails; the staging export.json writes
+    # pass through.
+    with monkeypatch.context() as ctx:
+        ctx.setattr(promote_module, "atomic_write_text", _fail_pointer_write)
+        with pytest.raises(OSError, match="simulated pointer-write failure"):
+            promote_full_version(_RID, "brb1-lgbm-v6")
+
+    # Slot published, pointer missing -> degraded.
+    slot = paths.export_dir("brb1-lgbm-v6", "full", _RID)
+    assert slot.is_dir()
+    assert not paths.current_pointer_path("brb1-lgbm-v6").exists()
+    assert lifecycle.current_full_status("brb1-lgbm-v6") == "degraded"
+
+    # force=True now repairs the pointer WITHOUT refitting.
+    def _must_not_fit(*args, **kwargs):
+        raise AssertionError("recovery must not refit")
+
+    with monkeypatch.context() as ctx:
+        ctx.setattr("nmr.promote._build_deploy_pipeline", _must_not_fit)
+        result = promote_full_version(_RID, "brb1-lgbm-v6", force=True)
+    assert result.artifact_path == slot / "predict.pkl"
+    assert lifecycle.current_full_status("brb1-lgbm-v6") == "full"
+    assert json.loads(
+        paths.current_pointer_path("brb1-lgbm-v6").read_text(encoding="utf-8")
+    )["run_id"] == _RID
+
+
+def test_promote_force_recovery_refuses_invalid_slot(tmp_path: Path) -> None:
+    """BLOCKING 1: force=True against an existing but INVALID slot refuses to
+    repoint — recovery only ever points at a valid export."""
+    data = _make_data(tmp_path / "data")
+    _write_registry(stored_config=_stored_config_dict(data), run_id=_RID)
+    promote_full_version(_RID, "brb1-lgbm-v6")
+    slot = paths.export_dir("brb1-lgbm-v6", "full", _RID)
+    (slot / "predict.pkl").unlink()  # hollow the slot -> invalid
+    with pytest.raises(ValueError, match="not a VALID full export"):
+        promote_full_version(_RID, "brb1-lgbm-v6", force=True)
 
 
 def test_promote_rejects_invalid_run_id_and_family(tmp_path: Path) -> None:
@@ -1011,9 +1099,10 @@ def test_full_scope_requires_current_pointer(tmp_path: Path) -> None:
     assert pointer["run_id"] == _RID
 
 
-def test_repromotion_rejected(tmp_path: Path) -> None:
-    """Exports are immutable: promoting an existing slot raises even with
-    force=True (force only gates repointing current.json, never overwrites)."""
+def test_repromotion_rejected_without_force(tmp_path: Path) -> None:
+    """Exports are immutable: promoting an existing slot raises with
+    force=False; force=True enters the pointer-repair recovery (repoints
+    current.json at the existing valid slot — never overwrites the slot)."""
     data = _make_data(tmp_path / "data")
     _write_registry(stored_config=_stored_config_dict(data))
     promote_full_version(
@@ -1028,9 +1117,19 @@ def test_repromotion_rejected(tmp_path: Path) -> None:
             _RID,
             "brb1-lgbm-v6",
             override_gate=True,
-            force=True,
+            force=False,
             scope="full",
         )
+    # force=True against the same existing valid slot is a no-op repair.
+    result = promote_full_version(
+        _RID,
+        "brb1-lgbm-v6",
+        override_gate=True,
+        force=True,
+        scope="full",
+    )
+    assert result.artifact_path.is_file()
+    assert lifecycle.current_full_status("brb1-lgbm-v6") == "full"
 
 
 def test_partial_scoring_failure_discards_staging(

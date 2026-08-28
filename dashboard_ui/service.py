@@ -72,6 +72,14 @@ class LeaderboardRowModel(BaseModel):
     family: str | None = None
     training_scope: str | None = None
     has_full_version: bool = False
+    # Lifecycle contract (2026-08-26 review, SECONDARY 5): the engine's
+    # unified frame emits these per family — mapped through verbatim so the
+    # HTML/Streamlit hosts render the same badge/stale/degraded facts as the
+    # engine.
+    display_name: str | None = None
+    lifecycle_stage: str | None = None  # uninitialized|research|partial|degraded|full|staked
+    current_full_status: str | None = None  # full|degraded|none
+    stale: bool | None = None
     run_name: str
     run_dir: str
     backend: str | None = None

@@ -42,7 +42,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 
-from nmr import experiment_store, paths
+from nmr import experiment_store, lifecycle, paths
 from nmr._atomicio import atomic_write_text
 from nmr.benchmark import Tier4GateConfig, load_benchmark_file
 from nmr.config import ExperimentConfig, config_from_dict
@@ -499,10 +499,17 @@ def promote_full_version(
     export.json, plus scorecard.json for partials) and published by a single
     atomic directory rename; any failure discards the staging dir — a
     half-written slot never appears. Exports are immutable: promoting an
-    already-present slot raises ``ValueError`` regardless of ``force``
-    (``force=True`` only gates repointing ``current.json`` at a different
-    existing full slot — never overwrites a slot). ``rehearsal=True`` writes
-    the slot with ``rehearsal: true`` + training provenance but never touches
+    already-present slot raises ``ValueError`` with ``force=False``, and with
+    ``force=True`` (full scope, non-rehearsal) the writer enters the
+    **pointer-repair recovery** path instead: it VALIDATES the existing slot
+    (``lifecycle.valid_export`` — it must be a valid full export for this
+    family/run_id) and writes ONLY ``current.json``, never refitting or
+    republishing. This makes the documented recovery for a failed pointer
+    write executable: the slot published but ``current.json`` did not (the
+    family reads ``degraded``); re-running with ``force=True`` repoints the
+    pointer at the already-valid slot. The slot itself is never overwritten
+    (immutability preserved). ``rehearsal=True`` writes the slot with
+    ``rehearsal: true`` + training provenance but never touches
     ``current.json``, so a rehearsal can never be read as the family's current
     full version. ``data_dir`` is the rehearsal override — train/validation
     are read from this directory instead of the stored config's, and the
@@ -514,6 +521,55 @@ def promote_full_version(
         raise ValueError(f"scope={scope!r} not in {_VALID_SCOPES}")
     persisted_scope = "partial" if scope == "train_only" else "full"
     validate_family_name(family)
+    slot = paths.export_dir(family, persisted_scope, run_id)
+    pointer = paths.current_pointer_path(family)
+    if slot.exists():
+        # Pointer-repair recovery (2026-08-26 review, BLOCKING 1): the slot is
+        # immutable and already published — with force=True (full scope,
+        # non-rehearsal) repoint current.json at the EXISTING VALID slot
+        # instead of raising. This is the executable form of the documented
+        # recovery for a promotion whose pointer write failed after the slot
+        # published (the family reads 'degraded' until repaired). The slot is
+        # never overwritten or replaced.
+        if not (force and scope == "full" and not rehearsal):
+            raise ValueError(
+                f"export slot {slot} already exists; exports are immutable — "
+                "force=True only repoints current.json at an existing VALID "
+                "full slot, never overwrites a slot (prefer a new run)"
+            )
+        version = lifecycle.valid_export(family, "full", run_id)
+        if version is None:
+            raise ValueError(
+                f"export slot {slot} exists but is not a VALID full export for "
+                f"family {family!r} / run {run_id!r}; refusing to repoint "
+                "current.json at an invalid slot (inspect the slot and its run "
+                "record before recovery)"
+            )
+        atomic_write_text(
+            pointer,
+            json.dumps(
+                {"run_id": run_id, "promoted_at": datetime.now(UTC).isoformat()},
+                sort_keys=True,
+            ),
+        )
+        logger.info(
+            "[promote] repaired current.json -> existing valid slot %s "
+            "(no refit; slot untouched)",
+            slot,
+        )
+        slot_record = json.loads((slot / "export.json").read_text(encoding="utf-8"))
+        return PromotionResult(
+            artifact_path=slot / "predict.pkl",
+            manifest_path=slot / "export.json",
+            run_id=run_id,
+            family=family,
+            tier4_gate_passed=bool(slot_record.get("tier4_gate_passed", False)),
+            override_used=bool(slot_record.get("override_used", False)),
+            scope=scope,
+            cross_check_path=None,
+            measured_peak_bytes=None,
+            measured_peak_commit_bytes=None,
+        )
     payload = _load_run_record(family, run_id)
     manifest = payload.get("manifest") or {}
     stored_config = manifest.get("config")
@@ -559,14 +615,6 @@ def promote_full_version(
     _supplemental_identity_check(config, manifest)
     _ram_guard(config, scope=scope)
 
-    slot = paths.export_dir(family, persisted_scope, run_id)
-    if slot.exists():
-        raise ValueError(
-            f"export slot {slot} already exists; exports are immutable — "
-            "force=True only gates repointing current.json, never overwrites "
-            "a slot (prefer a new run)"
-        )
-    pointer = paths.current_pointer_path(family)
     # A rehearsal never touches current.json — skip the repoint-guard entirely
     # (the writer below only writes the pointer for non-rehearsals; the guard
     # here must mirror that, or a rehearsal into a family with a genuine full
@@ -987,7 +1035,8 @@ def _pointer_references_rehearsal(family: str) -> bool:
         run_id = payload.get("run_id") if isinstance(payload, dict) else None
     except (json.JSONDecodeError, OSError):
         return False
-    if not isinstance(run_id, str):
+    # A non-hex run_id cannot name a slot — never resolve an unexpected path.
+    if not isinstance(run_id, str) or not _RID_RE.fullmatch(run_id):
         return False
     export_json = paths.export_dir(family, "full", run_id) / "export.json"
     try:

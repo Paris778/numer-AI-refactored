@@ -39,12 +39,15 @@ def _write_export(
     training_era_range: tuple[int, int] | None = None,
     body: str | None = None,
     write_pointer: bool = False,
+    write_run_record: bool = True,
 ) -> Path:
     """Write a REAL valid export slot under the (monkeypatched) experiments root.
 
     ``serialize_predict`` writes the sha256 sibling manifest, so
     ``lifecycle.valid_export``'s hash-verified loadability predicate holds.
     The ``current.json`` pointer is optional — callers control it explicitly.
+    A run record is written by default (identity binding, 2026-08-26 review
+    BLOCKING 2) — pass ``write_run_record=False`` to construct an orphan.
     """
     slot = paths.export_dir(slug, scope, run_id)
     slot.mkdir(parents=True, exist_ok=True)
@@ -77,6 +80,15 @@ def _write_export(
             }
         )
     (slot / "export.json").write_text(body, encoding="utf-8")
+    if write_run_record:
+        run_dir = paths.run_dir(slug, run_id)
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "run.json").write_text(
+            json.dumps(
+                {"run_id": run_id, "manifest": {"config": {"run": {"name": slug}}}}
+            ),
+            encoding="utf-8",
+        )
     if write_pointer:
         paths.current_pointer_path(slug).write_text(
             json.dumps({"run_id": run_id, "promoted_at": promoted_at}),
@@ -103,7 +115,9 @@ def test_available_slots_lists_all_slot_dirs(tmp_path: Path) -> None:
     # a validity claim.
     paths.export_dir("brb1-xgb-v6", "full", "d" * 64).mkdir(parents=True)
     # Staging dirs are never available slots.
-    (paths.export_dir("brb1-xgb-v6", "full", "x").parent / ".tmp-zzz").mkdir()
+    (paths.experiment_dir("brb1-xgb-v6") / "exports" / "full" / ".tmp-zzz").mkdir(
+        parents=True
+    )
     assert fam.available_slots(tmp_path, "brb1-xgb-v6") == [
         "a" * 64, "b" * 64, "c" * 64, "d" * 64,
     ]
@@ -167,7 +181,10 @@ def test_load_full_version_rejects_tampered_artifact(tmp_path: Path) -> None:
 
 
 def test_scan_full_versions_over_experiments(tmp_path: Path) -> None:
-    _write_export("fam1", "full", "a" * 64)  # no pointer — degraded, still scanned
+    _write_export("fam1", "full", "a" * 64)  # no pointer — degraded, NOT scanned
+    assert fam.scan_full_versions(tmp_path / "experiments") == {}
+    # With the pointer, the family IS scanned.
+    paths.current_pointer_path("fam1").write_text(json.dumps({"run_id": "a" * 64}))
     versions = fam.scan_full_versions(tmp_path / "experiments")
     assert set(versions) == {"fam1"}
     assert versions["fam1"].run_id == "a" * 64
@@ -193,12 +210,19 @@ def test_scan_full_versions_only_valid(tmp_path: Path) -> None:
     assert set(found) == {"brb1-xgb-v6", "brb1-lgbm-v6"}
 
 
-def test_scan_full_versions_picks_newest_valid_when_pointer_absent(tmp_path: Path) -> None:
+def test_scan_full_versions_pointer_driven_not_newest_guess(tmp_path: Path) -> None:
+    """SECONDARY 4: scan_full_versions is strictly pointer-driven — without a
+    pointer (even with two valid slots) the family is absent; no newest-slot
+    guessing."""
     _write_export("fam3", "full", "a" * 64, promoted_at="2026-08-25T10:00:00+00:00")
     _write_export("fam3", "full", "b" * 64, promoted_at="2026-08-26T10:00:00+00:00")
+    assert fam.scan_full_versions(tmp_path) == {}
+    paths.current_pointer_path("fam3").write_text(
+        json.dumps({"run_id": "a" * 64})
+    )
     found = fam.scan_full_versions(tmp_path)
     assert set(found) == {"fam3"}
-    assert found["fam3"].run_id == "b" * 64  # newest by promoted_at
+    assert found["fam3"].run_id == "a" * 64  # the POINTER's slot, not the newest
 
 
 def test_scan_full_versions_missing_dir_returns_empty(tmp_path: Path) -> None:
@@ -215,6 +239,24 @@ def test_validate_family_name_delegates_to_paths() -> None:
     assert fam.validate_family_name("brb1-xgb-v6") == "brb1-xgb-v6"
     with pytest.raises(ValueError):
         fam.validate_family_name("ModelA")
+
+
+def test_degraded_family_reads_no_current_full_version(tmp_path: Path) -> None:
+    """SECONDARY 4: a valid full export with a dangling pointer is 'degraded'
+    — load_full_version returns None and family_has_full_version is False (the
+    family must NOT read as having a *current* full version; the export itself
+    stays discoverable via available_slots)."""
+    _write_export("brb1-xgb-v6", "full", "a" * 64)  # valid slot, no pointer
+    assert lifecycle.current_full_status("brb1-xgb-v6") == "degraded"
+    assert fam.load_full_version(tmp_path, "brb1-xgb-v6") is None
+    assert fam.family_has_full_version(tmp_path, "brb1-xgb-v6") is False
+    assert fam.available_slots(tmp_path, "brb1-xgb-v6") == ["a" * 64]
+    # Repairing the pointer restores the current full version.
+    paths.current_pointer_path("brb1-xgb-v6").write_text(
+        json.dumps({"run_id": "a" * 64})
+    )
+    assert fam.load_full_version(tmp_path, "brb1-xgb-v6") is not None
+    assert fam.family_has_full_version(tmp_path, "brb1-xgb-v6") is True
 
 
 def test_rehearsal_never_reads_as_full_version(tmp_path: Path) -> None:

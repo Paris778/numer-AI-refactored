@@ -4,8 +4,10 @@ Runs live under ``experiments/<slug>/runs/<run_id>/run.json`` (persistence
 lives in :mod:`nmr.experiment_store` — run recording is
 ``experiment_store.record_run_result``); this class iterates families for
 comparison and owns the atomic ``champion.json`` pointer at the experiments
-root. Champion writes are single-writer (CLI/runner entry points only —
-design spec §9).
+root. Champion writes are single-writer — the read-compare-write in
+``promote_if_better`` is serialized by an inter-process advisory lock on
+``<root>/champion.json.lock`` (design spec §9; the invariant is documented AND
+enforced since the 2026-08-26 review).
 """
 
 from __future__ import annotations
@@ -17,8 +19,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from nmr import experiment_store, paths
+from nmr import paths
 from nmr._atomicio import atomic_write_text
+from nmr._filelock import file_lock
 
 logger = logging.getLogger("nmr.registry")
 
@@ -98,8 +101,14 @@ class RunRegistry:
     """Cross-family run registry: global comparison + champion pointer only.
 
     Runs live under ``experiments/<slug>/runs/<run_id>/run.json``; this class
-    iterates families for comparison and owns ``champion.json``. Champion
-    writes are single-writer (CLI/runner entry points only — spec §9).
+    iterates families for comparison and owns ``champion.json``. Every read
+    and write is rooted at ``self._root`` — run records at
+    ``<root>/<slug>/runs/<run_id>/run.json``, the champion pointer at
+    ``<root>/champion.json``, and the advisory lock file beside it — never the
+    module-global ``paths.*`` helpers, so a registry over an isolated root
+    cannot leak into the repo tree. Champion writes are single-writer,
+    enforced by the ``champion.json.lock`` file lock around the
+    read-compare-write (design spec §9).
     """
 
     def __init__(self, root: str | Path) -> None:
@@ -115,9 +124,20 @@ class RunRegistry:
                 f"run_id={run_id!r} is not a 64-char lowercase hex string"
             )
 
+    def _champion_path(self) -> Path:
+        return self._root / "champion.json"
+
+    def _champion_lock_path(self) -> Path:
+        return self._root / "champion.json.lock"
+
     def _read_run(self, run_id: str, slug: str) -> dict[str, Any]:
-        """Read a run record from the experiments layout (fail loud)."""
-        return experiment_store.read_run(slug, run_id)
+        """Read a run record under ``self._root`` (fail loud, rooted)."""
+        paths.validate_slug(slug)
+        self._validate_run_id(run_id)
+        path = self._root / slug / "runs" / run_id / "run.json"
+        if not path.is_file():
+            raise FileNotFoundError(f"no run record at {path}")
+        return json.loads(path.read_text(encoding="utf-8"))
 
     def _resolve_slug(self, run_id: str) -> str:
         return _resolve_run_slug(self._root, run_id)
@@ -136,7 +156,16 @@ class RunRegistry:
         return (best[1], best[2]) if best else None
 
     def promote(self, run_id: str, slug: str | None = None) -> Path:
-        """Promote ``run_id`` to champion; ``slug=None`` resolves it by scanning."""
+        """Promote ``run_id`` to champion; ``slug=None`` resolves it by scanning.
+
+        Serialized with ``promote_if_better`` by the champion lock — a
+        concurrent compare-and-promote cannot interleave a write.
+        """
+        with file_lock(self._champion_lock_path()):
+            return self._promote_locked(run_id, slug)
+
+    def _promote_locked(self, run_id: str, slug: str | None) -> Path:
+        """Promote without acquiring the lock (caller holds it)."""
         self._validate_run_id(run_id)
         slug = self._resolve_slug(run_id) if slug is None else paths.validate_slug(slug)
         self._read_run(run_id, slug)  # existence check, fail loud
@@ -146,7 +175,7 @@ class RunRegistry:
             "promoted_at": datetime.now(UTC).isoformat(),
         }
         logger.info("[promote] promoting %s/%s to champion", slug, run_id)
-        return self._atomic_json_write(paths.champion_path(), payload)
+        return self._atomic_json_write(self._champion_path(), payload)
 
     def promote_if_better(
         self, run_id: str, slug: str | None = None, metric: str = "corr_sharpe_ac"
@@ -157,6 +186,11 @@ class RunRegistry:
         A scorecard-bearing candidate may displace a scorecard-less champion;
         a candidate lacking the metric is refused. A missing/dangling/corrupt
         champion pointer fails loud (never silently treated as no champion).
+
+        The read-compare-write is wrapped in the inter-process advisory lock
+        (``<root>/champion.json.lock``, 30 s timeout, clear error on expiry) —
+        N concurrent writers serialize, so the final champion is the best
+        value, never a stale last-write-wins race.
         """
         self._validate_run_id(run_id)
         if metric not in _SCORECARD_METRIC_FIELDS:
@@ -166,33 +200,36 @@ class RunRegistry:
         candidate = (record.get("scorecard") or {}).get(metric)
         if candidate is None:
             raise ValueError(f"run {run_id} has no scorecard metric {metric}")
-        champion = self.resolve_champion()
-        if champion is None:
-            return self.promote(run_id, slug), True
-        champion_payload = json.loads(paths.champion_path().read_text(encoding="utf-8"))
-        champion_record = self._read_run(
-            champion_payload["run_id"], champion_payload["experiment_slug"]
-        )
-        champion_value = (champion_record.get("scorecard") or {}).get(metric)
-        if champion_value is None:
-            return self.promote(run_id, slug), True
-        candidate_value = float(candidate)
-        champion_value = float(champion_value)
-        if _SCORECARD_METRIC_DIRECTION[metric]:
-            better = candidate_value > champion_value
-        else:
-            better = candidate_value < champion_value
-        if not better:
-            logger.info(
-                "[promote_if_better] %s (%.6f) not better than champion %s (%.6f) "
-                "on %s; keeping champion",
-                run_id, candidate_value, champion_payload["run_id"], champion_value, metric,
+        with file_lock(self._champion_lock_path()):
+            champion = self.resolve_champion()
+            if champion is None:
+                return self._promote_locked(run_id, slug), True
+            champion_payload = json.loads(
+                self._champion_path().read_text(encoding="utf-8")
             )
-            return paths.champion_path(), False
-        return self.promote(run_id, slug), True
+            champion_record = self._read_run(
+                champion_payload["run_id"], champion_payload["experiment_slug"]
+            )
+            champion_value = (champion_record.get("scorecard") or {}).get(metric)
+            if champion_value is None:
+                return self._promote_locked(run_id, slug), True
+            candidate_value = float(candidate)
+            champion_value = float(champion_value)
+            if _SCORECARD_METRIC_DIRECTION[metric]:
+                better = candidate_value > champion_value
+            else:
+                better = candidate_value < champion_value
+            if not better:
+                logger.info(
+                    "[promote_if_better] %s (%.6f) not better than champion %s (%.6f) "
+                    "on %s; keeping champion",
+                    run_id, candidate_value, champion_payload["run_id"], champion_value, metric,
+                )
+                return self._champion_path(), False
+            return self._promote_locked(run_id, slug), True
 
     def resolve_champion(self) -> tuple[str, str] | None:
-        pointer = paths.champion_path()
+        pointer = self._champion_path()
         if not pointer.is_file():
             return None
         payload = json.loads(pointer.read_text(encoding="utf-8"))
