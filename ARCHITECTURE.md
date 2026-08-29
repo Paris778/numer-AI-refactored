@@ -487,7 +487,9 @@ one bad export never aborts a scan (2026-08-26 review SECONDARY 3).
 `derive_stage` is a total function over filesystem state returning
 `(lifecycle_stage, current_full_status)`. A syntactically valid pointer whose
 `run_id` is not 64-hex is treated as corrupt (→ `degraded` with valid full
-slots, `none` otherwise), never a crash (2026-08-29 re-review).
+slots, `none` otherwise), never a crash; likewise a `meta.json` staked
+`run_id` that is not 64-hex is treated as not-staked, never a crash
+(2026-08-29 re-review).
 
 ### Z. Experiment Persistence & Atomic Publication — `nmr/experiment_store.py`
 

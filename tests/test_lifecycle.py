@@ -148,6 +148,32 @@ def test_run_record_identity_mismatch_invalid():
     assert slot is not None
 
 
+def test_malformed_staked_run_id_is_not_staked_not_a_crash():
+    """2026-08-29 re-review (fixer-flagged residual): a meta.json staked
+    run_id that is not 64-hex must not let ``paths.export_dir``'s ValueError
+    escape ``derive_stage`` — the stake is treated as corrupt/absent (same as
+    ``load_staked_record`` returning None), the underlying stage shows, and the
+    total function never crashes."""
+    _write_export("fam-badstake", "full", "a" * 64)
+    bad = StakedRecord(run_id="../bad", scope="full", numerai_model_id="m1",
+                       staked_at="2026-08-26T11:00:00+00:00", status="active")
+    # No crash; the corrupt stake does not lift the stage (pointer missing ->
+    # degraded; a valid staked run_id would lift to staked only when the
+    # pointer resolves).
+    assert lifecycle.derive_stage("fam-badstake", bad) == ("degraded", "degraded")
+
+    # A valid full pointer + a malformed stake: still never 'staked'.
+    paths.current_pointer_path("fam-badstake").write_text(
+        json.dumps({"run_id": "a" * 64}), encoding="utf-8"
+    )
+    assert lifecycle.derive_stage("fam-badstake", bad) == ("full", "full")
+
+    # A well-formed active stake on the resolved slot lifts to 'staked'.
+    good = StakedRecord(run_id="a" * 64, scope="full", numerai_model_id="m1",
+                        staked_at="2026-08-26T11:00:00+00:00", status="active")
+    assert lifecycle.derive_stage("fam-badstake", good) == ("staked", "full")
+
+
 def test_scan_survives_malformed_numeric_metadata():
     """SECONDARY 3: a slot with NaN (or non-numeric) training_rows is INVALID
     and scan_valid_exports still returns the other valid slots — one

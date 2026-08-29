@@ -252,7 +252,9 @@ def derive_stage(family: str, staked: StakedRecord | None) -> tuple[str, str]:
     if status in ("full", "degraded"):
         stage_score = max(stage_score, _STAGE_ORDER_SCORES[status])
     if staked is not None and staked.status == "active" \
-            and staked.scope == "full" and valid_export(family, "full", staked.run_id) is not None:
+            and staked.scope == "full" \
+            and paths.RID_RE.fullmatch(staked.run_id) is not None \
+            and valid_export(family, "full", staked.run_id) is not None:
         stage_score = _STAGE_ORDER_SCORES["staked"]
     stage = next(s for s, v in _STAGE_ORDER_SCORES.items() if v == stage_score)
     return stage, status

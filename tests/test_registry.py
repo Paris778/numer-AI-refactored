@@ -303,6 +303,14 @@ def test_registry_rejects_misidentified_run_records(registry) -> None:
     with pytest.raises(ValueError, match="run.name"):
         registry.promote(run_id, "actual-family")
 
+    # A non-object payload (valid JSON, not a dict) has no verifiable identity —
+    # refused identically (ValueError, never AttributeError), never promoted.
+    (run_dir / "run.json").write_text(json.dumps([run_id]), encoding="utf-8")
+    with pytest.raises(ValueError, match="not a JSON object"):
+        registry.list()
+    with pytest.raises(ValueError, match="not a JSON object"):
+        registry.promote(run_id, "actual-family")
+
     # A matching-identity record passes every path.
     (run_dir / "run.json").write_text(
         json.dumps(

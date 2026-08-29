@@ -49,7 +49,10 @@ family whose stake references an invalid/missing export keeps the `stale` flag
 while the underlying stage (e.g. `full`) shows. `current_full_status` is
 `"full"` when the pointer resolves to a valid full slot, `"degraded"` when valid
 full slots exist but the pointer is missing, dangling, or carries a non-hex
-`run_id` (treated as corrupt — 2026-08-29 re-review), `"none"` otherwise.
+`run_id` (treated as corrupt — 2026-08-29 re-review), `"none"` otherwise. A
+`meta.json` whose staked `run_id` is not 64-hex is treated as not-staked
+(corrupt — same re-review), so `derive_stage` stays total; no stage is lifted
+by an unverifiable stake.
 
 **Surfacing in the dashboard:** `nmr/dashboard.UNIFIED_SCHEMA` carries
 `display_name`, `lifecycle_stage`, `current_full_status`, and `stale` per

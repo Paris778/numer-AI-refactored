@@ -130,6 +130,11 @@ class RunRegistry:
         BLOCKING 1): ``payload.run_id`` must equal the path run_id, and
         ``manifest.config.run.name`` (when present) must equal the family slug.
         A misidentified record must never reach the champion pointer — fail loud."""
+        if not isinstance(payload, dict):
+            raise ValueError(
+                f"run record at {slug}/runs/{run_id} is not a JSON object "
+                f"(got {type(payload).__name__}); record identity cannot be verified"
+            )
         embedded = payload.get("run_id")
         if embedded != run_id:
             raise ValueError(
