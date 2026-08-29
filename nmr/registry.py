@@ -124,6 +124,27 @@ class RunRegistry:
                 f"run_id={run_id!r} is not a 64-char lowercase hex string"
             )
 
+    @staticmethod
+    def _validate_identity(slug: str, run_id: str, payload: dict[str, Any]) -> None:
+        """Embedded identity must match the record's path (2026-08-29 re-review,
+        BLOCKING 1): ``payload.run_id`` must equal the path run_id, and
+        ``manifest.config.run.name`` (when present) must equal the family slug.
+        A misidentified record must never reach the champion pointer — fail loud."""
+        embedded = payload.get("run_id")
+        if embedded != run_id:
+            raise ValueError(
+                f"run record at {slug}/runs/{run_id} has embedded run_id={embedded!r}; "
+                "record identity does not match its path"
+            )
+        run_name = (
+            ((payload.get("manifest") or {}).get("config") or {}).get("run") or {}
+        ).get("name")
+        if run_name is not None and run_name != slug:
+            raise ValueError(
+                f"run record at {slug}/runs/{run_id} has manifest run.name={run_name!r}; "
+                "does not match the family slug"
+            )
+
     def _champion_path(self) -> Path:
         return self._root / "champion.json"
 
@@ -131,23 +152,36 @@ class RunRegistry:
         return self._root / "champion.json.lock"
 
     def _read_run(self, run_id: str, slug: str) -> dict[str, Any]:
-        """Read a run record under ``self._root`` (fail loud, rooted)."""
+        """Read a run record under ``self._root`` (fail loud, rooted).
+
+        Identity-bound (2026-08-29 re-review, BLOCKING 1): the payload's
+        embedded identity must match the path — ``payload.run_id`` == path
+        run_id and ``manifest.config.run.name`` (when present) == family slug;
+        a mismatched record raises ``ValueError``.
+        """
         paths.validate_slug(slug)
         self._validate_run_id(run_id)
         path = self._root / slug / "runs" / run_id / "run.json"
         if not path.is_file():
             raise FileNotFoundError(f"no run record at {path}")
-        return json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        self._validate_identity(slug, run_id, payload)
+        return payload
 
     def _resolve_slug(self, run_id: str) -> str:
         return _resolve_run_slug(self._root, run_id)
 
     def list(self) -> list[str]:
-        return sorted(run_id for _, run_id, _ in self._iter_run_records())
+        found = []
+        for slug, run_id, payload in self._iter_run_records():
+            self._validate_identity(slug, run_id, payload)
+            found.append(run_id)
+        return sorted(found)
 
     def best(self, metric: str = "corr_sharpe_ac") -> tuple[str, str] | None:
         best: tuple[float, str, str] | None = None
         for slug, run_id, payload in self._iter_run_records():
+            self._validate_identity(slug, run_id, payload)
             value = (payload.get("scorecard") or {}).get(metric)
             if value is None:
                 continue

@@ -93,19 +93,19 @@ def test_cross_family_list_and_best(registry) -> None:
     experiment_store.record_run(
         "fam-a",
         "a" * 64,
-        {"manifest": {"config": {"run": {"name": "fam-a"}}}, "scorecard": {"corr_sharpe_ac": 0.5}},
+        {"run_id": "a" * 64, "manifest": {"config": {"run": {"name": "fam-a"}}}, "scorecard": {"corr_sharpe_ac": 0.5}},
     )
     experiment_store.record_run(
         "fam-b",
         "b" * 64,
-        {"manifest": {"config": {"run": {"name": "fam-b"}}}, "scorecard": {"corr_sharpe_ac": 0.9}},
+        {"run_id": "b" * 64, "manifest": {"config": {"run": {"name": "fam-b"}}}, "scorecard": {"corr_sharpe_ac": 0.9}},
     )
     assert set(registry.list()) == {"a" * 64, "b" * 64}
     assert registry.best() == ("b" * 64, "fam-b")
 
 
 def test_champion_pointer_has_slug(registry) -> None:
-    experiment_store.record_run("fam-a", "a" * 64, {"scorecard": {}})
+    experiment_store.record_run("fam-a", "a" * 64, {"run_id": "a" * 64, "scorecard": {}})
     path = registry.promote("a" * 64, "fam-a")
     payload = json.loads(path.read_text())
     assert payload == {
@@ -116,17 +116,17 @@ def test_champion_pointer_has_slug(registry) -> None:
 
 
 def test_list_returns_all_run_ids_sorted(registry) -> None:
-    experiment_store.record_run("fam-b", "b" * 64, {"scorecard": {}})
-    experiment_store.record_run("fam-a", "a" * 64, {"scorecard": {}})
+    experiment_store.record_run("fam-b", "b" * 64, {"run_id": "b" * 64, "scorecard": {}})
+    experiment_store.record_run("fam-a", "a" * 64, {"run_id": "a" * 64, "scorecard": {}})
     assert registry.list() == ["a" * 64, "b" * 64]
 
 
 def test_best_skips_runs_without_metric_and_empty_registry(registry) -> None:
     assert registry.best() is None
     experiment_store.record_run(
-        "fam-a", "a" * 64, {"scorecard": {"corr_sharpe_ac": 0.3}}
+        "fam-a", "a" * 64, {"run_id": "a" * 64, "scorecard": {"corr_sharpe_ac": 0.3}}
     )
-    experiment_store.record_run("fam-b", "b" * 64, {"scorecard": {}})  # no metric
+    experiment_store.record_run("fam-b", "b" * 64, {"run_id": "b" * 64, "scorecard": {}})  # no metric
     assert registry.best() == ("a" * 64, "fam-a")
     assert registry.best("mmc") is None  # no run carries mmc
 
@@ -244,6 +244,81 @@ def test_resolve_champion_corrupt_pointer_fails_loud(registry) -> None:
     champion.write_text(json.dumps({"run_id": "b" * 64}), encoding="utf-8")
     with pytest.raises(ValueError, match="corrupt"):
         registry.resolve_champion()
+
+
+def test_registry_rejects_misidentified_run_records(registry) -> None:
+    """BLOCKING 1 (2026-08-29 re-review): a record stored at
+    ``actual-family/<rid>/run.json`` whose embedded identity disagrees with its
+    path — payload ``run_id`` != path run_id, or ``run.name`` != family slug —
+    is refused by every registry read (list/best/promote/promote_if_better/
+    resolve_champion). A misidentified record must never reach the champion
+    pointer: no champion is written, and a pointer aimed at it fails loud."""
+    run_id = "a" * 64
+    run_dir = paths.experiment_dir("actual-family") / "runs" / run_id
+    run_dir.mkdir(parents=True)
+
+    # Embedded run_id disagrees with the path run_id.
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "run_id": "b" * 64,
+                "manifest": {"config": {"run": {"name": "actual-family"}}},
+                "scorecard": {"corr_sharpe_ac": 0.9},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="run_id"):
+        registry.list()
+    with pytest.raises(ValueError, match="run_id"):
+        registry.best()
+    with pytest.raises(ValueError, match="run_id"):
+        registry.promote(run_id, "actual-family")
+    with pytest.raises(ValueError, match="run_id"):
+        registry.promote_if_better(run_id, "actual-family")
+    assert not paths.champion_path().exists()  # promote never wrote a champion
+
+    # A champion pointer already aimed at the misidentified record fails loud
+    # on resolve — never returns the wrong identity.
+    paths.champion_path().write_text(
+        json.dumps({"run_id": run_id, "experiment_slug": "actual-family"}),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="run_id"):
+        registry.resolve_champion()
+
+    # The same refusal when run_id agrees but run.name disagrees with the slug.
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "manifest": {"config": {"run": {"name": "other-family"}}},
+                "scorecard": {"corr_sharpe_ac": 0.9},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="run.name"):
+        registry.list()
+    with pytest.raises(ValueError, match="run.name"):
+        registry.promote(run_id, "actual-family")
+
+    # A matching-identity record passes every path.
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "manifest": {"config": {"run": {"name": "actual-family"}}},
+                "scorecard": {"corr_sharpe_ac": 0.9},
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert registry.list() == [run_id]
+    assert registry.best() == (run_id, "actual-family")
+    champion = registry.promote(run_id, "actual-family")
+    assert json.loads(champion.read_text(encoding="utf-8"))["run_id"] == run_id
+    assert registry.resolve_champion() == (run_id, "actual-family")
 
 
 def test_promote_if_better_dangling_champion_pointer_fails_loud(registry) -> None:

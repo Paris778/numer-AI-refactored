@@ -173,3 +173,37 @@ def test_scan_survives_malformed_numeric_metadata():
     (bad / "export.json").write_text(json.dumps(payload), encoding="utf-8")
     assert lifecycle.valid_export("fam-scan", "full", "b" * 64) is None
     assert [v.run_id for v in lifecycle.scan_valid_exports("fam-scan", "full")] == ["a" * 64]
+
+
+def test_malformed_pointer_run_id_is_degraded_not_a_crash():
+    """SECONDARY (2026-08-29 re-review): a syntactically valid ``current.json``
+    whose run_id is not a 64-hex string (``"../bad"``) must not let the
+    ValueError escape ``valid_export``'s path validation — the pointer is
+    treated as invalid (same as corrupt/missing): 'degraded' when valid full
+    slots exist, 'none' otherwise, and ``derive_stage`` stays total."""
+    _write_export("fam-badptr", "full", "a" * 64)
+    paths.current_pointer_path("fam-badptr").write_text(
+        json.dumps({"run_id": "../bad"}), encoding="utf-8"
+    )
+    assert lifecycle.current_full_status("fam-badptr") == "degraded"
+    assert lifecycle.derive_stage("fam-badptr", None) == ("degraded", "degraded")
+
+    # A non-string run_id in the pointer is equally invalid.
+    paths.current_pointer_path("fam-badptr").write_text(
+        json.dumps({"run_id": 123}), encoding="utf-8"
+    )
+    assert lifecycle.current_full_status("fam-badptr") == "degraded"
+
+    # Without any valid full slot the status is 'none' regardless of pointer.
+    paths.experiment_dir("fam-noslot").mkdir(parents=True)
+    no_slot_pointer = paths.current_pointer_path("fam-noslot")
+    no_slot_pointer.parent.mkdir(parents=True, exist_ok=True)
+    no_slot_pointer.write_text(json.dumps({"run_id": "../bad"}), encoding="utf-8")
+    assert lifecycle.current_full_status("fam-noslot") == "none"
+    assert lifecycle.derive_stage("fam-noslot", None) == ("uninitialized", "none")
+
+    # A well-formed pointer still resolves to 'full'.
+    paths.current_pointer_path("fam-badptr").write_text(
+        json.dumps({"run_id": "a" * 64}), encoding="utf-8"
+    )
+    assert lifecycle.current_full_status("fam-badptr") == "full"

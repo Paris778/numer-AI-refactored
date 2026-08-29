@@ -379,7 +379,9 @@ def test_promote_model_champion_resolves_from_paths_pointer(
     from nmr.registry import RunRegistry
 
     monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", tmp_path / "experiments")
-    experiment_store.record_run("fam-a", "a" * 64, {"scorecard": {}})
+    experiment_store.record_run(
+        "fam-a", "a" * 64, {"run_id": "a" * 64, "scorecard": {}}
+    )
     RunRegistry(paths.EXPERIMENTS_ROOT).promote("a" * 64, "fam-a")
     # Task 11: champion resolution reads paths.champion_path() only.
     assert promote_model._resolve_champion_run_id() == "a" * 64
@@ -404,7 +406,9 @@ def test_promote_model_champion_family_mismatch_raises(
     from nmr.registry import RunRegistry
 
     monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", tmp_path / "experiments")
-    experiment_store.record_run("champ-fam", "a" * 64, {"scorecard": {}})
+    experiment_store.record_run(
+        "champ-fam", "a" * 64, {"run_id": "a" * 64, "scorecard": {}}
+    )
     RunRegistry(paths.EXPERIMENTS_ROOT).promote("a" * 64, "champ-fam")
 
     # --champion + a wrong --family raises before any promotion.

@@ -216,7 +216,11 @@ def sort_exports(exports: list[ExportVersion]) -> list[ExportVersion]:
 
 def current_full_status(family: str) -> Literal["full", "degraded", "none"]:
     """'full' when the pointer resolves to a valid full slot; 'degraded' when
-    valid full slots exist but the pointer is missing/dangling; else 'none'."""
+    valid full slots exist but the pointer is missing/dangling; else 'none'.
+
+    A syntactically valid pointer whose run_id is not a 64-hex string is
+    treated as corrupt/invalid (never resolved, never crashes the total scan —
+    2026-08-29 re-review SECONDARY finding)."""
     pointer = paths.current_pointer_path(family)
     has_valid_full = any(scan_valid_exports(family, "full"))
     if not has_valid_full:
@@ -226,7 +230,8 @@ def current_full_status(family: str) -> Literal["full", "degraded", "none"]:
         run_id = payload.get("run_id") if isinstance(payload, dict) else None
     except (json.JSONDecodeError, OSError):
         run_id = None
-    if isinstance(run_id, str) and valid_export(family, "full", run_id) is not None:
+    if isinstance(run_id, str) and paths.RID_RE.fullmatch(run_id) is not None \
+            and valid_export(family, "full", run_id) is not None:
         return "full"
     return "degraded"
 

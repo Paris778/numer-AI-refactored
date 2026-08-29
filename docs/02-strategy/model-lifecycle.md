@@ -48,7 +48,8 @@ the derivation is a total function, so no state is ambiguous.
 family whose stake references an invalid/missing export keeps the `stale` flag
 while the underlying stage (e.g. `full`) shows. `current_full_status` is
 `"full"` when the pointer resolves to a valid full slot, `"degraded"` when valid
-full slots exist but the pointer is missing/dangling, `"none"` otherwise.
+full slots exist but the pointer is missing, dangling, or carries a non-hex
+`run_id` (treated as corrupt — 2026-08-29 re-review), `"none"` otherwise.
 
 **Surfacing in the dashboard:** `nmr/dashboard.UNIFIED_SCHEMA` carries
 `display_name`, `lifecycle_stage`, `current_full_status`, and `stale` per
