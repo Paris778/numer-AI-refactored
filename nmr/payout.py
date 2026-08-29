@@ -4,6 +4,17 @@ This module converts per-era CORR/MMC series into an economic payout proxy and
 downside shape metrics. Inference statistics (bootstrap CI, AC-adjusted Sharpe,
 Deflated Sharpe) are delegated to `nmr.inference`.
 
+Per-era payout (Numerai round semantics):
+
+    pi_e = clip(PF_e * (0.75 * CORR_e + 2.25 * MMC_e), -0.05, +0.05)
+
+``PF_e`` is the round's payout factor from ``payout_factor_historic.csv``
+(Numerai's published historic payout factors), aligned by ``int(era) == round``.
+Eras without a recorded factor use the explicit fallback ``PF_e = 1.0`` — a
+fallback/synthetic-test default, never the historical 86-era assumption.
+``payout_report`` derives mean payout, CAGR, drawdown, burn rate, and the other
+economic metrics from the era-specific clipped returns.
+
 Terminal-tranche accounting convention (simulator): tranches still locked at
 the end of the series are carried at par principal in ``final_equity`` and the
 equity curve — no mark-to-market and no unrealized payoff for the final
@@ -12,9 +23,11 @@ equity curve — no mark-to-market and no unrealized payoff for the final
 
 from __future__ import annotations
 
+import csv
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 
@@ -32,6 +45,9 @@ __all__ = [
     "PayoutSeries",
     "PayoutResult",
     "OverlappingSimulationResult",
+    "PAYOUT_FACTOR_FILENAME",
+    "load_payout_factors",
+    "era_payout_factors",
     "payout_series",
     "annual_compounded_return",
     "gain_to_pain_ratio",
@@ -91,6 +107,51 @@ def _as_finite_1d(
 
 _HORIZON_ERAS: dict[str, int] = {"20D": 20, "60D": 60}
 
+#: Filename of the cleaned historic payout-factor CSV inside the data version dir.
+PAYOUT_FACTOR_FILENAME = "payout_factor_historic.csv"
+
+
+def load_payout_factors(path: Path) -> dict[int, float]:
+    """Parse the cleaned historic payout-factor CSV: round -> payout factor.
+
+    The cleaned file keeps ``round, status, close, resolve, pf`` only (metric
+    columns are noise). Fails loud on a missing file, blank rows, non-numeric
+    factors, non-finite or non-positive factors, or duplicate rounds.
+    """
+    p = Path(path)
+    if not p.is_file():
+        raise FileNotFoundError(f"payout factor CSV missing: {p}")
+    factors: dict[int, float] = {}
+    with open(p, encoding="utf-8-sig", newline="") as fh:
+        for row in csv.DictReader(fh):
+            raw_round = (row.get("round") or "").strip()
+            raw_pf = (row.get("pf") or "").strip()
+            if not raw_round or not raw_pf:
+                raise ValueError(f"payout factor CSV {p} has a blank round/pf row")
+            round_no = int(raw_round)
+            pf = float(raw_pf)
+            if not math.isfinite(pf) or pf <= 0.0:
+                raise ValueError(
+                    f"payout factor for round {round_no} must be finite and > 0, got {pf}"
+                )
+            if round_no in factors:
+                raise ValueError(f"duplicate round {round_no} in payout factor CSV {p}")
+            factors[round_no] = pf
+    return factors
+
+
+def era_payout_factors(path: Path | None) -> dict[str, float]:
+    """Era-keyed payout factors, joining ``int(era) == round``.
+
+    Returns ``{}`` when ``path`` is None or the file is absent — the explicit
+    all-1.0 fallback mode (PF=1.0 is a fallback/synthetic default, never the
+    historical assumption). A present-but-malformed file fails loud via
+    :func:`load_payout_factors`.
+    """
+    if path is None or not Path(path).is_file():
+        return {}
+    return {f"{round_no:04d}": pf for round_no, pf in load_payout_factors(path).items()}
+
 
 @dataclass(frozen=True)
 class OverlappingSimulationResult:
@@ -104,13 +165,16 @@ def payout_series(
     corr_by_era: Mapping[str, float],
     mmc_by_era: Mapping[str, float],
     *,
-    pf: float = 1.0,
+    pf: Mapping[str, float] | float = 1.0,
     clip: float = 0.05,
 ) -> PayoutSeries:
-    pf_f = float(pf)
+    """Per-era payout series: ``raw_e = PF_e * (0.75*CORR_e + 2.25*MMC_e)``.
+
+    ``pf`` is either a scalar (uniform factor — synthetic-test default) or a
+    per-era mapping keyed by era string; eras absent from the mapping use the
+    explicit fallback ``PF_e = 1.0``. Applied factors must be finite and > 0.
+    """
     clip_f = float(clip)
-    if not np.isfinite(pf_f) or pf_f <= 0.0:
-        raise ValueError("pf must be finite and > 0")
     if not np.isfinite(clip_f) or clip_f <= 0.0:
         raise ValueError("clip must be finite and > 0")
 
@@ -125,7 +189,19 @@ def payout_series(
     if not np.isfinite(corr).all() or not np.isfinite(mmc).all():
         raise ValueError("corr_by_era and mmc_by_era must contain only finite values")
 
-    raw = pf_f * ((0.75 * corr) + (2.25 * mmc))
+    if isinstance(pf, Mapping):
+        pf_map = {str(k): float(v) for k, v in pf.items()}
+        for era, value in pf_map.items():
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"pf for era {era!r} must be finite and > 0, got {value}")
+        pf_values = np.asarray([pf_map.get(era, 1.0) for era in eras], dtype=float)
+    else:
+        pf_f = float(pf)
+        if not np.isfinite(pf_f) or pf_f <= 0.0:
+            raise ValueError("pf must be finite and > 0")
+        pf_values = np.full(len(eras), pf_f, dtype=float)
+
+    raw = pf_values * ((0.75 * corr) + (2.25 * mmc))
     clipped = np.clip(raw, -clip_f, clip_f)
     return PayoutSeries(eras=eras, raw=raw, clipped=clipped)
 
@@ -351,7 +427,7 @@ def payout_report(
     horizon: Horizon,
     n_trials: int,
     seed: int,
-    pf: float = 1.0,
+    pf: Mapping[str, float] | float = 1.0,
     clip: float = 0.05,
     n_boot: int = 1000,
     alpha: float = 0.05,
@@ -368,6 +444,13 @@ def payout_report(
         bl = resolve_block_len(n, horizon)
     else:
         bl = resolve_block_len(n, horizon, override=block_len)
+
+    # PayoutResult.pf is a scalar summary: the uniform factor when ``pf`` is a
+    # scalar, else the mean of the per-era factors applied on the scored eras.
+    if isinstance(pf, Mapping):
+        pf_summary = float(np.mean([float(pf.get(era, 1.0)) for era in series.eras]))
+    else:
+        pf_summary = float(pf)
 
     payout_ci = block_bootstrap_ci(
         series.clipped,
@@ -399,7 +482,7 @@ def payout_report(
     horizon_eras = _HORIZON_ERAS[horizon]
     return PayoutResult(
         n_eras=n,
-        pf=float(pf),
+        pf=pf_summary,
         mean_payout=float(np.mean(clipped)),
         payout_ci=payout_ci,
         deflated_sharpe=float(dsr),

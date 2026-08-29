@@ -50,6 +50,7 @@ from nmr.data import IngestionAgent
 from nmr.deployment import load_predict
 from nmr.families import DEFAULT_MODELS_DIR, validate_family_name
 from nmr.models import ModelOrchestrator
+from nmr.payout import PAYOUT_FACTOR_FILENAME, era_payout_factors
 from nmr.runner import (
     ExperimentRunner,
     _build_deploy_pipeline,
@@ -831,6 +832,7 @@ def _run_cross_check(
         horizon=config.data.horizon,
         main_target=config.evaluation.main_target,
         seed=config.run.seed,
+        pf=era_payout_factors(config.data.path(PAYOUT_FACTOR_FILENAME)),
     )
     return result, window_eras
 

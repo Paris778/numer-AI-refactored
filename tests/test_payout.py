@@ -17,8 +17,10 @@ from nmr.payout import (
     burn_rate,
     calmar,
     cvar,
+    era_payout_factors,
     gain_to_pain_ratio,
     kelly_fraction,
+    load_payout_factors,
     max_burn_streak,
     max_drawdown,
     payout_report,
@@ -442,3 +444,83 @@ def test_payout_series_sorts_eras_numerically() -> None:
     lexicographic ("10" < "2") — the documented regression class."""
     series = payout_series({"10": 0.1, "2": 0.2}, {"10": 0.05, "2": 0.06})
     assert series.eras == ("2", "10")
+
+def test_payout_series_per_era_pf_scales_each_era() -> None:
+    corr = {"0001": 0.10, "0002": 0.20, "0003": -0.05}
+    mmc = {"0001": 0.02, "0002": -0.03, "0003": 0.01}
+    pf_map = {"0001": 2.0, "0003": 3.0}  # "0002" absent -> explicit fallback 1.0
+    out = payout_series(corr, mmc, pf=pf_map, clip=0.05)
+    expected_raw = np.array(
+        [
+            2.0 * ((0.75 * 0.10) + (2.25 * 0.02)),
+            1.0 * ((0.75 * 0.20) + (2.25 * -0.03)),
+            3.0 * ((0.75 * -0.05) + (2.25 * 0.01)),
+        ],
+        dtype=float,
+    )
+    assert np.allclose(out.raw, expected_raw, atol=1e-12)
+    assert np.allclose(out.clipped, np.clip(expected_raw, -0.05, 0.05), atol=1e-12)
+
+
+def test_payout_series_pf_mapping_empty_is_fallback_one() -> None:
+    corr = {"0001": 0.10}
+    mmc = {"0001": 0.02}
+    out = payout_series(corr, mmc, pf={}, clip=0.05)
+    assert np.allclose(out.raw, [0.75 * 0.10 + 2.25 * 0.02], atol=1e-12)
+
+
+def test_payout_series_pf_mapping_invalid_values_raise() -> None:
+    corr = {"0001": 0.10}
+    mmc = {"0001": 0.02}
+    for bad in ({"0001": 0.0}, {"0001": -1.0}, {"0001": float("nan")}):
+        with pytest.raises(ValueError):
+            payout_series(corr, mmc, pf=bad)
+
+
+def test_payout_report_per_era_pf_summary_and_metrics() -> None:
+    corr = {"0001": 0.10, "0002": 0.20, "0003": -0.05, "0004": 0.05, "0005": 0.15, "0006": -0.02}
+    mmc = {"0001": 0.02, "0002": -0.03, "0003": 0.01, "0004": 0.01, "0005": -0.01, "0006": 0.02}
+    pf_map = {"0001": 2.0, "0002": 3.0, "0003": 0.5, "0004": 1.5, "0005": 2.5, "0006": 0.8}
+    report = payout_report(corr, mmc, horizon="20D", n_trials=1, seed=5, pf=pf_map, n_boot=5)
+    series = payout_series(corr, mmc, pf=pf_map)
+    assert report.pf == pytest.approx(float(np.mean([2.0, 3.0, 0.5, 1.5, 2.5, 0.8])))
+    assert report.mean_payout == pytest.approx(float(np.mean(series.clipped)))
+    assert report.cagr_1y == pytest.approx(annual_compounded_return(series.clipped))
+    assert report.burn_rate == pytest.approx(burn_rate(series.clipped))
+    assert report.max_drawdown == pytest.approx(max_drawdown(series.clipped))
+
+
+def test_load_payout_factors_round_to_pf(tmp_path) -> None:
+    csv_path = tmp_path / "payout_factor_historic.csv"
+    csv_path.write_text(
+        "round,status,close,resolve,pf\n"
+        "1020,Resolved,Jun 03 2025,Jul 04 2025,0.1009\n"
+        "1019,Resolved,Jun 02 2025,Jul 03 2025,0.0987\n",
+        encoding="utf-8",
+    )
+    assert load_payout_factors(csv_path) == {1020: 0.1009, 1019: 0.0987}
+
+
+def test_load_payout_factors_missing_and_malformed(tmp_path) -> None:
+    with pytest.raises(FileNotFoundError):
+        load_payout_factors(tmp_path / "missing.csv")
+    bad = tmp_path / "bad.csv"
+    bad.write_text("round,pf\n1019,not-a-number\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_payout_factors(bad)
+    zero = tmp_path / "zero.csv"
+    zero.write_text("round,pf\n1019,0.0\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_payout_factors(zero)
+    dup = tmp_path / "dup.csv"
+    dup.write_text("round,pf\n1019,0.1\n1019,0.2\n", encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_payout_factors(dup)
+
+
+def test_era_payout_factors_join_and_fallback(tmp_path) -> None:
+    path = tmp_path / "pf.csv"
+    path.write_text("round,pf\n1019,0.0987\n1020,0.1009\n", encoding="utf-8")
+    assert era_payout_factors(path) == {"1019": 0.0987, "1020": 0.1009}
+    assert era_payout_factors(None) == {}
+    assert era_payout_factors(tmp_path / "absent.csv") == {}

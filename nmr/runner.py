@@ -47,6 +47,10 @@ from nmr.deployment import DeploymentArtifact, serialize_predict
 from nmr.ensemble import Ensembler
 from nmr.evaluation import EvaluationEngine, MetricSummary
 from nmr.models import ModelOrchestrator
+from nmr.payout import (
+    PAYOUT_FACTOR_FILENAME,
+    era_payout_factors,
+)
 from nmr.risk import NeutralizationEngine
 from nmr.scorecard import MetricScorecard, evaluate_model
 from nmr.splitter import PurgedEraSplitter
@@ -662,6 +666,9 @@ class ExperimentRunner:
                 else None
             ),
             backend=self._config.evaluation.backend,
+            pf=era_payout_factors(
+                self._config.data.path(PAYOUT_FACTOR_FILENAME)
+            ),
             model_id=self._run_id,
         )
         return scorecard, preds, purge
@@ -1104,6 +1111,22 @@ def _data_fingerprint(config: ExperimentConfig) -> str:
     stat = features_path.stat()
     cache_keys.append(f"features.json:{stat.st_mtime_ns}:{stat.st_size}")
     records.append({"name": "features.json", "sha256": _sha256_file(features_path)})
+
+    # The historic payout-factor CSV is scoring input (per-era PF_e enters the
+    # payout proxy) — pin its content so a changed PF series changes run
+    # identity. Absent file => no record (the explicit all-1.0 fallback state).
+    payout_path = config.data.path(PAYOUT_FACTOR_FILENAME)
+    if payout_path.is_file():
+        payout_stat = payout_path.stat()
+        cache_keys.append(
+            f"payout_factor_historic.csv:{payout_stat.st_mtime_ns}:{payout_stat.st_size}"
+        )
+        records.append(
+            {
+                "name": "payout_factor_historic.csv",
+                "sha256": _sha256_file(payout_path),
+            }
+        )
 
     cache_path = config.run.artifacts_dir / "cache" / _DATA_FINGERPRINT_CACHE_NAME
     key = hashlib.sha256("\n".join(cache_keys).encode("utf-8")).hexdigest()

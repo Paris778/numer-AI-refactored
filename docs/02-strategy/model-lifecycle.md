@@ -92,6 +92,10 @@ research → partial → upload → compare → full → stake
    validation-era window, local-vs-platform. **The partial is the honest
    cross-check instrument** — it never saw validation during training, so its
    local diagnostics are a fair expectation of what the platform should report.
+   Both paths use the **same per-era payout factors**: the research validation
+   scorecard and the partial cross-check apply `PF_e` from
+   `data/v5.3/payout_factor_historic.csv` (aligned by `int(era) == round`),
+   falling back to `PF_e = 1.0` only for eras the CSV does not cover.
 5. **Full** — `promote_model.py` (the writer's default `scope="full"`) trains on
    train+validation and publishes the immutable slot `exports/full/<run_id>/`,
    repointing the atomic `current.json` pointer. The family moves to `full`.

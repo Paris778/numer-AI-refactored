@@ -10,7 +10,7 @@ import json
 import logging
 import re
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -526,7 +526,7 @@ def evaluate_model(
     backend: str = "custom",
     regime_labels: pl.DataFrame | None = None,
     perturbation: PerturbationResult | None = None,
-    pf: float = 1.0,
+    pf: Mapping[str, float] | float = 1.0,
     clip: float = 0.05,
     n_boot: int = 1000,
     alpha: float = 0.05,
@@ -888,6 +888,7 @@ def evaluate_cross_check(
     horizon: Horizon = "20D",
     main_target: str = "target",
     seed: int = 42,
+    pf: Mapping[str, float] | float = CROSSCHECK_PF,
 ) -> CrossCheckResult:
     """Era-grouped official-backend cross-check of a partial export.
 
@@ -896,6 +897,9 @@ def evaluate_cross_check(
     raw Sharpe the scorecard itself does not retain. Replay parameters are the
     fixed ``CROSSCHECK_N_TRIALS`` constant plus ``evaluate_model`` defaults
     (official backend forced; column names are ``evaluate_model``'s defaults).
+    ``pf`` accepts the same per-era payout-factor mapping as ``evaluate_model``
+    — the cross-check uses the same PF series as the research validation path
+    (per-era ``PF_e`` from ``payout_factor_historic.csv``, fallback 1.0).
     """
     base, _join_keys, feature_cols = _build_joined_base(
         predictions,
@@ -931,7 +935,7 @@ def evaluate_cross_check(
         backend="official",
         n_boot=CROSSCHECK_N_BOOT,
         alpha=CROSSCHECK_ALPHA,
-        pf=CROSSCHECK_PF,
+        pf=pf,
         clip=CROSSCHECK_CLIP,
         sr0_benchmark=CROSSCHECK_SR0_BENCHMARK,
     )

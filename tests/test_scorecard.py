@@ -808,3 +808,52 @@ def test_cross_check_result_shape() -> None:
         float(np.mean(corr_values)) / float(np.std(corr_values, ddof=0))
     )
     assert len(result.per_era["corr"]) == result.scorecard.n_eras
+
+
+
+
+
+def test_cross_check_honors_per_era_pf_mapping() -> None:
+    """The cross-check applies the same per-era payout-factor series as the
+    research validation path.
+
+    ``_tiny_inputs`` payouts are clip-saturated (raw well beyond +-0.05), so a
+    factor ABOVE 1 is invisible in the clipped mean; a uniform PF=0.01 pulls
+    the series inside the clip band and must reduce the clipped mean payout
+    below the base, proving the mapping reaches the payout computation. The
+    empty mapping is the explicit 1.0 fallback (identical to base)."""
+    predictions, meta_model, _benchmarks, features, targets = _tiny_inputs()
+    base = evaluate_cross_check(
+        predictions,
+        meta_model=meta_model,
+        features=features,
+        targets=targets,
+        horizon="20D",
+        main_target="target",
+        seed=42,
+    )
+    eras = [e["era"] for e in base.per_era["corr"]]
+    scaled = evaluate_cross_check(
+        predictions,
+        meta_model=meta_model,
+        features=features,
+        targets=targets,
+        horizon="20D",
+        main_target="target",
+        seed=42,
+        pf={era: 0.01 for era in eras},
+    )
+    assert scaled.scorecard.mean_payout.value < base.scorecard.mean_payout.value
+    fallback = evaluate_cross_check(
+        predictions,
+        meta_model=meta_model,
+        features=features,
+        targets=targets,
+        horizon="20D",
+        main_target="target",
+        seed=42,
+        pf={},
+    )
+    assert fallback.scorecard.mean_payout.value == pytest.approx(
+        base.scorecard.mean_payout.value
+    )

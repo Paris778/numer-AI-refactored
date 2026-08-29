@@ -197,12 +197,14 @@ The weight-learning `method` is driven by `EnsembleConfig.method` in both `run()
 
 ### J. Payout Proxy — `nmr/payout.py`
 
-`payout_series(corr_by_era, mmc_by_era, *, pf=1.0, clip=0.05)`:
+`payout_series(corr_by_era, mmc_by_era, *, pf: Mapping[str, float] | float = 1.0, clip=0.05)`:
 
 ```
-raw     = pf · (0.75·corr + 2.25·mmc)      # current Numerai Classic weighting
+raw_e   = PF_e · (0.75·CORR_e + 2.25·MMC_e)   # current Numerai Classic weighting
 clipped = clip(raw, −0.05, +0.05)
 ```
+
+`PF_e` is the round's **payout factor** from `data/v5.3/payout_factor_historic.csv` (Numerai's published historic payout factors, cleaned to `round,status,close,resolve,pf`), aligned by `int(era) == round` (`load_payout_factors` parses round→pf; `era_payout_factors` joins to era keys, returning `{}` — the explicit all-1.0 fallback — when the file is absent). `pf` accepts a scalar (uniform factor; synthetic-test default) or a per-era mapping; eras without a recorded factor use the explicit fallback `PF_e = 1.0`, never the historical 86-era assumption. `payout_report` derives mean payout, CAGR, drawdown, burn rate, and the other economic metrics from the era-specific clipped returns; `PayoutResult.pf` records the scalar factor or the mean applied factor. The CSV is content-fingerprinted into the run's data fingerprint (§M).
 
 Diagnostics on the series: `burn_rate` (fraction < 0), `cvar(q=0.05)` (mean of bottom 5%), `sortino` (downside-deviation ratio), `max_drawdown` (cumsum vs running max), `calmar` (mean/MDD), `max_burn_streak` (longest consecutive negative run), `time_to_recovery` (longest underwater period). `payout_report(...) -> PayoutResult` bundles all of these plus `BootstrapCI` on mean payout, deflated Sharpe, and AC-adjusted MMC Sharpe.
 
