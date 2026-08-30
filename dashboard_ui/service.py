@@ -30,7 +30,11 @@ from pydantic import BaseModel, Field
 
 from nmr import paths
 from nmr.config import REPO_ROOT
-from nmr.dashboard import load_benchmark_frame, load_unified_leaderboard
+from nmr.dashboard import (
+    _run_preds_path,
+    load_benchmark_frame,
+    load_unified_leaderboard,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -363,12 +367,12 @@ class DashboardDataService:
         """
         entries: list[tuple[str, int, int]] = []
 
-        def content(path: Path) -> None:
-            if path.is_file():
+        def content(path: Path | None) -> None:
+            if path is not None and path.is_file():
                 entries.append((str(path.resolve()), _sha256_file(path), 0))
 
-        def meta(path: Path) -> None:
-            if path.is_file():
+        def meta(path: Path | None) -> None:
+            if path is not None and path.is_file():
                 stat = path.stat()
                 entries.append((str(path.resolve()), stat.st_size, stat.st_mtime_ns))
 
@@ -383,8 +387,12 @@ class DashboardDataService:
             for pattern, kind in (
                 ("*/runs/*/run.json", "content"),
                 ("*/runs/*/validation_preds.parquet", "meta"),
+                ("*/validation_preds.parquet", "meta"),  # legacy flat layout
                 ("*/meta.json", "content"),
                 ("*/exports/**/export.json", "content"),
+                ("*/exports/**/scorecard.json", "content"),
+                ("*/exports/**/predict.pkl.manifest.json", "content"),
+                ("*/exports/**/predict.pkl", "meta"),
                 ("*/exports/full/current.json", "content"),
                 ("*/run.json", "content"),  # legacy one-level layout
             ):
@@ -810,6 +818,9 @@ class DashboardDataService:
             include_tier4_ref=True,
         )
         self._timeseries_cache[key] = payload
+        # Anchor the source fingerprint after a fresh load so later source
+        # changes invalidate this cache too (not just the leaderboard).
+        self._source_fingerprint = self.compute_source_fingerprint()
         return payload
 
     def load_full_history(self, run_ids: list[str]) -> dict[str, Any]:
@@ -861,7 +872,7 @@ class DashboardDataService:
         stats: dict[str, dict[str, Any]] = {}
 
         for model_id in key:
-            preds_path = self.registry_dir / model_id / "validation_preds.parquet"
+            preds_path = _run_preds_path(self.registry_dir, model_id)
             if not preds_path.exists():
                 logger.warning("dashboard_ui.service: missing preds %s", preds_path)
                 continue
@@ -910,6 +921,9 @@ class DashboardDataService:
 
         payload = {"series": series, "drawdowns": drawdowns, "stats": stats}
         self._full_history_cache[key] = payload
+        # Anchor the source fingerprint after a fresh load so later source
+        # changes invalidate this cache too (not just the leaderboard).
+        self._source_fingerprint = self.compute_source_fingerprint()
         return payload
 
 

@@ -1604,13 +1604,16 @@ def _series_label(registry_dir: Path, run_id: str) -> str:
 
 def _run_preds_path(registry_dir: Path, run_id: str) -> Path:
     """Validation-preds parquet for ``run_id``: legacy path first, then the
-    experiments layout (``experiments/<family>/runs/<run_id>/`` — where
-    ``experiment_store.record_run_result`` persists it since Task 11)."""
+    experiments layout under the SAME ``registry_dir`` root
+    (``experiments/<family>/runs/<run_id>/`` — where
+    ``experiment_store.record_run_result`` persists it since Task 11). The
+    experiments glob is rooted on ``registry_dir`` so custom roots resolve
+    their own tree."""
     legacy = Path(registry_dir) / run_id / "validation_preds.parquet"
     if legacy.exists():
         return legacy
     return next(
-        iter(paths.EXPERIMENTS_ROOT.glob(f"*/runs/{run_id}/validation_preds.parquet")),
+        iter(Path(registry_dir).glob(f"*/runs/{run_id}/validation_preds.parquet")),
         legacy,
     )
 
