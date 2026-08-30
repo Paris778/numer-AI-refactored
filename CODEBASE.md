@@ -50,7 +50,7 @@ When sources disagree, use this order: executable code and tests for behavior, t
 | `docs/` | Domain canon, strategy, research, references, notebooks, evaluation, and archive | [`docs/DOCS_README.md`](docs/DOCS_README.md) |
 | `notebooks/` | Researcher control plane only; no business logic | [`AGENTS.md`](AGENTS.md#2-global-engineering-principles-mandatory) |
 | `.kimi-code/skills/` | Research protocols for feature campaigns, HPO, meta-analysis, and verification | [`ARCHITECTURE.md`](ARCHITECTURE.md) |
-| `.github/` | CI and repository-local agent configuration | [CI workflow](.github/workflows/ci.yml), [reviewer agent](.github/agents/principal-reviewer.agent.md) |
+| `.github/` | CI and repository-local agent configuration | [CI workflow](.github/workflows/ci.yml), [principal reviewer](.github/agents/principal-reviewer.agent.md), [documentation janitor](.github/agents/documentation-janitor.agent.md) |
 
 ## System Flow
 

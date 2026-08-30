@@ -72,8 +72,11 @@ def _splitter() -> PurgedEraSplitter:
 
 def _run(ckpt: Path | None, train: pl.DataFrame) -> pl.DataFrame:
     return train_multi_target_oof(
-        _modeler(), train, feature_cols=["f1", "f2"],
-        splitter=_splitter(), targets=["target", "target_ender_20"],
+        _modeler(),
+        train,
+        feature_cols=["f1", "f2"],
+        splitter=_splitter(),
+        targets=["target", "target_ender_20"],
         checkpoint_dir=ckpt,
     )
 
@@ -277,9 +280,7 @@ def test_verify_checkpoint_manifest_missing_identity_fields_refuses(tmp_path):
 
 def test_verify_checkpoint_manifest_accepts_matching_manifest(tmp_path):
     manifest_path = tmp_path / "manifest.json"
-    manifest_path.write_text(
-        json.dumps(checkpoint_manifest("cpu")), encoding="utf-8"
-    )
+    manifest_path.write_text(json.dumps(checkpoint_manifest("cpu")), encoding="utf-8")
     verify_checkpoint_manifest(manifest_path, "cpu")  # known device, exact match
     verify_checkpoint_manifest(manifest_path, None)  # unresolved device, valid schema
 
@@ -331,7 +332,9 @@ def test_write_frame_and_bytes_atomic_leave_no_temp_files(tmp_path):
     assert bytes_path.read_bytes() == payload
 
     leftovers = [
-        p.name for p in tmp_path.iterdir() if ".tmp." in p.name or p.name.endswith(".part")
+        p.name
+        for p in tmp_path.iterdir()
+        if ".tmp." in p.name or p.name.endswith(".part")
     ]
     assert not leftovers, f"atomic write left temp files behind: {leftovers}"
 
@@ -363,9 +366,7 @@ def _write_fit_identity_manifest(tmp_path: Path) -> Path:
 def test_verify_checkpoint_manifest_target_mismatch_raises(tmp_path):
     manifest_path = _write_fit_identity_manifest(tmp_path)
     with pytest.raises(ValueError, match="target mismatch"):
-        verify_checkpoint_manifest(
-            manifest_path, "cpu", target_col="target_ender_20"
-        )
+        verify_checkpoint_manifest(manifest_path, "cpu", target_col="target_ender_20")
     verify_checkpoint_manifest(manifest_path, "cpu", target_col="target")  # agrees
 
 
