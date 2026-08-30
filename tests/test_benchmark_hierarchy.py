@@ -269,3 +269,16 @@ def test_canonical_bytes_include_fleet_scorecards_and_reject_collisions():
         canonical_scorecards_bytes(
             base, fleet_scorecards={"t0": _scorecard("t0")}
         )
+
+def test_hierarchy_honors_historical_pf_csv(tmp_path: Path) -> None:
+    """A present payout-factor CSV must change benchmark scorecard payouts
+    (validation eras 0049..0060 -> rounds 49..60)."""
+    data_dir = _data_dir(tmp_path)
+    base = _run(tmp_path).run()
+    csv_body = "round,status,close,resolve,pf\n" + "".join(
+        f"{r},Resolved,Jan 01 2025,Feb 01 2025,0.01\n" for r in range(49, 61)
+    )
+    (data_dir / "payout_factor_historic.csv").write_text(csv_body, encoding="utf-8")
+    scaled = _run(tmp_path).run()
+    ref = "v53_lgbm_ender60"
+    assert base.scorecards[ref].mean_payout.value != scaled.scorecards[ref].mean_payout.value

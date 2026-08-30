@@ -22,7 +22,9 @@ from nmr.config import REPO_ROOT
 from nmr.ensemble import Ensembler
 from nmr.evaluation import EvaluationEngine, downside_era_indices, sorted_era_labels
 from nmr.payout import (
+    PAYOUT_FACTOR_FILENAME,
     annual_compounded_return,
+    era_payout_factors,
     gain_to_pain_ratio,
     kelly_fraction,
     payout_series,
@@ -1514,6 +1516,7 @@ def reconcile_capital_metrics(
         )
         return leaderboard
     targets_86, meta, _ = lookups
+    pf_map = era_payout_factors(Path(data_dir) / PAYOUT_FACTOR_FILENAME)
 
     for row in rows:
         if not (
@@ -1530,7 +1533,7 @@ def reconcile_capital_metrics(
             )
             continue
         corr, mmc, meta_corr = _per_era_metrics(preds_path, targets_86, meta)
-        series = payout_series(corr, mmc)
+        series = payout_series(corr, mmc, pf=pf_map)
         row["cagr_1y"] = annual_compounded_return(series.clipped)
         row["gain_to_pain_ratio"] = gain_to_pain_ratio(series.clipped)
         row["kelly_fraction"] = kelly_fraction(series.raw)
@@ -1648,6 +1651,7 @@ def extract_multimetric_timeseries(
 
     axis = lookups.meta_eras
     engine = EvaluationEngine()
+    pf_map = era_payout_factors(Path(data_dir) / PAYOUT_FACTOR_FILENAME)
     meta_joined = lookups.meta.join(lookups.targets, on=["era", "id"], how="inner")
     meta_corr = engine.per_era_corr(
         meta_joined, pred_col="numerai_meta_model", target_col="target"
@@ -1691,7 +1695,7 @@ def extract_multimetric_timeseries(
         # window must not abort the report — skip its payout slice (drawdowns
         # derive from payout wealth) while the other metric slices still render
         if set(corr_t) & set(mmc_t):
-            pay = payout_series(corr_t, mmc_t)
+            pay = payout_series(corr_t, mmc_t, pf=pf_map)
             clipped_by_era = dict(zip(pay.eras, pay.clipped))
             standard = _align_era_values(axis, clipped_by_era)
             metrics["payout"][model_id] = {

@@ -161,6 +161,15 @@ class OverlappingSimulationResult:
     final_equity: float
 
 
+def _normalize_era_key(key: object) -> str:
+    """Normalize an era/round key numerically: ``"0001"`` and ``"1"`` both map
+    to ``"1"`` so the ``int(era) == round`` join holds regardless of padding."""
+    try:
+        return str(int(key))
+    except (ValueError, TypeError):
+        return str(key)
+
+
 def payout_series(
     corr_by_era: Mapping[str, float],
     mmc_by_era: Mapping[str, float],
@@ -190,11 +199,13 @@ def payout_series(
         raise ValueError("corr_by_era and mmc_by_era must contain only finite values")
 
     if isinstance(pf, Mapping):
-        pf_map = {str(k): float(v) for k, v in pf.items()}
+        pf_map = {_normalize_era_key(k): float(v) for k, v in pf.items()}
         for era, value in pf_map.items():
             if not math.isfinite(value) or value <= 0.0:
                 raise ValueError(f"pf for era {era!r} must be finite and > 0, got {value}")
-        pf_values = np.asarray([pf_map.get(era, 1.0) for era in eras], dtype=float)
+        pf_values = np.asarray(
+            [pf_map.get(_normalize_era_key(era), 1.0) for era in eras], dtype=float
+        )
     else:
         pf_f = float(pf)
         if not np.isfinite(pf_f) or pf_f <= 0.0:
@@ -448,7 +459,12 @@ def payout_report(
     # PayoutResult.pf is a scalar summary: the uniform factor when ``pf`` is a
     # scalar, else the mean of the per-era factors applied on the scored eras.
     if isinstance(pf, Mapping):
-        pf_summary = float(np.mean([float(pf.get(era, 1.0)) for era in series.eras]))
+        pf_map = {_normalize_era_key(k): float(v) for k, v in pf.items()}
+        pf_summary = float(
+            np.mean(
+                [pf_map.get(_normalize_era_key(era), 1.0) for era in series.eras]
+            )
+        )
     else:
         pf_summary = float(pf)
 

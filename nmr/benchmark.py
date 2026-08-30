@@ -28,6 +28,7 @@ from sklearn.linear_model import Ridge
 from nmr.ensemble import Ensembler
 from nmr.features import resolve_feature_sets, resolve_small_feature_set
 from nmr.models import construct_tree_model
+from nmr.payout import PAYOUT_FACTOR_FILENAME, era_payout_factors
 from nmr.risk import NeutralizationEngine
 from nmr.scorecard import MetricScorecard, evaluate_model
 
@@ -1226,6 +1227,9 @@ class BenchmarkHierarchy:
         val_targets = pl.read_parquet(
             self._data.validation_path, columns=self._target_cols
         )
+        pf_map = era_payout_factors(
+            Path(self._data.validation_path).parent / PAYOUT_FACTOR_FILENAME
+        )
 
         for cell in self._spec.cells:
             logger.info(
@@ -1244,6 +1248,7 @@ class BenchmarkHierarchy:
                 horizon=self._horizon,
                 main_target="target",
                 benchmark_col=self._spec.reference_column,
+                pf=pf_map,
                 n_boot=self._n_boot,
                 min_overlap_eras=self._min_overlap_eras,
                 model_id=cell.benchmark_id,
@@ -1292,6 +1297,7 @@ class BenchmarkHierarchy:
                     horizon=self._horizon,
                     main_target="target",
                     benchmark_col=self._spec.reference_column,
+                    pf=pf_map,
                     n_boot=self._n_boot,
                     min_overlap_eras=self._min_overlap_eras,
                     model_id=ref_col,

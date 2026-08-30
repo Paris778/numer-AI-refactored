@@ -2007,3 +2007,32 @@ def test_dashboard_app_robustness_matrix_includes_benchmark_excludes_diagnostic_
     matrix = app.robustness_matrix(frame)
     # benchmark reference curves participate; diagnostic full/partial do not
     assert matrix.get_column("model_id").to_list() == ["a" * 64, "bench_a"]
+
+def test_reconcile_capital_metrics_uses_historical_pf_csv(tmp_path: Path) -> None:
+    """A present payout-factor CSV must change the recomputed capital cells:
+    with the clip-saturated perfect-corr fixture, PF=0.01 pulls the per-era
+    returns inside the clip band, lowering the annualized return below the
+    PF=1.0 clip-saturated baseline."""
+    _write_registry(tmp_path, [_registry_entry("a" * 64, scorecard=True)])
+    entry = json.loads((tmp_path / ("a" * 64) / "run.json").read_text(encoding="utf-8"))
+    for field in ("cagr_1y", "gain_to_pain_ratio", "kelly_fraction", "mmc_down"):
+        entry["scorecard"].pop(field, None)
+    (tmp_path / ("a" * 64) / "run.json").write_text(json.dumps(entry), encoding="utf-8")
+    _write_preds(tmp_path / ("a" * 64), scale=1.0)
+    data = _synthetic_data_dir(tmp_path)
+    (data / "payout_factor_historic.csv").write_text(
+        "round,status,close,resolve,pf\n"
+        "1,Resolved,Jan 01 2025,Feb 01 2025,0.01\n"
+        "2,Resolved,Jan 02 2025,Feb 02 2025,0.01\n"
+        "3,Resolved,Jan 03 2025,Feb 03 2025,0.01\n",
+        encoding="utf-8",
+    )
+    frame = dash.load_unified_leaderboard(tmp_path, benchmark_path=False)
+    out = dash.reconcile_capital_metrics(frame, data)
+    row = out.row(0, named=True)
+    assert row["cagr_1y"] is not None
+    # PF=1.0 (no CSV) clips every era at 0.05 -> (1.05^52 - 1); PF=0.01 scales
+    # the raw payouts down inside the band, so the annualized return must be
+    # strictly lower.
+    assert row["cagr_1y"] < (1.05**52) - 1.0
+    assert row["cagr_1y"] > 0.0

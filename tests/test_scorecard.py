@@ -811,8 +811,8 @@ def test_cross_check_result_shape() -> None:
 
 
 
-
-
+
+
 def test_cross_check_honors_per_era_pf_mapping() -> None:
     """The cross-check applies the same per-era payout-factor series as the
     research validation path.

@@ -40,6 +40,7 @@ from nmr.benchmark import (
 from nmr.ensemble import Ensembler
 from nmr.features import feature_stability_screen
 from nmr.models import construct_tree_model
+from nmr.payout import PAYOUT_FACTOR_FILENAME, era_payout_factors
 from nmr.risk import NeutralizationEngine
 from nmr.scorecard import MetricScorecard, evaluate_model
 
@@ -1151,6 +1152,9 @@ class BenchmarkFleet:
         val_targets = pl.read_parquet(
             self._data.validation_path, columns=self._target_cols
         )
+        pf_map = era_payout_factors(
+            Path(self._data.validation_path).parent / PAYOUT_FACTOR_FILENAME
+        )
         for cell in self._spec:
             logger.info("[fleet] %s (kind=%s)", cell.benchmark_id, cell.model_kind)
             preds, val_features = self._predictions_for_cell(cell)
@@ -1165,6 +1169,7 @@ class BenchmarkFleet:
                 horizon=self._horizon,
                 main_target="target",
                 benchmark_col=None,
+                pf=pf_map,
                 n_boot=self._n_boot,
                 min_overlap_eras=self._min_overlap_eras,
                 model_id=cell.benchmark_id,

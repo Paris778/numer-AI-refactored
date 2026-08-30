@@ -524,3 +524,13 @@ def test_era_payout_factors_join_and_fallback(tmp_path) -> None:
     assert era_payout_factors(path) == {"1019": 0.0987, "1020": 0.1009}
     assert era_payout_factors(None) == {}
     assert era_payout_factors(tmp_path / "absent.csv") == {}
+
+def test_payout_series_pf_mapping_numeric_key_normalization() -> None:
+    """int(era) == round: the lookup is numeric, so padding never matters."""
+    corr = {"1": 0.10}
+    mmc = {"1": 0.02}
+    out = payout_series(corr, mmc, pf={"0001": 0.5}, clip=0.05)
+    expected = 0.5 * ((0.75 * 0.10) + (2.25 * 0.02))
+    assert np.allclose(out.raw, [expected], atol=1e-12)
+    out2 = payout_series({"0001": 0.10}, {"0001": 0.02}, pf={"1": 0.5}, clip=0.05)
+    assert np.allclose(out2.raw, out.raw, atol=1e-12)
