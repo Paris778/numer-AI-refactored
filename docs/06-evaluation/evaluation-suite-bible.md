@@ -6,7 +6,7 @@
 >
 > **Revision v2.1 (2026-06-21) — five hardening amendments** (red-team review, all verified): (1) adversarial perturbation is now a **discrete bin-shift / block-swap** — continuous Gaussian + re-quantize is a verified no-op on Int8 bins (§9); (2) the **DSR is computed on the unclipped** raw payout series, consistently (§4.3, §5.0); (3) **horizon-floor clamps** on bootstrap block length and Bartlett bandwidth (§4.1–4.2); (4) the **cross-trial Sharpe variance** must not fall back to the single-series analytic variance (§4.3); (5) the **non-vacuity guard is a hard `ValueError`** (§11 E3/E4).
 >
-> **Revision v2.5 (2026-08-15) — capital-readiness metrics added** (§16): CAGR 1Y, gain-to-pain, bounded Kelly, MMC-down, per-era turnover, and the overlapping lockup simulator, plus their twelve `MetricScorecard` fields. Locked contracts: design spec §3 (`docs/superpowers/specs/2026-08-15-evaluation-suite-v25-capital-readiness-design.md`).
+> **Revision v2.5 (2026-08-15) — capital-readiness metrics added** (§16): CAGR 1Y, gain-to-pain, bounded Kelly, MMC-down, per-era turnover, and the overlapping lockup simulator, plus their twelve `MetricScorecard` fields. The locked mathematical contracts are incorporated in §16 below.
 
 This document is exhaustive by intent. It defines **what** we measure, **why** each metric exists, the **exact mathematics**, the **edge cases**, the **grading gates**, and the **ordered build slices** (E1–E6) that implement it. Nothing is left implicit. Read top to bottom once; thereafter use the Table of Contents.
 
@@ -49,7 +49,7 @@ We do not "score a model" with one number and stop. A model passes through **thr
 
 1. **Rank on one scalar.** Humans cannot rank on 18 numbers. Everything in Tier 1 either *is* the rank scalar (the **Deflated Payout Proxy**) or can only **veto** it. Tiers 2 and 3 inform and gate; they do not silently re-rank.
 2. **No point estimate without an error bar.** A Sharpe of 1.2 over 60 eras with positive autocorrelation is not the same as 1.2 over 600 i.i.d. eras. Every Tier-1 scalar carries a confidence interval and a multiple-testing haircut. This is the difference between a 72/100 framework and a world-class one.
-3. **Per-era first, then aggregate.** Every metric is computed per era, then aggregated across eras. Flattening rows across eras is a category error in this tournament (overlapping, autocorrelated targets). This mirrors the canon in `../01-canon/scoring/00-definitions.md`.
+3. **Per-era first, then aggregate.** Every metric is computed per era, then aggregated across eras. Flattening rows across eras is a category error in this tournament (overlapping, autocorrelated targets). This mirrors the canon in [`../01-canon/10-scoring-reference.md`](../01-canon/10-scoring-reference.md).
 
 ---
 
@@ -181,7 +181,7 @@ $$
 \pi_e = \operatorname{clip}\!\big(\,\text{pf}\cdot(0.75\,\text{CORR}_e + 2.25\,\text{MMC}_e),\ -0.05,\ +0.05\,\big)
 $$
 
-- $\text{pf}$ = payout factor (default $1.0$; configurable to model real stake-threshold throttling, see `../01-canon/staking.md`).
+- $\text{pf}$ = payout factor (default $1.0$; configurable to model real stake-threshold throttling, see [`../01-canon/06-staking-legacy.md`](../01-canon/06-staking-legacy.md)).
 - Weights $0.75 / 2.25$ and the $\pm 0.05$ clip match the current canonical payout (see `../DOCS_README.md`).
 - **Mean payout proxy** $\bar\pi = \tfrac{1}{n}\sum_e \pi_e$ is the raw scalar; the **reported rank scalar** is $\bar\pi$ wrapped by the inference layer: report $(\bar\pi,\ \text{CI}_{95\%}(\bar\pi),\ \text{DSR})$. **We rank on the deflated, CI-aware payout proxy.**
 - **Clipped vs unclipped — a hard rule for the DSR.** The economic point estimates (mean payout $\bar\pi$, burn rate, CVaR, drawdown) use the **clipped** series $\pi_e$, because $\pm0.05$ is what you are actually paid. But the **Deflated Sharpe Ratio must be computed entirely on the *unclipped* raw series** $\pi_{\text{raw},e} = \text{pf}\cdot(0.75\,\text{CORR}_e + 2.25\,\text{MMC}_e)$ — its $\widehat{SR}$, $\gamma_3$, **and** $\gamma_4$ together, consistently from the same distribution. The clip masses probability at $\pm0.05$, truncating the tails and biasing sample kurtosis, which violates the continuity assumption underlying the Bailey–López de Prado framework and would make the rank scalar fluctuate erratically. **Do not** mix a clipped-series Sharpe with unclipped moments in the same DSR denominator — that combines moments from two different distributions and is its own error. Unclipped end-to-end for the DSR; clipped for the economic headline.
@@ -189,14 +189,14 @@ $$
 
 ### 5.1 CORR — Numerai rank correlation
 
-Per era, per the canon (`../01-canon/scoring/01-correlation.md`): tie-kept rank the predictions to uniform $(0,1)$ via $(\operatorname{rankdata}-0.5)/n$, gaussianize with $\Phi^{-1}$, apply sign-preserving power $1.5$ ($\operatorname{sign}(x)\,|x|^{1.5}$), do the same sign-preserving power-1.5 to the **centered** target, then take Pearson correlation. Tails dominate by design.
+Per era, per the canon ([`../01-canon/10-scoring-reference.md`](../01-canon/10-scoring-reference.md)): tie-kept rank the predictions to uniform $(0,1)$ via $(\operatorname{rankdata}-0.5)/n$, gaussianize with $\Phi^{-1}$, apply sign-preserving power $1.5$ ($\operatorname{sign}(x)\,|x|^{1.5}$), do the same sign-preserving power-1.5 to the **centered** target, then take Pearson correlation. Tails dominate by design.
 
 - **Source of truth:** `nmr/_transforms.py` (`tie_kept_rank`, `gaussianize`, `power_1_5`) and `nmr/evaluation.py::per_era_corr`. Custom path must match `numerai_tools.scoring.numerai_corr` (oracle parity, proven on v5.2).
 - **Report:** mean CORR + bootstrap CI.
 
 ### 5.2 MMC — Meta Model Contribution
 
-Per era: gaussian-rank predictions and the meta model, orthogonalize predictions against the meta model, center the target, then MMC $= (\text{target} \cdot \text{neutral\_preds})/n$ (covariance, since mean $=0$). See `../01-canon/scoring/02-mmc-bmc.md`.
+Per era: gaussian-rank predictions and the meta model, orthogonalize predictions against the meta model, center the target, then MMC $= (\text{target} \cdot \text{neutral\_preds})/n$ (covariance, since mean $=0$). See [`../01-canon/10-scoring-reference.md`](../01-canon/10-scoring-reference.md).
 
 - **CRITICAL implementation fact:** for targets in $[0,1]$ the evaluation engine must use `live_target * 4.0` to land the covariance in the oracle's scale. This is encoded in `nmr/evaluation.py` and verified by oracle parity. Do not "simplify" it away.
 - **Report:** mean MMC + bootstrap CI; **MMC Sharpe** (AC-adjusted) appears in Tier 2.
@@ -501,7 +501,7 @@ Logged, non-blocking. Revisit deliberately, not by accident.
 
 ## 16) v2.5 Capital-Readiness Metrics
 
-Added 2026-08-15. Six new metrics extend the payout proxy and the scorecard to judge capital readiness: compounded annual growth, gain-to-pain, a bounded Kelly stake, downside-MMC, prediction turnover, and a multi-round lockup simulator. Each is defined by the locked mathematical contracts in the design spec §3 (`docs/superpowers/specs/2026-08-15-evaluation-suite-v25-capital-readiness-design.md`); this file remains the evaluation spec of record. Let $r_t = \operatorname{clip}(\text{pf}\cdot(0.75\,\text{CORR}_t + 2.25\,\text{MMC}_t), \pm 0.05)$ be the clipped round return and $\text{raw}_t$ the same sum unclipped.
+Added 2026-08-15. Six new metrics extend the payout proxy and the scorecard to judge capital readiness: compounded annual growth, gain-to-pain, a bounded Kelly stake, downside-MMC, prediction turnover, and a multi-round lockup simulator. This section is the locked mathematical contract and evaluation spec of record. Let $r_t = \operatorname{clip}(\text{pf}\cdot(0.75\,\text{CORR}_t + 2.25\,\text{MMC}_t), \pm 0.05)$ be the clipped round return and $\text{raw}_t$ the same sum unclipped.
 
 **CAGR 1Y** (`nmr.payout.annual_compounded_return`; scorecard column `cagr_1y`). Geometric compounded growth of the clipped series annualized at 52 eras/year: $\text{CAGR} = (\prod_t (1 + r_t))^{52/n} - 1$ when $\prod_t (1 + r_t) > 0$. A non-positive wealth product — total ruin, which the geometric form could not otherwise express — maps to $-1.0$. Fewer than 2 observations return 0.0. All arithmetic is float64 on the finite-only validated input (`_as_finite_1d`: 1-D, non-empty, finite-only, else `ValueError`).
 

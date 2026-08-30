@@ -1,7 +1,7 @@
 # Pure Vanilla HTML/CSS/SVG Executive Dashboard — Design Spec
 
 > **Date:** 2026-08-18 · **Status:** Implemented; current contract
-> **Supersedes:** the Plotly embedding portions of `2026-08-16-executive-dashboard-design.md` and `2026-08-16-executive-dashboard-v2-design.md` (historical records). The `nmr/dashboard.py` engine remains renderer-neutral; presentation and missing-data alignment are implemented here.
+> **Supersedes:** the retired Plotly dashboard designs summarized in [`docs/99-archive/dashboard-history-2026-08.md`](../../99-archive/dashboard-history-2026-08.md). The `nmr/dashboard.py` engine remains renderer-neutral; presentation and missing-data alignment are implemented here.
 
 ---
 
@@ -16,7 +16,7 @@ Completely eliminate Plotly (the Python package, the `get_plotlyjs()` bundle emb
 3. **Front-end isolation.** All raw web assets (HTML scaffold, CSS, JS) live in `dashboard_ui/static/`; presentation logic lives in `dashboard_ui/`. `nmr/` never imports plotly/streamlit; `nmr/dashboard.py` owns the renderer-neutral alignment contract consumed here.
 4. **Tested boundary.** Every metric/formula stays in `nmr/` (unchanged). Chart geometry math has a pure Python reference implementation in `dashboard_ui/charts.py` that pytest asserts against; `app.js` mirrors the same algorithms client-side (the repo has no JS test runner — decision #7).
 5. **Deterministic artifacts.** No wall-clock timestamps, no absolute paths, sorted-key JSON, fixed templates and static assets ⇒ byte-identical output for identical registry/data state.
-6. **Hard gates.** Every commit passes `ruff check .` + `pytest -q`. Test count claims in `AGENTS.md` (two places) and `CONTRIBUTING.md` are updated in the same commit that changes the collected count (`tests/test_docs_hygiene.py` enforces this).
+6. **Hard gates.** Every commit passes `ruff check .` + `pytest -q`. Executed counts belong in review output; maintained core docs do not hardcode suite sizes (`tests/test_docs_hygiene.py` enforces this).
 
 ## 3. Architecture & Module Topology
 
@@ -49,7 +49,7 @@ tests/
 - #1 **Front-end home:** extend the existing `dashboard_ui/` package. The just-merged isolation refactor already placed all presentation code there; a parallel `templates/dashboard/` would split the front-end across two homes. The spec's `templates/dashboard/` alternative is rejected in favor of `dashboard_ui/static/` as the raw-assets location.
 - #2 **Streamlit survives, natively.** The interactive research view stays (documented tool), rewritten without Plotly: `st.bar_chart`, `st.scatter_chart`, and a pandas `Styler.background_gradient` heatmap in `st.dataframe`. `streamlit` remains a pinned user-granted dependency; `plotly` is removed.
 - #3 **`nmr/dashboard.py` remains renderer-neutral.** It emits plotly-free raw data (eras, metrics, drawdowns, matrix, gate status, KPIs); absent aligned eras remain unavailable rather than being coerced to zero. Presentation geometry is not an engine concern.
-- #4 **Test split:** `tests/test_dashboard.py` shrinks to engine-only tests; new `tests/test_dashboard_ui.py` owns all presentation-layer tests (geometry reference math, payload contract, HTML compiler, artifact contract). Net count change synced to docs in the same commit.
+- #4 **Test split:** `tests/test_dashboard.py` owns engine behavior; `tests/test_dashboard_ui.py` owns presentation-layer tests (geometry reference math, payload contract, HTML compiler, artifact contract). Executed suite counts are reported only in review output.
 
 ## 4. Data Payload Contract (`dashboard-data`)
 
@@ -163,17 +163,17 @@ Streamlit pure-helper tests unchanged; add the no-plotly-import guard for `dashb
 
 - `requirements.txt`: remove `plotly==6.6.0`.
 - **Plotly removal audit (P1):** after the rewrite, `grep -ri "plotly"` across the tree — the string may appear only in historical `docs/superpowers/` specs; **zero** imports or references in `dashboard_ui/`, `tests/`, `configs/`, and root scripts. (Pre-rewrite audit: references exist only in `tests/test_dashboard.py`, `dashboard_ui/{charts,app,report}.py`, and `requirements.txt` — all rewritten by this work; nothing in `tests/test_parity.py`, `tests/test_scripts.py`, or config files.)
-- `AGENTS.md`: dependency-exception line drops Plotly (keeps Streamlit, re-pointed at the native `dashboard_ui/app.py`); executive-dashboard toolkit row re-pointed at the new spec; test-count claims (two places) updated to the new collected count.
+- `AGENTS.md`: dependency-exception line drops Plotly (keeps Streamlit, re-pointed at `dashboard_ui/app.py`); executive-dashboard toolkit row points at this spec.
 - `ARCHITECTURE.md`: §W and the module table rows for `dashboard_ui/charts.py` / `report.py` / `app.py` — vanilla SVG rendering, native Streamlit, `< 112 KiB` budget, `tests/test_dashboard_ui.py`.
-- `CONTRIBUTING.md`: test-count claim updated.
-- Old specs (`2026-08-16-executive-dashboard*.md`) remain as historical records; this spec supersedes their presentation decisions.
+- `CONTRIBUTING.md`: verification workflow updated when commands or required gates change.
+- Retired dashboard designs are condensed in `docs/99-archive/dashboard-history-2026-08.md`; this spec owns their replacement presentation decisions.
 
 ## 9. Verification Gates (each task commit + final)
 
 ```powershell
 # 1. Lint gate
 .\.venv\Scripts\python -m ruff check .
-# 2. Functional gate (count must match the doc claims)
+# 2. Functional gate (report the executed count in review output)
 .\.venv\Scripts\python -m pytest -q
 # 3. Compiler execution
 .\.venv\Scripts\python generate_dashboard.py

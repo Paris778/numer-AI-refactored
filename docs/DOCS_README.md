@@ -1,6 +1,6 @@
 # NumerAI Docs Meta-Guide
 
-This document is the primary entrypoint for both humans and LLM agents.
+This document is the docs-library index for humans and LLM agents. For repository-wide routing to code, tests, workflows, and documentation owners, start with [`CODEBASE.md`](../CODEBASE.md).
 
 Goal: learn the Numerai Classic tournament from scratch with minimal noise and a deterministic reading path.
 
@@ -8,104 +8,33 @@ Goal: learn the Numerai Classic tournament from scratch with minimal noise and a
 
 Read in this order:
 
-1. `01-canon/overview.md`
-2. `01-canon/data.md`
-3. `01-canon/scoring/00-definitions.md`
-4. `01-canon/scoring/01-correlation.md`
-5. `01-canon/scoring/02-mmc-bmc.md`
-6. `01-canon/scoring/03-fnc.md`
-7. `01-canon/submissions.md`
-8. `01-canon/staking.md`
-9. `02-strategy/strategy-bible.md`
-10. `01-canon/models.md`
-11. `02-strategy/community-wisdom.md`
-12. `03-reference/numerapi.md` and `03-reference/numerai-tools.md`
-13. `04-research/research-program.md` (optional but high value)
-14. `06-evaluation/evaluation-suite-bible.md` (how this repo *judges* a model — the evaluation spec of record)
+1. [`01-canon/NUMERAI-CANON-DOCS-README.md`](01-canon/NUMERAI-CANON-DOCS-README.md)
+2. [`02-strategy/strategy-bible.md`](02-strategy/strategy-bible.md)
+3. [`02-strategy/model-lifecycle.md`](02-strategy/model-lifecycle.md)
+4. [`03-reference/numerapi.md`](03-reference/numerapi.md) and [`03-reference/numerai-tools.md`](03-reference/numerai-tools.md)
+5. [`04-research/research-program.md`](04-research/research-program.md) (optional but high value)
+6. [`06-evaluation/evaluation-suite-bible.md`](06-evaluation/evaluation-suite-bible.md) (how this repo judges a model)
 
-If you only have 15 minutes, read sections 2 and 3 below, then read items 1-8 above.
+If you only have 15 minutes, read the canon index and the evaluation bible.
 
-## 2) Canonical Laws (Ground Truth)
+## 2) Canonical Domain Source
 
-### Data and identity laws
+The [Numerai canon index](01-canon/NUMERAI-CANON-DOCS-README.md) is the sole maintained source for official domain rules. It routes to the topic page for data, models, scoring, submissions, model uploads, staking, live scoring, and API behavior. This guide deliberately does not restate those laws.
 
-- Data is obfuscated tabular equity data; it is intentionally not tradable outside Numerai.
-- Each row is stock-at-time; `id` is unique per stock per era.
-- You cannot track a single stock across eras using `id`.
-- `era` is the temporal unit; historical eras are weekly snapshots.
-- Features are mostly binned values and may contain missing values.
-- Main target is stock-specific residual return (beta-neutralized) and is never NaN.
-- Auxiliary targets can be NaN and vary by neutralization scheme and horizon.
+## 3) Repository-Specific Evaluation
 
-### Temporal and validation laws
-
-- Random row-level CV is invalid.
-- Targets are forward-looking and overlapping, so temporal leakage is easy.
-- Use era-grouped, walk-forward validation with purge/embargo.
-- Per-era scoring first, then aggregate. Flattened metrics are misleading.
-- Optimize risk-adjusted stability (era-wise Sharpe), not only mean correlation.
-
-### Scoring laws
-
-- CORR is Numerai-specific rank correlation:
-  - rank predictions (ties kept), gaussianize, apply power 1.5, then Pearson with transformed target.
-  - tails matter more than the center.
-- MMC is the covariance of your predictions with the target after tie-kept ranking, gaussianizing, and orthogonalizing them against the stake-weighted meta model (SWMM). It rewards unique, target-aligned signal, not consensus.
-- FNC measures performance after neutralizing predictions to features.
-- Rank order dominates; absolute prediction scale is secondary.
-
-### Ensembling laws
-
-- Ensemble by rank/percentile domain, not raw regression magnitude.
-- Multi-target and multi-seed ensembling generally improves stability and uniqueness.
-- Neutralization is a risk tool: reduces fragile linear feature exposure.
-
-### Submission and round laws
-
-- Submissions are predictions in [0, 1] (0 = lowest return, 0.5 = average, 1 = highest).
-- A new round opens each day Tuesday through Saturday; rounds overlap (up to ~25 active at once) and resolve roughly one month later (~260 rounds/year).
-- Only the latest valid submission in-window is selected for scoring.
-- Late submissions can be scored but carry zero at-risk stake (no payout, no meta-model or payout-factor impact).
-
-### Staking and economics laws
-
-- NMR stake is optional but required for rewards/burn and influence on meta-model weighting.
-- Per-round payout/burn is clipped at +/-5%. Formula and stake thresholds: [`01-canon/staking.md`](01-canon/staking.md) (authoritative).
-- `payout_factor = min(1, stake_threshold / total_at_risk)`. Thresholds: Numerai 72000, Signals 36000, Crypto 10000.
-- Negative outcomes burn stake irreversibly (sent to a null address, removed from supply; not taken by Numerai).
-- Releasing a stake takes ~1 month (one scoring round).
-
-Exact figures live in `01-canon/staking.md`; treat that file as authoritative if numbers ever drift.
-
-## 3) Critical Caveat: Purge / Embargo Convention
-
-You will see two conventions:
-
-- Minimum horizon-based logic: 4 eras for 20D targets, 16 eras for 60D targets.
-- Numerai benchmark walk-forward convention: 8 eras purge for 20D, 16 eras for 60D.
-
-Interpretation for this repository:
-
-- Treat 8/16 as the operational benchmark convention.
-- Treat 4/16 as the theoretical minimum.
+Validation, purge, metric, scorecard, and benchmark behavior are repository contracts. Use [`ARCHITECTURE.md`](../ARCHITECTURE.md) for implementation details and [`06-evaluation/evaluation-suite-bible.md`](06-evaluation/evaluation-suite-bible.md) for the evaluation protocol. The canon explains Numerai; these references explain how this repository implements and judges it.
 
 ## 4) Importance Ranking (Tiered)
 
 ### Tier T0: Must-read canonical truth
 
-- `01-canon/overview.md`
-- `01-canon/data.md`
-- `01-canon/scoring/00-definitions.md`
-- `01-canon/scoring/01-correlation.md`
-- `01-canon/scoring/02-mmc-bmc.md`
-- `01-canon/scoring/03-fnc.md`
-- `01-canon/submissions.md`
-- `01-canon/staking.md`
+- [`01-canon/NUMERAI-CANON-DOCS-README.md`](01-canon/NUMERAI-CANON-DOCS-README.md) — canonical index and reading order
 
 ### Tier T1: Core strategy and execution intuition
 
 - `02-strategy/strategy-bible.md`
-- `01-canon/models.md`
+- `01-canon/03-models.md`
 - `05-notebooks/1_hello_numerai.ipynb`
 - `05-notebooks/2_feature_neutralization.ipynb`
 - `05-notebooks/3_target_ensemble.ipynb`
@@ -125,26 +54,29 @@ Interpretation for this repository:
 - `02-strategy/model-lifecycle.md` (repo-internal: how a model moves research → partial → full → staked over `experiments/`)
 - `04-research/advanced-ideas.md` (merged with former `neural-networks.md`, 2026-08-06)
 - `04-research/State-of-the-Art Deep Learning for Obfuscated, Non-Stationary Tabular Regression.md`
+- [`superpowers/README.md`](superpowers/README.md) — active, narrowly scoped design records
 
 ### Tier T4: Archive / non-essential for modeling core
 
-- `99-archive/bounties.md` (pointer only, trimmed 2026-08-06)
-- `99-archive/grandmasters-seasons.md` (summary only, trimmed 2026-08-06)
-- `99-archive/super-research.prompt.md`
+- [`99-archive/README.md`](99-archive/README.md) — archive index and authority boundary
 
 ## 5) Full File Map
 
 | New Path | Tier | Purpose | Source |
 |---|---|---|---|
-| `01-canon/overview.md` | T0 | Tournament overview | `Overview.txt` |
-| `01-canon/data.md` | T0 | Data structure and target semantics | `Data.txt` |
-| `01-canon/models.md` | T1 | Official model and benchmark guidance | `Models.txt` |
-| `01-canon/submissions.md` | T0 | Submission lifecycle and automation paths | `Submissions.txt` |
-| `01-canon/staking.md` | T0 | NMR staking rules and payout mechanics | `Staking.txt` |
-| `01-canon/scoring/00-definitions.md` | T0 | Statistical and scoring definitions | `Scoring-Definitions.txt` |
-| `01-canon/scoring/01-correlation.md` | T0 | CORR definition and rationale | `Scoring-Correlation.txt` |
-| `01-canon/scoring/02-mmc-bmc.md` | T0 | MMC/BMC definitions and calculation | `Scoring-Meta-Model-Contribution.txt` |
-| `01-canon/scoring/03-fnc.md` | T0 | FNC definition and calculation | `Scoring-Feature-Neutral-Correlation.txt` |
+| `01-canon/NUMERAI-CANON-DOCS-README.md` | T0 | Canonical domain index and reading order | this build |
+| `01-canon/00-overview.md` | T0 | Tournament overview | `Overview.txt` |
+| `01-canon/01-faq.md` | T0 | FAQ and scope boundaries | `FAQ.txt` |
+| `01-canon/02-data.md` | T0 | Data structure and target semantics | `Data.txt` |
+| `01-canon/03-models.md` | T1 | Official model and benchmark guidance | `Models.txt` |
+| `01-canon/04-submissions.md` | T0 | Submission lifecycle and automation paths | `Submissions.txt` |
+| `01-canon/05-model-uploads.md` | T0 | Hosted prediction contract and runtime | `Model-Uploads.txt` |
+| `01-canon/06-staking-legacy.md` | T0 | Legacy NMR staking and payout mechanics | `Staking.txt` |
+| `01-canon/07-staking-atomic.md` | T0 | Atomic staking and allocation mechanics | `Staking-Atomic.txt` |
+| `01-canon/08-grandmasters.md` | T2 | Grandmasters, seasons, and titles | `Grandmasters.txt` |
+| `01-canon/09-scoring-live.md` | T0 | Live scoring and leaderboard behavior | `Scoring-Live.txt` |
+| `01-canon/10-scoring-reference.md` | T0 | Statistical and scoring definitions | `Scoring-Definitions.txt` |
+| `01-canon/11-api-and-mcp.md` | T1 | API and MCP access | `API/` |
 | `02-strategy/strategy-bible.md` | T1 | Consolidated tactical bible | `bible.md` + `Golden Bible.txt` |
 | `02-strategy/community-wisdom.md` | T2 | Community heuristics and caveats | `community_notes.md` |
 | `02-strategy/why-it-works.md` | T2 | System-level architecture and intuition | `Pipeline Grand Scheme.txt` + `NumerAI Architecture Explained.txt` |
@@ -162,7 +94,15 @@ Interpretation for this repository:
 | `05-notebooks/community_notebooks/analysis_and_tips.ipynb` | T2 | Community notebook: data analysis and modeling tips | `community_models_and_notebooks/` |
 | `05-notebooks/community_notebooks/numerai-example-model-sunshine (1).ipynb` | T1 | Community example model notebook ("Numerai Example Model Sunshine", Kaggle re-download) | `community_models_and_notebooks/` |
 | `06-evaluation/evaluation-suite-bible.md` | T0 | Evaluation suite spec of record (metrics, math, build slices E1–E6) | this build |
-| `99-archive/*` | T4 | Peripheral or low-priority context | archive sources |
+| `06-evaluation/benchmark-line-in-the-sand.md` | T0 | Active benchmark hierarchy and capital-gate reference | this build |
+| `superpowers/README.md` | T3 | Index of active detailed design contracts | this build |
+| [`superpowers/specs/2026-08-18-vanilla-dashboard-design.md`](superpowers/specs/2026-08-18-vanilla-dashboard-design.md) | T3 | Active renderer and dashboard presentation contract | approved design |
+| [`superpowers/specs/2026-08-19-benchmark-fleet-design.md`](superpowers/specs/2026-08-19-benchmark-fleet-design.md) | T3 | Active untiered benchmark-fleet contract | approved design |
+| [`superpowers/specs/2026-08-26-model-lifecycle-experiments-design.md`](superpowers/specs/2026-08-26-model-lifecycle-experiments-design.md) | T3 | Active experiment-layout and lifecycle contract | approved design |
+| `99-archive/README.md` | T4 | Archive index and authority boundary | this build |
+| `99-archive/dashboard-history-2026-08.md` | T4 | Condensed dashboard architecture provenance | retired delivery records |
+| `99-archive/design-records-2026-08.md` | T4 | Condensed completed-design chronology | retired specs and plans |
+| `99-archive/super-research.prompt.md` | T4 | Historical research context | archived prompt |
 
 ## 6) Provenance And Merge Policy
 
@@ -170,14 +110,21 @@ Interpretation for this repository:
 - `02-strategy/strategy-bible.md` intentionally deduplicates overlapping guidance from two source bibles.
 - `03-reference/numerapi.md` is a practical consolidated surface, not a full generated API spec.
 - `04-research` is useful but speculative. Do not treat as protocol truth.
+- `superpowers/` contains only active design records whose detailed contracts
+	have not yet been fully absorbed by an owner document. Once integrated,
+	durable facts move to the owner, provenance is condensed under `99-archive/`,
+	and completed implementation plans are deleted.
+- `99-archive/` is provenance only and cannot override an active owner. Its
+	`raw-source/` subtree is immutable and intentionally excluded from link
+	maintenance.
 - The `Source` column in section 5 names the original inputs. Surviving raw originals are preserved unmodified in `99-archive/raw-source/` (normalized lowercase names, e.g. `Golden Bible.txt` -> `golden-bible.txt`); the remaining sources (canon `*.txt`, `Scoring-*.txt`, `numerai_tools_reference.md`, `llm_reports/`, notebook collections) are not archived as separate files. The 2026-08-06 trim removed two superseded files (`04-research/the-state-of-the-art.md`, `99-archive/general-ml-cookbook.md`) and merged `04-research/neural-networks.md` into `04-research/advanced-ideas.md`.
 
 ## 7) Minimal Traversal Recipes
 
 Subsets of the §1 fast-start order, for focused goals:
 
-- **Scoring comprehension:** `01-canon/scoring/00-definitions.md` → `01-canon/scoring/01-correlation.md` → `01-canon/scoring/02-mmc-bmc.md` → `01-canon/scoring/03-fnc.md` → `01-canon/staking.md`
-- **Data-to-submission lifecycle:** `01-canon/data.md` → `01-canon/models.md` → `01-canon/submissions.md` → `01-canon/staking.md` → `03-reference/numerapi.md`
+- **Scoring comprehension:** `01-canon/NUMERAI-CANON-DOCS-README.md` → `01-canon/10-scoring-reference.md` → `01-canon/09-scoring-live.md` → `01-canon/06-staking-legacy.md`
+- **Data-to-submission lifecycle:** `01-canon/02-data.md` → `01-canon/03-models.md` → `01-canon/04-submissions.md` → `01-canon/05-model-uploads.md` → `03-reference/numerapi.md`
 - **Robust modeling intuition:** `02-strategy/strategy-bible.md` → `02-strategy/community-wisdom.md` → `02-strategy/why-it-works.md` → `04-research/research-program.md`
 - **Model promotion & lifecycle ops:** `02-strategy/model-lifecycle.md` → `06-evaluation/evaluation-suite-bible.md` (how this repo judges a model) → [`ARCHITECTURE.md`](../ARCHITECTURE.md) §N/§X–§Z (schemas)
 

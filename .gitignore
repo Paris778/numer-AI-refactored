@@ -7,6 +7,15 @@ data/**/*.parquet
 onboarding_notebooks/**/**/*.parquet
 *.pkl
 
+docs/superpowers/**
+!docs/superpowers/
+!docs/superpowers/README.md
+!docs/superpowers/specs/
+docs/superpowers/specs/**
+!docs/superpowers/specs/2026-08-18-vanilla-dashboard-design.md
+!docs/superpowers/specs/2026-08-19-benchmark-fleet-design.md
+!docs/superpowers/specs/2026-08-26-model-lifecycle-experiments-design.md
+
 .ipynb_checkpoints/
 __pycache__/
 *.pyc

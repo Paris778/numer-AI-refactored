@@ -75,7 +75,9 @@ A **lean, deterministic research framework** for the [Numerai Classic tournament
 ├── generate_dashboard.py      # thin wrapper — builds the executive HTML dashboard (logic in dashboard_ui.report)
 ├── dashboard_app.py           # thin wrapper — Streamlit host for the shared renderer
 ├── pytest.ini                 # pytest configuration
-├── requirements.txt           # runtime + dev dependencies (all exact-pinned)
+├── requirements.txt           # runtime dependencies (all exact-pinned)
+├── requirements-dev.txt       # development tooling (exact-pinned)
+├── CODEBASE.md                # repository navigation: owners, routes, code, tests
 ├── AGENTS.md                  # authoritative reference for AI coding agents
 ├── ARCHITECTURE.md            # pipeline topology, formulas, schemas
 └── CONTRIBUTING.md            # human contributor workflow + test commands
@@ -184,16 +186,16 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md#testing--verification) for the full work
 
 A curated, tiered Numerai knowledge base with a deterministic reading path:
 
-- [docs/01-canon/](docs/01-canon/overview.md) — canonical tournament truth: data, scoring (CORR/MMC/BMC/FNC), submissions, staking
+- [docs/01-canon/](docs/01-canon/NUMERAI-CANON-DOCS-README.md) — canonical tournament truth: data, scoring (CORR/MMC/BMC/FNC), submissions, staking
 - [docs/02-strategy/](docs/02-strategy/strategy-bible.md) — strategy bible, community wisdom, target-ensembling math
 - [docs/02-strategy/model-lifecycle.md](docs/02-strategy/model-lifecycle.md) — **how a model moves research → partial → full → staked** over the `experiments/` layout (workflow + lifecycle derivation)
 - [docs/03-reference/](docs/03-reference/numerai-tools.md) — `numerapi` and `numerai-tools` API references
 - [docs/04-research/](docs/04-research/research-program.md) — research program + consolidated research-ideas file (incl. neural-network directions), deep tabular-DL survey
 - [docs/05-notebooks/](docs/05-notebooks/) — onboarding notebooks (hello-numerai, neutralization, target ensembles, sunshine example)
 - [docs/06-evaluation/](docs/06-evaluation/evaluation-suite-bible.md) — **the evaluation spec of record**: how this repo judges a model; the 5-tier benchmark hierarchy (tier-0 null floor to tier-4 production gate) is [benchmark-line-in-the-sand.md](docs/06-evaluation/benchmark-line-in-the-sand.md)
-- [docs/99-archive/](docs/99-archive/) — archived, low-priority reference (bounty/security pointer, grandmaster-seasons summary, super-research prompt); surviving raw source originals under `docs/99-archive/raw-source/` (provenance policy: [docs/DOCS_README.md](docs/DOCS_README.md#6-provenance-and-merge-policy))
+- [docs/99-archive/](docs/99-archive/README.md) — historical provenance and condensed design records; immutable source originals live under `docs/99-archive/raw-source/`
 
-The authoritative map — importance tiers, per-file table, and reading recipes — lives in [docs/DOCS_README.md](docs/DOCS_README.md); the bullets above are a directory summary, not the map itself.
+The repository-wide routing map lives in [CODEBASE.md](CODEBASE.md). The docs-specific inventory, provenance notes, and reading recipes live in [docs/DOCS_README.md](docs/DOCS_README.md); the bullets above are a directory summary, not either map.
 
 ### Other
 

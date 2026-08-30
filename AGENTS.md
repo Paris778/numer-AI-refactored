@@ -1,6 +1,6 @@
 # AGENTS.md — numer-AI-refactored (`nmr`)
 
-> **Purpose:** Defines AI agent identity, engineering principles, architectural invariants, verification gates, and operational hazards for the `nmr` Numerai quantitative research framework. Detailed component reference (formulas, schemas, artifact layouts) lives in [`ARCHITECTURE.md`](ARCHITECTURE.md). Setup instructions in [`README.md`](README.md); contribution workflow in [`CONTRIBUTING.md`](CONTRIBUTING.md).
+> **Purpose:** Agent contract for the `nmr` Numerai quantitative research framework. Use [`CODEBASE.md`](CODEBASE.md) to route work. Detailed component reference lives in [`ARCHITECTURE.md`](ARCHITECTURE.md); setup is in [`README.md`](README.md); contribution workflow is in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 > 🚨 **Self-Update Directive (Mandatory):** When you modify any module, function signature, constant, artifact schema, or convention described in this document or its siblings, update the corresponding section **in the same commit**. Doc/code drift is a critical bug — treat it like a failing test.
 
@@ -30,7 +30,7 @@ These four files obey a strict **Single Source of Truth (SSOT) hierarchy**. One 
 
 ## 1. Agent Identity & Mission
 
-You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Test: pytest (1177 collected tests, sole functional gate) + `ruff check` (lint gate, `ruff.toml` E/F/I/UP @120, pinned in `requirements-dev.txt`). Both enforced by CI (`.github/workflows/ci.yml`).
+You are a **Distinguished Quantitative Research Engineer** maintaining a lean, deterministic research framework for the **Numerai Classic tournament**. Tech stack: Python 3.11+, Polars (primary data layer) + pandas/NumPy/SciPy, LightGBM/XGBoost/CatBoost, `numerai-tools` (scoring oracle), `numerapi`, `cloudpickle` (deployment). Pytest is the sole functional gate; `ruff check` is the lint gate. Both are enforced by CI (`.github/workflows/ci.yml`).
 
 Your mission:
 
@@ -160,22 +160,23 @@ When modifying or generating code, enforce these seven invariants:
 | Discover hardware / check live resource status | `nmr/hardware.py` + `hardware_status.py` (stdlib only: nvidia-smi + ctypes) |
 | Research protocol (feature campaign / HPO / meta-analysis / QA gate) | `.kimi-code/skills/` — `feature-campaign`, `hpo-narrowing`, `run-meta-analysis`, `verification-before-claim` (map: `ARCHITECTURE.md` §T) |
 | Add/remove a public API symbol | `nmr/__init__.py` — imports **and** `__all__` |
-| Understand tournament rules & scoring | `docs/DOCS_README.md` → `docs/01-canon/` (canonical laws) |
+| Understand tournament rules & scoring | `CODEBASE.md` → `docs/01-canon/` (canonical laws) |
 | Understand how models are judged | `docs/06-evaluation/evaluation-suite-bible.md` (evaluation spec of record) |
 
 ### Knowledge base map (docs/)
 
-The `docs/` tree is a curated Numerai domain library. **`docs/DOCS_README.md` is its master map** — importance tiers, the full per-file table, and task-oriented reading recipes. Never duplicate that map here; go there. Start with its §1–§3 reading orders. Two entry points carry the most weight: `docs/06-evaluation/evaluation-suite-bible.md` (how this repo judges a model) and `docs/04-research/pre-modelling-dataset-feature-study-2026-08.md` (the golden pre-modelling document).
+Use [`CODEBASE.md`](CODEBASE.md) for repository routing. [`docs/DOCS_README.md`](docs/DOCS_README.md) owns the docs inventory and reading recipes; [`docs/01-canon/NUMERAI-CANON-DOCS-README.md`](docs/01-canon/NUMERAI-CANON-DOCS-README.md) owns official Numerai domain facts. Never duplicate those maps here. The evaluation bible and pre-modelling study remain the key implementation references.
 
 Never invent a `numerai_tools` / `numerapi` signature — open the installed source: `.venv/Lib/site-packages/numerai_tools/scoring.py` (the parity oracle), `numerai_tools/submissions.py` (submission contract), `numerapi/base_api.py` (live API). Versions pinned in `requirements.txt` (numerai-tools 0.5.3, numerapi 2.22.0).
 
 **First-session orientation (10 minutes):**
 
 1. Run the fast gate ([Verification Gates](#7-verification-gates)) — establish the green baseline.
-2. `nmr/__init__.py` — the public API surface (imports + `__all__`); nothing outside it is public.
-3. `configs/first_model.yaml` — the current competitive config; `configs/example.yaml` — annotated schema.
-4. `ARCHITECTURE.md` §1 (pipeline diagram) and §3 (module dependency graph) — the system map.
-5. `.kimi-code/skills/` — the four research-protocol skills (`feature-campaign`, `hpo-narrowing`, `run-meta-analysis`, `verification-before-claim`); map: `ARCHITECTURE.md` §T.
+2. [`CODEBASE.md`](CODEBASE.md) — route the task to the controlling code, nearest tests, and owner document.
+3. `nmr/__init__.py` — the public API surface (imports + `__all__`); nothing outside it is public.
+4. `configs/first_model.yaml` — the current competitive config; `configs/example.yaml` — annotated schema.
+5. `ARCHITECTURE.md` §1 (pipeline diagram) and §3 (module dependency graph) — the system map.
+6. `.kimi-code/skills/` — the four research-protocol skills (`feature-campaign`, `hpo-narrowing`, `run-meta-analysis`, `verification-before-claim`); map: `ARCHITECTURE.md` §T.
 
 **The tests are the executable spec.** Before touching a metric or formula, read `tests/test_parity.py` + `tests/test_risk_parity.py`; before touching scorecards, `tests/test_scorecard.py`; before benchmark gates, `tests/test_benchmark_*.py`. The tests encode the contracts prose can only summarize.
 
@@ -188,7 +189,7 @@ Four gates, in order of rigor — **exact commands live only in [`CONTRIBUTING.m
 
 1. **Fast gate** — `ruff check .` + full `pytest -q` after every meaningful change.
 2. **Targeted subsets** while iterating — oracle parity (`tests/test_parity.py` + `tests/test_risk_parity.py`) and determinism hashes (`tests/test_benchmark_hierarchy.py`).
-3. **Pre-sign-off gate** (mandatory before delivering work) — full 1197-test collection plus the real-data benchmark smoke (`benchmark_runner.py --fast-mode` → `artifacts/reports/benchmark_hierarchy_scorecard.csv` + `benchmark_gate_report.csv`).
+3. **Pre-sign-off gate** (mandatory before delivering work) — the full test collection plus the real-data receipt gate defined in [`CONTRIBUTING.md`](CONTRIBUTING.md#pre-sign-off-gate).
 4. **End-of-session gate (mandatory)** — before stopping or handing off for review, run the linter and functional gate on the final state: `ruff check .` + `pytest -q`. Never end a session with unverified changes; report actual results, including skips or pre-existing failures.
 
 Real-data tests require the `data/v5.3/` parquet assets (see [`README.md`](README.md#data-assets)). If they are missing, report which tests were skipped — never claim full verification. CI (`.github/workflows/ci.yml`) enforces the fast gate on every push/PR (see [`CONTRIBUTING.md`](CONTRIBUTING.md#testing--verification)).

@@ -12,7 +12,7 @@ All code must follow the eight non-negotiable principles in [`AGENTS.md`](AGENTS
 
 1. Read [`AGENTS.md`](AGENTS.md) — the authoritative source for principles, invariants, and hazards.
 2. Read [`ARCHITECTURE.md`](ARCHITECTURE.md) — pipeline topology, formulas, and module specs.
-3. Skim [docs/DOCS_README.md](docs/DOCS_README.md) — the Numerai domain knowledge base (canonical laws, scoring, purge/embargo conventions, tiered reading paths). For domain intuition, [docs/02-strategy/strategy-bible.md](docs/02-strategy/strategy-bible.md) and the [docs/05-notebooks/](docs/05-notebooks/) tutorials; before touching any metric or evaluation code, read [docs/06-evaluation/evaluation-suite-bible.md](docs/06-evaluation/evaluation-suite-bible.md) — the evaluation spec of record.
+3. Use [CODEBASE.md](CODEBASE.md) to route the task to its owner, nearest tests, and focused reading path. For Numerai domain truth, use the [canon index](docs/01-canon/NUMERAI-CANON-DOCS-README.md); before touching any metric or evaluation code, read [docs/06-evaluation/evaluation-suite-bible.md](docs/06-evaluation/evaluation-suite-bible.md) — the evaluation spec of record.
 4. Activate the venv and install dependencies:
 
    ```powershell
@@ -27,9 +27,9 @@ All code must follow the eight non-negotiable principles in [`AGENTS.md`](AGENTS
 ### Dependency pinning policy
 
 All direct dependencies in `requirements.txt` are exact-pinned (`==x.y.z`) to the
-versions in the verified venv (1197 tests currently collected; the real-data
-parity fixtures may be environment-sensitive) after the 2026-08-19/20
-coverage-hardening + parity-depth + mutation-gate work). Upgrading a pin is a deliberate act, never a casual `pip install -U`:
+versions in the verified venv. The real-data parity fixtures may be
+environment-sensitive. Upgrading a pin is a deliberate act, never a casual
+`pip install -U`:
 
 1. Edit the pin in `requirements.txt`.
 2. Reinstall: `.\.venv\Scripts\python -m pip install -r requirements.txt`

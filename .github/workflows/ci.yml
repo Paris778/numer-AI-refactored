@@ -19,6 +19,8 @@ jobs:
           pip install -r requirements-dev.txt
       - name: Lint (ruff check)
         run: python -m ruff check .
+      - name: Documentation hygiene
+        run: python -m pytest tests/test_docs_hygiene.py -q
       - name: Run test suite
         # -rs surfaces every skip reason so a green build does not read as
         # "real-data verified": the v5.3-gated tests (oracle parity, real

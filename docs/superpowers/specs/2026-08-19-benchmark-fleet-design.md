@@ -191,9 +191,9 @@ Existing tests: `tests/test_benchmark_hierarchy.py` determinism test extended wi
 ## 9. Documentation & SSOT (implementation commit)
 
 - `docs/06-evaluation/benchmark-line-in-the-sand.md`: new "Untiered Benchmark Fleet" section (schema, placement semantics, fidelity policy, anchor re-pin procedure).
-- `docs/superpowers/specs/2026-08-15-benchmark-hierarchy-design.md`: one-line §10-style amendment pointing at this spec.
+- `docs/06-evaluation/benchmark-line-in-the-sand.md`: active hierarchy reference pointing at this fleet extension.
 - `ARCHITECTURE.md`: `nmr/benchmark_fleet.py` module spec, fleet schema, generators, runner CLI, artifact paths.
-- `AGENTS.md`: toolkit table row (fleet), operational hazards (deep 20k/30k-tree fits are multi-hour; fleet exempt from hard gates; v1.5.1 search cell is selection-biased by design), test count.
+- `AGENTS.md`: toolkit table row and operational hazards (deep 20k/30k-tree fits are multi-hour; fleet is exempt from hard gates; the v1.5.1 search cell is selection-biased by design).
 - `CONTRIBUTING.md` / `README.md`: touched only if they name removed artifacts (none — check in plan).
 
 ## 10. Implementation Watchpoints
@@ -212,7 +212,7 @@ Existing tests: `tests/test_benchmark_hierarchy.py` determinism test extended wi
 - **`fa_v151_ridge_ensemble` is selection-biased**: its scorecard was selected on validation. Never compare it naively against unbiased cells; the `selection_bias` column exists for exactly this reason.
 - **v4 target-name mappings** (`jerome_v4_20 → target_jeremy_20` etc.): name-adjacency assumptions, one-line config edits if incorrect.
 - **Fleet scorecards vs monotonicity**: fleet results never feed the hard gates, so a fleet model beating the tier-4 reference cannot break the ladder. Re-pinning anchors is manual and evidence-driven.
-- **Test-count drift**: AGENTS.md/CI claims updated in the same commit (mandatory self-update directive).
+- **Suite drift**: verification results belong in review output, not as hardcoded counts in maintained docs.
 
 ## 12. Verification & Execution Order
 

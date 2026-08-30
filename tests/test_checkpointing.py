@@ -1,6 +1,4 @@
-"""OOF fold-checkpointing & resume contracts (spec 2026-08-20-oof-checkpoint-resume v2),
-plus direct unit tests for the shared checkpoint helpers extracted in Task A
-(spec 2026-08-23-checkpoint-coverage-extension-design)."""
+"""OOF, deploy, and validation checkpoint contracts from ARCHITECTURE.md section G."""
 
 from __future__ import annotations
 

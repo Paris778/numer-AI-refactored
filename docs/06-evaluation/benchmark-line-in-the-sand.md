@@ -1,6 +1,6 @@
 # Benchmark "Line in the Sand" — The 5-Tier Hierarchy
 
-> **Purpose of this file:** a standing memory aid for the tiered benchmark floor every model must clear before capital deployment. The authoritative spec is the evaluation bible (`evaluation-suite-bible.md`, §11 E6 gate) and the design spec `docs/superpowers/specs/2026-08-15-benchmark-hierarchy-design.md`. If a tier, gate, or threshold changes, change it in the bible first, then here.
+> **Purpose of this file:** the active reference for the tiered benchmark floor every model must clear before capital deployment. The evaluation protocol is owned by [`evaluation-suite-bible.md`](evaluation-suite-bible.md), §11 E6. If a tier, gate, or threshold changes, update the bible and this reference together.
 
 ## 1) The one idea
 
