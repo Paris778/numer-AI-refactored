@@ -192,11 +192,17 @@ def render_tournament() -> None:
 
     from dashboard_ui.service import DashboardDataService
 
-    service = DashboardDataService(
-        registry_dir=registry_dir,
-        benchmark_path=benchmark_path,
-        data_dir=data_dir,
-    )
+    # Retain ONE service instance for the session: the sidebar Refresh action
+    # clears ITS caches (the refreshable layer for every dashboard host). The
+    # rendered page is rebuilt fresh on each rerun via the offline compiler,
+    # so the visible report is always current after a rerun.
+    if "dash_service" not in st.session_state:
+        st.session_state["dash_service"] = DashboardDataService(
+            registry_dir=registry_dir,
+            benchmark_path=benchmark_path,
+            data_dir=data_dir,
+        )
+    service = st.session_state["dash_service"]
 
     with st.sidebar:
         st.markdown("### Model Tournament")

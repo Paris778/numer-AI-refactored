@@ -35,6 +35,16 @@ from nmr.dashboard import load_benchmark_frame, load_unified_leaderboard
 logger = logging.getLogger(__name__)
 
 
+def _sha256_file(path: Path) -> str:
+    """Content SHA-256 of a file (streamed; safe for the small metadata files
+    the dashboard fingerprint content-hashes)."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _is_evaluable(source: str) -> bool:
     """Evaluable-source predicate mirroring ``nmr.dashboard.EVALUABLE_ROWS``
     (``~source.is_in(["full", "partial"])``): full (in-sample metrics) and
@@ -340,27 +350,46 @@ class DashboardDataService:
         return None
 
     def compute_source_fingerprint(self) -> str:
-        """Content-aware staleness fingerprint over EVERY source the dashboard
-        reads: registry run records, the benchmark scorecard CSV, the
-        validation/meta parquets, the historic payout-factor CSV, and the
-        tier-4 gate configuration. Registry-dir mtime alone misses benchmark,
-        data, and payout-factor changes — this replaces that heuristic."""
+        """Staleness fingerprint over EVERY input the dashboard reads.
+
+        Metadata files (JSON/CSV/YAML — run records, family metadata, the
+        champion pointer, export metadata, the benchmark scorecard, the
+        payout-factor CSV, the tier-4 gate config) are CONTENT-hashed, so a
+        same-size/same-mtime edit still invalidates the caches. Parquet assets
+        (validation/meta/benchmark models + per-run prediction files) use
+        size+mtime — rewrites change both, and hashing multi-GB files on every
+        call is not viable. Both registry layouts are covered: the experiments
+        tree (``*/runs/*/run.json``) and the legacy one-level ``*/run.json``.
+        """
         entries: list[tuple[str, int, int]] = []
 
-        def add(path: Path) -> None:
+        def content(path: Path) -> None:
+            if path.is_file():
+                entries.append((str(path.resolve()), _sha256_file(path), 0))
+
+        def meta(path: Path) -> None:
             if path.is_file():
                 stat = path.stat()
                 entries.append((str(path.resolve()), stat.st_size, stat.st_mtime_ns))
 
-        add(self.benchmark_path)
-        add(self.data_dir / "validation.parquet")
-        add(self.data_dir / "meta_model.parquet")
-        add(self.data_dir / "payout_factor_historic.csv")
-        add(REPO_ROOT / "configs" / "benchmarks" / "tier4_gate.yaml")
+        content(self.benchmark_path)
+        content(self.data_dir / "payout_factor_historic.csv")
+        content(REPO_ROOT / "configs" / "benchmarks" / "tier4_gate.yaml")
+        content(self.registry_dir / "champion.json")
+        meta(self.data_dir / "validation.parquet")
+        meta(self.data_dir / "meta_model.parquet")
+        meta(self.data_dir / "validation_benchmark_models.parquet")
         if self.registry_dir.is_dir():
-            for run_json in sorted(self.registry_dir.glob("*/runs/*/run.json")):
-                stat = run_json.stat()
-                entries.append((str(run_json.resolve()), stat.st_size, stat.st_mtime_ns))
+            for pattern, kind in (
+                ("*/runs/*/run.json", "content"),
+                ("*/runs/*/validation_preds.parquet", "meta"),
+                ("*/meta.json", "content"),
+                ("*/exports/**/export.json", "content"),
+                ("*/exports/full/current.json", "content"),
+                ("*/run.json", "content"),  # legacy one-level layout
+            ):
+                for path in sorted(self.registry_dir.glob(pattern)):
+                    content(path) if kind == "content" else meta(path)
         return hashlib.sha256(
             "\n".join(f"{p}:{s}:{m}" for p, s, m in sorted(entries)).encode("utf-8")
         ).hexdigest()

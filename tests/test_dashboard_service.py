@@ -630,3 +630,87 @@ class TestFullHistoryLoading:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+    def test_fingerprint_detects_same_size_same_mtime_edit(self, tmp_path):
+        """Content hashing catches a same-size edit with restored mtime."""
+        import os
+        service = DashboardDataService(registry_dir=Path(tmp_path))
+        run_dir = tmp_path / "fam" / "runs" / ("a" * 64)
+        run_dir.mkdir(parents=True)
+        run_json = run_dir / "run.json"
+        run_json.write_text("A" * 100, encoding="utf-8")
+        before = service.compute_source_fingerprint()
+        stat = run_json.stat()
+        run_json.write_text("B" * 100, encoding="utf-8")
+        os.utime(run_json, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        assert service.compute_source_fingerprint() != before
+
+    def test_fingerprint_covers_legacy_meta_champion_and_benchmark_parquet(
+        self, tmp_path
+    ):
+        """Every dashboard input moves the fingerprint: legacy run records,
+        family metadata, the champion pointer, and the tier-4 benchmark
+        parquet (size+mtime)."""
+        import polars as pl
+
+        service = DashboardDataService(registry_dir=Path(tmp_path))
+        before = service.compute_source_fingerprint()
+
+        legacy = tmp_path / "legacy" / "run.json"
+        legacy.parent.mkdir(parents=True)
+        legacy.write_text("{}", encoding="utf-8")
+        assert service.compute_source_fingerprint() != before
+        before = service.compute_source_fingerprint()
+
+        meta = tmp_path / "fam" / "meta.json"
+        meta.parent.mkdir(parents=True)
+        meta.write_text("{}", encoding="utf-8")
+        assert service.compute_source_fingerprint() != before
+        before = service.compute_source_fingerprint()
+
+        champion = tmp_path / "champion.json"
+        champion.write_text('{"run_id": "x"}', encoding="utf-8")
+        assert service.compute_source_fingerprint() != before
+        before = service.compute_source_fingerprint()
+
+        bench = tmp_path / "validation_benchmark_models.parquet"
+        pl.DataFrame({"era": ["1"], "id": ["a"], "bench": [0.5]}).write_parquet(bench)
+        assert service.compute_source_fingerprint() != before
+
+    def test_full_history_invalidates_when_preds_change(self, tmp_path):
+        """load_full_history re-reads when a model validation_preds.parquet
+        changes (the prediction path is part of the source fingerprint)."""
+        import polars as pl
+
+        data = tmp_path / "data"
+        registry = tmp_path / "registry"
+        data.mkdir()
+        model = "m" * 64
+        run = registry / model
+        run.mkdir(parents=True)
+        targets = pl.DataFrame(
+            {"era": ["1", "1", "1", "2", "2", "2"],
+             "id": ["a", "b", "c", "a", "b", "c"],
+             "target": [1.0, 2.0, 3.0, 1.0, 2.0, 3.0]}
+        )
+        targets.write_parquet(data / "validation.parquet")
+        preds = pl.DataFrame(
+            {"era": ["1", "1", "1", "2", "2", "2"],
+             "id": ["a", "b", "c", "a", "b", "c"],
+             "prediction": [1.0, 2.0, 3.0, 1.0, 2.0, 3.0]}
+        )
+        preds.write_parquet(run / "validation_preds.parquet")
+        service = DashboardDataService(
+            registry_dir=registry, benchmark_path=None, data_dir=data
+        )
+        first = service.load_full_history([model])
+        first_vals = first["series"][model]["standard"]
+        changed = pl.DataFrame(
+            {"era": ["1", "1", "1", "2", "2", "2"],
+             "id": ["a", "b", "c", "a", "b", "c"],
+             "prediction": [3.0, 1.0, 2.0, 3.0, 1.0, 2.0]}
+        )
+        changed.write_parquet(run / "validation_preds.parquet")
+        second = service.load_full_history([model])
+        assert first_vals != second["series"][model]["standard"]
