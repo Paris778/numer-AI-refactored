@@ -2036,3 +2036,22 @@ def test_reconcile_capital_metrics_uses_historical_pf_csv(tmp_path: Path) -> Non
     # strictly lower.
     assert row["cagr_1y"] < (1.05**52) - 1.0
     assert row["cagr_1y"] > 0.0
+
+
+def test_benchmark_tier4_labels_unique_per_model(tmp_path: Path) -> None:
+    """The tier-4 reference pair shares the generic "tier4" strategy label;
+    derived display labels must be unique per model id."""
+    csv_path = tmp_path / "bench.csv"
+    csv_path.write_text(
+        "model_id,strategy_group,tier,horizon_target_name,mean_payout\n"
+        "v53_lgbm_ender20,tier4,4,ender,0.01\n"
+        "v53_lgbm_ender60,tier4,4,ender,0.02\n"
+        "null_constant_05,null,0,,0.0\n"
+        , encoding="utf-8",
+    )
+    frame = dash.load_benchmark_frame(csv_path)
+    labels = frame.select(["model_id", "run_name"]).to_dicts()
+    by_id = {row["model_id"]: row["run_name"] for row in labels}
+    assert by_id["v53_lgbm_ender20"] == "Tier 4 " + chr(0xB7) +  " Ender 20D"
+    assert by_id["v53_lgbm_ender60"] == "Tier 4 " + chr(0xB7) +  " Ender 60D"
+    assert len({row["run_name"] for row in labels}) == len(labels)

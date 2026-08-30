@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -848,6 +849,31 @@ def resolve_benchmark_path(
     return None
 
 
+def _benchmark_display_label(row: Mapping[str, Any]) -> str:
+    """Unique human label for a benchmark row.
+
+    The tier-4 reference pair (``v53_lgbm_ender20`` / ``v53_lgbm_ender60``)
+    shares the generic ``strategy_group`` value ``tier4``; derive a
+    disambiguated label from the model id (which remains the stable identity)
+    so no two rows display identically: ``Tier 4 · Ender 20D``. Rows carrying a
+    distinct strategy label (e.g. ``ref``) keep it unchanged.
+    """
+    strategy = row.get("strategy_group")
+    tier = row.get("tier")
+    base = strategy or (f"tier{int(tier)}" if tier is not None else "benchmark")
+    model_id = str(row.get("model_id") or "")
+    collides = not strategy or (
+        tier is not None and str(strategy).lower() == f"tier{int(tier)}"
+    )
+    if tier is not None and str(tier) == "4" and collides and model_id:
+        suffix = model_id.rsplit("_", 1)[-1]
+        match = re.fullmatch(r"([a-z]+)(\d{2})", suffix)
+        if match:
+            return f"Tier 4 · {match.group(1).capitalize()} {match.group(2)}D"
+        return f"Tier 4 · {suffix.capitalize()}"
+    return base
+
+
 def load_benchmark_frame(benchmark_path: Path) -> pl.DataFrame:
     """Normalize a benchmark scorecard CSV into unified-schema rows.
 
@@ -872,10 +898,7 @@ def load_benchmark_frame(benchmark_path: Path) -> pl.DataFrame:
                 "family": None,
                 "training_scope": None,
                 "has_full_version": False,
-                "run_name": row.get("strategy_group")
-                or (
-                    f"tier{int(tier_value)}" if tier_value is not None else "benchmark"
-                ),
+                "run_name": _benchmark_display_label(row),
                 "backend": "benchmark",
                 "preset": "benchmark",
                 "feature_set": "all",

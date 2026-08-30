@@ -293,22 +293,47 @@ class TestDashboardDataService:
             assert entries == []
 
     def test_cache_invalidation(self, temp_registry_dir: Path):
-        """Test cache invalidation on mtime change."""
+        """Test source-fingerprint cache invalidation."""
         service = DashboardDataService(registry_dir=temp_registry_dir)
-
-        # Record initial mtime
-        initial_mtime = temp_registry_dir.stat().st_mtime
 
         # Cache should be invalid initially
         assert not service._check_cache_valid()
 
-        # Load once
+        # Load once -> anchored on the source fingerprint
         leaderboard1 = service.load_leaderboard()
-        assert service._mtime_registry == initial_mtime
+        assert service._source_fingerprint is not None
 
-        # Second load should return cached (mtime unchanged)
+        # Second load should return cached (fingerprint unchanged)
         leaderboard2 = service.load_leaderboard()
         assert leaderboard1 is leaderboard2  # Same object
+
+    def test_source_fingerprint_invalidates_on_registry_change(
+        self, temp_registry_dir: Path
+    ):
+        """A registry change (new run record) invalidates the cache."""
+        service = DashboardDataService(registry_dir=temp_registry_dir)
+        first = service.load_leaderboard()
+        run_dir = temp_registry_dir / "fam" / "runs" / ("b" * 64)
+        run_dir.mkdir(parents=True)
+        (run_dir / "run.json").write_text(
+            json.dumps({"run_id": "b" * 64, "scorecard": {"corr": 0.05}}),
+            encoding="utf-8",
+        )
+        second = service.load_leaderboard()
+        assert second is not first  # cache invalidated by the new record
+
+    def test_refresh_clears_all_caches(self, tmp_path):
+        """refresh() drops leaderboard + timeseries + full-history caches."""
+        service = DashboardDataService(registry_dir=Path(tmp_path))
+        service.load_leaderboard()
+        service._timeseries_cache[("a",)] = {"eras": []}
+        service._full_history_cache[("b",)] = {"series": {}}
+        assert service._leaderboard_cache is not None
+        service.refresh()
+        assert service._leaderboard_cache is None
+        assert service._timeseries_cache == {}
+        assert service._full_history_cache == {}
+        assert service._source_fingerprint is not None
 
     def test_format_model_label_trained(self):
         """Test format_model_label for trained run."""

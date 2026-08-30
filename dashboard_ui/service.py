@@ -18,6 +18,7 @@ The service is a thin data aggregation + formatting layer.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from datetime import datetime
@@ -324,8 +325,7 @@ class DashboardDataService:
         # + meta_model.parquet live under data/v5.3), not the bare data/ root.
         self.data_dir = Path(data_dir) if data_dir else REPO_ROOT / "data" / "v5.3"
 
-        self._mtime_registry: float | None = None
-        self._mtime_benchmark: float | None = None
+        self._source_fingerprint: str | None = None
         self._leaderboard_cache: LeaderboardFrame | None = None
         self._timeseries_cache: dict[tuple[str, ...], dict[str, Any]] = {}
         self._full_history_cache: dict[tuple[str, ...], dict[str, Any]] = {}
@@ -339,22 +339,66 @@ class DashboardDataService:
             return default_path
         return None
 
+    def compute_source_fingerprint(self) -> str:
+        """Content-aware staleness fingerprint over EVERY source the dashboard
+        reads: registry run records, the benchmark scorecard CSV, the
+        validation/meta parquets, the historic payout-factor CSV, and the
+        tier-4 gate configuration. Registry-dir mtime alone misses benchmark,
+        data, and payout-factor changes — this replaces that heuristic."""
+        entries: list[tuple[str, int, int]] = []
+
+        def add(path: Path) -> None:
+            if path.is_file():
+                stat = path.stat()
+                entries.append((str(path.resolve()), stat.st_size, stat.st_mtime_ns))
+
+        add(self.benchmark_path)
+        add(self.data_dir / "validation.parquet")
+        add(self.data_dir / "meta_model.parquet")
+        add(self.data_dir / "payout_factor_historic.csv")
+        add(REPO_ROOT / "configs" / "benchmarks" / "tier4_gate.yaml")
+        if self.registry_dir.is_dir():
+            for run_json in sorted(self.registry_dir.glob("*/runs/*/run.json")):
+                stat = run_json.stat()
+                entries.append((str(run_json.resolve()), stat.st_size, stat.st_mtime_ns))
+        return hashlib.sha256(
+            "\n".join(f"{p}:{s}:{m}" for p, s, m in sorted(entries)).encode("utf-8")
+        ).hexdigest()
+
+    def refresh(self) -> None:
+        """Drop every cached payload and re-anchor the source fingerprint.
+
+        Programmatic callers (a Streamlit refresh action, a scheduled job)
+        call this to force the next read to re-read the local artifacts.
+        Purely local — never touches Numerai credentials or downloads data.
+        """
+        self._leaderboard_cache = None
+        self._timeseries_cache.clear()
+        self._full_history_cache.clear()
+        self._source_fingerprint = self.compute_source_fingerprint()
+
+    def _invalidate_if_stale(self) -> None:
+        """Clear all caches when any source file changed since the anchor."""
+        if self._source_fingerprint is None:
+            return
+        if self.compute_source_fingerprint() != self._source_fingerprint:
+            logger.info(
+                "nmr.service: source fingerprint changed; clearing dashboard caches"
+            )
+            self._leaderboard_cache = None
+            self._timeseries_cache.clear()
+            self._full_history_cache.clear()
+            self._source_fingerprint = self.compute_source_fingerprint()
+
     def _check_cache_valid(self) -> bool:
-        """Check if cached data is still valid (mtime unchanged)."""
+        """Check if cached data is still valid (source fingerprint unchanged)."""
         if self._leaderboard_cache is None:
             return False
         if not self.registry_dir.exists():
             return False
-
-        current_mtime = self.registry_dir.stat().st_mtime
-        if self._mtime_registry is None:
+        if self._source_fingerprint is None:
             return False
-
-        # Simple heuristic: if registry mtime changed, invalidate
-        if current_mtime != self._mtime_registry:
-            return False
-
-        return True
+        return self.compute_source_fingerprint() == self._source_fingerprint
 
     def load_leaderboard(self) -> LeaderboardFrame:
         """Load and merge registry + benchmark runs into unified leaderboard.
@@ -366,13 +410,13 @@ class DashboardDataService:
             Invalidate on mtime change in registry_dir or benchmark_path.
         """
         # Return cached if valid
+        self._invalidate_if_stale()
         if self._check_cache_valid() and self._leaderboard_cache:
             logger.debug("Using cached leaderboard")
             return self._leaderboard_cache
 
-        # Update mtime sentinel
-        if self.registry_dir.exists():
-            self._mtime_registry = self.registry_dir.stat().st_mtime
+        # Anchor the source fingerprint after a fresh load.
+        self._source_fingerprint = self.compute_source_fingerprint()
 
         # Load from nmr.dashboard (engine)
         try:
@@ -724,6 +768,7 @@ class DashboardDataService:
             The timeseries payload dict (see nmr.dashboard for schema).
         """
         key = tuple(sorted(run_ids))
+        self._invalidate_if_stale()
         if key in self._timeseries_cache:
             return self._timeseries_cache[key]
 
@@ -769,6 +814,7 @@ class DashboardDataService:
             missing models are simply absent from the result).
         """
         key = tuple(sorted(run_ids))
+        self._invalidate_if_stale()
         if key in self._full_history_cache:
             return self._full_history_cache[key]
 
