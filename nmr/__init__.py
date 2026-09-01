@@ -204,8 +204,12 @@ from .meta import (
 from .models import CVResult, ModelOrchestrator, coerce_float32_features
 from .opt import bayesian_sweep
 from .payout import (
+    CLASSIC_ATOMIC_ENDER60_R1343_V1,
+    CLASSIC_LEGACY_V1,
     PAYOUT_FACTOR_FILENAME,
+    PAYOUT_POLICIES,
     OverlappingSimulationResult,
+    PayoutPolicy,
     PayoutResult,
     PayoutSeries,
     annual_compounded_return,
@@ -220,6 +224,7 @@ from .payout import (
     max_drawdown,
     payout_report,
     payout_series,
+    resolve_payout_policy,
     simulate_overlapping_portfolio,
     sortino,
     time_to_recovery,
@@ -246,6 +251,7 @@ from .research import (
     NeutralizationFrontier,
     SweepResult,
     feature_exposure_report,
+    metric_direction,
     neutralization_frontier,
 )
 from .risk import NeutralizationEngine
@@ -471,6 +477,10 @@ __all__ = [
     "read_champion_pointer",
     "reconcile_capital_metrics",
     "PAYOUT_FACTOR_FILENAME",
+    "PayoutPolicy",
+    "CLASSIC_ATOMIC_ENDER60_R1343_V1",
+    "CLASSIC_LEGACY_V1",
+    "PAYOUT_POLICIES",
     "OverlappingSimulationResult",
     "PayoutSeries",
     "PayoutResult",
@@ -478,6 +488,7 @@ __all__ = [
     "era_payout_factors",
     "payout_series",
     "payout_report",
+    "resolve_payout_policy",
     "burn_rate",
     "cvar",
     "gain_to_pain_ratio",
@@ -509,6 +520,7 @@ __all__ = [
     "NeutralizationFrontier",
     "neutralization_frontier",
     "feature_exposure_report",
+    "metric_direction",
     "Fold",
     "PurgedEraSplitter",
     "build_submission",

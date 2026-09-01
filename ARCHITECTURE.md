@@ -177,7 +177,7 @@ Presets mirror Numerai's published benchmark params and walk-forward purge conve
 - `rank_normalize(df, *, pred_cols, era_col)` — per-era `rank_gaussianize_unit_variance` on each component.
 - `blend(df, *, pred_cols, weights=None, out_col="prediction")` — rank-normalize → weighted dot product (default uniform 1/n) → `rank_gaussianize` the combination.
 - `learn_weights(oof_df, *, pred_cols, target_col, method="ridge") -> tuple[float, ...]` — rank-normalized design matrix, finite-row masking, then:
-  - **ridge** (α=1.0): `solve(XᵀX + I, Xᵀy)`
+     - **ridge** (α=1.0): `solve(XᵀX/n + αI, Xᵀy/n)` — the mean-squared-error objective keeps regularization invariant when rows/eras are replicated
   - **nnls**: `scipy.optimize.nnls(X, y)`
 
 The weight-learning `method` is driven by `EnsembleConfig.method` in both `run()` (§N) and the HPO path `_held_out_metric` (§L), so sweeps evaluate the same blend the runner deploys. `neutralization_frontier` sweeps proportions explicitly and does not use it.
@@ -195,30 +195,28 @@ The weight-learning `method` is driven by `EnsembleConfig.method` in both `run()
 
 `Horizon = Literal["20D", "60D"]`.
 
-### J. Payout Proxy — `nmr/payout.py`
+### J. Versioned Payout Policies — `nmr/payout.py`
 
-`payout_series(corr_by_era, mmc_by_era, *, pf: Mapping[str, float] | float = 1.0, clip=0.05)`:
+`payout_series(..., *, policy, pf=None, clip=None)` and `payout_report(..., *, policy, horizon, ...)` require an explicit `PayoutPolicy`. `classic_atomic_ender60_r1343_v1` is the current Classic policy: target `target_ender_60`, scoring horizon `60D`, fixed payout factor `1`, 64 concurrent positions, effective from round 1343, and
 
 ```
-raw_e   = PF_e · (0.75·CORR_e + 2.25·MMC_e)   # current Numerai Classic weighting
-clipped = clip(raw, −0.05, +0.05)
+raw_e   = 3·CORR60_e + 15·MMC60_e
+clipped = clip(raw, −1, +1)
 ```
 
-`PF_e` is the round's **payout factor** from `data/v5.3/payout_factor_historic.csv` (Numerai's published historic payout factors, cleaned to `round,status,close,resolve,pf`), aligned by `int(era) == round` (`load_payout_factors` parses round→pf; `era_payout_factors` joins to era keys, returning `{}` — the explicit all-1.0 fallback — when the file is absent). `pf` accepts a scalar (uniform factor; synthetic-test default) or a per-era mapping; eras without a recorded factor use the explicit fallback `PF_e = 1.0`, never the historical 86-era assumption. `payout_report` derives mean payout, CAGR, drawdown, burn rate, and the other economic metrics from the era-specific clipped returns; `PayoutResult.pf` records the scalar factor or the mean applied factor. The CSV is content-fingerprinted into the run's data fingerprint (§M).
+`classic_legacy_075_225_clip005_v1` preserves historical replay only: `PF_e·(0.75·CORR_e + 2.25·MMC_e)`, clipped to ±0.05. Only that legacy policy accepts `pf`/`clip` overrides and `payout_factor_historic.csv`; Atomic rejects them. Policy ID, scoring target, and scoring horizon persist in every scorecard and form a mandatory comparison/gate cohort.
 
-Diagnostics on the series: `burn_rate` (fraction < 0), `cvar(q=0.05)` (mean of bottom 5%), `sortino` (downside-deviation ratio), `max_drawdown` (cumsum vs running max), `calmar` (mean/MDD), `max_burn_streak` (longest consecutive negative run), `time_to_recovery` (longest underwater period). `payout_report(...) -> PayoutResult` bundles all of these plus `BootstrapCI` on mean payout, deflated Sharpe, and AC-adjusted MMC Sharpe.
+Diagnostics include burn rate, CVaR, Sortino, zero-baseline cumulative drawdown/Calmar, burn streak, and recovery duration. Prefixing cumulative returns with initial equity zero ensures an immediate loss counts as drawdown. `kelly_fraction(returns)` maximizes empirical mean `log(1 + f·r)` over `0 ≤ f ≤ 1`, restricted so every observed wealth multiplier stays positive; `payout_report` passes policy-clipped realizable returns.
 
-Capital-readiness extensions (v2.5, pure NumPy, float64 throughout): `annual_compounded_return(clipped, *, eras_per_year=52.0)` — `(∏(1 + r_t))^(52/n) − 1`, `−1.0` when the wealth product ≤ 0 (ruin), `0.0` when `n < 2`; `gain_to_pain_ratio(clipped)` — `Σ max(0, r_t) / Σ |min(0, r_t)|`, `+inf` on a zero-pain positive series (precedented by `calmar`; the canonical JSON sanitizer `_sanitize_json_payload` maps non-finite floats to `"Infinity"`/`"-Infinity"`/`"NaN"` strings in canonical bytes while parquet/CSV carry `inf` natively), `0.0` on an all-flat series; `kelly_fraction(raw)` — `min(1.0, max(0.0, μ / σ²))` with `σ² = var(ddof=0)` computed on the **raw** (unclipped) series (`0.0` when `σ² = 0` or `μ ≤ 0`): the clipped series has Popoviciu-bounded variance (≤ 0.0025 under the ±5% clip) so μ/σ² there saturates at 1.0 for every viable model and carries no discrimination; `simulate_overlapping_portfolio(clipped, *, horizon_eras=20, initial_capital=1.0, eras_per_year=52.0) -> OverlappingSimulationResult` — multi-round lockup simulator: at each era, tranches maturing at `t` pay `principal·(1 + r_{t−K})` (the initiating era's return — Numerai round semantics), then `min(cash, total_equity/K)` deploys as a new tranche maturing at `t + K`; equity and utilization are recorded **before** the era's deployment; tranches still locked at series end are carried at par principal (at-cost convention — no mark-to-market, no unrealized payoff); `n < horizon_eras` returns a zeroed result. Horizon eras derive from the report's `horizon` argument via `_HORIZON_ERAS = {"20D": 20, "60D": 60}`. `PayoutResult` gains `cagr_1y`, `gain_to_pain_ratio`, `kelly_fraction` (CAGR/GPR on `series.clipped`, Kelly on `series.raw`) and `overlapping_sim: OverlappingSimulationResult | None = None` (default preserves existing direct constructions).
-
-Payout weights, ±5% clip, and stake thresholds follow the applicable [legacy staking](docs/01-canon/06-staking-legacy.md) and [Atomic staking](docs/01-canon/07-staking-atomic.md) specifications.
+Weekly validation eras cannot reconstruct Atomic's five-round-per-week, 64-position portfolio. Atomic `overlapping_sim` fields are therefore `None` with `capital_metrics_reason="round_level_returns_unavailable"`; the legacy simulator remains an explicitly historical diagnostic, not Atomic capital evidence.
 
 ### K. Scorecard — `nmr/scorecard.py`
 
-`evaluate_model(predictions, *, meta_model, benchmarks, features, targets, n_trials, seed, horizon="20D", main_target="target", benchmark_col=None, backend="custom", regime_labels=None, perturbation=None, pf=1.0, clip=0.05, n_boot=1000, alpha=0.05, min_overlap_eras=20, model_id="model", ...) -> MetricScorecard`
+`evaluate_model(..., *, n_trials, seed, payout_policy, horizon="20D", main_target="target", ...) -> MetricScorecard`
 
-Flow: join predictions ∩ meta ∩ targets ∩ features on `[era]` or `[era, id]` (optional left-join benchmarks) → per-era CORR/MMC/FNC (+BMC/CWMM when benchmark/meta available) → payout report → `MetricCell(value, ci_low, ci_high, n_eras)` bootstrap cells → feature-exposure, horizon-stability, regime, and perturbation diagnostics. Horizon targets inferred by regex `_([a-zA-Z0-9]+)(?:20|60)$` on `benchmark_col`, requiring both `target_{name}_20` and `target_{name}_60`.
+Flow: require unique `[era,id]` keys in predictions/meta/targets/features, reject mixed ID availability or cardinality-expanding joins, then compute per-era metrics and the policy-bound payout report. `payout_policy_id`, `scoring_target`, and `scoring_horizon` persist in the flattened scorecard. The runner keeps training-target horizon (`data.horizon`) separate from payout evaluation: Atomic scores every model against Ender-60 with 60D inference and drops the first 16 overlapping validation eras.
 
-`MetricScorecard` (frozen, 44 fields) includes `rank_scalar`, `deflated_sharpe`, `mean_payout/corr/mmc/corr_sharpe_ac/bmc/cwmm` cells, `fnc`, `cvar5`, `max_drawdown`, `burn_rate`, `sortino`, `calmar`, `max_feature_exposure`, `degenerate_eras`, robustness sub-results, the capital-readiness block (v2.5), and `metric_timing_seconds` + `eval_total_seconds` instrumentation. Capital-readiness fields: `cagr_1y`, `gain_to_pain_ratio`, `kelly_fraction`, `sim_portfolio_cagr`, `sim_portfolio_mdd`, `sim_capital_utilization` (floats, from `PayoutResult`/`OverlappingSimulationResult`); `mmc_down` (mean MMC over the eras where the meta model's per-era CORR < 0 — `None` + `mmc_down_reason="insufficient_downside_eras"` when fewer than `_MMC_DOWN_MIN_ERAS` (5) such eras; `mmc_down_n_eras` always records the count, `mmc_down_reason` is `None` otherwise); `turnover_mean`/`turnover_std` (mean and population std ddof=0 of `1 − ρ_k` transitions — both `None` when the join lacks the id column (`turnover_reason="id column unavailable"`) or fewer than 2 valid transitions exist (`"insufficient_transitions"`), `None` reason otherwise). `degenerate_eras: tuple[str, ...]` (A4, 2026-08-18) lists the era labels whose per-era CORR was normalized to `0.0` at the engine boundary (<2 usable rows, zero variance, or non-finite values — §E): metric values are unchanged, but the eras are now surfaced rather than silently pooled into the aggregates. `to_frame()` flattens to a single-row Polars frame (cells expand to `{name}`, `{name}_ci_low`, `{name}_ci_high`, `{name}_n_eras`; timings become `timing_*` columns + `quality_metric_timings_json` / `quality_metric_total_seconds`). **Timing columns are excluded from canonical hashing** (§M).
+`MetricScorecard` includes `rank_scalar`, inference/quality cells, payout policy identity, robustness diagnostics, and capital fields. `sim_portfolio_cagr`, `sim_portfolio_mdd`, and `sim_capital_utilization` are nullable; Atomic sets all three to `None` with `capital_metrics_reason="round_level_returns_unavailable"`. `mmc_down` is available only with at least five downside eras, and turnover requires at least two valid shared-ID transitions. `degenerate_eras` surfaces metric short-circuits. `to_frame()` flattens cells and instrumentation; all timing columns remain excluded from canonical hashing.
 
 The evaluation spec of record (metrics, gates, build slices E1–E6) is [docs/06-evaluation/evaluation-suite-bible.md](docs/06-evaluation/evaluation-suite-bible.md).
 
@@ -243,11 +241,7 @@ e.g. `v53_lgbm_ender20`, scored as informational tier-4 rows) through
 `evaluate_model()` and evaluates
 three hard gates: `assert_tier0_null_floor` (|CORR| ≤ 0.005, |AC-Sharpe| ≤ 0.15
 over the three structural nulls; no DSR check — null DSRs span 0.11–1.0),
-`assert_tier4_gate` (6 production thresholds in `configs/benchmarks/tier4_gate.yaml`;
-turnover is structurally unavailable on v5.3 — reported as measured=None/pass=None,
-excluded from hard failure; **`deflated_sharpe` is display-only — pass=None, A6 2026-08-18**:
-at n_trials=1 no deflation occurs and no search history exists at gate time, so gating
-on it was false assurance; search-aware DSR lives in `sweep_dsr`/`campaign_evidence`),
+`assert_tier4_gate` (four Atomic Ender-60 thresholds in `configs/benchmarks/tier4_gate.yaml`: CORR, 60D AC-Sharpe, FNC@medium, and GPR; DSR, turnover, and weekly-era CAGR remain diagnostics because their required search, shared-ID, or round-level evidence is unavailable),
 and `assert_hierarchy_monotone` (per-tier max of
 `corr.value`, T0 < T1 < T2 < T3 ≤ T4, atol 1e-5; `rank_scalar` selectable via
 `metric=`). Tier 1–3 fits use `train_validation_purged_split()` (exact 8-era
@@ -532,7 +526,7 @@ immutable slot per promoted run at
 `scorecard.json`), and a `scope="full"` promotion repoints the atomic
 `current.json` pointer (`{"run_id": <64-hex>, "promoted_at": ...}`,
 temp + fsync + `os.replace`) naming the active full slot — the pointer +
-valid slot record IS the marker. Writes live in `nmr/promote.py` (the
+activation-eligible slot record IS the marker. Writes live in `nmr/promote.py` (the
 promotion writer). The read-side discovery layer (`nmr/families.py`)
 is a thin compatibility wrapper over `nmr/lifecycle` + `nmr/paths`: it
 re-exports `lifecycle.ExportVersion` as `FullVersion` and resolves the
@@ -562,7 +556,11 @@ Export record schema (`export.json`, per-slot):
 | `config` | snapshot of the promoted research config |
 | `rehearsal` | `true` for a D7 truncated-subset rehearsal artifact — first-class discriminator: excluded from `scan_full_versions`/`family_has_full_version` and NEVER the `current.json` pointer, so it can never be read as a genuine full version at a glance (review directive 2026-08-18) |
 | `training_rows` / `training_era_range` | actual rows + `[min, max]` era range the artifact was fit on — a rehearsal (~68k rows on a subset) is distinguishable from a genuine full version (6.85M rows, `[0001..1231]`) without reading `config_normalizations` |
-| `tier4_gate_passed` / `tier4_receipts` / `override_used` / `config_normalizations` | promotion verdict block — always written by the writer; a failed-gate rehearsal artifact carries `tier4_gate_passed: false` in its own manifest |
+| `tier4_gate_passed` / `tier4_receipts` / `override_used` / `config_normalizations` | versioned gate verdict; gate, config, and scorecard must agree on payout policy, target, and horizon |
+| `scorecard_sha256` / `components_sha256` / `data_fingerprint` / `promotion_data_fingerprint` | timing-free scorecard, ordered target/prediction/weight tuple, run snapshot, and byte-content fit identity; lifecycle recomputes each against immutable `run.json` |
+| `acceptance` / `activation_eligible` | staged artifact acceptance receipt bound to artifact/live-feature/live-benchmark hashes, IDs, feature list, and row count; lifecycle replays the official raw-output validator before activation |
+
+Staging directories are writer-unique. A family-scoped advisory lock covers only the final pointer recheck, atomic slot rename, and pointer write. Structural validity is diagnostic; current/full/staked status additionally requires derived activation eligibility. Overrides and rehearsals may publish quarantined diagnostic slots but can never become current or staked.
 
 Public API: `available_slots`, `load_full_version`, `scan_full_versions`,
 `family_has_full_version`, `FullVersion` (= `lifecycle.ExportVersion`),
@@ -632,7 +630,7 @@ registry.py  ──> _atomicio, _filelock (champion read-compare-write lock), pa
 _filelock.py (leaf — stdlib-only advisory file lock: msvcrt/fcntl)
 dashboard.py ──> benchmark, config, ensemble, evaluation, lifecycle, paths, payout, scorecard
 explainers.py ──> dashboard_ui.service (read-only dynamic model labels)
-scenarios.py  ──> payout, evaluation (allocation scenario research helpers)
+scenarios.py  ──> payout, evaluation (immutable allocation scenarios; portfolio metrics require aligned observed per-era payout series, and unavailable/degenerate evidence stays explicit)
 promote.py   ──> _atomicio, benchmark, config, data, deployment, experiment_store, families, models, paths, runner, scorecard, submission
 
 nmr/__init__.py re-exports the public API of all modules (keep imports and __all__ in sync).

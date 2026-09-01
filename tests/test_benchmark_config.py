@@ -41,6 +41,9 @@ def test_all_shipped_config_files_load() -> None:
     }
     assert spec.reference_column == "v53_lgbm_ender60"
     assert spec.gate is not None
+    assert spec.gate.payout_policy_id == "classic_atomic_ender60_r1343_v1"
+    assert spec.gate.scoring_target == "target_ender_60"
+    assert spec.gate.scoring_horizon == "60D"
     assert spec.gate.corr_min == 0.0286
     tiers = [cell.tier for cell in spec.cells]
     assert tiers == sorted(tiers)
@@ -52,12 +55,9 @@ def test_tier4_gate_thresholds() -> None:
     gate = spec.gate
     assert gate is not None
     assert gate.corr_min == 0.0286
-    assert gate.corr_sharpe_ac_min == 0.78
+    assert gate.corr_sharpe_ac_min == 0.86
     assert gate.fnc_min == 0.020
-    assert gate.deflated_sharpe_min == 0.95
     assert gate.gain_to_pain_min == 1.50
-    assert gate.cagr_min == 0.0
-    assert gate.turnover_max == 0.35
 
 
 def test_unknown_keys_rejected(tmp_path: Path) -> None:

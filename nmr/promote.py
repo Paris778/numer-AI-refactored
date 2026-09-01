@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import hashlib
 import json
 import logging
 import os
@@ -44,25 +45,26 @@ import polars as pl
 
 from nmr import experiment_store, lifecycle, paths
 from nmr._atomicio import atomic_write_text
+from nmr._filelock import file_lock
 from nmr.benchmark import Tier4GateConfig, load_benchmark_file
 from nmr.config import ExperimentConfig, config_from_dict
 from nmr.data import IngestionAgent
 from nmr.deployment import load_predict
 from nmr.families import DEFAULT_MODELS_DIR, validate_family_name
 from nmr.models import ModelOrchestrator
-from nmr.payout import PAYOUT_FACTOR_FILENAME, era_payout_factors
+from nmr.payout import PAYOUT_FACTOR_FILENAME, era_payout_factors, resolve_payout_policy
 from nmr.runner import (
     ExperimentRunner,
     _build_deploy_pipeline,
+    _data_fingerprint,
     _predict_in_era_batches,
+    _promotion_data_fingerprint,
     _serialize_predict_artifact,
 )
 from nmr.scorecard import (
     CROSSCHECK_ALPHA,
-    CROSSCHECK_CLIP,
     CROSSCHECK_N_BOOT,
     CROSSCHECK_N_TRIALS,
-    CROSSCHECK_PF,
     CROSSCHECK_SR0_BENCHMARK,
     CrossCheckResult,
     MetricCell,
@@ -98,7 +100,12 @@ _RAM_GUARD_BYTES = 45 * 2**30
 # resident still thrashes at 1.1 iters/s).
 _RAM_WS_FRACTION = 0.85
 # Default tier-4 gate config (the line in the sand).
-_TIER4_GATE_YAML = Path(__file__).resolve().parent.parent / "configs" / "benchmarks" / "tier4_gate.yaml"
+_TIER4_GATE_YAML = (
+    Path(__file__).resolve().parent.parent
+    / "configs"
+    / "benchmarks"
+    / "tier4_gate.yaml"
+)
 
 # Hard gate fields: (scorecard field, gate threshold attr, strict needs >).
 # deflated_sharpe is display-only (A6: no search history to bind deflation to
@@ -109,7 +116,6 @@ _HARD_GATE_FIELDS = (
     ("corr_sharpe_ac", "corr_sharpe_ac_min", False),
     ("fnc", "fnc_min", False),
     ("gain_to_pain_ratio", "gain_to_pain_min", False),
-    ("cagr_1y", "cagr_min", True),
 )
 
 
@@ -157,9 +163,7 @@ def _normalize_stored_config(
     embargo = split.get("embargo_eras")
     if embargo not in (None, 0):
         split["embargo_eras"] = 0
-        normalizations.append(
-            {"field": "split.embargo_eras", "from": embargo, "to": 0}
-        )
+        normalizations.append({"field": "split.embargo_eras", "from": embargo, "to": 0})
     data = normalized.setdefault("data", {})
     if "horizon" not in data:
         data["horizon"] = "20D"
@@ -178,10 +182,21 @@ def _evaluate_gate(
     """
     receipts: dict[str, Any] = {}
     violations: list[str] = []
+    for field in ("payout_policy_id", "scoring_target", "scoring_horizon"):
+        expected = getattr(gate, field)
+        measured = scorecard.get(field)
+        passed = measured == expected
+        if not passed:
+            violations.append(f"{field}: observed={measured!r}, expected={expected!r}")
+        receipts[field] = {
+            "expected": expected,
+            "measured": measured,
+            "passed": passed,
+        }
     for field, threshold_attr, strict in _HARD_GATE_FIELDS:
         threshold = float(getattr(gate, threshold_attr))
         measured = scorecard.get(field)
-        if measured is None:
+        if measured is None or not np.isfinite(float(measured)):
             passed = False
             violations.append(f"{field}: missing measured value")
         elif strict:
@@ -196,18 +211,56 @@ def _evaluate_gate(
                 violations.append(
                     f"{field}: observed={measured:.8f}, need >= {threshold:.8f}"
                 )
-        receipts[field] = {"threshold": threshold, "measured": measured, "passed": passed}
-    receipts["turnover_mean"] = {
-        "threshold": float(gate.turnover_max),
-        "measured": scorecard.get("turnover_mean"),
-        "passed": None,
-    }
-    receipts["deflated_sharpe"] = {
-        "threshold": float(gate.deflated_sharpe_min),
-        "measured": scorecard.get("deflated_sharpe"),
-        "passed": None,
-    }
+        receipts[field] = {
+            "threshold": threshold,
+            "measured": measured,
+            "passed": passed,
+        }
     return not violations, receipts
+
+
+def _canonical_digest(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _scorecard_digest(scorecard: dict[str, Any]) -> str:
+    canonical = {
+        key: value
+        for key, value in scorecard.items()
+        if not key.startswith(("timing_", "quality_metric"))
+    }
+    return _canonical_digest(canonical)
+
+
+def _component_identity(
+    target_cols: Sequence[str], pred_cols: Sequence[str], weights: Sequence[float]
+) -> tuple[list[dict[str, Any]], str]:
+    expected_preds = [f"pred_{target}" for target in target_cols]
+    if list(pred_cols) != expected_preds:
+        raise ValueError(
+            f"component prediction columns mismatch: expected {expected_preds}, "
+            f"got {list(pred_cols)}"
+        )
+    if len(weights) != len(target_cols):
+        raise ValueError(
+            f"component weights ({len(weights)}) do not match targets "
+            f"({len(target_cols)})"
+        )
+    numeric_weights = [float(weight) for weight in weights]
+    if not np.isfinite(numeric_weights).all():
+        raise ValueError("component weights must be finite")
+    components = [
+        {"target": target, "prediction_col": pred, "weight": weight}
+        for target, pred, weight in zip(target_cols, pred_cols, numeric_weights)
+    ]
+    return components, _canonical_digest(components)
 
 
 def _load_run_record(family: str, run_id: str) -> dict[str, Any]:
@@ -230,6 +283,19 @@ def _load_run_record(family: str, run_id: str) -> dict[str, Any]:
         raise ValueError(f"corrupt run.json for {run_id!r}: {exc}") from exc
     if not isinstance(payload, dict):
         raise ValueError(f"run.json for {run_id!r} is not a mapping")
+    if payload.get("run_id") != run_id:
+        raise ValueError(
+            f"run record identity mismatch: payload run_id={payload.get('run_id')!r} "
+            f"!= requested {run_id!r}"
+        )
+    run_name = (
+        ((payload.get("manifest") or {}).get("config") or {}).get("run") or {}
+    ).get("name")
+    if run_name != family:
+        raise ValueError(
+            f"run record identity mismatch: config.run.name={run_name!r} "
+            f"!= family {family!r}"
+        )
     return payload
 
 
@@ -298,7 +364,9 @@ def _ram_guard(config: ExperimentConfig, *, scope: str) -> None:
     derive from ``config.run.artifacts_dir`` (shared-reports retarget).
     """
     curve_path = paths.shared_reports_dir(config.run.artifacts_dir) / "ram_curve.json"
-    estimate_path = paths.shared_reports_dir(config.run.artifacts_dir) / RAM_ESTIMATE_FILENAME
+    estimate_path = (
+        paths.shared_reports_dir(config.run.artifacts_dir) / RAM_ESTIMATE_FILENAME
+    )
     current_rows = _scope_rows(config, scope)
     if curve_path.is_file():
         try:
@@ -310,8 +378,7 @@ def _ram_guard(config: ExperimentConfig, *, scope: str) -> None:
                 * 2**30
             )
             parent_ws = (
-                float(np.median([p["parent_ws_gib"] for p in curve["points"]]))
-                * 2**30
+                float(np.median([p["parent_ws_gib"] for p in curve["points"]])) * 2**30
             )
             source = "curve"
         except (json.JSONDecodeError, OSError, KeyError, TypeError, ValueError) as exc:
@@ -323,13 +390,12 @@ def _ram_guard(config: ExperimentConfig, *, scope: str) -> None:
             curve = None
         if curve is not None:
             child_commit = (
-                (fit_commit["intercept_gib"] + fit_commit["slope_gib_per_row"] * current_rows)
-                * 2**30
-            )
+                fit_commit["intercept_gib"]
+                + fit_commit["slope_gib_per_row"] * current_rows
+            ) * 2**30
             child_ws = (
-                (fit_ws["intercept_gib"] + fit_ws["slope_gib_per_row"] * current_rows)
-                * 2**30
-            )
+                fit_ws["intercept_gib"] + fit_ws["slope_gib_per_row"] * current_rows
+            ) * 2**30
             combined_commit = child_commit + parent_commit
             combined_ws = child_ws + parent_ws
             _raise_if_over_guard(
@@ -365,7 +431,9 @@ def _ram_guard(config: ExperimentConfig, *, scope: str) -> None:
             "[promote] no RAM curve; single-point estimate extrapolation "
             "(through-origin) is a WEAK upper bound"
         )
-        _raise_if_over_guard(combined_commit, combined_ws, current_rows, source="estimate")
+        _raise_if_over_guard(
+            combined_commit, combined_ws, current_rows, source="estimate"
+        )
         return
     logger.warning(
         "[promote] no RAM curve or estimate at %s; skipping the guard "
@@ -481,6 +549,7 @@ def promote_full_version(
     data_dir: Path | None = None,
     rehearsal: bool = False,
     scope: Literal["train_only", "full"] = "full",
+    _acceptance_data_dir: Path | None = None,
 ) -> PromotionResult:
     """Train the full version for ``run_id`` and publish it to the experiment layout.
 
@@ -524,6 +593,7 @@ def promote_full_version(
     validate_family_name(family)
     slot = paths.export_dir(family, persisted_scope, run_id)
     pointer = paths.current_pointer_path(family)
+    promotion_lock = paths.experiment_dir(family) / "promotion.lock"
     if slot.exists():
         # Pointer-repair recovery (2026-08-26 review, BLOCKING 1): the slot is
         # immutable and already published — with force=True (full scope,
@@ -538,21 +608,28 @@ def promote_full_version(
                 "force=True only repoints current.json at an existing VALID "
                 "full slot, never overwrites a slot (prefer a new run)"
             )
-        version = lifecycle.valid_export(family, "full", run_id)
-        if version is None:
-            raise ValueError(
-                f"export slot {slot} exists but is not a VALID full export for "
-                f"family {family!r} / run {run_id!r}; refusing to repoint "
-                "current.json at an invalid slot (inspect the slot and its run "
-                "record before recovery)"
+        with file_lock(promotion_lock):
+            version = lifecycle.valid_export(family, "full", run_id)
+            if version is None:
+                raise ValueError(
+                    f"export slot {slot} exists but is not a VALID full export for "
+                    f"family {family!r} / run {run_id!r}; refusing to repoint "
+                    "current.json at an invalid slot (inspect the slot and its run "
+                    "record before recovery)"
+                )
+            if not lifecycle.activation_eligible(version):
+                raise ValueError(
+                    f"export slot {slot} is not activation-eligible; refusing to "
+                    "repoint current.json at a failed, overridden, rehearsal, or "
+                    "unaccepted export"
+                )
+            atomic_write_text(
+                pointer,
+                json.dumps(
+                    {"run_id": run_id, "promoted_at": datetime.now(UTC).isoformat()},
+                    sort_keys=True,
+                ),
             )
-        atomic_write_text(
-            pointer,
-            json.dumps(
-                {"run_id": run_id, "promoted_at": datetime.now(UTC).isoformat()},
-                sort_keys=True,
-            ),
-        )
         logger.info(
             "[promote] repaired current.json -> existing valid slot %s "
             "(no refit; slot untouched)",
@@ -613,6 +690,44 @@ def promote_full_version(
             }
         )
     config = config_from_dict(normalized)
+    payout_policy = resolve_payout_policy(config.evaluation.payout_policy)
+    expected_scoring_target = payout_policy.target or config.evaluation.main_target
+    expected_scoring_horizon = payout_policy.scoring_horizon or config.data.horizon
+    expected_identity = {
+        "payout_policy_id": payout_policy.policy_id,
+        "scoring_target": expected_scoring_target,
+        "scoring_horizon": expected_scoring_horizon,
+    }
+    observed_identity = {field: scorecard.get(field) for field in expected_identity}
+    if observed_identity != expected_identity:
+        raise ValueError(
+            "promotion scorecard identity mismatch: "
+            f"expected {expected_identity}, got {observed_identity}"
+        )
+    if not rehearsal:
+        recorded_data_fingerprint = manifest.get("data_fingerprint")
+        if not isinstance(recorded_data_fingerprint, str):
+            raise ValueError(
+                "promotion requires the run manifest data_fingerprint; legacy "
+                "runs without snapshot identity are not activation-eligible"
+            )
+        current_data_fingerprint = _data_fingerprint(config)
+        if current_data_fingerprint != recorded_data_fingerprint:
+            raise ValueError(
+                "promotion data fingerprint mismatch: the configured data "
+                "snapshot changed after the research run"
+            )
+        recorded_promotion_fingerprint = manifest.get("promotion_data_fingerprint")
+        if not isinstance(recorded_promotion_fingerprint, str):
+            raise ValueError(
+                "promotion requires the run manifest promotion_data_fingerprint; "
+                "legacy runs without content identity are not activation-eligible"
+            )
+        if _promotion_data_fingerprint(config) != recorded_promotion_fingerprint:
+            raise ValueError(
+                "promotion data content fingerprint mismatch: train, validation, "
+                "or features content changed after the research run"
+            )
     _supplemental_identity_check(config, manifest)
     _ram_guard(config, scope=scope)
 
@@ -624,7 +739,9 @@ def promote_full_version(
         if pointer.is_file():
             try:
                 current = json.loads(pointer.read_text(encoding="utf-8"))
-                current_id = current.get("run_id") if isinstance(current, dict) else None
+                current_id = (
+                    current.get("run_id") if isinstance(current, dict) else None
+                )
             except (json.JSONDecodeError, OSError):
                 current_id = None
             if current_id != run_id and not force:
@@ -639,12 +756,12 @@ def promote_full_version(
         if not feature_cols:
             raise ValueError(f"run {run_id!r} manifest has no feature_cols")
         target_cols = list(config.data.targets)
+        pred_cols = list(manifest.get("pred_cols") or [])
         weights = list(manifest.get("weights") or [])
-        if len(weights) != len(target_cols):
-            raise ValueError(
-                f"run {run_id!r} weights ({len(weights)}) do not match targets "
-                f"({len(target_cols)})"
-            )
+        components, components_sha256 = _component_identity(
+            target_cols, pred_cols, weights
+        )
+        scorecard_sha256 = _scorecard_digest(scorecard)
         proportion = float(config.risk.neutralization_proportion)
 
         orchestrator = ModelOrchestrator(config.model, seed=config.run.seed)
@@ -676,6 +793,16 @@ def promote_full_version(
             artifact_path=artifact_path,
         )
 
+        acceptance = _accept_staged_artifact(
+            artifact_path,
+            config=config,
+            feature_cols=feature_cols,
+            data_dir=_acceptance_data_dir,
+        )
+        activation_eligible = bool(
+            gate_passed and not override_gate and not rehearsal and acceptance["passed"]
+        )
+
         promoted_at = datetime.now(UTC).isoformat()
         export_payload = {
             "family": family,
@@ -683,12 +810,21 @@ def promote_full_version(
             "promoted_from_run_id": run_id,
             "promoted_at": promoted_at,
             "artifact_path": "predict.pkl",
-            "config": json.loads(
-                json.dumps(dataclasses.asdict(config), default=str)
-            ),
+            "feature_cols": feature_cols,
+            "components": components,
+            "components_sha256": components_sha256,
+            "scorecard_sha256": scorecard_sha256,
+            "data_fingerprint": manifest.get("data_fingerprint"),
+            "promotion_data_fingerprint": manifest.get("promotion_data_fingerprint"),
+            "payout_policy_id": payout_policy.policy_id,
+            "scoring_target": expected_scoring_target,
+            "scoring_horizon": expected_scoring_horizon,
+            "config": json.loads(json.dumps(dataclasses.asdict(config), default=str)),
             "tier4_gate_passed": bool(gate_passed),
             "tier4_receipts": receipts,
             "override_used": bool(override_gate),
+            "acceptance": acceptance,
+            "activation_eligible": activation_eligible,
             "config_normalizations": normalizations,
             # First-class rehearsal discriminator + training provenance (review
             # directive 2026-08-18): an artifact whose record overstates its own
@@ -713,7 +849,13 @@ def promote_full_version(
                 config=config,
                 feature_cols=feature_cols,
                 target_cols=list(
-                    dict.fromkeys([*target_cols, config.evaluation.main_target])
+                    dict.fromkeys(
+                        [
+                            *target_cols,
+                            config.evaluation.main_target,
+                            expected_scoring_target,
+                        ]
+                    )
                 ),
             )
             cross_check_path = staging / "scorecard.json"
@@ -731,13 +873,43 @@ def promote_full_version(
                 ),
             )
 
-        slot = experiment_store.publish_staged_export(family, persisted_scope, run_id)
+        with file_lock(promotion_lock):
+            if slot.exists():
+                raise ValueError(
+                    f"export slot {slot} already exists; exports are immutable"
+                )
+            if scope == "full" and activation_eligible and pointer.is_file():
+                try:
+                    current = json.loads(pointer.read_text(encoding="utf-8"))
+                    current_id = (
+                        current.get("run_id") if isinstance(current, dict) else None
+                    )
+                except (json.JSONDecodeError, OSError):
+                    current_id = None
+                if current_id != run_id and not force:
+                    raise ValueError(
+                        f"current.json for family {family!r} points to "
+                        f"{current_id!r}; repointing requires force=True"
+                    )
+            slot = experiment_store.publish_staged_export(
+                family, persisted_scope, run_id, staging=staging
+            )
+            if scope == "full" and activation_eligible:
+                atomic_write_text(
+                    pointer,
+                    json.dumps(
+                        {"run_id": run_id, "promoted_at": promoted_at},
+                        sort_keys=True,
+                    ),
+                )
         if scope == "train_only":
             # The staging dir was renamed into the final slot — report the
             # published scorecard path (the staging path no longer exists).
             cross_check_path = slot / "scorecard.json"
     except Exception:
-        experiment_store.discard_staged_export(family, persisted_scope, run_id)
+        experiment_store.discard_staged_export(
+            family, persisted_scope, run_id, staging=staging
+        )
         logger.error(
             "[promote] promotion for %s (%s scope) FAILED; staged export discarded",
             run_id,
@@ -745,11 +917,6 @@ def promote_full_version(
         )
         raise
 
-    if scope == "full" and not rehearsal:
-        atomic_write_text(
-            pointer,
-            json.dumps({"run_id": run_id, "promoted_at": promoted_at}, sort_keys=True),
-        )
     logger.info(
         "[promote] %s published: %s (scope=%s, gate_passed=%s, override=%s, rows=%d)",
         "rehearsal" if rehearsal else "promotion",
@@ -773,6 +940,75 @@ def promote_full_version(
     )
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _accept_staged_artifact(
+    artifact_path: Path,
+    *,
+    config: ExperimentConfig,
+    feature_cols: Sequence[str],
+    data_dir: Path | None = None,
+) -> dict[str, Any]:
+    version_dir = (
+        Path(data_dir) / config.data.version
+        if data_dir is not None
+        else config.data.path("live.parquet").parent
+    )
+    live_features_path = version_dir / "live.parquet"
+    if not live_features_path.is_file():
+        raise FileNotFoundError(f"promotion acceptance requires {live_features_path}")
+    live_benchmark_path = version_dir / "live_benchmark_models.parquet"
+    live_df = pl.read_parquet(live_features_path).select(["era", "id", *feature_cols])
+    live_pd = live_df.to_pandas().set_index("id")
+    if not live_benchmark_path.is_file():
+        raise FileNotFoundError(f"promotion acceptance requires {live_benchmark_path}")
+    schema = pl.read_parquet_schema(live_benchmark_path)
+    benchmark_cols = [column for column in schema if column not in {"era", "id"}]
+    if not benchmark_cols:
+        raise ValueError(
+            f"promotion acceptance requires benchmark columns in {live_benchmark_path}"
+        )
+    benchmark_pd = pl.read_parquet(
+        live_benchmark_path,
+        columns=["era", "id", benchmark_cols[0]],
+    ).to_pandas()
+
+    from nmr.submission import accept_promoted_artifact
+
+    predictions = accept_promoted_artifact(
+        artifact_path,
+        live_features=live_pd,
+        live_benchmark_models=benchmark_pd,
+    )
+    return {
+        "passed": True,
+        "artifact_sha256": _sha256_file(artifact_path),
+        "live_features_sha256": _sha256_file(live_features_path),
+        "live_benchmark_models_sha256": _sha256_file(live_benchmark_path),
+        "live_ids_sha256": hashlib.sha256(
+            json.dumps(
+                [str(value) for value in live_pd.index.to_list()],
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest(),
+        "feature_cols_sha256": hashlib.sha256(
+            json.dumps(
+                list(feature_cols), sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest(),
+        "benchmark_columns": benchmark_cols,
+        "data_version": config.data.version,
+        "n_rows": int(len(predictions)),
+    }
+
+
 def _run_cross_check(
     predict_fn: Callable[[pd.DataFrame], pd.DataFrame],
     *,
@@ -791,6 +1027,9 @@ def _run_cross_check(
     fit-phase isolation applies to the fit (``_full_history_frame``) only.
     """
     data = config.data
+    payout_policy = resolve_payout_policy(config.evaluation.payout_policy)
+    scoring_target = payout_policy.target or config.evaluation.main_target
+    scoring_horizon = payout_policy.scoring_horizon or data.horizon
     val_path = data.path("validation.parquet")
     if not val_path.is_file():
         raise FileNotFoundError(
@@ -807,7 +1046,12 @@ def _run_cross_check(
     val_df = agent.load(
         "validation", columns=["era", "id", *feature_cols, *target_cols]
     )
-    purge = config.split.purge_eras
+    policy_overlap = (
+        16
+        if payout_policy.scoring_horizon == "60D"
+        else 8 if payout_policy.scoring_horizon == "20D" else 0
+    )
+    purge = max(config.split.purge_eras, policy_overlap)
     if purge > 0:
         # Same window rule as the runner's validation stage: the first
         # purge_eras validation eras overlap the last train eras' targets.
@@ -815,8 +1059,9 @@ def _run_cross_check(
         val_df = val_df.filter(pl.col("era").cast(pl.Int32).is_in(all_eras[purge:]))
         logger.info(
             "[promote] cross-check dropping first %d validation eras "
-            "(20D-target overlap); %d eras scored",
+            "(%s scoring overlap); %d eras scored",
             purge,
+            scoring_horizon,
             val_df.select(pl.col("era").n_unique()).item(),
         )
     meta_model = pl.read_parquet(meta_path).select(["era", "id", "numerai_meta_model"])
@@ -829,10 +1074,15 @@ def _run_cross_check(
         meta_model=meta_model,
         features=val_df.select(["era", "id", *feature_cols]),
         targets=val_df.select(["era", "id", *target_cols]),
-        horizon=config.data.horizon,
-        main_target=config.evaluation.main_target,
+        payout_policy=payout_policy,
+        horizon=scoring_horizon,
+        main_target=scoring_target,
         seed=config.run.seed,
-        pf=era_payout_factors(config.data.path(PAYOUT_FACTOR_FILENAME)),
+        pf=(
+            era_payout_factors(config.data.path(PAYOUT_FACTOR_FILENAME))
+            if payout_policy.fixed_payout_factor is None
+            else None
+        ),
     )
     return result, window_eras
 
@@ -883,8 +1133,9 @@ def _cross_check_payload(
             "n_trials": CROSSCHECK_N_TRIALS,
             "n_boot": CROSSCHECK_N_BOOT,
             "alpha": CROSSCHECK_ALPHA,
-            "pf": CROSSCHECK_PF,
-            "clip": CROSSCHECK_CLIP,
+            "payout_policy_id": sc.payout_policy_id,
+            "scoring_target": sc.scoring_target,
+            "scoring_horizon": sc.scoring_horizon,
             "sr0_benchmark": CROSSCHECK_SR0_BENCHMARK,
             "backend": "official",
         },
@@ -1078,7 +1329,9 @@ def rehearse_promotion(
         raise ValueError(f"run {run_id!r} manifest has no config dict")
     version = stored_config.get("data", {}).get("version", "v5.3")
     source_data_dir = Path(
-        stored_config.get("data", {}).get("data_dir", DEFAULT_MODELS_DIR.parent.parent / "data")
+        stored_config.get("data", {}).get(
+            "data_dir", DEFAULT_MODELS_DIR.parent.parent / "data"
+        )
     )
 
     rehearsal_root = (
@@ -1103,6 +1356,7 @@ def rehearse_promotion(
             force=True,  # repoints/repairs current.json; a rehearsal slot is
             # immutable like any export (re-rehearsing the same run_id raises)
             rehearsal=True,
+            _acceptance_data_dir=source_data_dir,
         )
     finally:
         if old_threshold is None:
@@ -1170,11 +1424,15 @@ def rehearse_promotion(
 
     # Phase D acceptance criterion (decision 10): validate the RAW contract
     # output on the real local live.parquet via the official validator.
-    live_features_path = Path(live_features_path) if live_features_path else (
-        source_data_dir / version / "live.parquet"
+    live_features_path = (
+        Path(live_features_path)
+        if live_features_path
+        else (source_data_dir / version / "live.parquet")
     )
-    live_benchmark_path = Path(live_benchmark_path) if live_benchmark_path else (
-        source_data_dir / version / "live_benchmark_models.parquet"
+    live_benchmark_path = (
+        Path(live_benchmark_path)
+        if live_benchmark_path
+        else (source_data_dir / version / "live_benchmark_models.parquet")
     )
     feature_cols = list((payload.get("manifest") or {}).get("feature_cols") or [])
     if not feature_cols:

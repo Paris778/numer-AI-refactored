@@ -205,7 +205,9 @@ class TestDashboardDataService:
         def dummy_predict(live_features, live_benchmark_models=None):
             return live_features
 
-        serialize_predict(dummy_predict, path=slot / "predict.pkl", feature_names=["f1"])
+        serialize_predict(
+            dummy_predict, path=slot / "predict.pkl", feature_names=["f1"]
+        )
         (slot / "export.json").write_text(
             json.dumps(
                 {
@@ -231,23 +233,21 @@ class TestDashboardDataService:
         trained = rows[run_id]
         assert trained.family == "brb1-xgb-v6"
         assert trained.display_name == "brb1-xgb-v6"
-        assert trained.lifecycle_stage == "full"
-        assert trained.current_full_status == "full"
+        assert trained.lifecycle_stage == "research"
+        assert trained.current_full_status == "none"
         assert trained.stale is False
-        assert trained.has_full_version is True
+        assert trained.has_full_version is False
         full_id = f"brb1-xgb-v6::full::{run_id}"
         assert full_id in rows
-        assert rows[full_id].lifecycle_stage == "full"
-        assert rows[full_id].current_full_status == "full"
+        assert rows[full_id].lifecycle_stage == "research"
+        assert rows[full_id].current_full_status == "none"
 
         # The fields survive the Pydantic JSON round-trip (serialization
         # contract for the HTML/Streamlit hosts).
-        restored = LeaderboardFrame.model_validate_json(
-            leaderboard.model_dump_json()
-        )
+        restored = LeaderboardFrame.model_validate_json(leaderboard.model_dump_json())
         restored_row = next(r for r in restored.rows if r.model_id == run_id)
-        assert restored_row.lifecycle_stage == "full"
-        assert restored_row.current_full_status == "full"
+        assert restored_row.lifecycle_stage == "research"
+        assert restored_row.current_full_status == "none"
         assert restored_row.display_name == "brb1-xgb-v6"
 
     @pytest.fixture
@@ -627,11 +627,10 @@ class TestFullHistoryLoading:
         assert all(d <= 1e-12 for d in dd)  # drawdown <= 0
         assert max(dd) == pytest.approx(0.0, abs=1e-9)  # starts at peak
 
-
-
     def test_fingerprint_detects_same_size_same_mtime_edit(self, tmp_path):
         """Content hashing catches a same-size edit with restored mtime."""
         import os
+
         service = DashboardDataService(registry_dir=Path(tmp_path))
         run_dir = tmp_path / "fam" / "runs" / ("a" * 64)
         run_dir.mkdir(parents=True)
@@ -689,15 +688,19 @@ class TestFullHistoryLoading:
         run = registry / model
         run.mkdir(parents=True)
         targets = pl.DataFrame(
-            {"era": ["1", "1", "1", "2", "2", "2"],
-             "id": ["a", "b", "c", "a", "b", "c"],
-             "target": [1.0, 2.0, 3.0, 1.0, 2.0, 3.0]}
+            {
+                "era": ["1", "1", "1", "2", "2", "2"],
+                "id": ["a", "b", "c", "a", "b", "c"],
+                "target": [1.0, 2.0, 3.0, 1.0, 2.0, 3.0],
+            }
         )
         targets.write_parquet(data / "validation.parquet")
         preds = pl.DataFrame(
-            {"era": ["1", "1", "1", "2", "2", "2"],
-             "id": ["a", "b", "c", "a", "b", "c"],
-             "prediction": [1.0, 2.0, 3.0, 1.0, 2.0, 3.0]}
+            {
+                "era": ["1", "1", "1", "2", "2", "2"],
+                "id": ["a", "b", "c", "a", "b", "c"],
+                "prediction": [1.0, 2.0, 3.0, 1.0, 2.0, 3.0],
+            }
         )
         preds.write_parquet(run / "validation_preds.parquet")
         service = DashboardDataService(
@@ -706,20 +709,19 @@ class TestFullHistoryLoading:
         first = service.load_full_history([model])
         first_vals = first["series"][model]["standard"]
         changed = pl.DataFrame(
-            {"era": ["1", "1", "1", "2", "2", "2"],
-             "id": ["a", "b", "c", "a", "b", "c"],
-             "prediction": [1.0, 1.0, 3.0, 1.0, 1.0, 3.0]}
+            {
+                "era": ["1", "1", "1", "2", "2", "2"],
+                "id": ["a", "b", "c", "a", "b", "c"],
+                "prediction": [1.0, 1.0, 3.0, 1.0, 1.0, 3.0],
+            }
         )
         changed.write_parquet(run / "validation_preds.parquet")
         second = service.load_full_history([model])
         assert first_vals != second["series"][model]["standard"]
 
-
     def test_fingerprint_handles_absent_benchmark_report(self, tmp_path):
         """A service without a benchmark report must fingerprint safely."""
-        service = DashboardDataService(
-            registry_dir=Path(tmp_path), benchmark_path=None
-        )
+        service = DashboardDataService(registry_dir=Path(tmp_path), benchmark_path=None)
         assert isinstance(service.compute_source_fingerprint(), str)
 
     def test_fingerprint_covers_export_validity_inputs(self, tmp_path):
@@ -751,20 +753,25 @@ class TestFullHistoryLoading:
         data.mkdir()
         run.mkdir(parents=True)
         pl.DataFrame(
-            {"era": ["1", "1", "1", "2", "2", "2"],
-             "id": ["a", "b", "c", "a", "b", "c"],
-             "target": [1.0, 2.0, 3.0, 1.0, 2.0, 3.0]}
+            {
+                "era": ["1", "1", "1", "2", "2", "2"],
+                "id": ["a", "b", "c", "a", "b", "c"],
+                "target": [1.0, 2.0, 3.0, 1.0, 2.0, 3.0],
+            }
         ).write_parquet(data / "validation.parquet")
         pl.DataFrame(
-            {"era": ["1", "1", "1", "2", "2", "2"],
-             "id": ["a", "b", "c", "a", "b", "c"],
-             "prediction": [1.0, 2.0, 3.0, 1.0, 2.0, 3.0]}
+            {
+                "era": ["1", "1", "1", "2", "2", "2"],
+                "id": ["a", "b", "c", "a", "b", "c"],
+                "prediction": [1.0, 2.0, 3.0, 1.0, 2.0, 3.0],
+            }
         ).write_parquet(run / "validation_preds.parquet")
         service = DashboardDataService(
             registry_dir=exp, benchmark_path=None, data_dir=data
         )
         out = service.load_full_history(["a" * 64])
         assert list(out["series"]) == ["a" * 64]
+
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -93,7 +93,7 @@ cells:
 
 ### 5.3 `tier4_gate_verdict`
 
-`nmr/benchmark.py` gains `tier4_gate_verdict(scorecard, gate_config) -> dict[str, bool|None]` returning per-threshold booleans (None where a field is structurally unavailable, e.g. turnover). `assert_tier4_gate` refactored to build on it (hard gate unchanged: raises on failure). Fleet rows display the verdict dict.
+`nmr/benchmark.py` provides `tier4_gate_verdict(scorecard, gate_config) -> dict[str, bool]` for the four enforceable Atomic Ender-60 fields: CORR, 60D AC-Sharpe, FNC@medium, and GPR. Diagnostics without the required evidence (search-aware DSR, shared-ID turnover, round-level CAGR) are excluded from gate configuration. `assert_tier4_gate` raises on any false verdict; fleet rows display the verdict dict.
 
 ### 5.4 Determinism
 

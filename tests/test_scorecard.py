@@ -14,14 +14,38 @@ from nmr._transforms import rank_gaussianize, tie_kept_rank
 from nmr.evaluation import EvaluationEngine
 from nmr.inference import block_bootstrap_ci, era_series_stats, resolve_block_len
 from nmr.payout import (
+    CLASSIC_ATOMIC_ENDER60_R1343_V1,
+    CLASSIC_LEGACY_V1,
     annual_compounded_return,
     gain_to_pain_ratio,
     kelly_fraction,
-    payout_report,
-    payout_series,
-    simulate_overlapping_portfolio,
 )
-from nmr.scorecard import MetricScorecard, evaluate_cross_check, evaluate_model
+from nmr.payout import payout_report as _payout_report
+from nmr.payout import payout_series as _payout_series
+from nmr.payout import simulate_overlapping_portfolio
+from nmr.scorecard import MetricScorecard
+from nmr.scorecard import evaluate_cross_check as _evaluate_cross_check
+from nmr.scorecard import evaluate_model as _evaluate_model
+
+
+def payout_series(*args, **kwargs):
+    kwargs.setdefault("policy", CLASSIC_LEGACY_V1)
+    return _payout_series(*args, **kwargs)
+
+
+def payout_report(*args, **kwargs):
+    kwargs.setdefault("policy", CLASSIC_LEGACY_V1)
+    return _payout_report(*args, **kwargs)
+
+
+def evaluate_model(*args, **kwargs):
+    kwargs.setdefault("payout_policy", CLASSIC_LEGACY_V1)
+    return _evaluate_model(*args, **kwargs)
+
+
+def evaluate_cross_check(*args, **kwargs):
+    kwargs.setdefault("payout_policy", CLASSIC_LEGACY_V1)
+    return _evaluate_cross_check(*args, **kwargs)
 
 
 def _tiny_inputs() -> (
@@ -45,6 +69,7 @@ def _tiny_inputs() -> (
                     "target": float((i + j) % 5) / 4.0,
                     "target_cyrusd_20": float((i + j) % 5) / 4.0,
                     "target_cyrusd_60": float((2 * i + j) % 5) / 4.0,
+                    "target_ender_60": float((i + 2 * j) % 5) / 4.0,
                     "f1": float(f1),
                     "f2": float(f2),
                     "f3": float(f3),
@@ -63,7 +88,14 @@ def _tiny_inputs() -> (
     predictions = full.select(["era", "id", "prediction"])
     meta_model = full.select(["era", "id", "numerai_meta_model"])
     targets = full.select(
-        ["era", "id", "target", "target_cyrusd_20", "target_cyrusd_60"]
+        [
+            "era",
+            "id",
+            "target",
+            "target_cyrusd_20",
+            "target_cyrusd_60",
+            "target_ender_60",
+        ]
     )
     features = full.select(["era", "id", "f1", "f2", "f3"])
     benchmarks = pl.DataFrame(bench)
@@ -131,6 +163,36 @@ def test_scorecard_composition_parity_and_cells() -> None:
     assert score.corr.ci_low == corr_ci.lo
     assert score.corr.ci_high == corr_ci.hi
     assert score.corr.n_eras == len(corr_vals)
+
+
+def test_atomic_scorecard_persists_policy_target_and_horizon() -> None:
+    predictions, meta_model, benchmarks, features, targets = _tiny_inputs()
+
+    score = evaluate_model(
+        predictions,
+        meta_model=meta_model,
+        benchmarks=benchmarks,
+        features=features,
+        targets=targets,
+        n_trials=1,
+        seed=11,
+        payout_policy=CLASSIC_ATOMIC_ENDER60_R1343_V1,
+        horizon="60D",
+        main_target="target_ender_60",
+        benchmark_col="v52_lgbm_cyrusd20",
+        n_boot=5,
+        min_overlap_eras=20,
+    )
+    row = score.to_frame().row(0, named=True)
+
+    assert score.payout_policy_id == CLASSIC_ATOMIC_ENDER60_R1343_V1.policy_id
+    assert score.scoring_target == "target_ender_60"
+    assert score.scoring_horizon == "60D"
+    assert score.sim_portfolio_cagr is None
+    assert score.capital_metrics_reason == "round_level_returns_unavailable"
+    assert row["payout_policy_id"] == score.payout_policy_id
+    assert row["scoring_target"] == score.scoring_target
+    assert row["scoring_horizon"] == score.scoring_horizon
 
 
 def test_scorecard_bmc_cell_oracle_parity() -> None:
@@ -349,6 +411,7 @@ def test_scorecard_synthetic_determinism_cross_process() -> None:
     code = r"""
 import json
 import polars as pl
+from nmr.payout import CLASSIC_LEGACY_V1
 from nmr.scorecard import evaluate_model
 
 rows = []
@@ -398,6 +461,7 @@ card = evaluate_model(
     targets=targets,
     n_trials=1,
     seed=77,
+    payout_policy=CLASSIC_LEGACY_V1,
     benchmark_col="v52_lgbm_cyrusd20",
     n_boot=2,
     min_overlap_eras=20,
@@ -430,6 +494,13 @@ def test_evaluate_model_input_validation_branches() -> None:
         seed=7,
         min_overlap_eras=5,
     )
+
+    with pytest.raises(ValueError, match="id column must be present"):
+        evaluate_model(predictions.drop("id"), **base)
+
+    duplicate_predictions = pl.concat([predictions, predictions.head(1)])
+    with pytest.raises(ValueError, match="unique"):
+        evaluate_model(duplicate_predictions, **base)
 
     with pytest.raises(ValueError, match="must be a polars DataFrame"):
         evaluate_model(predictions.to_pandas(), **base)
@@ -545,7 +616,9 @@ def test_mmc_down_filtering() -> None:
     )
     engine = EvaluationEngine("custom")
     mmc_by_era = engine.per_era_mmc(
-        full, pred_col="prediction", meta_col="numerai_meta_model",
+        full,
+        pred_col="prediction",
+        meta_col="numerai_meta_model",
         target_col="target",
     )
     expected_down = [f"{i:04d}" for i in range(21, 31)]
@@ -635,26 +708,23 @@ def test_capital_metrics_flow_from_payout() -> None:
         seed=7,
     )
     engine = EvaluationEngine("custom")
-    full = (
-        predictions.join(meta_model, on=["era", "id"])
-        .join(targets, on=["era", "id"])
+    full = predictions.join(meta_model, on=["era", "id"]).join(
+        targets, on=["era", "id"]
     )
     corr = engine.per_era_corr(full, pred_col="prediction", target_col="target")
     mmc = engine.per_era_mmc(
-        full, pred_col="prediction", meta_col="numerai_meta_model",
+        full,
+        pred_col="prediction",
+        meta_col="numerai_meta_model",
         target_col="target",
     )
     series = payout_series(corr, mmc)
     assert score.cagr_1y == pytest.approx(annual_compounded_return(series.clipped))
-    assert score.gain_to_pain_ratio == pytest.approx(
-        gain_to_pain_ratio(series.clipped)
-    )
-    assert score.kelly_fraction == pytest.approx(kelly_fraction(series.raw))
+    assert score.gain_to_pain_ratio == pytest.approx(gain_to_pain_ratio(series.clipped))
+    assert score.kelly_fraction == pytest.approx(kelly_fraction(series.clipped))
     expected_sim = simulate_overlapping_portfolio(series.clipped, horizon_eras=20)
     assert score.sim_portfolio_cagr == pytest.approx(expected_sim.portfolio_cagr)
-    assert score.sim_portfolio_mdd == pytest.approx(
-        expected_sim.portfolio_max_drawdown
-    )
+    assert score.sim_portfolio_mdd == pytest.approx(expected_sim.portfolio_max_drawdown)
     assert score.sim_capital_utilization == pytest.approx(
         expected_sim.avg_capital_utilization
     )
@@ -671,14 +741,18 @@ def test_final_rank_step_is_scorecard_neutral_except_exposure() -> None:
         latent = rng.normal(size=40)
         for idx in range(40):
             target = float(np.clip(0.5 + 0.2 * latent[idx], 0.0, 1.0))
-            rows.append({
-                "era": era, "id": f"{era}_{idx:03d}",
-                "prediction": float(0.5 * latent[idx] + 0.5 * rng.normal()),
-                "target": target,
-                "numerai_meta_model": float(0.55 * target + 0.45 * rng.normal()),
-                "f1": float(rng.normal()), "f2": float(rng.normal()),
-                "f3": float(rng.normal()),
-            })
+            rows.append(
+                {
+                    "era": era,
+                    "id": f"{era}_{idx:03d}",
+                    "prediction": float(0.5 * latent[idx] + 0.5 * rng.normal()),
+                    "target": target,
+                    "numerai_meta_model": float(0.55 * target + 0.45 * rng.normal()),
+                    "f1": float(rng.normal()),
+                    "f2": float(rng.normal()),
+                    "f3": float(rng.normal()),
+                }
+            )
     full = pl.DataFrame(rows)
     predictions = full.select(["era", "id", "prediction"])
     meta_model = full.select(["era", "id", "numerai_meta_model"])
@@ -721,11 +795,25 @@ def test_final_rank_step_is_scorecard_neutral_except_exposure() -> None:
     post = _score(_per_era_rank(predictions))
 
     invariant = [
-        "corr", "mmc", "fnc", "corr_sharpe_ac", "cwmm",
-        "std_corr", "turnover_mean", "turnover_std", "cagr_1y",
-        "gain_to_pain_ratio", "kelly_fraction", "max_drawdown",
-        "sortino", "calmar", "burn_rate", "mean_payout",
-        "rank_scalar", "deflated_sharpe", "n_eras",
+        "corr",
+        "mmc",
+        "fnc",
+        "corr_sharpe_ac",
+        "cwmm",
+        "std_corr",
+        "turnover_mean",
+        "turnover_std",
+        "cagr_1y",
+        "gain_to_pain_ratio",
+        "kelly_fraction",
+        "max_drawdown",
+        "sortino",
+        "calmar",
+        "burn_rate",
+        "mean_payout",
+        "rank_scalar",
+        "deflated_sharpe",
+        "n_eras",
     ]
     for name in invariant:
         assert getattr(pre, name) == getattr(post, name), f"{name} changed"
@@ -755,13 +843,17 @@ def test_degenerate_eras_are_surfaced_not_silent() -> None:
         constant = era_num == 1
         for j in range(4):
             pred = 0.5 if constant else 0.2 * era_num + 0.03 * j
-            rows.append({
-                "era": era, "id": f"{era}_{j}",
-                "prediction": float(pred),
-                "numerai_meta_model": float(0.4 + 0.05 * era_num + 0.03 * j),
-                "target": float((era_num + j) % 4) / 4.0,
-                "f1": float(j % 2), "f2": float(j % 3),
-            })
+            rows.append(
+                {
+                    "era": era,
+                    "id": f"{era}_{j}",
+                    "prediction": float(pred),
+                    "numerai_meta_model": float(0.4 + 0.05 * era_num + 0.03 * j),
+                    "target": float((era_num + j) % 4) / 4.0,
+                    "f1": float(j % 2),
+                    "f2": float(j % 3),
+                }
+            )
     full = pl.DataFrame(rows)
     predictions = full.select(["era", "id", "prediction"])
     meta_model = full.select(["era", "id", "numerai_meta_model"])
@@ -769,9 +861,15 @@ def test_degenerate_eras_are_surfaced_not_silent() -> None:
     features = full.select(["era", "id", "f1", "f2"])
 
     score = evaluate_model(
-        predictions, meta_model=meta_model, benchmarks=None,
-        features=features, targets=targets, n_trials=1, seed=3,
-        n_boot=5, min_overlap_eras=10,
+        predictions,
+        meta_model=meta_model,
+        benchmarks=None,
+        features=features,
+        targets=targets,
+        n_trials=1,
+        seed=3,
+        n_boot=5,
+        min_overlap_eras=10,
     )
     assert score.degenerate_eras == ("0001",)  # zero-variance predictions
     assert score.n_degenerate_eras == 1
@@ -808,9 +906,6 @@ def test_cross_check_result_shape() -> None:
         float(np.mean(corr_values)) / float(np.std(corr_values, ddof=0))
     )
     assert len(result.per_era["corr"]) == result.scorecard.n_eras
-
-
-
 
 
 def test_cross_check_honors_per_era_pf_mapping() -> None:

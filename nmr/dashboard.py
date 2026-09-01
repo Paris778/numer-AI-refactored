@@ -23,6 +23,7 @@ from nmr.config import REPO_ROOT
 from nmr.ensemble import Ensembler
 from nmr.evaluation import EvaluationEngine, downside_era_indices, sorted_era_labels
 from nmr.payout import (
+    CLASSIC_LEGACY_V1,
     PAYOUT_FACTOR_FILENAME,
     annual_compounded_return,
     era_payout_factors,
@@ -85,6 +86,9 @@ UNIFIED_SCHEMA = pl.Schema(
         "targets": pl.String,
         "neutralization_proportion": pl.Float64,
         "oof_device": pl.String,
+        "payout_policy_id": pl.String,
+        "scoring_target": pl.String,
+        "scoring_horizon": pl.String,
         "corr": pl.Float64,
         "corr_ci_low": pl.Float64,
         "corr_ci_high": pl.Float64,
@@ -105,6 +109,10 @@ UNIFIED_SCHEMA = pl.Schema(
         "cagr_1y": pl.Float64,
         "gain_to_pain_ratio": pl.Float64,
         "kelly_fraction": pl.Float64,
+        "sim_portfolio_cagr": pl.Float64,
+        "sim_portfolio_mdd": pl.Float64,
+        "sim_capital_utilization": pl.Float64,
+        "capital_metrics_reason": pl.String,
         "mmc_down": pl.Float64,
         "mmc_down_reason": pl.String,
         "turnover_mean": pl.Float64,
@@ -214,6 +222,16 @@ def _dashboard_sort_key(
     )
 
 
+def _row_policy_identity(
+    row: Mapping[str, Any],
+) -> tuple[object, object, object]:
+    return (
+        row.get("payout_policy_id"),
+        row.get("scoring_target"),
+        row.get("scoring_horizon"),
+    )
+
+
 def rank_leaderboard(
     leaderboard: pl.DataFrame, metric: str = DEFAULT_RANK_METRIC
 ) -> pl.DataFrame:
@@ -238,7 +256,12 @@ def rank_leaderboard(
         key=lambda row: _dashboard_sort_key(row, metric, spec.higher_is_better)
     )
     unranked_rows.sort(key=lambda row: str(row.get("model_id") or ""))
-    ranks = {id(row): index for index, row in enumerate(ranked_rows, start=1)}
+    ranks: dict[int, int] = {}
+    policy_counts: dict[tuple[object, object, object], int] = {}
+    for row in ranked_rows:
+        identity = _row_policy_identity(row)
+        policy_counts[identity] = policy_counts.get(identity, 0) + 1
+        ranks[id(row)] = policy_counts[identity]
     decorated: list[dict[str, Any]] = []
     for row in [*ranked_rows, *unranked_rows]:
         item = dict(row)
@@ -289,17 +312,26 @@ def _strict_beats_by_metric(leaderboard: pl.DataFrame) -> dict[str, list[str]]:
         if not benchmarks:
             result[spec.name] = []
             continue
-        benchmark = min(
-            benchmarks,
-            key=lambda row: _dashboard_sort_key(row, spec.name, spec.higher_is_better),
-        )
-        benchmark_value = _finite_metric_value(benchmark, spec.name)
-        assert benchmark_value is not None
         winners = []
         for row in rows:
             value = _finite_metric_value(row, spec.name)
             if dashboard_cohort(row) != "trained" or value is None:
                 continue
+            matching = [
+                benchmark
+                for benchmark in benchmarks
+                if _row_policy_identity(benchmark) == _row_policy_identity(row)
+            ]
+            if not matching:
+                continue
+            benchmark = min(
+                matching,
+                key=lambda candidate: _dashboard_sort_key(
+                    candidate, spec.name, spec.higher_is_better
+                ),
+            )
+            benchmark_value = _finite_metric_value(benchmark, spec.name)
+            assert benchmark_value is not None
             beats = (
                 value > benchmark_value
                 if spec.higher_is_better
@@ -376,9 +408,21 @@ def compute_ml_advantage(
     spec = _dashboard_metric_spec(metric)
     ranked = rank_leaderboard(leaderboard, metric=metric)
     rows = ranked.to_dicts()
+    trained = _best_cohort_row(rows, "trained", metric, spec.higher_is_better)
+    trained_identity = _row_policy_identity(trained) if trained is not None else None
+    comparable_rows = [
+        row
+        for row in rows
+        if trained_identity is None or _row_policy_identity(row) == trained_identity
+    ]
     best = {
-        cohort: _best_cohort_row(rows, cohort, metric, spec.higher_is_better)
-        for cohort in ("trained", "heuristic", "benchmark")
+        "trained": trained,
+        "heuristic": _best_cohort_row(
+            comparable_rows, "heuristic", metric, spec.higher_is_better
+        ),
+        "benchmark": _best_cohort_row(
+            comparable_rows, "benchmark", metric, spec.higher_is_better
+        ),
     }
 
     def summary(row: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -907,6 +951,9 @@ def load_benchmark_frame(benchmark_path: Path) -> pl.DataFrame:
                 "targets": row.get("horizon_target_name") or "target",
                 "neutralization_proportion": None,
                 "oof_device": None,
+                "payout_policy_id": row.get("payout_policy_id"),
+                "scoring_target": row.get("scoring_target"),
+                "scoring_horizon": row.get("scoring_horizon"),
                 "corr": row.get("corr"),
                 "corr_ci_low": row.get("corr_ci_low"),
                 "corr_ci_high": row.get("corr_ci_high"),
@@ -927,6 +974,10 @@ def load_benchmark_frame(benchmark_path: Path) -> pl.DataFrame:
                 "cagr_1y": row.get("cagr_1y"),
                 "gain_to_pain_ratio": row.get("gain_to_pain_ratio"),
                 "kelly_fraction": row.get("kelly_fraction"),
+                "sim_portfolio_cagr": row.get("sim_portfolio_cagr"),
+                "sim_portfolio_mdd": row.get("sim_portfolio_mdd"),
+                "sim_capital_utilization": row.get("sim_capital_utilization"),
+                "capital_metrics_reason": row.get("capital_metrics_reason"),
                 "mmc_down": row.get("mmc_down"),
                 "mmc_down_reason": row.get("mmc_down_reason"),
                 "turnover_mean": row.get("turnover_mean"),
@@ -985,6 +1036,9 @@ def _registry_row(payload: dict[str, Any], run_file: Path) -> dict[str, Any]:
         "targets": ", ".join(data_cfg.get("targets", [])),
         "neutralization_proportion": risk_cfg.get("neutralization_proportion"),
         "oof_device": manifest.get("oof_device"),
+        "payout_policy_id": scorecard.get("payout_policy_id"),
+        "scoring_target": scorecard.get("scoring_target"),
+        "scoring_horizon": scorecard.get("scoring_horizon"),
         "corr": sc_corr if sc_corr is not None else metrics.get("mean"),
         "corr_ci_low": scorecard.get("corr_ci_low"),
         "corr_ci_high": scorecard.get("corr_ci_high"),
@@ -996,9 +1050,7 @@ def _registry_row(payload: dict[str, Any], run_file: Path) -> dict[str, Any]:
         "corr_sharpe_ac_ci_high": scorecard.get("corr_sharpe_ac_ci_high"),
         "corr_sharpe_ac_n_eras": scorecard.get("corr_sharpe_ac_n_eras"),
         "std_corr": sc_std if sc_std is not None else metrics.get("std"),
-        "max_drawdown": (
-            sc_dd if sc_dd is not None else metrics.get("max_drawdown")
-        ),
+        "max_drawdown": (sc_dd if sc_dd is not None else metrics.get("max_drawdown")),
         "deflated_sharpe": scorecard.get("deflated_sharpe"),
         "fnc": scorecard.get("fnc"),
         "mmc": scorecard.get("mmc"),
@@ -1009,6 +1061,10 @@ def _registry_row(payload: dict[str, Any], run_file: Path) -> dict[str, Any]:
         "cagr_1y": scorecard.get("cagr_1y"),
         "gain_to_pain_ratio": scorecard.get("gain_to_pain_ratio"),
         "kelly_fraction": scorecard.get("kelly_fraction"),
+        "sim_portfolio_cagr": scorecard.get("sim_portfolio_cagr"),
+        "sim_portfolio_mdd": scorecard.get("sim_portfolio_mdd"),
+        "sim_capital_utilization": scorecard.get("sim_capital_utilization"),
+        "capital_metrics_reason": scorecard.get("capital_metrics_reason"),
         "mmc_down": scorecard.get("mmc_down"),
         "mmc_down_reason": scorecard.get("mmc_down_reason"),
         "turnover_mean": scorecard.get("turnover_mean"),
@@ -1158,14 +1214,16 @@ def _scan_experiment_families(
         }
         family_info[family] = info
         full_versions = [
-            v for v in lifecycle.scan_valid_exports(family, "full") if not v.rehearsal
+            version
+            for version in lifecycle.scan_valid_exports(family, "full")
+            if not version.rehearsal
         ]
         partial_versions = [
             v
             for v in lifecycle.scan_valid_exports(family, "partial")
             if not v.rehearsal
         ]
-        if full_versions:
+        if any(lifecycle.activation_eligible(version) for version in full_versions):
             promoted_families.add(family)
         for version in [*full_versions, *partial_versions]:
             export_rows.append(_export_row(version, family, info))
@@ -1263,19 +1321,13 @@ _GATE_THRESHOLD_ATTRS = {
     "corr_sharpe_ac": "corr_sharpe_ac_min",
     "fnc": "fnc_min",
     "gain_to_pain_ratio": "gain_to_pain_min",
-    "cagr_1y": "cagr_min",
 }
-# A6 (audit SEV-2 #4): deflated_sharpe is display-only — no search history
-# exists at gate time to bind deflation to, so gating on it was false
-# assurance. The dashboard's CAPITAL READY badge must agree with the benchmark
-# gate, which no longer checks it.
+# Only measurable, policy-comparable fields participate in capital readiness.
 _GATE_FIELDS = (
     "corr",
     "corr_sharpe_ac",
     "fnc",
     "gain_to_pain_ratio",
-    "cagr_1y",
-    "turnover_mean",
 )
 _STATUS_SCHEMA = pl.Schema(
     {
@@ -1304,10 +1356,6 @@ def _gate_receipt(field: str, row: dict, gate) -> bool | None:
     if value is None:
         return None
     measured = float(value)
-    if field == "turnover_mean":
-        return measured <= float(gate.turnover_max)
-    if field == "cagr_1y":
-        return measured > float(gate.cagr_min)  # strict, mirrors assert_tier4_gate
     return measured >= float(getattr(gate, _GATE_THRESHOLD_ATTRS[field]))
 
 
@@ -1344,15 +1392,13 @@ def evaluate_gate_status(
             status = "PARTIAL"  # train-only cross-check — never gated
         elif row["source"] == "benchmark":
             status = "GATE HURDLE" if model_id == reference_column else "BENCHMARK"
-        elif (
-            all(
-                _gate_receipt(f, row, gate) is True
-                for f in _GATE_FIELDS
-                if f != "turnover_mean"
-            )
-            # turnover is exempt only when None; a measured violation blocks the gate
-            and _gate_receipt("turnover_mean", row, gate) is not False
+        elif _row_policy_identity(row) != (
+            gate.payout_policy_id,
+            gate.scoring_target,
+            gate.scoring_horizon,
         ):
+            status = "RESEARCH"
+        elif all(_gate_receipt(f, row, gate) is True for f in _GATE_FIELDS):
             status = "CHAMPION" if model_id == champion_id else "CAPITAL READY"
         else:
             status = "RESEARCH"
@@ -1556,10 +1602,18 @@ def reconcile_capital_metrics(
             )
             continue
         corr, mmc, meta_corr = _per_era_metrics(preds_path, targets_86, meta)
-        series = payout_series(corr, mmc, pf=pf_map)
+        if row.get("payout_policy_id") != CLASSIC_LEGACY_V1.policy_id:
+            row["capital_metrics_reason"] = "policy_identity_unavailable"
+            continue
+        series = payout_series(
+            corr,
+            mmc,
+            policy=CLASSIC_LEGACY_V1,
+            pf=pf_map,
+        )
         row["cagr_1y"] = annual_compounded_return(series.clipped)
         row["gain_to_pain_ratio"] = gain_to_pain_ratio(series.clipped)
-        row["kelly_fraction"] = kelly_fraction(series.raw)
+        row["kelly_fraction"] = kelly_fraction(series.clipped)
         downside = downside_era_indices(meta_corr)
         if len(downside) >= MMC_DOWN_MIN_ERAS:
             row["mmc_down"] = float(np.mean([mmc[e] for e in downside]))
@@ -1721,7 +1775,12 @@ def extract_multimetric_timeseries(
         # window must not abort the report — skip its payout slice (drawdowns
         # derive from payout wealth) while the other metric slices still render
         if set(corr_t) & set(mmc_t):
-            pay = payout_series(corr_t, mmc_t, pf=pf_map)
+            pay = payout_series(
+                corr_t,
+                mmc_t,
+                policy=CLASSIC_LEGACY_V1,
+                pf=pf_map,
+            )
             clipped_by_era = dict(zip(pay.eras, pay.clipped))
             standard = _align_era_values(axis, clipped_by_era)
             metrics["payout"][model_id] = {

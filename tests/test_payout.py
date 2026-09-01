@@ -10,6 +10,8 @@ import pytest
 from nmr.evaluation import EvaluationEngine
 from nmr.inference import deflated_sharpe, era_series_stats
 from nmr.payout import (
+    CLASSIC_ATOMIC_ENDER60_R1343_V1,
+    CLASSIC_LEGACY_V1,
     OverlappingSimulationResult,
     PayoutResult,
     PayoutSeries,
@@ -23,19 +25,78 @@ from nmr.payout import (
     load_payout_factors,
     max_burn_streak,
     max_drawdown,
-    payout_report,
-    payout_series,
-    simulate_overlapping_portfolio,
-    sortino,
-    time_to_recovery,
 )
+from nmr.payout import payout_report as _payout_report
+from nmr.payout import payout_series as _payout_series
+from nmr.payout import simulate_overlapping_portfolio, sortino, time_to_recovery
+
+
+def payout_series(*args, **kwargs):
+    kwargs.setdefault("policy", CLASSIC_LEGACY_V1)
+    return _payout_series(*args, **kwargs)
+
+
+def payout_report(*args, **kwargs):
+    kwargs.setdefault("policy", CLASSIC_LEGACY_V1)
+    return _payout_report(*args, **kwargs)
+
+
+def test_payout_policy_must_be_explicit_at_public_boundary() -> None:
+    with pytest.raises(TypeError, match="policy"):
+        _payout_series({"1343": 0.1}, {"1343": 0.01})
+
+
+def test_atomic_policy_matches_current_classic_payout_contract() -> None:
+    policy = CLASSIC_ATOMIC_ENDER60_R1343_V1
+
+    assert policy.policy_id == "classic_atomic_ender60_r1343_v1"
+    assert policy.target == "target_ender_60"
+    assert policy.scoring_horizon == "60D"
+    assert policy.concurrent_positions == 64
+
+    out = payout_series(
+        {"1343": 0.10, "1344": 0.50, "1345": -0.50},
+        {"1343": 0.01, "1344": 0.10, "1345": -0.10},
+        policy=policy,
+    )
+    assert np.allclose(out.raw, [0.45, 3.0, -3.0], atol=1e-12)
+    assert np.allclose(out.clipped, [0.45, 1.0, -1.0], atol=1e-12)
+
+
+def test_atomic_policy_rejects_historical_payout_factors() -> None:
+    with pytest.raises(ValueError, match="fixed payout factor"):
+        payout_series(
+            {"1343": 0.10},
+            {"1343": 0.01},
+            policy=CLASSIC_ATOMIC_ENDER60_R1343_V1,
+            pf={"1343": 0.5},
+        )
+
+
+def test_atomic_report_does_not_fabricate_round_level_capital_metrics() -> None:
+    corr = {str(1343 + i): 0.01 + (i % 5) * 0.001 for i in range(20)}
+    mmc = {str(1343 + i): 0.005 - (i % 3) * 0.0005 for i in range(20)}
+
+    report = payout_report(
+        corr,
+        mmc,
+        policy=CLASSIC_ATOMIC_ENDER60_R1343_V1,
+        horizon="60D",
+        n_trials=1,
+        seed=7,
+        n_boot=5,
+    )
+
+    assert report.policy_id == CLASSIC_ATOMIC_ENDER60_R1343_V1.policy_id
+    assert report.overlapping_sim is None
+    assert report.capital_metrics_reason == "round_level_returns_unavailable"
 
 
 def test_payout_series_arithmetic_parity_and_clip_and_pf_order() -> None:
     corr = {"0002": 0.20, "0001": -0.20, "0003": -0.25}
     mmc = {"0001": 0.03, "0002": -0.04, "0003": 0.10}
 
-    out = payout_series(corr, mmc, pf=2.0, clip=0.05)
+    out = payout_series(corr, mmc, policy=CLASSIC_LEGACY_V1, pf=2.0, clip=0.05)
     assert isinstance(out, PayoutSeries)
     assert out.eras == ("0001", "0002", "0003")
 
@@ -121,6 +182,12 @@ def test_downside_metrics_match_hand_calcs() -> None:
     assert calmar(x) == pytest.approx(-0.15, abs=1e-12)
     assert max_burn_streak(x) == 1
     assert time_to_recovery(x) == 3
+
+
+def test_drawdown_counts_losses_from_initial_equity() -> None:
+    assert max_drawdown(np.array([-0.1])) == pytest.approx(0.1)
+    assert max_drawdown(np.array([-0.1, 0.05])) == pytest.approx(0.1)
+    assert time_to_recovery(np.array([-0.1, 0.05])) == 2
 
 
 def test_order_independence_for_dict_input_and_order_sensitivity_for_paths() -> None:
@@ -345,34 +412,43 @@ def test_kelly_fraction_bounds_and_degenerate() -> None:
     assert kelly_fraction(np.array([0.01, 0.01, 0.01])) == 0.0
     # non-positive mean -> 0.0
     assert kelly_fraction(np.array([-0.01, 0.01])) == 0.0
-    # mid-range: mu=0.02, sigma=0.2 -> 0.5
+    # Interior optimum: neighboring fractions cannot improve mean log growth.
     series = np.array([0.2, -0.2, 0.2, -0.2, 0.2, -0.2, 0.2, -0.2, 0.2, -0.1])
-    mu = float(np.mean(series))
-    var = float(np.var(series, ddof=0))
-    assert kelly_fraction(series) == pytest.approx(min(1.0, mu / var))
-    # saturation: mu=0.1, var=1e-6 -> mu/var = 100,000 -> capped at 1.0
-    # (a constant array would have zero variance -> 0.0, so use a
-    #  low-variance positive-drift sequence)
-    assert kelly_fraction(np.array([0.101, 0.099, 0.101, 0.099])) == 1.0
+    fraction = kelly_fraction(series)
+
+    def objective(value: float) -> float:
+        return float(np.mean(np.log1p(value * series)))
+
+    assert 0.0 < fraction < 1.0
+    assert objective(fraction) >= objective(max(0.0, fraction - 1e-4))
+    assert objective(fraction) >= objective(min(1.0, fraction + 1e-4))
+    assert kelly_fraction(np.array([0.101, 0.099, 0.101, 0.099])) == pytest.approx(1.0)
 
 
-def test_kelly_uses_raw_not_clipped() -> None:
-    # Raw series: 19 x +0.03 and one -0.5. Raw Kelly = 0.0035 / 0.01334275
-    # ~ 0.2623 (< 1). The clipped variant compresses variance so its Kelly
-    # saturates at 1.0. Locks the director-approved raw-series contract.
+def test_kelly_fraction_maximizes_admissible_mean_log_growth() -> None:
+    returns = np.array([0.1] * 99 + [-2.0])
+    fraction = kelly_fraction(returns)
+
+    assert 0.0 <= fraction < 0.5
+    assert np.all(1.0 + fraction * returns > 0.0)
+    grid = np.linspace(0.0, np.nextafter(0.5, 0.0), 20_001)
+    objective = np.mean(np.log1p(grid[:, None] * returns[None, :]), axis=1)
+    expected = float(grid[int(np.argmax(objective))])
+    assert fraction == pytest.approx(expected, abs=5e-4)
+
+
+def test_kelly_uses_policy_clipped_returns() -> None:
     raw = np.array([0.03] * 19 + [-0.5])
     clipped = np.clip(raw, -0.05, 0.05)
     kelly_raw = kelly_fraction(raw)
     assert 0.0 < kelly_raw < 1.0
-    assert kelly_fraction(clipped) == 1.0
+    assert kelly_fraction(clipped) == pytest.approx(1.0)
 
 
 def test_overlapping_sim_zero_return_lockup() -> None:
     # K=20, n=100, all returns zero. Steady-state utilization (pre-deployment)
     # is (K-1)/K = 0.95; 20 warm-up eras average 0.475 -> overall 0.855 exactly.
-    result = simulate_overlapping_portfolio(
-        np.zeros(100), horizon_eras=20
-    )
+    result = simulate_overlapping_portfolio(np.zeros(100), horizon_eras=20)
     assert isinstance(result, OverlappingSimulationResult)
     assert result.final_equity == pytest.approx(1.0)
     assert result.portfolio_cagr == 0.0
@@ -395,9 +471,7 @@ def test_overlapping_sim_lockup_math() -> None:
     # equity = 0.55 + 0.5 (still-locked tranche 3) = 1.05.
     # A payoff-index off-by-one (paying x[2] = 0.3 instead of x[0] = 0.1)
     # would produce equity 1.15, so this pins the x[maturity_t - horizon] index.
-    result = simulate_overlapping_portfolio(
-        np.array([0.1, 0.2, 0.3]), horizon_eras=2
-    )
+    result = simulate_overlapping_portfolio(np.array([0.1, 0.2, 0.3]), horizon_eras=2)
     assert result.final_equity == pytest.approx(1.05)
     assert result.portfolio_max_drawdown == 0.0
     assert result.portfolio_cagr == pytest.approx(1.05 ** (52.0 / 3.0) - 1.0)
@@ -422,9 +496,7 @@ def test_payout_report_includes_capital_metrics() -> None:
     mmc = {f"{i:04d}": 0.01 for i in range(1, 41)}
     report = payout_report(corr, mmc, horizon="20D", n_trials=1, seed=7)
     series = payout_series(corr, mmc)
-    assert report.cagr_1y == pytest.approx(
-        annual_compounded_return(series.clipped)
-    )
+    assert report.cagr_1y == pytest.approx(annual_compounded_return(series.clipped))
     assert report.gain_to_pain_ratio == pytest.approx(
         gain_to_pain_ratio(series.clipped)
     )
@@ -444,6 +516,7 @@ def test_payout_series_sorts_eras_numerically() -> None:
     lexicographic ("10" < "2") — the documented regression class."""
     series = payout_series({"10": 0.1, "2": 0.2}, {"10": 0.05, "2": 0.06})
     assert series.eras == ("2", "10")
+
 
 def test_payout_series_per_era_pf_scales_each_era() -> None:
     corr = {"0001": 0.10, "0002": 0.20, "0003": -0.05}
@@ -478,10 +551,33 @@ def test_payout_series_pf_mapping_invalid_values_raise() -> None:
 
 
 def test_payout_report_per_era_pf_summary_and_metrics() -> None:
-    corr = {"0001": 0.10, "0002": 0.20, "0003": -0.05, "0004": 0.05, "0005": 0.15, "0006": -0.02}
-    mmc = {"0001": 0.02, "0002": -0.03, "0003": 0.01, "0004": 0.01, "0005": -0.01, "0006": 0.02}
-    pf_map = {"0001": 2.0, "0002": 3.0, "0003": 0.5, "0004": 1.5, "0005": 2.5, "0006": 0.8}
-    report = payout_report(corr, mmc, horizon="20D", n_trials=1, seed=5, pf=pf_map, n_boot=5)
+    corr = {
+        "0001": 0.10,
+        "0002": 0.20,
+        "0003": -0.05,
+        "0004": 0.05,
+        "0005": 0.15,
+        "0006": -0.02,
+    }
+    mmc = {
+        "0001": 0.02,
+        "0002": -0.03,
+        "0003": 0.01,
+        "0004": 0.01,
+        "0005": -0.01,
+        "0006": 0.02,
+    }
+    pf_map = {
+        "0001": 2.0,
+        "0002": 3.0,
+        "0003": 0.5,
+        "0004": 1.5,
+        "0005": 2.5,
+        "0006": 0.8,
+    }
+    report = payout_report(
+        corr, mmc, horizon="20D", n_trials=1, seed=5, pf=pf_map, n_boot=5
+    )
     series = payout_series(corr, mmc, pf=pf_map)
     assert report.pf == pytest.approx(float(np.mean([2.0, 3.0, 0.5, 1.5, 2.5, 0.8])))
     assert report.mean_payout == pytest.approx(float(np.mean(series.clipped)))
@@ -524,6 +620,7 @@ def test_era_payout_factors_join_and_fallback(tmp_path) -> None:
     assert era_payout_factors(path) == {"1019": 0.0987, "1020": 0.1009}
     assert era_payout_factors(None) == {}
     assert era_payout_factors(tmp_path / "absent.csv") == {}
+
 
 def test_payout_series_pf_mapping_numeric_key_normalization() -> None:
     """int(era) == round: the lookup is numeric, so padding never matters."""

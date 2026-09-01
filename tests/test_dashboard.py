@@ -157,6 +157,10 @@ def _registry_entry(run_id: str, *, scorecard: bool = True) -> dict:
                 },
                 "model": {"backend": "lightgbm", "preset": "fast"},
                 "risk": {"neutralization_proportion": 1.0},
+                "evaluation": {
+                    "main_target": "target",
+                    "payout_policy": "classic_legacy_075_225_clip005_v1",
+                },
                 "run": {"name": "sample-run"},
             },
         },
@@ -164,6 +168,9 @@ def _registry_entry(run_id: str, *, scorecard: bool = True) -> dict:
             None
             if not scorecard
             else {
+                "payout_policy_id": "classic_legacy_075_225_clip005_v1",
+                "scoring_target": "target",
+                "scoring_horizon": "20D",
                 "corr": 0.12,
                 "corr_ci_low": 0.05,
                 "corr_ci_high": 0.19,
@@ -305,6 +312,9 @@ def test_gate_status_research_and_capital_ready(tmp_path: Path) -> None:
     base = {
         "model_id": "r1",
         "source": "trained",
+        "payout_policy_id": "classic_atomic_ender60_r1343_v1",
+        "scoring_target": "target_ender_60",
+        "scoring_horizon": "60D",
         "corr": 0.01,
         "corr_sharpe_ac": 0.2,
         "fnc": 0.001,
@@ -322,7 +332,7 @@ def test_gate_status_research_and_capital_ready(tmp_path: Path) -> None:
         {
             "model_id": "r2",
             "corr": 0.03,
-            "corr_sharpe_ac": 0.8,
+            "corr_sharpe_ac": 0.87,
             "fnc": 0.03,
             "deflated_sharpe": 0.96,
             "gain_to_pain_ratio": 1.6,
@@ -332,7 +342,19 @@ def test_gate_status_research_and_capital_ready(tmp_path: Path) -> None:
     frame = _status_frame(tmp_path, [passing])
     assert frame.row(0, named=True)["status"] == "CAPITAL READY"
     assert frame.row(0, named=True)["gate_corr"] is True
-    assert frame.row(0, named=True)["gate_cagr_1y"] is True  # strict > 0.0
+    assert "gate_cagr_1y" not in frame.row(0, named=True)
+
+    legacy = dict(passing)
+    legacy.update(
+        {
+            "model_id": "legacy",
+            "payout_policy_id": "classic_legacy_075_225_clip005_v1",
+            "scoring_target": "target",
+            "scoring_horizon": "20D",
+        }
+    )
+    frame = _status_frame(tmp_path, [legacy])
+    assert frame.row(0, named=True)["status"] == "RESEARCH"
 
 
 def test_gate_status_champion_via_pointer(tmp_path: Path) -> None:
@@ -369,8 +391,11 @@ def test_gate_status_champion_requires_pointer_and_capital_gate(tmp_path: Path) 
             {
                 "model_id": champion_id,
                 "source": "trained",
+                "payout_policy_id": "classic_atomic_ender60_r1343_v1",
+                "scoring_target": "target_ender_60",
+                "scoring_horizon": "60D",
                 "corr": 0.03,
-                "corr_sharpe_ac": 0.8,
+                "corr_sharpe_ac": 0.87,
                 "fnc": 0.03,
                 "deflated_sharpe": 0.96,
                 "gain_to_pain_ratio": 1.6,
@@ -387,7 +412,7 @@ def test_gate_status_benchmark_rows_never_capital_ready(tmp_path: Path) -> None:
         "model_id": "v53_lgbm_ender60",
         "source": "benchmark",
         "corr": 0.029,
-        "corr_sharpe_ac": 0.78,
+        "corr_sharpe_ac": 0.87,
         "fnc": 0.027,
         "deflated_sharpe": 1.0,
         "gain_to_pain_ratio": 44.0,
@@ -401,10 +426,9 @@ def test_gate_status_benchmark_rows_never_capital_ready(tmp_path: Path) -> None:
     assert statuses["null_constant_05"] == "BENCHMARK"
     ref_row = frame.filter(pl.col("model_id") == "v53_lgbm_ender60").row(0, named=True)
     assert ref_row["gate_corr_sharpe_ac"] is True
-    assert ref_row["gate_turnover_mean"] is None  # turnover absent -> exempt
 
 
-def test_gate_status_turnover_violation_when_present(tmp_path: Path) -> None:
+def test_gate_status_turnover_is_diagnostic_only(tmp_path: Path) -> None:
     row = {
         "model_id": "r3",
         "source": "trained",
@@ -418,7 +442,7 @@ def test_gate_status_turnover_violation_when_present(tmp_path: Path) -> None:
     }
     frame = _status_frame(tmp_path, [row])
     out = frame.row(0, named=True)
-    assert out["gate_turnover_mean"] is False  # 0.9 > 0.35
+    assert "gate_turnover_mean" not in out
     assert out["status"] == "RESEARCH"
 
 
@@ -460,6 +484,9 @@ def test_reconcile_capital_metrics_recomputes_missing_block(tmp_path: Path) -> N
     data = _synthetic_data_dir(tmp_path)
 
     frame = dash.load_unified_leaderboard(tmp_path, benchmark_path=False)
+    assert frame.row(0, named=True)["payout_policy_id"] == (
+        "classic_legacy_075_225_clip005_v1"
+    )
     out = dash.reconcile_capital_metrics(frame, data)
     row = out.row(0, named=True)
     assert row["cagr_1y"] is not None
@@ -767,7 +794,9 @@ def test_real_tier4_cagr_matches_smoke_csv() -> None:
         meta_col="numerai_meta_model",
         target_col="target",
     )
-    pay = payout.payout_series(corr, mmc)  # import nmr.payout as payout at top
+    pay = payout.payout_series(
+        corr, mmc, policy=payout.CLASSIC_LEGACY_V1
+    )  # import nmr.payout as payout at top
     recomputed = payout.annual_compounded_return(pay.clipped)
     stored = (
         dash.load_benchmark_frame(_SMOKE_CSV)
@@ -1196,10 +1225,10 @@ def test_load_unified_leaderboard_family_columns_and_full_rows(
     trained = rows["a" * 64]
     assert trained["family"] == "brb1-xgb-v6"
     assert trained["training_scope"] == "research"
-    assert trained["has_full_version"] is True
+    assert trained["has_full_version"] is False
     assert trained["display_name"] == "Brb1 XGB v6"
-    assert trained["lifecycle_stage"] == "full"
-    assert trained["current_full_status"] == "full"
+    assert trained["lifecycle_stage"] == "research"
+    assert trained["current_full_status"] == "none"
     full_id = "brb1-xgb-v6::full::" + "a" * 64
     full = rows[full_id]
     assert full["source"] == "full"
@@ -1236,7 +1265,9 @@ def test_load_unified_leaderboard_scan_once(
         return real_scan(family, scope)
 
     monkeypatch.setattr(dash.lifecycle, "scan_valid_exports", counting_scan)
-    dash.load_unified_leaderboard(registry, benchmark_path=False, models_dir=experiments)
+    dash.load_unified_leaderboard(
+        registry, benchmark_path=False, models_dir=experiments
+    )
     # Per (family, scope) the dashboard scans once; lifecycle internals
     # (current_full_status / derive_stage) add one more each — never per slot.
     assert calls.count(("sample-run", "full")) == 2
@@ -1318,7 +1349,9 @@ def test_load_unified_leaderboard_full_row_export_version_fields(
     frame = dash.load_unified_leaderboard(registry, benchmark_path=False)
     full_id = "sample-run::full::" + "a" * 64
     full = {r["model_id"]: r for r in frame.to_dicts()}[full_id]
-    assert full["run_dir"] == str(experiments / "sample-run" / "exports" / "full" / ("a" * 64))
+    assert full["run_dir"] == str(
+        experiments / "sample-run" / "exports" / "full" / ("a" * 64)
+    )
     assert full["feature_set"] == "all"
     assert full["n_targets"] == 1
     assert full["targets"] == "target"
@@ -1495,13 +1528,15 @@ def test_stale_staked_flag(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     _write_current_pointer(experiments, "sample-run", "a" * 64)
     frame = dash.load_unified_leaderboard(registry, benchmark_path=False)
     rows = {r["model_id"]: r for r in frame.to_dicts()}
-    # active staked record referencing an invalid export => underlying stage + stale
-    assert rows["a" * 64]["lifecycle_stage"] == "full"
+    # Active stake plus an unverified export is stale and remains research-only.
+    assert rows["a" * 64]["lifecycle_stage"] == "research"
     assert rows["a" * 64]["stale"] is True
     assert rows["sample-run::full::" + "a" * 64]["stale"] is True
 
 
-def test_valid_staked_record_not_stale(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unverified_staked_record_is_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     registry = tmp_path / "registry"
     experiments = tmp_path / "experiments"
     monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", experiments)
@@ -1518,8 +1553,8 @@ def test_valid_staked_record_not_stale(tmp_path: Path, monkeypatch: pytest.Monke
     _write_current_pointer(experiments, "sample-run", "a" * 64)
     frame = dash.load_unified_leaderboard(registry, benchmark_path=False)
     rows = {r["model_id"]: r for r in frame.to_dicts()}
-    assert rows["a" * 64]["lifecycle_stage"] == "staked"
-    assert rows["a" * 64]["stale"] is False
+    assert rows["a" * 64]["lifecycle_stage"] == "research"
+    assert rows["a" * 64]["stale"] is True
 
 
 def test_series_label_prefers_display_name(
@@ -1560,7 +1595,7 @@ def test_gate_status_full_rows_stamped_full(tmp_path: Path) -> None:
     )
     assert out["status"] == "FULL"
     assert out["gate_corr"] is None
-    assert out["gate_turnover_mean"] is None
+    assert "gate_turnover_mean" not in out
 
 
 def test_evaluable_rows_predicate() -> None:
@@ -1637,6 +1672,67 @@ def test_rank_leaderboard_is_direction_aware_null_safe_and_deterministic() -> No
     assert lower.get_column("rank").to_list() == [1, 2, 3, None, None]
 
 
+def test_rank_leaderboard_partitions_payout_policy_cohorts() -> None:
+    rows = [
+        {
+            "model_id": "legacy",
+            "source": "trained",
+            "mmc": 0.2,
+            "payout_policy_id": "classic_legacy_075_225_clip005_v1",
+            "scoring_target": "target",
+            "scoring_horizon": "20D",
+        },
+        {
+            "model_id": "atomic",
+            "source": "trained",
+            "mmc": 0.1,
+            "payout_policy_id": "classic_atomic_ender60_r1343_v1",
+            "scoring_target": "target_ender_60",
+            "scoring_horizon": "60D",
+        },
+    ]
+    ranked = dash.rank_leaderboard(
+        pl.DataFrame(rows, schema=dash.UNIFIED_SCHEMA, strict=False), metric="mmc"
+    )
+
+    assert dict(zip(ranked.get_column("model_id"), ranked.get_column("rank"))) == {
+        "legacy": 1,
+        "atomic": 1,
+    }
+
+
+def test_ml_advantage_does_not_compare_across_payout_policies() -> None:
+    frame = pl.DataFrame(
+        [
+            {
+                "model_id": "trained-atomic",
+                "source": "trained",
+                "mmc": 0.10,
+                "payout_policy_id": "atomic",
+                "scoring_target": "target_ender_60",
+                "scoring_horizon": "60D",
+            },
+            {
+                "model_id": "benchmark-legacy",
+                "source": "benchmark",
+                "tier": 4,
+                "mmc": 0.08,
+                "payout_policy_id": "legacy",
+                "scoring_target": "target",
+                "scoring_horizon": "20D",
+            },
+        ],
+        schema=dash.UNIFIED_SCHEMA,
+        strict=False,
+    )
+
+    result = dash.compute_ml_advantage(frame, metric="mmc")
+
+    assert result["benchmark"] is None
+    assert result["vs_benchmark"]["absolute_edge"] is None
+    assert result["vs_benchmark"]["reason"] == "no_benchmark_baseline"
+
+
 def test_rank_map_covers_each_metric_and_excludes_full_rows() -> None:
     frame = pl.DataFrame(
         [
@@ -1695,8 +1791,10 @@ def test_tournament_payload_contains_ranked_rows_details_and_offline_metadata(
     _write_registry(tmp_path, [trained_entry])
     benchmark = _write_benchmark_csv(
         tmp_path,
-        "model_id,corr,mmc,corr_sharpe_ac,strategy_group,tier\n"
-        "simple_baseline,0.01,0.02,0.1,ridge,1\n",
+        "model_id,corr,mmc,corr_sharpe_ac,strategy_group,tier,"
+        "payout_policy_id,scoring_target,scoring_horizon\n"
+        "simple_baseline,0.01,0.02,0.1,ridge,1,"
+        "classic_legacy_075_225_clip005_v1,target,20D\n",
     )
     frame = dash.load_unified_leaderboard(
         tmp_path, benchmark_path=benchmark, models_dir=tmp_path / "models"
@@ -1881,7 +1979,9 @@ def test_generate_dashboard_row_html_full_chip() -> None:
     assert 'class="badge full">FULL</span>' in html_out
 
 
-def test_generate_dashboard_bar_input_includes_benchmark_excludes_diagnostic_rows() -> None:
+def test_generate_dashboard_bar_input_includes_benchmark_excludes_diagnostic_rows() -> (
+    None
+):
     rows = [
         _lb_row("a" * 64, "trained", "r1", 0.5),
         _lb_row("bench_a", "benchmark", "ref", 0.78),
@@ -1946,7 +2046,9 @@ def test_dashboard_app_shaped_leaderboard_pins_full_rows_first() -> None:
     assert "_is_full" not in pdf.columns
 
 
-def test_dashboard_app_robustness_matrix_includes_benchmark_excludes_diagnostic_rows() -> None:
+def test_dashboard_app_robustness_matrix_includes_benchmark_excludes_diagnostic_rows() -> (
+    None
+):
     from dashboard_ui import app
 
     rows = [
@@ -2008,6 +2110,7 @@ def test_dashboard_app_robustness_matrix_includes_benchmark_excludes_diagnostic_
     # benchmark reference curves participate; diagnostic full/partial do not
     assert matrix.get_column("model_id").to_list() == ["a" * 64, "bench_a"]
 
+
 def test_reconcile_capital_metrics_uses_historical_pf_csv(tmp_path: Path) -> None:
     """A present payout-factor CSV must change the recomputed capital cells:
     with the clip-saturated perfect-corr fixture, PF=0.01 pulls the per-era
@@ -2046,12 +2149,12 @@ def test_benchmark_tier4_labels_unique_per_model(tmp_path: Path) -> None:
         "model_id,strategy_group,tier,horizon_target_name,mean_payout\n"
         "v53_lgbm_ender20,tier4,4,ender,0.01\n"
         "v53_lgbm_ender60,tier4,4,ender,0.02\n"
-        "null_constant_05,null,0,,0.0\n"
-        , encoding="utf-8",
+        "null_constant_05,null,0,,0.0\n",
+        encoding="utf-8",
     )
     frame = dash.load_benchmark_frame(csv_path)
     labels = frame.select(["model_id", "run_name"]).to_dicts()
     by_id = {row["model_id"]: row["run_name"] for row in labels}
-    assert by_id["v53_lgbm_ender20"] == "Tier 4 " + chr(0xB7) +  " Ender 20D"
-    assert by_id["v53_lgbm_ender60"] == "Tier 4 " + chr(0xB7) +  " Ender 60D"
+    assert by_id["v53_lgbm_ender20"] == "Tier 4 " + chr(0xB7) + " Ender 20D"
+    assert by_id["v53_lgbm_ender60"] == "Tier 4 " + chr(0xB7) + " Ender 60D"
     assert len({row["run_name"] for row in labels}) == len(labels)

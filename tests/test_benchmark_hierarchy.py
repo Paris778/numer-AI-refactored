@@ -44,12 +44,16 @@ def _data_dir(tmp_path: Path) -> Path:
             f1 = float(rng.normal())
             target = float(np.clip(0.5 + 0.2 * f1 + rng.normal(0, 0.3), 0, 1))
             signal = target if signal_is_target else 1.0 - target
-            rows.append({
-                "era": era, "id": f"asset_{idx}", "f1": f1,
-                "target": target,
-                "numerai_meta_model": float(0.5 * signal + 0.5 * rng.random()),
-                "bench": float(0.6 * signal + 0.4 * rng.random()),
-            })
+            rows.append(
+                {
+                    "era": era,
+                    "id": f"asset_{idx}",
+                    "f1": f1,
+                    "target": target,
+                    "numerai_meta_model": float(0.5 * signal + 0.5 * rng.random()),
+                    "bench": float(0.6 * signal + 0.4 * rng.random()),
+                }
+            )
     frame = pl.DataFrame(rows)
 
     train = frame.filter(pl.col("era").is_in([f"{e:04d}" for e in range(1, 49)]))
@@ -59,9 +63,9 @@ def _data_dir(tmp_path: Path) -> Path:
     val.select(["era", "id", "numerai_meta_model"]).write_parquet(
         tmp_path / "meta_model.parquet"
     )
-    val.select(["era", "id", "bench"]).rename({"bench": "v53_lgbm_ender60"}).write_parquet(
-        tmp_path / "validation_benchmark_models.parquet"
-    )
+    val.select(["era", "id", "bench"]).rename(
+        {"bench": "v53_lgbm_ender60"}
+    ).write_parquet(tmp_path / "validation_benchmark_models.parquet")
     (tmp_path / "features.json").write_text(
         '{"feature_sets": {"small": ["f1"], "medium": ["f1"]}}',
         encoding="utf-8",
@@ -71,33 +75,56 @@ def _data_dir(tmp_path: Path) -> Path:
 
 def _spec() -> BenchmarkSuiteSpec:
     gate = Tier4GateConfig(
-        corr_min=-1.0, corr_sharpe_ac_min=-10.0, fnc_min=-1.0,
-        deflated_sharpe_min=-10.0, gain_to_pain_min=-10.0, cagr_min=-1.0,
-        turnover_max=10.0,
+        payout_policy_id="classic_legacy_075_225_clip005_v1",
+        scoring_target="target",
+        scoring_horizon="20D",
+        corr_min=-1.0,
+        corr_sharpe_ac_min=-10.0,
+        fnc_min=-1.0,
+        gain_to_pain_min=-10.0,
     )
     cells = (
         BenchmarkCellConfig(
-            benchmark_id="null_constant_05", input_space="none",
-            model_kind="null_constant_05", tier=0,
+            benchmark_id="null_constant_05",
+            input_space="none",
+            model_kind="null_constant_05",
+            tier=0,
         ),
         BenchmarkCellConfig(
-            benchmark_id="linear_ridge_small", input_space="small",
-            model_kind="ridge", tier=1,
-            targets=("target",), params={"alpha": 1.0},
-        ),
-        BenchmarkCellConfig(
-            benchmark_id="tree_lgbm_shallow_small", input_space="small",
-            model_kind="lightgbm", tier=2,
+            benchmark_id="linear_ridge_small",
+            input_space="small",
+            model_kind="ridge",
+            tier=1,
             targets=("target",),
-            params={"n_estimators": 5, "learning_rate": 0.1,
-                    "max_depth": 2, "num_leaves": 4, "colsample_bytree": 0.5},
+            params={"alpha": 1.0},
         ),
         BenchmarkCellConfig(
-            benchmark_id="canon_hello_numerai", input_space="small",
-            model_kind="lightgbm", tier=3,
+            benchmark_id="tree_lgbm_shallow_small",
+            input_space="small",
+            model_kind="lightgbm",
+            tier=2,
             targets=("target",),
-            params={"n_estimators": 5, "learning_rate": 0.1,
-                    "max_depth": 2, "num_leaves": 4, "colsample_bytree": 0.5},
+            params={
+                "n_estimators": 5,
+                "learning_rate": 0.1,
+                "max_depth": 2,
+                "num_leaves": 4,
+                "colsample_bytree": 0.5,
+            },
+        ),
+        BenchmarkCellConfig(
+            benchmark_id="canon_hello_numerai",
+            input_space="small",
+            model_kind="lightgbm",
+            tier=3,
+            targets=("target",),
+            params={
+                "n_estimators": 5,
+                "learning_rate": 0.1,
+                "max_depth": 2,
+                "num_leaves": 4,
+                "colsample_bytree": 0.5,
+            },
         ),
     )
     return BenchmarkSuiteSpec(
@@ -107,10 +134,15 @@ def _spec() -> BenchmarkSuiteSpec:
 
 def _run(tmp_path: Path, *, seed: int = 42) -> BenchmarkHierarchy:
     from nmr.benchmark import load_benchmark_data
+
     data = load_benchmark_data(_data_dir(tmp_path))
     hierarchy = BenchmarkHierarchy(
-        spec=_spec(), data=data, seed=seed, n_boot=50,
-        min_overlap_eras=5, fast_mode=True,
+        spec=_spec(),
+        data=data,
+        seed=seed,
+        n_boot=50,
+        min_overlap_eras=5,
+        fast_mode=True,
     )
     return hierarchy
 
@@ -118,8 +150,10 @@ def _run(tmp_path: Path, *, seed: int = 42) -> BenchmarkHierarchy:
 def test_hierarchy_runs_and_emits_frames(tmp_path: Path) -> None:
     result = _run(tmp_path).run()
     expected_ids = {
-        "null_constant_05", "linear_ridge_small",
-        "tree_lgbm_shallow_small", "canon_hello_numerai",
+        "null_constant_05",
+        "linear_ridge_small",
+        "tree_lgbm_shallow_small",
+        "canon_hello_numerai",
         "v53_lgbm_ender60",
     }
     assert set(result.scorecards) == expected_ids
@@ -128,13 +162,19 @@ def test_hierarchy_runs_and_emits_frames(tmp_path: Path) -> None:
     assert frame.height == 5
     assert "strategy_group" in frame.columns
     assert set(frame.get_column("strategy_group").unique().to_list()) == {
-        "tier0", "tier1", "tier2", "tier3", "tier4",
+        "tier0",
+        "tier1",
+        "tier2",
+        "tier3",
+        "tier4",
     }
     report = gate_report_frame(result)
-    assert report.height == 7
-    assert set(report.get_column("field").to_list()) == {
-        "corr", "corr_sharpe_ac", "fnc", "deflated_sharpe",
-        "gain_to_pain_ratio", "cagr_1y", "turnover_mean",
+    assert report.height == 4
+    assert set(report.get_column("field")) == {
+        "corr",
+        "corr_sharpe_ac",
+        "fnc",
+        "gain_to_pain_ratio",
     }
 
 
@@ -147,7 +187,11 @@ def test_hierarchy_is_deterministic(tmp_path: Path) -> None:
 
 
 def test_hierarchy_scores_additional_tier4_reference_columns(tmp_path: Path) -> None:
-    from nmr.benchmark import BenchmarkHierarchy, BenchmarkSuiteSpec, load_benchmark_data
+    from nmr.benchmark import (
+        BenchmarkHierarchy,
+        BenchmarkSuiteSpec,
+        load_benchmark_data,
+    )
 
     data = _data_dir(tmp_path)
     # add the second official benchmark column to the fixture parquet
@@ -158,21 +202,29 @@ def test_hierarchy_scores_additional_tier4_reference_columns(tmp_path: Path) -> 
     bench.write_parquet(data / "validation_benchmark_models.parquet")
 
     spec = BenchmarkSuiteSpec(
-        cells=_spec().cells, gate=_spec().gate,
+        cells=_spec().cells,
+        gate=_spec().gate,
         reference_column="v53_lgbm_ender60",
         reference_columns=("v53_lgbm_ender20",),
     )
     loaded = load_benchmark_data(data)
     result = BenchmarkHierarchy(
-        spec=spec, data=loaded, seed=42, n_boot=50,
-        min_overlap_eras=5, fast_mode=True,
+        spec=spec,
+        data=loaded,
+        seed=42,
+        n_boot=50,
+        min_overlap_eras=5,
+        fast_mode=True,
     ).run()
 
     # both official benchmark columns are scored as tier-4 rows
     assert set(result.scorecards) == {
-        "null_constant_05", "linear_ridge_small",
-        "tree_lgbm_shallow_small", "canon_hello_numerai",
-        "v53_lgbm_ender60", "v53_lgbm_ender20",
+        "null_constant_05",
+        "linear_ridge_small",
+        "tree_lgbm_shallow_small",
+        "canon_hello_numerai",
+        "v53_lgbm_ender60",
+        "v53_lgbm_ender20",
     }
     assert result.tier_of["v53_lgbm_ender60"] == 4
     assert result.tier_of["v53_lgbm_ender20"] == 4
@@ -181,13 +233,15 @@ def test_hierarchy_scores_additional_tier4_reference_columns(tmp_path: Path) -> 
     assert frame.height == 6
     # the gate report stays keyed to the gated capital line
     report = gate_report_frame(result)
-    assert set(report.get_column("model_id").unique().to_list()) == {
-        "v53_lgbm_ender60"
-    }
+    assert set(report.get_column("model_id").unique().to_list()) == {"v53_lgbm_ender60"}
     # determinism covers the additional reference row
     result_b = BenchmarkHierarchy(
-        spec=spec, data=loaded, seed=42, n_boot=50,
-        min_overlap_eras=5, fast_mode=True,
+        spec=spec,
+        data=loaded,
+        seed=42,
+        n_boot=50,
+        min_overlap_eras=5,
+        fast_mode=True,
     ).run()
     assert scorecards_sha256(result.scorecards) == scorecards_sha256(
         result_b.scorecards
@@ -201,8 +255,9 @@ def test_hierarchy_cross_process_determinism(tmp_path: Path) -> None:
         "from nmr.benchmark import load_benchmark_data, BenchmarkHierarchy, "
         "BenchmarkCellConfig, BenchmarkSuiteSpec, Tier4GateConfig, scorecards_sha256;"
         f"data = load_benchmark_data(Path(r'{data_dir}'));"
-        "gate = Tier4GateConfig(corr_min=-1, corr_sharpe_ac_min=-10, fnc_min=-1, "
-        "deflated_sharpe_min=-10, gain_to_pain_min=-10, cagr_min=-1, turnover_max=10);"
+        "gate = Tier4GateConfig(payout_policy_id='classic_legacy_075_225_clip005_v1', "
+        "scoring_target='target', scoring_horizon='20D', corr_min=-1, "
+        "corr_sharpe_ac_min=-10, fnc_min=-1, gain_to_pain_min=-10);"
         "cells = (BenchmarkCellConfig('null_constant_05', 'none', "
         "'null_constant_05', 0), "
         "BenchmarkCellConfig('linear_ridge_small', 'small', 'ridge', 1, "
@@ -217,8 +272,12 @@ def test_hierarchy_cross_process_determinism(tmp_path: Path) -> None:
 
     def run() -> str:
         return subprocess.run(
-            [sys.executable, "-c", script], capture_output=True, text=True,
-            env=env, cwd=Path.cwd(), check=True,
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=Path.cwd(),
+            check=True,
         ).stdout.strip()
 
     assert run() == run()
@@ -234,6 +293,11 @@ def test_monotone_failure_surfaces_in_result(tmp_path: Path) -> None:
     assert result.tier4_violations == ()
 
 
+def test_hierarchy_projects_only_required_scoring_targets(tmp_path: Path) -> None:
+    hierarchy = _run(tmp_path)
+    assert hierarchy._target_cols == ["era", "id", "target"]
+
+
 def _scorecard(model_id: str) -> MetricScorecard:
     """Synthetic scorecard for canonical-bytes determinism tests."""
 
@@ -241,21 +305,53 @@ def _scorecard(model_id: str) -> MetricScorecard:
         return MetricCell(value=value, ci_low=None, ci_high=None, n_eras=10)
 
     return MetricScorecard(
-        model_id=model_id, n_eras=10, rank_scalar=0.0, deflated_sharpe=0.0,
-        mean_payout=cell(0.0), corr=cell(0.0), mmc=cell(0.0), fnc=0.0,
-        corr_sharpe_ac=cell(0.0), cvar5=0.0, max_drawdown=0.1,
-        burn_rate=0.0, mmc_sharpe_ac=0.0, sortino=0.0, calmar=0.0,
-        std_corr=0.1, max_burn_streak=0, time_to_recovery=0,
-        horizon_stability=None, horizon_reason=None, regime_corr=None,
-        regime_reason=None, perturbation=None, max_feature_exposure=0.0,
-        bmc=None, bmc_reason=None, cwmm=None, cwmm_reason=None,
+        model_id=model_id,
+        payout_policy_id="classic_legacy_075_225_clip005_v1",
+        scoring_target="target",
+        scoring_horizon="20D",
+        n_eras=10,
+        rank_scalar=0.0,
+        deflated_sharpe=0.0,
+        mean_payout=cell(0.0),
+        corr=cell(0.0),
+        mmc=cell(0.0),
+        fnc=0.0,
+        corr_sharpe_ac=cell(0.0),
+        cvar5=0.0,
+        max_drawdown=0.1,
+        burn_rate=0.0,
+        mmc_sharpe_ac=0.0,
+        sortino=0.0,
+        calmar=0.0,
+        std_corr=0.1,
+        max_burn_streak=0,
+        time_to_recovery=0,
+        horizon_stability=None,
+        horizon_reason=None,
+        regime_corr=None,
+        regime_reason=None,
+        perturbation=None,
+        max_feature_exposure=0.0,
+        bmc=None,
+        bmc_reason=None,
+        cwmm=None,
+        cwmm_reason=None,
         book_correlation=None,
-        cagr_1y=0.0, gain_to_pain_ratio=0.0, kelly_fraction=0.0,
-        mmc_down=None, mmc_down_n_eras=0, mmc_down_reason=None,
-        turnover_mean=None, turnover_std=None, turnover_reason=None,
-        sim_portfolio_cagr=0.0, sim_portfolio_mdd=0.0,
+        cagr_1y=0.0,
+        gain_to_pain_ratio=0.0,
+        kelly_fraction=0.0,
+        mmc_down=None,
+        mmc_down_n_eras=0,
+        mmc_down_reason=None,
+        turnover_mean=None,
+        turnover_std=None,
+        turnover_reason=None,
+        sim_portfolio_cagr=0.0,
+        sim_portfolio_mdd=0.0,
         sim_capital_utilization=0.0,
-        metric_timing_seconds=None, eval_total_seconds=0.0,
+        capital_metrics_reason=None,
+        metric_timing_seconds=None,
+        eval_total_seconds=0.0,
     )
 
 
@@ -266,9 +362,8 @@ def test_canonical_bytes_include_fleet_scorecards_and_reject_collisions():
     combined = canonical_scorecards_bytes(base, fleet_scorecards=fleet)
     assert solo != combined
     with pytest.raises(ValueError, match="collision"):
-        canonical_scorecards_bytes(
-            base, fleet_scorecards={"t0": _scorecard("t0")}
-        )
+        canonical_scorecards_bytes(base, fleet_scorecards={"t0": _scorecard("t0")})
+
 
 def test_hierarchy_honors_historical_pf_csv(tmp_path: Path) -> None:
     """A present payout-factor CSV must change benchmark scorecard payouts
@@ -281,4 +376,7 @@ def test_hierarchy_honors_historical_pf_csv(tmp_path: Path) -> None:
     (data_dir / "payout_factor_historic.csv").write_text(csv_body, encoding="utf-8")
     scaled = _run(tmp_path).run()
     ref = "v53_lgbm_ender60"
-    assert base.scorecards[ref].mean_payout.value != scaled.scorecards[ref].mean_payout.value
+    assert (
+        base.scorecards[ref].mean_payout.value
+        != scaled.scorecards[ref].mean_payout.value
+    )

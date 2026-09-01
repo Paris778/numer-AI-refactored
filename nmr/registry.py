@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -120,9 +121,7 @@ class RunRegistry:
     @staticmethod
     def _validate_run_id(run_id: str) -> None:
         if not isinstance(run_id, str) or not _RUN_ID_PATTERN.fullmatch(run_id):
-            raise ValueError(
-                f"run_id={run_id!r} is not a 64-char lowercase hex string"
-            )
+            raise ValueError(f"run_id={run_id!r} is not a 64-char lowercase hex string")
 
     @staticmethod
     def _validate_identity(slug: str, run_id: str, payload: dict[str, Any]) -> None:
@@ -183,16 +182,48 @@ class RunRegistry:
             found.append(run_id)
         return sorted(found)
 
-    def best(self, metric: str = "corr_sharpe_ac") -> tuple[str, str] | None:
-        best: tuple[float, str, str] | None = None
+    def best(
+        self,
+        metric: str = "corr_sharpe_ac",
+        *,
+        policy_identity: tuple[object, object, object] | None = None,
+    ) -> tuple[str, str] | None:
+        if metric not in _SCORECARD_METRIC_FIELDS:
+            raise ValueError(
+                f"metric={metric!r} not in {sorted(_SCORECARD_METRIC_FIELDS)}"
+            )
+        candidates: list[tuple[float, str, str, tuple[object, object, object]]] = []
         for slug, run_id, payload in self._iter_run_records():
             self._validate_identity(slug, run_id, payload)
             value = (payload.get("scorecard") or {}).get(metric)
             if value is None:
                 continue
-            if best is None or float(value) > best[0]:
-                best = (float(value), run_id, slug)
-        return (best[1], best[2]) if best else None
+            numeric_value = float(value)
+            if not math.isfinite(numeric_value):
+                raise ValueError(
+                    f"run {run_id} has non-finite scorecard metric {metric}: {value!r}"
+                )
+            identity = _scorecard_policy_identity(payload)
+            if policy_identity is None or identity == policy_identity:
+                candidates.append((numeric_value, run_id, slug, identity))
+        identities = {candidate[3] for candidate in candidates}
+        if policy_identity is None and len(identities) > 1:
+            raise ValueError(
+                "best() requires policy_identity when runs span multiple payout "
+                f"policy identities: {sorted(identities, key=str)}"
+            )
+        if not candidates:
+            return None
+        higher_is_better = _SCORECARD_METRIC_DIRECTION[metric]
+        candidates.sort(
+            key=lambda item: (
+                -item[0] if higher_is_better else item[0],
+                item[1],
+                item[2],
+            )
+        )
+        best = candidates[0]
+        return best[1], best[2]
 
     def promote(self, run_id: str, slug: str | None = None) -> Path:
         """Promote ``run_id`` to champion; ``slug=None`` resolves it by scanning.
@@ -233,12 +264,18 @@ class RunRegistry:
         """
         self._validate_run_id(run_id)
         if metric not in _SCORECARD_METRIC_FIELDS:
-            raise ValueError(f"metric={metric!r} not in {sorted(_SCORECARD_METRIC_FIELDS)}")
+            raise ValueError(
+                f"metric={metric!r} not in {sorted(_SCORECARD_METRIC_FIELDS)}"
+            )
         slug = self._resolve_slug(run_id) if slug is None else paths.validate_slug(slug)
         record = self._read_run(run_id, slug)
         candidate = (record.get("scorecard") or {}).get(metric)
         if candidate is None:
             raise ValueError(f"run {run_id} has no scorecard metric {metric}")
+        if not math.isfinite(float(candidate)):
+            raise ValueError(
+                f"run {run_id} has non-finite scorecard metric {metric}: {candidate!r}"
+            )
         with file_lock(self._champion_lock_path()):
             champion = self.resolve_champion()
             if champion is None:
@@ -252,6 +289,18 @@ class RunRegistry:
             champion_value = (champion_record.get("scorecard") or {}).get(metric)
             if champion_value is None:
                 return self._promote_locked(run_id, slug), True
+            if not math.isfinite(float(champion_value)):
+                raise ValueError(
+                    "champion has non-finite scorecard metric "
+                    f"{metric}: {champion_value!r}"
+                )
+            candidate_identity = _scorecard_policy_identity(record)
+            champion_identity = _scorecard_policy_identity(champion_record)
+            if candidate_identity != champion_identity:
+                raise ValueError(
+                    "cannot compare runs across payout policy identities: "
+                    f"candidate={candidate_identity}, champion={champion_identity}"
+                )
             candidate_value = float(candidate)
             champion_value = float(champion_value)
             if _SCORECARD_METRIC_DIRECTION[metric]:
@@ -262,7 +311,11 @@ class RunRegistry:
                 logger.info(
                     "[promote_if_better] %s (%.6f) not better than champion %s (%.6f) "
                     "on %s; keeping champion",
-                    run_id, candidate_value, champion_payload["run_id"], champion_value, metric,
+                    run_id,
+                    candidate_value,
+                    champion_payload["run_id"],
+                    champion_value,
+                    metric,
                 )
                 return self._champion_path(), False
             return self._promote_locked(run_id, slug), True
@@ -284,3 +337,14 @@ class RunRegistry:
     def _atomic_json_write(self, path: Path, payload: dict[str, Any]) -> Path:
         atomic_write_text(path, json.dumps(payload, sort_keys=True, indent=2))
         return path
+
+
+def _scorecard_policy_identity(
+    payload: dict[str, Any],
+) -> tuple[object, object, object]:
+    scorecard = payload.get("scorecard") or {}
+    return (
+        scorecard.get("payout_policy_id"),
+        scorecard.get("scoring_target"),
+        scorecard.get("scoring_horizon"),
+    )

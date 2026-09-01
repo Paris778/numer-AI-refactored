@@ -29,17 +29,13 @@ from nmr.config import (
     RiskConfig,
     RunConfig,
     SplitConfig,
+    config_from_dict,
 )
 from nmr.data import IngestionAgent
 from nmr.deployment import load_predict
-from nmr.promote import (
-    PromotionResult,
-    promote_full_version,
-    rehearse_promotion,
-)
-from nmr.promote import (
-    _full_history_frame as _orig_full_history_frame,
-)
+from nmr.promote import PromotionResult
+from nmr.promote import _full_history_frame as _orig_full_history_frame
+from nmr.promote import promote_full_version, rehearse_promotion
 from nmr.runner import ExperimentRunner
 from nmr.scorecard import CROSSCHECK_N_TRIALS
 
@@ -47,9 +43,7 @@ _RID = "a" * 64
 
 
 @pytest.fixture(autouse=True)
-def _isolated_experiments_root(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _isolated_experiments_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Pin the experiment layout to tmp — promotions never touch the repo tree."""
     monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", tmp_path / "experiments")
 
@@ -76,6 +70,7 @@ def _make_data(root: Path, *, validation_eras: int = 8) -> Path:
                     "f1": f1,
                     "f2": f2,
                     "target": (0.5 + 0.03 * era) * f1 - (0.05 * era) * f2 + 0.01 * era,
+                    "target_ender_60": (0.4 + 0.02 * era) * f1 - (0.03 * era) * f2,
                 }
             )
     pl.DataFrame([r for r in rows if int(r["era"]) <= train_eras]).write_parquet(
@@ -88,6 +83,9 @@ def _make_data(root: Path, *, validation_eras: int = 8) -> Path:
     pl.DataFrame(val_rows).select(["era", "id"]).with_columns(
         pl.lit(0.35).alias("numerai_meta_model")
     ).write_parquet(version_dir / "meta_model.parquet")
+    pl.DataFrame(val_rows).select(["era", "id"]).with_columns(
+        pl.lit(0.2).alias("v53_lgbm_ender20")
+    ).write_parquet(version_dir / "validation_benchmark_models.parquet")
     # Rehearsal needs features.json + live files in the same layout as v5.3.
     version_dir.joinpath("features.json").write_text(
         json.dumps({"feature_sets": {"small": ["f1", "f2"]}}), encoding="utf-8"
@@ -99,6 +97,7 @@ def _make_data(root: Path, *, validation_eras: int = 8) -> Path:
             "f1": [0.0, 0.1, 0.2, 0.3, 0.05],
             "f2": [0.0, 0.1, 0.0, 0.1, 0.2],
             "target": [0.5] * 5,
+            "target_ender_60": [0.5] * 5,
         }
     ).write_parquet(version_dir / "live.parquet")
     pl.DataFrame(
@@ -121,7 +120,7 @@ def _config(tmp_data: Path) -> ExperimentConfig:
         ),
         split=SplitConfig(purge_eras=8),
         model=ModelConfig(backend="lightgbm", preset="fast"),
-        evaluation=EvalConfig(),
+        evaluation=EvalConfig(payout_policy="classic_atomic_ender60_r1343_v1"),
         risk=RiskConfig(neutralization_proportion=0.0),
         ensemble=EnsembleConfig(),
         run=RunConfig(
@@ -132,16 +131,22 @@ def _config(tmp_data: Path) -> ExperimentConfig:
 
 def _stored_config_dict(tmp_data: Path) -> dict:
     stored = json.loads(json.dumps(dataclasses.asdict(_config(tmp_data)), default=str))
-    stored["data"].pop("horizon", None)  # legacy stored configs predate the field
     stored["split"]["embargo_eras"] = 4  # legacy stored value (all 29 registry rows)
     return stored
 
 
 def _passing_scorecard() -> dict:
     return {
-        "corr": 0.05, "corr_sharpe_ac": 1.0, "fnc": 0.03,
-        "gain_to_pain_ratio": 2.0, "cagr_1y": 0.1,
-        "deflated_sharpe": 0.9, "turnover_mean": None,
+        "payout_policy_id": "classic_atomic_ender60_r1343_v1",
+        "scoring_target": "target_ender_60",
+        "scoring_horizon": "60D",
+        "corr": 0.05,
+        "corr_sharpe_ac": 1.0,
+        "fnc": 0.03,
+        "gain_to_pain_ratio": 2.0,
+        "cagr_1y": 0.1,
+        "deflated_sharpe": 0.9,
+        "turnover_mean": None,
     }
 
 
@@ -155,10 +160,20 @@ def _write_registry(
     supplemental_sha: str | None = None,
 ) -> Path:
     """Write the run record through experiment_store (experiments layout)."""
+    normalized = json.loads(json.dumps(stored_config))
+    normalized.setdefault("data", {}).setdefault("horizon", "20D")
+    normalized.setdefault("split", {})["embargo_eras"] = 0
+    fingerprint_config = config_from_dict(normalized)
+    target_names = list(stored_config.get("data", {}).get("targets") or ["target"])
     manifest = {
         "config": stored_config,
         "feature_cols": feature_cols if feature_cols is not None else ["f1", "f2"],
+        "pred_cols": [f"pred_{target}" for target in target_names],
         "weights": weights if weights is not None else [1.0],
+        "data_fingerprint": ExperimentRunner(fingerprint_config)._data_fingerprint,
+        "promotion_data_fingerprint": ExperimentRunner(
+            fingerprint_config
+        )._promotion_data_fingerprint,
     }
     if supplemental_sha is not None:
         manifest["supplemental_feature_sets_sha256"] = supplemental_sha
@@ -184,9 +199,7 @@ def _promote(tmp_path: Path, **kwargs) -> object:
 def test_promote_happy_path_manifest_and_artifact(tmp_path: Path) -> None:
     data = _make_data(tmp_path / "data")
     _write_registry(stored_config=_stored_config_dict(data))
-    result = promote_full_version(
-        _RID, "brb1-lgbm-v6"
-    )
+    result = promote_full_version(_RID, "brb1-lgbm-v6")
 
     assert result.scope == "full"
     assert result.cross_check_path is None
@@ -204,7 +217,9 @@ def test_promote_happy_path_manifest_and_artifact(tmp_path: Path) -> None:
     assert version.run_id == _RID
     assert version.scope == "full"
     assert version.training_scope == "full"
-    assert [v.run_id for v in lifecycle.scan_valid_exports("brb1-lgbm-v6", "full")] == [_RID]
+    assert [v.run_id for v in lifecycle.scan_valid_exports("brb1-lgbm-v6", "full")] == [
+        _RID
+    ]
     pointer = paths.current_pointer_path("brb1-lgbm-v6")
     assert json.loads(pointer.read_text(encoding="utf-8"))["run_id"] == _RID
 
@@ -215,13 +230,19 @@ def test_promote_happy_path_manifest_and_artifact(tmp_path: Path) -> None:
     assert record["override_used"] is False
     assert record["training_scope"] == "full"
     normalizations = {n["field"]: n for n in record["config_normalizations"]}
-    assert normalizations["split.embargo_eras"] == {"field": "split.embargo_eras", "from": 4, "to": 0}
-    assert normalizations["data.horizon"] == {"field": "data.horizon", "from": None, "to": "20D"}
+    assert normalizations["split.embargo_eras"] == {
+        "field": "split.embargo_eras",
+        "from": 4,
+        "to": 0,
+    }
+    assert "data.horizon" not in normalizations
     # First-class training provenance (review directive 2026-08-18): a genuine
     # full version is explicitly NOT a rehearsal and states what it trained on.
     assert record["rehearsal"] is False
     assert record["training_rows"] > 0
     assert len(record["training_era_range"]) == 2
+    assert record["acceptance"]["passed"] is True
+    assert record["activation_eligible"] is True
 
     # The artifact loads and the raw contract output is strictly in (0,1).
     predict_fn = load_predict(result.artifact_path)
@@ -246,6 +267,49 @@ def test_promote_happy_path_manifest_and_artifact(tmp_path: Path) -> None:
     assert ((raw["prediction"] > 0) & (raw["prediction"] < 1)).all()
 
 
+def test_promote_accepts_staged_artifact_before_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = _make_data(tmp_path / "data")
+    _write_registry(stored_config=_stored_config_dict(data))
+    observed: dict[str, object] = {}
+
+    from nmr.submission import accept_promoted_artifact as real_accept
+
+    def _accept_while_staged(artifact_path, **kwargs):
+        final_slot = paths.export_dir("brb1-lgbm-v6", "full", _RID)
+        observed["final_slot_exists"] = final_slot.exists()
+        observed["artifact_parent"] = Path(artifact_path).parent.name
+        return real_accept(artifact_path, **kwargs)
+
+    monkeypatch.setattr("nmr.submission.accept_promoted_artifact", _accept_while_staged)
+    result = promote_full_version(_RID, "brb1-lgbm-v6")
+    record = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+
+    assert observed["final_slot_exists"] is False
+    assert str(observed["artifact_parent"]).startswith(".tmp-")
+    assert record["acceptance"]["passed"] is True
+    assert len(record["acceptance"]["artifact_sha256"]) == 64
+    assert len(record["acceptance"]["live_features_sha256"]) == 64
+
+
+def test_promote_acceptance_failure_leaves_no_export_or_pointer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = _make_data(tmp_path / "data")
+    _write_registry(stored_config=_stored_config_dict(data))
+
+    def _reject(*args, **kwargs):
+        raise ValueError("raw contract rejected")
+
+    monkeypatch.setattr("nmr.submission.accept_promoted_artifact", _reject)
+    with pytest.raises(ValueError, match="raw contract rejected"):
+        promote_full_version(_RID, "brb1-lgbm-v6")
+
+    assert not paths.export_dir("brb1-lgbm-v6", "full", _RID).exists()
+    assert not paths.current_pointer_path("brb1-lgbm-v6").exists()
+
+
 def test_promote_gate_refusal_and_override(tmp_path: Path) -> None:
     data = _make_data(tmp_path / "data")
     failing = _passing_scorecard()
@@ -253,9 +317,7 @@ def test_promote_gate_refusal_and_override(tmp_path: Path) -> None:
     _write_registry(stored_config=_stored_config_dict(data), scorecard=failing)
 
     with pytest.raises(ValueError, match="tier-4 promotion gate"):
-        promote_full_version(
-            _RID, "brb1-lgbm-v6"
-        )
+        promote_full_version(_RID, "brb1-lgbm-v6")
     # The rehearsal path: override records the failure in the artifact's own
     # manifest — a failed-gate artifact carries its verdict with it.
     result = promote_full_version(
@@ -269,16 +331,92 @@ def test_promote_gate_refusal_and_override(tmp_path: Path) -> None:
     assert manifest["tier4_gate_passed"] is False
     assert manifest["override_used"] is True
     assert manifest["tier4_receipts"]["corr"]["passed"] is False
+    assert manifest["activation_eligible"] is False
+    assert not paths.current_pointer_path("brb1-lgbm-v6").exists()
+    with pytest.raises(ValueError, match="activation-eligible"):
+        promote_full_version(
+            _RID,
+            "brb1-lgbm-v6",
+            override_gate=True,
+            force=True,
+        )
 
 
 def test_promote_missing_scorecard_refused(tmp_path: Path) -> None:
     data = _make_data(tmp_path / "data")
-    _write_registry(stored_config=_stored_config_dict(data), scorecard={}
-    )
+    _write_registry(stored_config=_stored_config_dict(data), scorecard={})
     with pytest.raises(ValueError, match="no validation scorecard"):
-        promote_full_version(
-            _RID, "brb1-lgbm-v6"
-        )
+        promote_full_version(_RID, "brb1-lgbm-v6")
+
+
+def test_promote_refuses_payout_policy_identity_mismatch_before_fit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = _make_data(tmp_path / "data")
+    stored = _stored_config_dict(data)
+    stored["evaluation"]["payout_policy"] = "classic_legacy_075_225_clip005_v1"
+    _write_registry(stored_config=stored, scorecard=_passing_scorecard())
+
+    def _must_not_fit(*args, **kwargs):
+        raise AssertionError("identity mismatch must fail before fitting")
+
+    monkeypatch.setattr("nmr.promote._build_deploy_pipeline", _must_not_fit)
+    with pytest.raises(ValueError, match="scorecard identity mismatch"):
+        promote_full_version(_RID, "brb1-lgbm-v6", override_gate=True)
+
+
+def test_promote_refuses_same_shape_training_value_change_before_fit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = _make_data(tmp_path / "data")
+    _write_registry(stored_config=_stored_config_dict(data))
+    train_path = data / "vtest" / "train.parquet"
+    train = pl.read_parquet(train_path)
+    train.with_row_index("row_index").with_columns(
+        pl.when(pl.col("row_index") == 0)
+        .then(pl.col("f1") + 0.123)
+        .otherwise(pl.col("f1"))
+        .alias("f1")
+    ).drop("row_index").write_parquet(train_path)
+
+    def _must_not_fit(*args, **kwargs):
+        raise AssertionError("content mismatch must fail before fitting")
+
+    monkeypatch.setattr("nmr.promote._build_deploy_pipeline", _must_not_fit)
+    with pytest.raises(ValueError, match="content fingerprint mismatch"):
+        promote_full_version(_RID, "brb1-lgbm-v6")
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("scorecard_sha256", "0" * 64),
+        ("components_sha256", "0" * 64),
+        ("data_fingerprint", "0" * 64),
+        ("payout_policy_id", "unrelated_policy"),
+    ],
+)
+def test_export_identity_tampering_revokes_activation_and_force_recovery(
+    tmp_path: Path,
+    field: str,
+    replacement: str,
+) -> None:
+    data = _make_data(tmp_path / "data")
+    _write_registry(stored_config=_stored_config_dict(data))
+    promote_full_version(_RID, "brb1-lgbm-v6")
+    slot = paths.export_dir("brb1-lgbm-v6", "full", _RID)
+    export_path = slot / "export.json"
+    export = json.loads(export_path.read_text(encoding="utf-8"))
+    export[field] = replacement
+    export_path.write_text(json.dumps(export), encoding="utf-8")
+    paths.current_pointer_path("brb1-lgbm-v6").unlink()
+
+    version = lifecycle.valid_export("brb1-lgbm-v6", "full", _RID)
+    assert version is not None
+    assert lifecycle.activation_eligible(version) is False
+    assert lifecycle.current_full_status("brb1-lgbm-v6") == "none"
+    with pytest.raises(ValueError, match="activation-eligible"):
+        promote_full_version(_RID, "brb1-lgbm-v6", force=True)
 
 
 def test_promote_supplemental_identity_mismatch_refused(tmp_path: Path) -> None:
@@ -289,9 +427,7 @@ def test_promote_supplemental_identity_mismatch_refused(tmp_path: Path) -> None:
         supplemental_sha="f" * 64,
     )
     with pytest.raises(ValueError, match="supplemental feature-set identity"):
-        promote_full_version(
-            _RID, "brb1-lgbm-v6"
-        )
+        promote_full_version(_RID, "brb1-lgbm-v6")
 
 
 def test_promote_supplemental_identity_match(tmp_path: Path) -> None:
@@ -301,37 +437,32 @@ def test_promote_supplemental_identity_match(tmp_path: Path) -> None:
     stored = _stored_config_dict(data)
     stored["data"]["supplemental_feature_sets"] = str(supp)
     sha = ExperimentRunner._supplemental_fingerprint(supp)
-    _write_registry(stored_config=stored, supplemental_sha=sha
-    )
-    result = promote_full_version(
-        _RID, "brb1-lgbm-v6"
-    )
+    _write_registry(stored_config=stored, supplemental_sha=sha)
+    result = promote_full_version(_RID, "brb1-lgbm-v6")
     assert result.artifact_path.is_file()
 
 
 def test_promote_overwrite_and_repoint_guards(tmp_path: Path) -> None:
     data = _make_data(tmp_path / "data")
     _write_registry(stored_config=_stored_config_dict(data), run_id=_RID)
-    promote_full_version(
-        _RID, "brb1-lgbm-v6"
-    )
+    promote_full_version(_RID, "brb1-lgbm-v6")
     # Same slot again WITHOUT force: immutable — refused (a slot is never
     # overwritten; force only gates repointing current.json).
     with pytest.raises(ValueError, match="already exists"):
-        promote_full_version(
-            _RID, "brb1-lgbm-v6"
-        )
+        promote_full_version(_RID, "brb1-lgbm-v6")
     # A second run repointing current.json away: refused without force.
     other = "b" * 64
     _write_registry(stored_config=_stored_config_dict(data), run_id=other)
     with pytest.raises(ValueError, match="repointing requires force"):
-        promote_full_version(
-            other, "brb1-lgbm-v6"
-        )
+        promote_full_version(other, "brb1-lgbm-v6")
     promote_full_version(
-        other, "brb1-lgbm-v6", force=True,
+        other,
+        "brb1-lgbm-v6",
+        force=True,
     )
-    assert sorted(v.run_id for v in lifecycle.scan_valid_exports("brb1-lgbm-v6", "full")) == [_RID, other]
+    assert sorted(
+        v.run_id for v in lifecycle.scan_valid_exports("brb1-lgbm-v6", "full")
+    ) == [_RID, other]
     pointer = json.loads(
         paths.current_pointer_path("brb1-lgbm-v6").read_text(encoding="utf-8")
     )
@@ -361,7 +492,10 @@ def test_promote_force_recovery_repoints_existing_valid_slot(
         paths.current_pointer_path("brb1-lgbm-v6").read_text(encoding="utf-8")
     )
     assert pointer["run_id"] == _RID
-    assert result.artifact_path == paths.export_dir("brb1-lgbm-v6", "full", _RID) / "predict.pkl"
+    assert (
+        result.artifact_path
+        == paths.export_dir("brb1-lgbm-v6", "full", _RID) / "predict.pkl"
+    )
     # The slot itself is untouched (immutability preserved).
     assert lifecycle.valid_export("brb1-lgbm-v6", "full", _RID) is not None
     assert lifecycle.current_full_status("brb1-lgbm-v6") == "full"
@@ -409,9 +543,12 @@ def test_promote_pointer_write_failure_recoverable_via_force(
         result = promote_full_version(_RID, "brb1-lgbm-v6", force=True)
     assert result.artifact_path == slot / "predict.pkl"
     assert lifecycle.current_full_status("brb1-lgbm-v6") == "full"
-    assert json.loads(
-        paths.current_pointer_path("brb1-lgbm-v6").read_text(encoding="utf-8")
-    )["run_id"] == _RID
+    assert (
+        json.loads(
+            paths.current_pointer_path("brb1-lgbm-v6").read_text(encoding="utf-8")
+        )["run_id"]
+        == _RID
+    )
 
 
 def test_promote_force_recovery_refuses_invalid_slot(tmp_path: Path) -> None:
@@ -431,15 +568,15 @@ def test_promote_rejects_invalid_run_id_and_family(tmp_path: Path) -> None:
     _write_registry(stored_config=_stored_config_dict(data))
     with pytest.raises(ValueError, match="64-char"):
         promote_full_version(
-            "not-a-run-id", "brb1-lgbm-v6",
+            "not-a-run-id",
+            "brb1-lgbm-v6",
         )
     with pytest.raises(ValueError, match="invalid family name"):
-        promote_full_version(
-            _RID, "../evil"
-        )
+        promote_full_version(_RID, "../evil")
     with pytest.raises(FileNotFoundError, match="has no record"):
         promote_full_version(
-            "c" * 64, "brb1-lgbm-v6",
+            "c" * 64,
+            "brb1-lgbm-v6",
         )
 
 
@@ -453,7 +590,8 @@ def test_promote_spawn_path_trains_on_train_plus_validation(
     data = _make_data(tmp_path / "data")
     _write_registry(stored_config=_stored_config_dict(data))
     result = promote_full_version(
-        _RID, "brb1-lgbm-v6",
+        _RID,
+        "brb1-lgbm-v6",
     )
     assert result.artifact_path.is_file()
     predict_fn = load_predict(result.artifact_path)
@@ -496,13 +634,13 @@ def test_rehearse_promotion_end_to_end(tmp_path: Path) -> None:
 
 def _gate() -> Tier4GateConfig:
     return Tier4GateConfig(
+        payout_policy_id="classic_atomic_ender60_r1343_v1",
+        scoring_target="target_ender_60",
+        scoring_horizon="60D",
         corr_min=0.0286,
         corr_sharpe_ac_min=0.5,
         fnc_min=0.01,
-        deflated_sharpe_min=0.3,
         gain_to_pain_min=1.0,
-        cagr_min=0.05,
-        turnover_max=0.05,
     )
 
 
@@ -515,18 +653,16 @@ def test_evaluate_gate_missing_evidence_fails() -> None:
     assert passed is False
     assert receipts["corr"]["measured"] is None
     assert receipts["corr"]["passed"] is False
-    assert receipts["cagr_1y"]["passed"] is True  # other fields still evaluated
 
 
-def test_evaluate_gate_strict_cagr_fails_at_threshold() -> None:
-    """cagr_1y uses strict `>`: equality at the threshold fails (promote.py:165)."""
+def test_evaluate_gate_rejects_non_finite_evidence() -> None:
     from nmr.promote import _evaluate_gate
 
     scorecard = _passing_scorecard()
-    scorecard["cagr_1y"] = 0.05  # exactly cagr_min — strict needs strictly greater
+    scorecard["corr"] = float("inf")
     passed, receipts = _evaluate_gate(scorecard, _gate())
     assert passed is False
-    assert receipts["cagr_1y"]["passed"] is False
+    assert receipts["corr"]["passed"] is False
 
 
 def test_load_run_record_corrupt_json(tmp_path: Path) -> None:
@@ -546,6 +682,31 @@ def test_load_run_record_non_mapping(tmp_path: Path) -> None:
     run_dir.mkdir(parents=True)
     (run_dir / "run.json").write_text("[]", encoding="utf-8")
     with pytest.raises(ValueError, match="not a mapping"):
+        _load_run_record("brb1-lgbm-v6", _RID)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "run_id": "b" * 64,
+            "manifest": {"config": {"run": {"name": "brb1-lgbm-v6"}}},
+        },
+        {
+            "run_id": _RID,
+            "manifest": {"config": {"run": {"name": "other-family"}}},
+        },
+    ],
+)
+def test_load_run_record_rejects_embedded_identity_mismatch(
+    tmp_path: Path, payload: dict
+) -> None:
+    from nmr.promote import _load_run_record
+
+    run_dir = paths.run_dir("brb1-lgbm-v6", _RID)
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="run record identity mismatch"):
         _load_run_record("brb1-lgbm-v6", _RID)
 
 
@@ -582,7 +743,9 @@ def test_ram_guard_curve_path_passes_when_under_guard(
     assert "extrapolated full-version combined commit" in caplog.text
 
 
-def _huge_curve(*, commit_slope: float, ws_slope: float, ws_intercept: float = 0.0) -> str:
+def _huge_curve(
+    *, commit_slope: float, ws_slope: float, ws_intercept: float = 0.0
+) -> str:
     return json.dumps(
         {
             "fit": {"intercept_gib": 0.0, "slope_gib_per_row": commit_slope},
@@ -599,12 +762,16 @@ def test_ram_guard_over_ceiling_raises(tmp_path: Path) -> None:
     data = _make_data(tmp_path / "data")
     reports = paths.shared_reports_dir(_config(data).run.artifacts_dir)
     reports.mkdir(parents=True)
-    (reports / "ram_curve.json").write_text(_huge_curve(commit_slope=1e9, ws_slope=0.0), encoding="utf-8")
+    (reports / "ram_curve.json").write_text(
+        _huge_curve(commit_slope=1e9, ws_slope=0.0), encoding="utf-8"
+    )
     with pytest.raises(RuntimeError, match="exceeds the 45 GiB guard"):
         _ram_guard(_config(data), scope="full")
 
 
-def test_ram_guard_over_commit_limit_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ram_guard_over_commit_limit_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """combined commit under the ceiling but over the machine commit limit."""
     from nmr.models import _machine_memory_limits
     from nmr.promote import _ram_guard
@@ -616,12 +783,16 @@ def test_ram_guard_over_commit_limit_raises(tmp_path: Path, monkeypatch: pytest.
     data = _make_data(tmp_path / "data")
     reports = paths.shared_reports_dir(_config(data).run.artifacts_dir)
     reports.mkdir(parents=True)
-    (reports / "ram_curve.json").write_text(_huge_curve(commit_slope=1e9, ws_slope=0.0), encoding="utf-8")
+    (reports / "ram_curve.json").write_text(
+        _huge_curve(commit_slope=1e9, ws_slope=0.0), encoding="utf-8"
+    )
     with pytest.raises(RuntimeError, match="exceeds the machine commit limit"):
         _ram_guard(_config(data), scope="full")
 
 
-def test_ram_guard_over_working_set_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ram_guard_over_working_set_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """commit small but combined working set > 85% of physical RAM → thrash refusal."""
     from nmr.models import _machine_memory_limits
     from nmr.promote import _ram_guard
@@ -633,14 +804,18 @@ def test_ram_guard_over_working_set_raises(tmp_path: Path, monkeypatch: pytest.M
     data = _make_data(tmp_path / "data")
     reports = paths.shared_reports_dir(_config(data).run.artifacts_dir)
     reports.mkdir(parents=True)
-    (reports / "ram_curve.json").write_text(_huge_curve(commit_slope=0.0, ws_slope=1e9), encoding="utf-8")
+    (reports / "ram_curve.json").write_text(
+        _huge_curve(commit_slope=0.0, ws_slope=1e9), encoding="utf-8"
+    )
     with pytest.raises(RuntimeError, match="would thrash"):
         _ram_guard(_config(data), scope="full")
 
 
 def _write_estimate(reports: Path, payload: dict) -> None:
     reports.mkdir(parents=True, exist_ok=True)
-    (reports / "full_version_ram_estimate.json").write_text(json.dumps(payload), encoding="utf-8")
+    (reports / "full_version_ram_estimate.json").write_text(
+        json.dumps(payload), encoding="utf-8"
+    )
 
 
 def test_ram_guard_estimate_path_passes_when_under_guard(
@@ -716,7 +891,9 @@ def test_ram_guard_corrupt_estimate_skips(
     config = _config(data)
     reports = paths.shared_reports_dir(config.run.artifacts_dir)
     reports.mkdir(parents=True)
-    (reports / "full_version_ram_estimate.json").write_text("{corrupt", encoding="utf-8")
+    (reports / "full_version_ram_estimate.json").write_text(
+        "{corrupt", encoding="utf-8"
+    )
     with caplog.at_level(logging.WARNING, logger="nmr.promote"):
         _ram_guard(config, scope="full")  # must not raise
     assert "unreadable RAM estimate" in caplog.text
@@ -728,10 +905,8 @@ def test_promote_manifest_without_config_refused(tmp_path: Path) -> None:
         _RID,
         {"run_id": _RID, "manifest": {}, "scorecard": _passing_scorecard()},
     )
-    with pytest.raises(ValueError, match="no config dict"):
-        promote_full_version(
-            _RID, "brb1-lgbm-v6"
-        )
+    with pytest.raises(ValueError, match="run record identity mismatch"):
+        promote_full_version(_RID, "brb1-lgbm-v6")
 
 
 def test_promote_gate_missing_from_yaml_refused(
@@ -745,9 +920,7 @@ def test_promote_gate_missing_from_yaml_refused(
         "nmr.promote.load_benchmark_file", lambda path: types.SimpleNamespace(gate=None)
     )
     with pytest.raises(ValueError, match="no gate"):
-        promote_full_version(
-            _RID, "brb1-lgbm-v6"
-        )
+        promote_full_version(_RID, "brb1-lgbm-v6")
 
 
 def test_promote_corrupt_current_pointer_requires_force(tmp_path: Path) -> None:
@@ -757,28 +930,21 @@ def test_promote_corrupt_current_pointer_requires_force(tmp_path: Path) -> None:
     pointer.parent.mkdir(parents=True, exist_ok=True)
     pointer.write_text("{corrupt", encoding="utf-8")
     with pytest.raises(ValueError, match="repointing requires force"):
-        promote_full_version(
-            _RID, "brb1-lgbm-v6"
-        )
+        promote_full_version(_RID, "brb1-lgbm-v6")
 
 
 def test_promote_missing_feature_cols_refused(tmp_path: Path) -> None:
     data = _make_data(tmp_path / "data")
     _write_registry(stored_config=_stored_config_dict(data), feature_cols=[])
     with pytest.raises(ValueError, match="no feature_cols"):
-        promote_full_version(
-            _RID, "brb1-lgbm-v6"
-        )
+        promote_full_version(_RID, "brb1-lgbm-v6")
 
 
 def test_promote_weight_count_mismatch_refused(tmp_path: Path) -> None:
     data = _make_data(tmp_path / "data")
-    _write_registry(stored_config=_stored_config_dict(data), weights=[1.0, 1.0]
-    )
+    _write_registry(stored_config=_stored_config_dict(data), weights=[1.0, 1.0])
     with pytest.raises(ValueError, match="do not match targets"):
-        promote_full_version(
-            _RID, "brb1-lgbm-v6"
-        )
+        promote_full_version(_RID, "brb1-lgbm-v6")
 
 
 def test_build_truncated_data_missing_asset(tmp_path: Path) -> None:
@@ -841,9 +1007,7 @@ def test_rehearse_restores_env_and_removes_stale_pointer(
     # references it.
     slot = paths.export_dir("brb1-lgbm-v6", "full", _RID)
     slot.mkdir(parents=True, exist_ok=True)
-    (slot / "export.json").write_text(
-        json.dumps({"rehearsal": True}), encoding="utf-8"
-    )
+    (slot / "export.json").write_text(json.dumps({"rehearsal": True}), encoding="utf-8")
     pointer = paths.current_pointer_path("brb1-lgbm-v6")
     pointer.parent.mkdir(parents=True, exist_ok=True)
     pointer.write_text(json.dumps({"run_id": _RID}), encoding="utf-8")
@@ -891,10 +1055,8 @@ def test_rehearse_manifest_without_config_refused(tmp_path: Path) -> None:
         _RID,
         {"run_id": _RID, "manifest": {}, "scorecard": _passing_scorecard()},
     )
-    with pytest.raises(ValueError, match="no config dict"):
-        rehearse_promotion(
-            _RID, "brb1-lgbm-v6"
-        )
+    with pytest.raises(ValueError, match="run record identity mismatch"):
+        rehearse_promotion(_RID, "brb1-lgbm-v6")
 
 
 def _fake_promotion_result(tmp_path: Path) -> PromotionResult:
@@ -917,8 +1079,7 @@ def test_rehearse_missing_feature_cols_refused(
     """The post-promotion feature_cols check (promote.py:870-872) — the promotion
     itself is stubbed out so the test never fits a model."""
     data = _make_data(tmp_path / "data")
-    _write_registry(stored_config=_stored_config_dict(data), feature_cols=[]
-    )
+    _write_registry(stored_config=_stored_config_dict(data), feature_cols=[])
     fake = _fake_promotion_result(tmp_path)
     monkeypatch.setattr("nmr.promote.promote_full_version", lambda *a, **k: fake)
     with pytest.raises(ValueError, match="no feature_cols"):
@@ -962,6 +1123,7 @@ def test_rehearse_acceptance_failure_propagates(
 
 
 # --- Task 8: scope, fit-phase isolation, cross-check, atomic staging ---------
+
 
 def test_train_only_scope_fits_train_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1031,11 +1193,25 @@ def test_train_only_spawn_spec_excludes_validation(
     captured: dict[str, object] = {}
     original = ModelOrchestrator._fit_full_history_subprocess
 
-    def _spy(self, train_df, *, feature_cols, target_col, era_col, data, include_validation=False):
+    def _spy(
+        self,
+        train_df,
+        *,
+        feature_cols,
+        target_col,
+        era_col,
+        data,
+        include_validation=False,
+    ):
         captured["include_validation"] = include_validation
         return original(
-            self, train_df, feature_cols=feature_cols, target_col=target_col,
-            era_col=era_col, data=data, include_validation=include_validation,
+            self,
+            train_df,
+            feature_cols=feature_cols,
+            target_col=target_col,
+            era_col=era_col,
+            data=data,
+            include_validation=include_validation,
         )
 
     monkeypatch.setattr(ModelOrchestrator, "_fit_full_history_subprocess", _spy)
@@ -1068,10 +1244,13 @@ def test_train_only_writes_cross_check_scorecard(tmp_path: Path) -> None:
     assert sc["schema_version"] == 3
     assert sc["replay"]["backend"] == "official"
     assert sc["replay"]["n_trials"] == CROSSCHECK_N_TRIALS
+    assert sc["replay"]["payout_policy_id"] == "classic_atomic_ender60_r1343_v1"
+    assert sc["replay"]["scoring_target"] == "target_ender_60"
+    assert sc["replay"]["scoring_horizon"] == "60D"
     assert sc["scope"] == "partial"
     assert sc["window"]["eras"] == sorted(sc["window"]["eras"], key=int)
-    # 32 validation eras minus the 8-era 20D-target purge.
-    assert len(sc["window"]["eras"]) == 24
+    # 32 validation eras minus the 16-era Atomic/60D overlap.
+    assert len(sc["window"]["eras"]) == 16
     assert sc["per_era"]["corr"] and all(
         {"era", "value"} <= set(entry) for entry in sc["per_era"]["corr"]
     )
@@ -1081,8 +1260,8 @@ def test_train_only_writes_cross_check_scorecard(tmp_path: Path) -> None:
     assert set(sc["scorecard"]) >= {"corr", "mmc", "corr_sharpe_ac", "fnc", "n_eras"}
 
 
-def test_full_scope_requires_current_pointer(tmp_path: Path) -> None:
-    """A full-scope promotion repoints current.json atomically."""
+def test_overridden_full_scope_is_quarantined_without_pointer(tmp_path: Path) -> None:
+    """A failed/overridden full export is diagnostic-only, never current."""
     data = _make_data(tmp_path / "data")
     _write_registry(stored_config=_stored_config_dict(data))
     result = promote_full_version(
@@ -1093,10 +1272,9 @@ def test_full_scope_requires_current_pointer(tmp_path: Path) -> None:
     )
     assert result.scope == "full"
     assert result.cross_check_path is None
-    pointer = json.loads(
-        paths.current_pointer_path("brb1-lgbm-v6").read_text(encoding="utf-8")
-    )
-    assert pointer["run_id"] == _RID
+    record = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+    assert record["activation_eligible"] is False
+    assert not paths.current_pointer_path("brb1-lgbm-v6").exists()
 
 
 def test_repromotion_rejected_without_force(tmp_path: Path) -> None:
@@ -1120,16 +1298,16 @@ def test_repromotion_rejected_without_force(tmp_path: Path) -> None:
             force=False,
             scope="full",
         )
-    # force=True against the same existing valid slot is a no-op repair.
-    result = promote_full_version(
-        _RID,
-        "brb1-lgbm-v6",
-        override_gate=True,
-        force=True,
-        scope="full",
-    )
-    assert result.artifact_path.is_file()
-    assert lifecycle.current_full_status("brb1-lgbm-v6") == "full"
+    # force=True cannot activate a quarantined slot.
+    with pytest.raises(ValueError, match="activation-eligible"):
+        promote_full_version(
+            _RID,
+            "brb1-lgbm-v6",
+            override_gate=True,
+            force=True,
+            scope="full",
+        )
+    assert lifecycle.current_full_status("brb1-lgbm-v6") == "none"
 
 
 def test_partial_scoring_failure_discards_staging(

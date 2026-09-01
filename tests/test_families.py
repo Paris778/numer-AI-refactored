@@ -9,9 +9,12 @@ is a thin compatibility wrapper over ``nmr.lifecycle``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
+import pandas as pd
+import polars as pl
 import pytest
 
 import nmr.families as fam
@@ -53,22 +56,83 @@ def _write_export(
     slot.mkdir(parents=True, exist_ok=True)
 
     def dummy_predict(live_features, live_benchmark_models=None):
-        return live_features
+        return pd.DataFrame({"prediction": [0.25, 0.75]}, index=live_features.index)
 
     serialize_predict(dummy_predict, path=slot / "predict.pkl", feature_names=["f1"])
+    data_root = paths.EXPERIMENTS_ROOT.parent / "data" / slug
+    version_dir = data_root / "vtest"
+    version_dir.mkdir(parents=True, exist_ok=True)
+    live_ids = ["live_0", "live_1"]
+    pl.DataFrame({"era": ["1", "1"], "id": live_ids, "f1": [0.1, 0.2]}).write_parquet(
+        version_dir / "live.parquet"
+    )
+    pl.DataFrame(
+        {"era": ["1", "1"], "id": live_ids, "benchmark": [0.2, 0.3]}
+    ).write_parquet(version_dir / "live_benchmark_models.parquet")
+
+    def file_sha(path: Path) -> str:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+
+    def json_sha(value: object) -> str:
+        return hashlib.sha256(
+            json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    policy_id = "classic_legacy_075_225_clip005_v1"
+    scorecard = {
+        "payout_policy_id": policy_id,
+        "scoring_target": "target",
+        "scoring_horizon": "20D",
+        "corr": 0.05,
+        "corr_sharpe_ac": 1.0,
+        "fnc": 0.03,
+        "gain_to_pain_ratio": 2.0,
+        "cagr_1y": 0.1,
+    }
+    components = [{"target": "target", "prediction_col": "pred_target", "weight": 1.0}]
+    data_fingerprint = "d" * 64
+    promotion_data_fingerprint = "e" * 64
+    receipts = {
+        field: {"measured": scorecard[field], "passed": True}
+        for field in (
+            "corr",
+            "corr_sharpe_ac",
+            "fnc",
+            "gain_to_pain_ratio",
+            "cagr_1y",
+        )
+    }
+    receipts.update(
+        {
+            "payout_policy_id": {"measured": policy_id, "passed": True},
+            "scoring_target": {"measured": "target", "passed": True},
+            "scoring_horizon": {"measured": "20D", "passed": True},
+        }
+    )
+    export_config = {
+        "run": {"name": slug},
+        "data": {
+            "version": "vtest",
+            "data_dir": str(data_root),
+            "feature_set": "all",
+            "feature_subset": "medium",
+            "targets": ["target"],
+            "horizon": "20D",
+        },
+        "evaluation": {"main_target": "target", "payout_policy": policy_id},
+        "model": {"backend": "xgboost", "preset": "fast"},
+    }
     if body is None:
         body = json.dumps(
             {
                 "family": family if family is not None else slug,
                 "training_scope": training_scope or scope,
                 "promoted_from_run_id": (
-                    promoted_from_run_id
-                    if promoted_from_run_id is not None
-                    else run_id
+                    promoted_from_run_id if promoted_from_run_id is not None else run_id
                 ),
                 "promoted_at": promoted_at,
                 "artifact_path": "predict.pkl",
-                "config": {"run": {"name": slug}},
+                "config": export_config,
                 "rehearsal": rehearsal,
                 "training_rows": (
                     training_rows if training_rows is not None else 6_853_308
@@ -77,6 +141,31 @@ def _write_export(
                     training_era_range if training_era_range is not None else [1, 1231]
                 ),
                 "tier4_gate_passed": True,
+                "tier4_receipts": receipts,
+                "override_used": False,
+                "activation_eligible": not rehearsal,
+                "feature_cols": ["f1"],
+                "components": components,
+                "components_sha256": json_sha(components),
+                "scorecard_sha256": json_sha(scorecard),
+                "data_fingerprint": data_fingerprint,
+                "promotion_data_fingerprint": promotion_data_fingerprint,
+                "payout_policy_id": policy_id,
+                "scoring_target": "target",
+                "scoring_horizon": "20D",
+                "acceptance": {
+                    "passed": True,
+                    "artifact_sha256": file_sha(slot / "predict.pkl"),
+                    "live_features_sha256": file_sha(version_dir / "live.parquet"),
+                    "live_benchmark_models_sha256": file_sha(
+                        version_dir / "live_benchmark_models.parquet"
+                    ),
+                    "live_ids_sha256": json_sha(live_ids),
+                    "feature_cols_sha256": json_sha(["f1"]),
+                    "benchmark_columns": ["benchmark"],
+                    "data_version": "vtest",
+                    "n_rows": 2,
+                },
             }
         )
     (slot / "export.json").write_text(body, encoding="utf-8")
@@ -85,7 +174,24 @@ def _write_export(
         run_dir.mkdir(parents=True, exist_ok=True)
         (run_dir / "run.json").write_text(
             json.dumps(
-                {"run_id": run_id, "manifest": {"config": {"run": {"name": slug}}}}
+                {
+                    "run_id": run_id,
+                    "manifest": {
+                        "config": {
+                            "run": {"name": slug},
+                            "data": {"targets": ["target"], "horizon": "20D"},
+                            "evaluation": {
+                                "main_target": "target",
+                                "payout_policy": policy_id,
+                            },
+                        },
+                        "pred_cols": ["pred_target"],
+                        "weights": [1.0],
+                        "data_fingerprint": data_fingerprint,
+                        "promotion_data_fingerprint": promotion_data_fingerprint,
+                    },
+                    "scorecard": scorecard,
+                }
             ),
             encoding="utf-8",
         )
@@ -119,7 +225,10 @@ def test_available_slots_lists_all_slot_dirs(tmp_path: Path) -> None:
         parents=True
     )
     assert fam.available_slots(tmp_path, "brb1-xgb-v6") == [
-        "a" * 64, "b" * 64, "c" * 64, "d" * 64,
+        "a" * 64,
+        "b" * 64,
+        "c" * 64,
+        "d" * 64,
     ]
     assert fam.available_slots(tmp_path, "nope") == []
 
@@ -133,7 +242,10 @@ def test_load_full_version_happy_path(tmp_path: Path) -> None:
     assert v.training_scope == "full"
     assert v.run_id == "a" * 64
     assert v.slot_dir == paths.export_dir("brb1-xgb-v6", "full", "a" * 64)
-    assert v.config == {"run": {"name": "brb1-xgb-v6"}}
+    assert v.config["run"] == {"name": "brb1-xgb-v6"}
+    assert v.config["evaluation"]["payout_policy"] == (
+        "classic_legacy_075_225_clip005_v1"
+    )
     assert v.rehearsal is False
     assert v.training_rows == 6_853_308
     assert v.training_era_range == (1, 1231)
@@ -217,9 +329,7 @@ def test_scan_full_versions_pointer_driven_not_newest_guess(tmp_path: Path) -> N
     _write_export("fam3", "full", "a" * 64, promoted_at="2026-08-25T10:00:00+00:00")
     _write_export("fam3", "full", "b" * 64, promoted_at="2026-08-26T10:00:00+00:00")
     assert fam.scan_full_versions(tmp_path) == {}
-    paths.current_pointer_path("fam3").write_text(
-        json.dumps({"run_id": "a" * 64})
-    )
+    paths.current_pointer_path("fam3").write_text(json.dumps({"run_id": "a" * 64}))
     found = fam.scan_full_versions(tmp_path)
     assert set(found) == {"fam3"}
     assert found["fam3"].run_id == "a" * 64  # the POINTER's slot, not the newest
@@ -273,7 +383,8 @@ def test_rehearsal_never_reads_as_full_version(tmp_path: Path) -> None:
         training_era_range=(3, 14),
         write_pointer=True,
     )
-    version = fam.load_full_version(tmp_path, "brb1-lgbm-v6")
+    assert fam.load_full_version(tmp_path, "brb1-lgbm-v6") is None
+    version = lifecycle.valid_export("brb1-lgbm-v6", "full", "a" * 64)
     assert version is not None
     assert version.rehearsal is True
     assert version.training_rows == 68_096

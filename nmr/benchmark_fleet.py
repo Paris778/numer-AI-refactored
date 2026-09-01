@@ -40,7 +40,12 @@ from nmr.benchmark import (
 from nmr.ensemble import Ensembler
 from nmr.features import feature_stability_screen
 from nmr.models import construct_tree_model
-from nmr.payout import PAYOUT_FACTOR_FILENAME, era_payout_factors
+from nmr.payout import (
+    CLASSIC_LEGACY_V1,
+    PAYOUT_FACTOR_FILENAME,
+    era_payout_factors,
+    resolve_payout_policy,
+)
 from nmr.risk import NeutralizationEngine
 from nmr.scorecard import MetricScorecard, evaluate_model
 
@@ -70,7 +75,11 @@ __all__ = [
 ]
 
 VALID_FLEET_MODEL_KINDS: tuple[str, ...] = (
-    "target_lag_mean", "lightgbm", "xgboost", "mlp", "ridge_stack",
+    "target_lag_mean",
+    "lightgbm",
+    "xgboost",
+    "mlp",
+    "ridge_stack",
 )
 VALID_FLEET_NEUTRALIZATION: tuple[float | None, ...] = (None, 0.25, 0.35, 0.5, 1.0)
 VALID_FLEET_NEUTRALIZER_SELECTIONS: tuple[str, ...] = ("none", "riskiest_50")
@@ -97,7 +106,9 @@ class FleetCellConfig:
 
     def __post_init__(self) -> None:
         if not self.benchmark_id or not isinstance(self.benchmark_id, str):
-            raise ValueError(f"benchmark_id must be a non-empty string: {self.benchmark_id!r}")
+            raise ValueError(
+                f"benchmark_id must be a non-empty string: {self.benchmark_id!r}"
+            )
         if not self.source or not isinstance(self.source, str):
             raise ValueError(f"source must be a non-empty string: {self.source!r}")
         if self.input_space not in VALID_INPUT_SPACES:
@@ -126,9 +137,7 @@ class FleetCellConfig:
         if self.model_kind == "ridge_stack":
             for key in ("mode", "main_target", "specialists"):
                 if key not in self.params:
-                    raise ValueError(
-                        f"ridge_stack requires params.{key}"
-                    )
+                    raise ValueError(f"ridge_stack requires params.{key}")
             if self.params["mode"] not in ("fixed", "search"):
                 raise ValueError(
                     f"ridge_stack params.mode must be 'fixed' or 'search', "
@@ -144,8 +153,11 @@ class FleetCellConfig:
                 f"neutralizer_selection={self.neutralizer_selection!r} not in "
                 f"{VALID_FLEET_NEUTRALIZER_SELECTIONS}"
             )
-        if not isinstance(self.neutralizer_count, int) or isinstance(self.neutralizer_count, bool) \
-                or self.neutralizer_count < 1:
+        if (
+            not isinstance(self.neutralizer_count, int)
+            or isinstance(self.neutralizer_count, bool)
+            or self.neutralizer_count < 1
+        ):
             raise ValueError(
                 f"neutralizer_count must be a positive int, got {self.neutralizer_count!r}"
             )
@@ -159,21 +171,28 @@ class FleetCellConfig:
                     raise ValueError(
                         f"target_weights key {target!r} not in targets {self.targets!r}"
                     )
-            if not all(isinstance(w, (int, float)) and not isinstance(w, bool)
-                       and float(w) > 0.0 for w in weights.values()):
+            if not all(
+                isinstance(w, (int, float))
+                and not isinstance(w, bool)
+                and float(w) > 0.0
+                for w in weights.values()
+            ):
                 raise ValueError("target_weights must be positive numbers")
             object.__setattr__(
-                self, "target_weights",
+                self,
+                "target_weights",
                 _freeze_mapping(self.target_weights, name="target_weights"),
             )
         if self.fast_mode_params is not None:
             object.__setattr__(
-                self, "fast_mode_params",
+                self,
+                "fast_mode_params",
                 _freeze_mapping(self.fast_mode_params, name="fast_mode_params"),
             )
         if self.anchors is not None:
             object.__setattr__(
-                self, "anchors",
+                self,
+                "anchors",
                 _freeze_mapping(self.anchors, name="anchors"),
             )
 
@@ -297,7 +316,9 @@ def _select_riskiest_features(
     if not isinstance(count, int) or isinstance(count, bool) or count < 1:
         raise ValueError(f"count must be a positive int, got {count!r}")
     screen = feature_stability_screen(
-        train, feature_cols=list(feature_cols), target_col=target_col,
+        train,
+        feature_cols=list(feature_cols),
+        target_col=target_col,
         era_col=era_col,
     )
     # polars >= 1.41 dropped Expr.nulls_last()/Expr.desc(); the kwargs form
@@ -341,27 +362,47 @@ def generate_fleet_lightgbm_predictions(
 
     if neutralizer_selection == "riskiest_50":
         neutralizer_cols = _select_riskiest_features(
-            train_rows, feature_cols=feature_cols,
-            target_col=list(targets)[0], count=neutralizer_count, era_col=era_col,
+            train_rows,
+            feature_cols=feature_cols,
+            target_col=list(targets)[0],
+            count=neutralizer_count,
+            era_col=era_col,
         )
     else:
         neutralizer_cols = list(feature_cols)
 
     out = generate_canonical_predictions(
-        train, val, targets=list(targets), feature_cols=list(feature_cols),
-        params=params, seed=seed, neutralization=0.0,
-        purge_eras=purge_eras, era_col=era_col, id_col=id_col, pred_col=pred_col,
+        train,
+        val,
+        targets=list(targets),
+        feature_cols=list(feature_cols),
+        params=params,
+        seed=seed,
+        neutralization=0.0,
+        purge_eras=purge_eras,
+        era_col=era_col,
+        id_col=id_col,
+        pred_col=pred_col,
     )
 
     if float(neutralization) > 0.0:
         with_features = out.join(
             val.select([era_col, id_col, *neutralizer_cols]),
-            on=[era_col, id_col], how="inner",
+            on=[era_col, id_col],
+            how="inner",
         )
-        out = NeutralizationEngine().neutralize(
-            with_features, pred_col=pred_col, feature_cols=neutralizer_cols,
-            era_col=era_col, proportion=float(neutralization),
-        ).select([era_col, id_col, pred_col]).sort([era_col, id_col])
+        out = (
+            NeutralizationEngine()
+            .neutralize(
+                with_features,
+                pred_col=pred_col,
+                feature_cols=neutralizer_cols,
+                era_col=era_col,
+                proportion=float(neutralization),
+            )
+            .select([era_col, id_col, pred_col])
+            .sort([era_col, id_col])
+        )
     return out
 
 
@@ -404,7 +445,9 @@ def generate_fleet_xgb_predictions(
     )
     train_rows = train.filter(pl.col(era_col).is_in(trimmed_train_eras))
     val_rows = val.sort([era_col, id_col])
-    missing_feats = [c for c in feature_cols if c not in train.columns or c not in val.columns]
+    missing_feats = [
+        c for c in feature_cols if c not in train.columns or c not in val.columns
+    ]
     if missing_feats:
         raise ValueError(f"missing feature columns: {missing_feats}")
 
@@ -420,8 +463,12 @@ def generate_fleet_xgb_predictions(
         fit_eras = fit_eras[:-n_hold]
     model_params = {k: v for k, v in params.items() if k not in _ES_KEYS}
 
-    x_fit = train_rows.filter(pl.col(era_col).is_in(fit_eras)) \
-        .select(feature_cols).cast(pl.Float32).to_pandas()
+    x_fit = (
+        train_rows.filter(pl.col(era_col).is_in(fit_eras))
+        .select(feature_cols)
+        .cast(pl.Float32)
+        .to_pandas()
+    )
     x_val = val_rows.select(feature_cols).cast(pl.Float32).to_pandas()
     x_hold = None
     if holdout_eras:
@@ -432,8 +479,12 @@ def generate_fleet_xgb_predictions(
     for index, target in enumerate(targets):
         if target not in train.columns:
             raise ValueError(f"missing target column: {target!r}")
-        y = train_rows.filter(pl.col(era_col).is_in(fit_eras)) \
-            .get_column(target).cast(pl.Float64).to_numpy()
+        y = (
+            train_rows.filter(pl.col(era_col).is_in(fit_eras))
+            .get_column(target)
+            .cast(pl.Float64)
+            .to_numpy()
+        )
         mask = np.isfinite(y)
         if mask.sum() < 2:
             raise ValueError(
@@ -443,15 +494,24 @@ def generate_fleet_xgb_predictions(
             {"early_stopping_rounds": int(es_rounds)} if es_rounds is not None else None
         )
         model = construct_tree_model(
-            "xgboost", model_params, seed=seed + index,
-            n_features=len(feature_cols), device="cpu", extra_params=extra,
+            "xgboost",
+            model_params,
+            seed=seed + index,
+            n_features=len(feature_cols),
+            device="cpu",
+            extra_params=extra,
         )
         if x_hold is not None:
-            y_hold = train_rows.filter(pl.col(era_col).is_in(holdout_eras)) \
-                .get_column(target).cast(pl.Float64).to_numpy()
+            y_hold = (
+                train_rows.filter(pl.col(era_col).is_in(holdout_eras))
+                .get_column(target)
+                .cast(pl.Float64)
+                .to_numpy()
+            )
             mask_h = np.isfinite(y_hold)
             model.fit(
-                x_fit[mask], y[mask],
+                x_fit[mask],
+                y[mask],
                 eval_set=[(x_hold[mask_h], y_hold[mask_h])],
                 verbose=False,
             )
@@ -471,8 +531,10 @@ def generate_fleet_xgb_predictions(
     ensembler = Ensembler()
     blended = ensembler.blend(
         Ensembler.rank_normalize(frame, pred_cols=list(targets), era_col=era_col),
-        pred_cols=list(targets), weights=blend_weights,
-        era_col=era_col, out_col=pred_col,
+        pred_cols=list(targets),
+        weights=blend_weights,
+        era_col=era_col,
+        out_col=pred_col,
     )
     gaussianized = Ensembler.rank_normalize(
         blended, pred_cols=[pred_col], era_col=era_col
@@ -482,18 +544,34 @@ def generate_fleet_xgb_predictions(
         neutralizer_cols = list(feature_cols)
         with_features = out.join(
             val.select([era_col, id_col, *neutralizer_cols]),
-            on=[era_col, id_col], how="inner",
+            on=[era_col, id_col],
+            how="inner",
         )
-        out = NeutralizationEngine().neutralize(
-            with_features, pred_col=pred_col, feature_cols=neutralizer_cols,
-            era_col=era_col, proportion=float(neutralization),
-        ).select([era_col, id_col, pred_col]).sort([era_col, id_col])
+        out = (
+            NeutralizationEngine()
+            .neutralize(
+                with_features,
+                pred_col=pred_col,
+                feature_cols=neutralizer_cols,
+                era_col=era_col,
+                proportion=float(neutralization),
+            )
+            .select([era_col, id_col, pred_col])
+            .sort([era_col, id_col])
+        )
     return out
 
 
 _VALID_MLP_PARAM_KEYS: tuple[str, ...] = (
-    "hidden_layer_sizes", "activation", "solver", "alpha", "learning_rate_init",
-    "batch_size", "max_iter", "early_stopping", "n_iter_no_change",
+    "hidden_layer_sizes",
+    "activation",
+    "solver",
+    "alpha",
+    "learning_rate_init",
+    "batch_size",
+    "max_iter",
+    "early_stopping",
+    "n_iter_no_change",
     "validation_fraction",
 )
 
@@ -532,7 +610,9 @@ def generate_mlp_predictions(
     val_rows = val.sort([era_col, id_col])
     if target not in train.columns:
         raise ValueError(f"missing target column: {target!r}")
-    missing_feats = [c for c in feature_cols if c not in train.columns or c not in val.columns]
+    missing_feats = [
+        c for c in feature_cols if c not in train.columns or c not in val.columns
+    ]
     if missing_feats:
         raise ValueError(f"missing feature columns: {missing_feats}")
 
@@ -553,19 +633,31 @@ def generate_mlp_predictions(
     frame = val_rows.select([era_col, id_col]).with_columns(pl.Series(pred_col, raw))
     blended = Ensembler().blend(
         Ensembler.rank_normalize(frame, pred_cols=[pred_col], era_col=era_col),
-        pred_cols=[pred_col], weights=[1.0], era_col=era_col, out_col=pred_col,
+        pred_cols=[pred_col],
+        weights=[1.0],
+        era_col=era_col,
+        out_col=pred_col,
     )
     out = blended.select([era_col, id_col, pred_col]).sort([era_col, id_col])
     if float(neutralization) > 0.0:
         neutralizer_cols = list(feature_cols)
         with_features = out.join(
             val.select([era_col, id_col, *neutralizer_cols]),
-            on=[era_col, id_col], how="inner",
+            on=[era_col, id_col],
+            how="inner",
         )
-        out = NeutralizationEngine().neutralize(
-            with_features, pred_col=pred_col, feature_cols=neutralizer_cols,
-            era_col=era_col, proportion=float(neutralization),
-        ).select([era_col, id_col, pred_col]).sort([era_col, id_col])
+        out = (
+            NeutralizationEngine()
+            .neutralize(
+                with_features,
+                pred_col=pred_col,
+                feature_cols=neutralizer_cols,
+                era_col=era_col,
+                proportion=float(neutralization),
+            )
+            .select([era_col, id_col, pred_col])
+            .sort([era_col, id_col])
+        )
     return out
 
 
@@ -633,7 +725,9 @@ def generate_ridge_stack_predictions(
     )
     train_rows = train.filter(pl.col(era_col).is_in(trimmed_train_eras))
     val_rows = val.sort([era_col, id_col])
-    missing_feats = [c for c in feature_cols if c not in train.columns or c not in val.columns]
+    missing_feats = [
+        c for c in feature_cols if c not in train.columns or c not in val.columns
+    ]
     if missing_feats:
         raise ValueError(f"missing feature columns: {missing_feats}")
 
@@ -648,11 +742,19 @@ def generate_ridge_stack_predictions(
 
     if mode == "search":
         return _ridge_stack_search(
-            train_rows, val_rows, main_target=main_target,
-            specialists=list(specialists), feature_cols=list(feature_cols),
-            params=params, seed=seed, neutralization=float(neutralization),
-            val_targets=val_targets, benchmarks=benchmarks,
-            era_col=era_col, id_col=id_col, pred_col=pred_col,
+            train_rows,
+            val_rows,
+            main_target=main_target,
+            specialists=list(specialists),
+            feature_cols=list(feature_cols),
+            params=params,
+            seed=seed,
+            neutralization=float(neutralization),
+            val_targets=val_targets,
+            benchmarks=benchmarks,
+            era_col=era_col,
+            id_col=id_col,
+            pred_col=pred_col,
         )
 
     spec_eras, meta_eras = _stack_partitions(
@@ -718,20 +820,37 @@ def generate_ridge_stack_predictions(
         dtype=float,
     )
     frame = val_ranked.select([era_col, id_col]).with_columns(pl.Series(pred_col, raw))
-    out = Ensembler().blend(
-        Ensembler.rank_normalize(frame, pred_cols=[pred_col], era_col=era_col),
-        pred_cols=[pred_col], weights=[1.0], era_col=era_col, out_col=pred_col,
-    ).select([era_col, id_col, pred_col]).sort([era_col, id_col])
+    out = (
+        Ensembler()
+        .blend(
+            Ensembler.rank_normalize(frame, pred_cols=[pred_col], era_col=era_col),
+            pred_cols=[pred_col],
+            weights=[1.0],
+            era_col=era_col,
+            out_col=pred_col,
+        )
+        .select([era_col, id_col, pred_col])
+        .sort([era_col, id_col])
+    )
 
     if float(neutralization) > 0.0:
         with_features = out.join(
             val.select([era_col, id_col, *feature_cols]),
-            on=[era_col, id_col], how="inner",
+            on=[era_col, id_col],
+            how="inner",
         )
-        out = NeutralizationEngine().neutralize(
-            with_features, pred_col=pred_col, feature_cols=list(feature_cols),
-            era_col=era_col, proportion=float(neutralization),
-        ).select([era_col, id_col, pred_col]).sort([era_col, id_col])
+        out = (
+            NeutralizationEngine()
+            .neutralize(
+                with_features,
+                pred_col=pred_col,
+                feature_cols=list(feature_cols),
+                era_col=era_col,
+                proportion=float(neutralization),
+            )
+            .select([era_col, id_col, pred_col])
+            .sort([era_col, id_col])
+        )
     return out
 
 
@@ -767,7 +886,9 @@ def _rank_values_per_era(values: np.ndarray, eras: Sequence[str]) -> np.ndarray:
     return ranked.get_column("__v").to_numpy()
 
 
-def _per_era_corrs(values: np.ndarray, eras: Sequence[str], target: np.ndarray) -> np.ndarray:
+def _per_era_corrs(
+    values: np.ndarray, eras: Sequence[str], target: np.ndarray
+) -> np.ndarray:
     frame = pl.DataFrame(
         {"__v": values, "era": list(eras), "target": target}
     ).drop_nulls()
@@ -775,10 +896,14 @@ def _per_era_corrs(values: np.ndarray, eras: Sequence[str], target: np.ndarray) 
     for _, era_frame in frame.group_by("era", maintain_order=True):
         if era_frame["__v"].n_unique() < 2 or era_frame["target"].n_unique() < 2:
             continue
-        out.append(float(np.corrcoef(
-            era_frame.get_column("__v").to_numpy(),
-            era_frame.get_column("target").to_numpy(),
-        )[0, 1]))
+        out.append(
+            float(
+                np.corrcoef(
+                    era_frame.get_column("__v").to_numpy(),
+                    era_frame.get_column("target").to_numpy(),
+                )[0, 1]
+            )
+        )
     return np.asarray(out, dtype=float)
 
 
@@ -918,12 +1043,16 @@ def _ridge_stack_search(
     else:
         is_valid = np.zeros(meta_fit.height, dtype=bool)
     lgbm_model = construct_tree_model(
-        "lightgbm", lgbm_params, seed=seed,
-        n_features=len(kept_cols), device="cpu",
+        "lightgbm",
+        lgbm_params,
+        seed=seed,
+        n_features=len(kept_cols),
+        device="cpu",
     )
     if is_valid.any():
         lgbm_model.fit(
-            meta_fit_X[~is_valid], meta_fit_y[~is_valid],
+            meta_fit_X[~is_valid],
+            meta_fit_y[~is_valid],
             eval_set=[(meta_fit_X[is_valid], meta_fit_y[is_valid])],
             callbacks=[early_stopping(es_rounds, verbose=False)],
         )
@@ -964,15 +1093,26 @@ def _ridge_stack_search(
     if best[3] > 0.0:
         with_features = frame.join(
             val_rows.select([era_col, id_col, *feature_cols]),
-            on=[era_col, id_col], how="inner",
+            on=[era_col, id_col],
+            how="inner",
         )
-        frame = NeutralizationEngine().neutralize(
-            with_features, pred_col=pred_col, feature_cols=feature_cols,
-            era_col=era_col, proportion=best[3],
-        ).select([era_col, id_col, pred_col])
+        frame = (
+            NeutralizationEngine()
+            .neutralize(
+                with_features,
+                pred_col=pred_col,
+                feature_cols=feature_cols,
+                era_col=era_col,
+                proportion=best[3],
+            )
+            .select([era_col, id_col, pred_col])
+        )
     out = Ensembler().blend(
         Ensembler.rank_normalize(frame, pred_cols=[pred_col], era_col=era_col),
-        pred_cols=[pred_col], weights=[1.0], era_col=era_col, out_col=pred_col,
+        pred_cols=[pred_col],
+        weights=[1.0],
+        era_col=era_col,
+        out_col=pred_col,
     )
     return out.select([era_col, id_col, pred_col]).sort([era_col, id_col])
 
@@ -991,7 +1131,8 @@ def fleet_placement(corr: float, rungs: Mapping[int, float]) -> str:
     if not rungs:
         raise ValueError("rungs must be non-empty")
     if (
-        not isinstance(corr, (int, float)) or isinstance(corr, bool)
+        not isinstance(corr, (int, float))
+        or isinstance(corr, bool)
         or not -1.0 <= float(corr) <= 1.0
     ):
         raise ValueError(f"corr must be a float in [-1, 1], got {corr!r}")
@@ -1032,9 +1173,7 @@ class BenchmarkFleet:
         self._min_overlap_eras = int(min_overlap_eras)
         self._fast_mode = bool(fast_mode)
         self._schema_cols = pl.read_parquet_schema(data.validation_path).names()
-        self._target_cols = ["era", "id"] + [
-            c for c in self._schema_cols if c == "target" or c.startswith("target_")
-        ]
+        self._target_cols = ["era", "id", "target"]
 
     def _feature_cols(self, cell: FleetCellConfig) -> list[str]:
         return resolve_benchmark_feature_cols(
@@ -1072,14 +1211,17 @@ class BenchmarkFleet:
                 self._data.train_path, columns=["era", cell.targets[0]]
             )
             preds = generate_lagged_target_predictions(
-                train_targets, val_id, target=cell.targets[0],
+                train_targets,
+                val_id,
+                target=cell.targets[0],
                 window=int(params.get("window", 1)),
             )
             return preds, val_features
 
         if cell.model_kind == "ridge_stack":
             stack_targets = [
-                str(params["main_target"]), *map(str, params["specialists"])
+                str(params["main_target"]),
+                *map(str, params["specialists"]),
             ]
             train = pl.read_parquet(
                 self._data.train_path,
@@ -1089,18 +1231,20 @@ class BenchmarkFleet:
             val_cols = ["era", "id", *feature_cols]
             if is_search:
                 val_cols.append(str(params["main_target"]))
-            val = pl.read_parquet(
-                self._data.validation_path, columns=val_cols
-            )
+            val = pl.read_parquet(self._data.validation_path, columns=val_cols)
             preds = generate_ridge_stack_predictions(
-                train, val,
+                train,
+                val,
                 main_target=str(params["main_target"]),
                 specialists=[str(t) for t in params["specialists"]],
-                feature_cols=feature_cols, params=params, seed=cell.seed,
+                feature_cols=feature_cols,
+                params=params,
+                seed=cell.seed,
                 neutralization=float(cell.neutralization or 0.0),
                 val_targets=(
                     val.select(["era", "id", str(params["main_target"])])
-                    if is_search else None
+                    if is_search
+                    else None
                 ),
                 benchmarks=self._data.benchmarks,
             )
@@ -1115,16 +1259,24 @@ class BenchmarkFleet:
         )
         if cell.model_kind == "lightgbm":
             preds = generate_fleet_lightgbm_predictions(
-                train, val, targets=list(cell.targets), feature_cols=feature_cols,
-                params=params, seed=cell.seed,
+                train,
+                val,
+                targets=list(cell.targets),
+                feature_cols=feature_cols,
+                params=params,
+                seed=cell.seed,
                 neutralization=float(cell.neutralization or 0.0),
                 neutralizer_selection=cell.neutralizer_selection,
                 neutralizer_count=cell.neutralizer_count,
             )
         elif cell.model_kind == "xgboost":
             preds = generate_fleet_xgb_predictions(
-                train, val, targets=list(cell.targets), feature_cols=feature_cols,
-                params=params, seed=cell.seed,
+                train,
+                val,
+                targets=list(cell.targets),
+                feature_cols=feature_cols,
+                params=params,
+                seed=cell.seed,
                 neutralization=float(cell.neutralization or 0.0),
                 target_weights=(
                     dict(cell.target_weights) if cell.target_weights else None
@@ -1132,8 +1284,12 @@ class BenchmarkFleet:
             )
         elif cell.model_kind == "mlp":
             preds = generate_mlp_predictions(
-                train, val, target=cell.targets[0], feature_cols=feature_cols,
-                params=params, seed=cell.seed,
+                train,
+                val,
+                target=cell.targets[0],
+                feature_cols=feature_cols,
+                params=params,
+                seed=cell.seed,
                 neutralization=float(cell.neutralization or 0.0),
             )
         else:
@@ -1149,8 +1305,16 @@ class BenchmarkFleet:
         scorecards: dict[str, MetricScorecard] = {}
         sources: dict[str, str] = {}
         selection_bias: dict[str, bool] = {}
+        gate_policy = (
+            resolve_payout_policy(gate.payout_policy_id)
+            if gate is not None
+            else CLASSIC_LEGACY_V1
+        )
+        scoring_target = gate_policy.target or "target"
+        scoring_horizon = gate_policy.scoring_horizon or self._horizon
+        target_columns = list(dict.fromkeys([*self._target_cols, scoring_target]))
         val_targets = pl.read_parquet(
-            self._data.validation_path, columns=self._target_cols
+            self._data.validation_path, columns=target_columns
         )
         pf_map = era_payout_factors(
             Path(self._data.validation_path).parent / PAYOUT_FACTOR_FILENAME
@@ -1166,25 +1330,27 @@ class BenchmarkFleet:
                 targets=val_targets,
                 n_trials=1,
                 seed=cell.seed,
-                horizon=self._horizon,
-                main_target="target",
+                payout_policy=gate_policy,
+                horizon=scoring_horizon,
+                main_target=scoring_target,
                 benchmark_col=None,
-                pf=pf_map,
+                pf=pf_map if gate_policy.fixed_payout_factor is None else None,
                 n_boot=self._n_boot,
                 min_overlap_eras=self._min_overlap_eras,
                 model_id=cell.benchmark_id,
             )
             sources[cell.benchmark_id] = cell.source
             selection_bias[cell.benchmark_id] = (
-                cell.model_kind == "ridge_stack"
-                and cell.params.get("mode") == "search"
+                cell.model_kind == "ridge_stack" and cell.params.get("mode") == "search"
             )
             if cell.anchors:
                 measured = float(scorecards[cell.benchmark_id].corr.value)
                 for key, anchor in cell.anchors.items():
                     logger.info(
                         "    anchor %s=%.4f (measured=%.6f)",
-                        key, float(anchor), measured,
+                        key,
+                        float(anchor),
+                        measured,
                     )
         placements = (
             {
@@ -1243,18 +1409,23 @@ def select_fleet_cells(
 def fleet_frame(result: FleetResult) -> pl.DataFrame:
     """Scorecard rows + placement/selection-bias/gate-verdict columns."""
     frame = scorecards_to_frame(result.scorecards)
-    extra = pl.DataFrame({
-        "model_id": list(result.scorecards.keys()),
-        "source": [result.sources[mid] for mid in result.scorecards],
-        "placement": [result.placements[mid] for mid in result.scorecards],
-        "selection_bias": [
-            result.selection_bias[mid] for mid in result.scorecards
-        ],
-    })
+    extra = pl.DataFrame(
+        {
+            "model_id": list(result.scorecards.keys()),
+            "source": [result.sources[mid] for mid in result.scorecards],
+            "placement": [result.placements[mid] for mid in result.scorecards],
+            "selection_bias": [result.selection_bias[mid] for mid in result.scorecards],
+        }
+    )
     out = frame.join(extra, on="model_id", how="left")
     verdict_fields = (
-        "corr", "corr_sharpe_ac", "fnc", "deflated_sharpe",
-        "gain_to_pain_ratio", "cagr_1y", "turnover_mean",
+        "corr",
+        "corr_sharpe_ac",
+        "fnc",
+        "deflated_sharpe",
+        "gain_to_pain_ratio",
+        "cagr_1y",
+        "turnover_mean",
     )
     # Gate series must follow the joined frame's row order, which
     # ``scorecards_to_frame`` sorts by model_id.

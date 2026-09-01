@@ -39,16 +39,22 @@ def _build_train_frame() -> pl.DataFrame:
     rows: list[dict[str, float | str]] = []
     for era in range(1, 13):
         for idx in range(6):
-            f1 = (idx * 0.02)
-            f2 = ((idx % 3) * 0.01)
+            f1 = idx * 0.02
+            f2 = (idx % 3) * 0.01
             rows.append(
                 {
                     "era": str(era),
                     "id": f"{era}_{idx}",
                     "f1": f1,
                     "f2": f2,
-                    "target": (0.6 + 0.03 * era) * f1 - (0.3 + 0.01 * era) * f2 + 0.3 * f1 * f1 + 0.05 * era,
-                    "target_alt": (0.2 + 0.02 * era) * f1 + (0.7 - 0.01 * era) * f2 - 0.2 * f2 * f2 - 0.04 * era,
+                    "target": (0.6 + 0.03 * era) * f1
+                    - (0.3 + 0.01 * era) * f2
+                    + 0.3 * f1 * f1
+                    + 0.05 * era,
+                    "target_alt": (0.2 + 0.02 * era) * f1
+                    + (0.7 - 0.01 * era) * f2
+                    - 0.2 * f2 * f2
+                    - 0.04 * era,
                 }
             )
     return pl.DataFrame(rows)
@@ -79,16 +85,22 @@ def _write_synthetic_data(root) -> None:
             # exactly 0.0 — making the F-019 fidelity test's Spearman rho
             # undefined. Shifted features keep eras/assertions unchanged while
             # yielding non-degenerate predictions.
-            f1 = (idx * 0.02)
-            f2 = ((idx % 3) * 0.01)
+            f1 = idx * 0.02
+            f2 = (idx % 3) * 0.01
             val_rows.append(
                 {
                     "era": str(era),
                     "id": f"{era}_{idx}",
                     "f1": f1,
                     "f2": f2,
-                    "target": (0.6 + 0.03 * era) * f1 - (0.3 + 0.01 * era) * f2 + 0.3 * f1 * f1 + 0.05 * era,
-                    "target_alt": (0.2 + 0.02 * era) * f1 + (0.7 - 0.01 * era) * f2 - 0.2 * f2 * f2 - 0.04 * era,
+                    "target": (0.6 + 0.03 * era) * f1
+                    - (0.3 + 0.01 * era) * f2
+                    + 0.3 * f1 * f1
+                    + 0.05 * era,
+                    "target_alt": (0.2 + 0.02 * era) * f1
+                    + (0.7 - 0.01 * era) * f2
+                    - 0.2 * f2 * f2
+                    - 0.04 * era,
                 }
             )
     val = pl.DataFrame(val_rows)
@@ -120,8 +132,13 @@ def _config(tmp_path) -> ExperimentConfig:
             params={"n_estimators": 10, "learning_rate": 0.05, "min_data_in_leaf": 2},
         ),
         evaluation=EvalConfig(
-            backend="custom", main_target="target",
-            metrics=("corr", "fnc", "sharpe"),  # mmc is validation-only; guard rejects it without the validation stage
+            backend="custom",
+            main_target="target",
+            metrics=(
+                "corr",
+                "fnc",
+                "sharpe",
+            ),  # mmc is validation-only; guard rejects it without the validation stage
             validation_scorecard=False,
         ),
         run=RunConfig(
@@ -155,7 +172,10 @@ def test_runner_deploy_serializes_reloadable_predict(tmp_path) -> None:
     loaded_predict = load_predict(result.artifact.path)
     live_features = pd.DataFrame(
         # in-envelope live features (train support: f1 in [0, 0.1], f2 in [0, 0.02])
-        {"f1": [0.0, 0.02, 0.04, 0.06, 0.08, 0.1], "f2": [0.0, 0.01, 0.02, 0.0, 0.01, 0.02]},
+        {
+            "f1": [0.0, 0.02, 0.04, 0.06, 0.08, 0.1],
+            "f2": [0.0, 0.01, 0.02, 0.0, 0.01, 0.02],
+        },
         index=[f"id_{i}" for i in range(6)],
     )
     prediction = loaded_predict(live_features)
@@ -186,8 +206,17 @@ def test_deploy_predict_ranks_per_era_not_whole_frame(tmp_path) -> None:
         {
             "f1": [0.0, 0.02, 0.04, 0.06, 0.08, 0.1, 0.0, 0.03, 0.07],
             "f2": [0.0, 0.01, 0.02, 0.0, 0.01, 0.02, 0.02, 0.0, 0.01],
-            "era": ["0001", "0001", "0001", "0002", "0002", "0002",
-                    "0003", "0003", "0003"],
+            "era": [
+                "0001",
+                "0001",
+                "0001",
+                "0002",
+                "0002",
+                "0002",
+                "0003",
+                "0003",
+                "0003",
+            ],
         },
         index=[f"id_{i}" for i in range(9)],
     )
@@ -231,7 +260,10 @@ def _validation_config(tmp_path) -> ExperimentConfig:
         split=cfg.split,
         model=cfg.model,
         evaluation=EvalConfig(
-            backend="custom", main_target="target", validation_scorecard=True
+            backend="custom",
+            main_target="target",
+            payout_policy="classic_legacy_075_225_clip005_v1",
+            validation_scorecard=True,
         ),
         run=cfg.run,
     )
@@ -243,7 +275,9 @@ def test_validation_stage_produces_scorecard_and_purges_first_eras(tmp_path) -> 
 
     assert result.scorecard is not None
     assert result.scorecard.model_id == result.run_id
-    assert result.manifest["validation_purge_dropped_first_eras"] == cfg.split.purge_eras
+    assert (
+        result.manifest["validation_purge_dropped_first_eras"] == cfg.split.purge_eras
+    )
     assert result.validation_predictions is not None
     scored_eras = set(result.validation_predictions.get_column("era").to_list())
     assert "13" not in scored_eras  # purge_eras=1 -> era 13 dropped
@@ -267,9 +301,13 @@ def test_deployed_artifact_matches_validation_stage_predictions(tmp_path) -> Non
     out = loaded(features_pd)
 
     expected = result.validation_predictions.sort("id")
-    actual = pl.from_pandas(out.reset_index().rename(columns={"index": "id"})).sort("id")
-    rho, _ = spearmanr(expected.get_column("prediction").to_numpy(),
-                       actual.get_column("prediction").to_numpy())
+    actual = pl.from_pandas(out.reset_index().rename(columns={"index": "id"})).sort(
+        "id"
+    )
+    rho, _ = spearmanr(
+        expected.get_column("prediction").to_numpy(),
+        actual.get_column("prediction").to_numpy(),
+    )
     assert rho > 0.999
     assert np.allclose(
         expected.get_column("prediction").to_numpy(),
@@ -281,16 +319,23 @@ def test_deployed_artifact_matches_validation_stage_predictions(tmp_path) -> Non
 def test_single_fold_falls_back_to_uniform_weights(tmp_path, caplog) -> None:
     cfg = _config(tmp_path)
     single_fold = ExperimentConfig(
-        data=cfg.data, split=SplitConfig(scheme="anchor", purge_eras=1, n_folds=1),
+        data=cfg.data,
+        split=SplitConfig(scheme="anchor", purge_eras=1, n_folds=1),
         model=cfg.model,
         evaluation=EvalConfig(
-            backend="custom", main_target="target",
-            metrics=("corr", "fnc", "sharpe"),  # mmc is validation-only; guard rejects it without the validation stage
+            backend="custom",
+            main_target="target",
+            metrics=(
+                "corr",
+                "fnc",
+                "sharpe",
+            ),  # mmc is validation-only; guard rejects it without the validation stage
             validation_scorecard=False,
         ),
         run=cfg.run,
     )
     import logging
+
     with caplog.at_level(logging.WARNING, logger="nmr.runner"):
         result = ExperimentRunner(single_fold).run(deploy=False)
     assert result.manifest["weights"] == [0.5, 0.5]  # 2 components, uniform
@@ -300,14 +345,19 @@ def test_single_fold_falls_back_to_uniform_weights(tmp_path, caplog) -> None:
 def test_mmc_metric_requires_validation_scorecard(tmp_path) -> None:
     cfg = _config(tmp_path)
     bad = ExperimentConfig(
-        data=cfg.data, split=cfg.split, model=cfg.model,
+        data=cfg.data,
+        split=cfg.split,
+        model=cfg.model,
         evaluation=EvalConfig(
-            backend="custom", main_target="target",
-            validation_scorecard=False, metrics=("corr", "mmc", "sharpe"),
+            backend="custom",
+            main_target="target",
+            validation_scorecard=False,
+            metrics=("corr", "mmc", "sharpe"),
         ),
         run=cfg.run,
     )
     import pytest as _pytest
+
     with _pytest.raises(ValueError, match="mmc"):
         ExperimentRunner(bad).run(deploy=False)
 
@@ -339,11 +389,16 @@ def test_feature_subset_changes_run_id_and_uses_subset_features(tmp_path) -> Non
     plain = ExperimentRunner(cfg)
     subset_cfg = ExperimentConfig(
         data=DataConfig(
-            version=cfg.data.version, feature_set=cfg.data.feature_set,
-            feature_subset="sunshine", targets=cfg.data.targets,
+            version=cfg.data.version,
+            feature_set=cfg.data.feature_set,
+            feature_subset="sunshine",
+            targets=cfg.data.targets,
             data_dir=cfg.data.data_dir,
         ),
-        split=cfg.split, model=cfg.model, evaluation=cfg.evaluation, run=cfg.run,
+        split=cfg.split,
+        model=cfg.model,
+        evaluation=cfg.evaluation,
+        run=cfg.run,
     )
     subset = ExperimentRunner(subset_cfg)
     assert plain._run_id != subset._run_id
@@ -353,10 +408,7 @@ def test_feature_subset_changes_run_id_and_uses_subset_features(tmp_path) -> Non
 def test_compute_run_id_public_accessor_matches_private(tmp_path) -> None:
     cfg = _config(tmp_path)
     assert ExperimentRunner.compute_run_id(cfg) == ExperimentRunner(cfg)._run_id
-    assert (
-        ExperimentRunner.compute_run_id(cfg)
-        == ExperimentRunner.compute_run_id(cfg)
-    )
+    assert ExperimentRunner.compute_run_id(cfg) == ExperimentRunner.compute_run_id(cfg)
 
 
 def test_runner_catboost_end_to_end(tmp_path) -> None:
@@ -370,10 +422,15 @@ def test_runner_catboost_end_to_end(tmp_path) -> None:
     """
     cfg = _config(tmp_path)
     catboost_cfg = ExperimentConfig(
-        data=cfg.data, split=cfg.split,
-        model=ModelConfig(backend="catboost", preset="fast",
-                          params={"n_estimators": 40, "learning_rate": 0.05}),
-        evaluation=cfg.evaluation, run=cfg.run,
+        data=cfg.data,
+        split=cfg.split,
+        model=ModelConfig(
+            backend="catboost",
+            preset="fast",
+            params={"n_estimators": 40, "learning_rate": 0.05},
+        ),
+        evaluation=cfg.evaluation,
+        run=cfg.run,
     )
     runner = ExperimentRunner(catboost_cfg)
     first = runner.run(deploy=True)
@@ -399,7 +456,12 @@ def test_environment_fingerprint_lightgbm_shape(tmp_path) -> None:
     assert cfg.model.backend == "lightgbm"
     packages = ExperimentRunner._environment_fingerprint(cfg.model.backend)["packages"]
     assert set(packages) == {
-        "numpy", "polars", "pandas", "lightgbm", "xgboost", "optuna"
+        "numpy",
+        "polars",
+        "pandas",
+        "lightgbm",
+        "xgboost",
+        "optuna",
     }
     assert "catboost" not in packages
     # The no-arg call must be byte-identical to the backend-specific one.
@@ -414,14 +476,19 @@ def test_environment_fingerprint_catboost_includes_version(tmp_path) -> None:
     """
     cfg = _config(tmp_path)
     catboost_cfg = ExperimentConfig(
-        data=cfg.data, split=cfg.split,
-        model=ModelConfig(backend="catboost", preset="fast",
-                          params={"n_estimators": 40, "learning_rate": 0.05}),
-        evaluation=cfg.evaluation, run=cfg.run,
+        data=cfg.data,
+        split=cfg.split,
+        model=ModelConfig(
+            backend="catboost",
+            preset="fast",
+            params={"n_estimators": 40, "learning_rate": 0.05},
+        ),
+        evaluation=cfg.evaluation,
+        run=cfg.run,
     )
-    packages = ExperimentRunner._environment_fingerprint(
-        catboost_cfg.model.backend
-    )["packages"]
+    packages = ExperimentRunner._environment_fingerprint(catboost_cfg.model.backend)[
+        "packages"
+    ]
     assert "catboost" in packages
     assert isinstance(packages["catboost"], str) and packages["catboost"]
 
@@ -477,23 +544,21 @@ def test_validation_purge_keeps_zero_padded_eras(tmp_path) -> None:
     ):
         path = vd / name
         df = pl.read_parquet(path)
-        df = df.with_columns(
-            pl.col("era").cast(pl.Int32).cast(pl.String).str.zfill(4)
-        )
+        df = df.with_columns(pl.col("era").cast(pl.Int32).cast(pl.String).str.zfill(4))
         df.write_parquet(path)
 
     result = ExperimentRunner(cfg).run(deploy=True)
     assert result.validation_predictions is not None
-    scored = sorted(
-        result.validation_predictions.get_column("era").unique().to_list()
-    )
+    scored = sorted(result.validation_predictions.get_column("era").unique().to_list())
     assert scored == ["0014", "0015", "0016", "0017", "0018"]
 
 
 def test_predict_in_era_batches_empty_frame() -> None:
     from nmr.runner import _predict_in_era_batches
 
-    empty = pl.DataFrame({"era": [], "id": []}, schema={"era": pl.String, "id": pl.String})
+    empty = pl.DataFrame(
+        {"era": [], "id": []}, schema={"era": pl.String, "id": pl.String}
+    )
     out = _predict_in_era_batches(empty, ["f1"], lambda pdf: pdf, batch_eras=40)
     assert out.height == 0
     assert out.columns == ["era", "id", "prediction"]
@@ -692,14 +757,16 @@ def test_validation_stage_enables_horizon_diagnostics(tmp_path) -> None:
 
     data_root = tmp_path / "data" / "vtest"
     data_root.mkdir(parents=True)
-    (_json_features := {
-        "feature_sets": {
-            "small": ["f1", "f2"],
-            "medium": ["f1", "f2"],
-            "all": ["f1", "f2"],
-        },
-        "targets": ["target", "target_ender_20", "target_ender_60"],
-    }) and (data_root / "features.json").write_text(
+    (
+        _json_features := {
+            "feature_sets": {
+                "small": ["f1", "f2"],
+                "medium": ["f1", "f2"],
+                "all": ["f1", "f2"],
+            },
+            "targets": ["target", "target_ender_20", "target_ender_60"],
+        }
+    ) and (data_root / "features.json").write_text(
         _json.dumps(_json_features), encoding="utf-8"
     )
 
@@ -744,18 +811,28 @@ def test_validation_stage_enables_horizon_diagnostics(tmp_path) -> None:
 
     cfg = ExperimentConfig(
         data=DataConfig(
-            version="vtest", feature_set="small", targets=("target",),
+            version="vtest",
+            feature_set="small",
+            targets=("target",),
             data_dir=tmp_path / "data",
         ),
-        split=SplitConfig(scheme="walk_forward", purge_eras=1, embargo_eras=0, n_folds=2),
+        split=SplitConfig(
+            scheme="walk_forward", purge_eras=1, embargo_eras=0, n_folds=2
+        ),
         model=ModelConfig(
-            backend="lightgbm", preset="fast",
+            backend="lightgbm",
+            preset="fast",
             params={"n_estimators": 10, "learning_rate": 0.05, "min_data_in_leaf": 2},
         ),
         evaluation=EvalConfig(
-            backend="custom", main_target="target", validation_scorecard=True
+            backend="custom",
+            main_target="target",
+            payout_policy="classic_legacy_075_225_clip005_v1",
+            validation_scorecard=True,
         ),
-        run=RunConfig(seed=17, artifacts_dir=tmp_path / "artifacts", name="horizon-test"),
+        run=RunConfig(
+            seed=17, artifacts_dir=tmp_path / "artifacts", name="horizon-test"
+        ),
     )
     result = ExperimentRunner(cfg).run(deploy=True)
     reason = result.scorecard.horizon_reason
@@ -764,6 +841,58 @@ def test_validation_stage_enables_horizon_diagnostics(tmp_path) -> None:
         "runner did not load them"
     )
     assert reason != "benchmark unavailable"
+
+
+def test_validation_stage_uses_atomic_target_horizon_and_overlap(tmp_path) -> None:
+    cfg = _validation_config(tmp_path)
+    validation_rows = []
+    for era in range(13, 49):
+        for idx in range(6):
+            f1 = idx * 0.02
+            f2 = (idx % 3) * 0.01
+            validation_rows.append(
+                {
+                    "era": str(era),
+                    "id": f"{era}_{idx}",
+                    "f1": f1,
+                    "f2": f2,
+                    "target": (0.6 + 0.03 * era) * f1 - (0.3 + 0.01 * era) * f2,
+                    "target_alt": (0.2 + 0.02 * era) * f1 + (0.7 - 0.01 * era) * f2,
+                    "target_ender_60": (0.4 + 0.005 * era) * f1 - 0.2 * f2,
+                }
+            )
+    validation = pl.DataFrame(validation_rows)
+    validation.write_parquet(cfg.data.path("validation.parquet"))
+    validation.select(["era", "id"]).with_columns(
+        (pl.col("id").str.extract(r"_(\d+)$", 1).cast(pl.Float64) / 10.0).alias(
+            "numerai_meta_model"
+        )
+    ).write_parquet(cfg.data.path("meta_model.parquet"))
+    validation.select(["era", "id"]).with_columns(
+        (pl.col("id").str.extract(r"_(\d+)$", 1).cast(pl.Float64) / 10.0).alias(
+            "bench_cyrusd_20"
+        )
+    ).write_parquet(cfg.data.path("validation_benchmark_models.parquet"))
+    atomic_cfg = ExperimentConfig(
+        data=cfg.data,
+        split=cfg.split,
+        model=cfg.model,
+        evaluation=EvalConfig(
+            backend="custom",
+            main_target="target",
+            payout_policy="classic_atomic_ender60_r1343_v1",
+            validation_scorecard=True,
+        ),
+        run=cfg.run,
+    )
+
+    result = ExperimentRunner(atomic_cfg).run(deploy=True)
+
+    assert result.scorecard is not None
+    assert result.scorecard.payout_policy_id == "classic_atomic_ender60_r1343_v1"
+    assert result.scorecard.scoring_target == "target_ender_60"
+    assert result.scorecard.scoring_horizon == "60D"
+    assert result.manifest["validation_purge_dropped_first_eras"] == 16
 
 
 def test_run_id_changes_when_data_changes(tmp_path) -> None:
@@ -797,8 +926,12 @@ def test_run_id_sensitive_to_optuna_version(tmp_path, monkeypatch) -> None:
 
     cfg = _config(tmp_path)
     versions = {
-        "numpy": "1.0", "polars": "1.0", "pandas": "1.0",
-        "lightgbm": "1.0", "xgboost": "1.0", "optuna": "3.0",
+        "numpy": "1.0",
+        "polars": "1.0",
+        "pandas": "1.0",
+        "lightgbm": "1.0",
+        "xgboost": "1.0",
+        "optuna": "3.0",
     }
     monkeypatch.setattr(runner_mod, "_package_version", lambda name: versions.get(name))
     id_a = runner_mod.ExperimentRunner.compute_run_id(cfg)
@@ -824,7 +957,9 @@ def test_runner_and_research_share_oof_implementation(tmp_path) -> None:
         orch, train_df, feature_cols=["f1", "f2"], splitter=splitter, targets=targets
     )
     via_runner = runner._train_multi_target_oof(
-        train_df, feature_cols=["f1", "f2"], splitter=splitter,
+        train_df,
+        feature_cols=["f1", "f2"],
+        splitter=splitter,
         model_orchestrator=orch,
     )
     via_research = research_oof(
@@ -853,14 +988,18 @@ def test_runner_writes_and_reuses_oof_checkpoints(tmp_path, caplog) -> None:
     assert "loaded from checkpoint" in caplog.text
 
 
-def test_deploy_checkpoints_written_and_mixed_resume_bit_for_bit(tmp_path, caplog) -> None:
+def test_deploy_checkpoints_written_and_mixed_resume_bit_for_bit(
+    tmp_path, caplog
+) -> None:
     """Deploy mixed resume (spec 2026-08-23-checkpoint-coverage-extension):
     per-target pickled models persist under deploy_checkpoints/; deleting one
     .pkl and resuming refits only that target, and the deploy artifact's
     predictions are byte-identical to the uninterrupted run's."""
     live = pd.DataFrame(
-        {"f1": [0.0, 0.02, 0.04, 0.06, 0.08, 0.1],
-         "f2": [0.0, 0.01, 0.02, 0.0, 0.01, 0.02]},
+        {
+            "f1": [0.0, 0.02, 0.04, 0.06, 0.08, 0.1],
+            "f2": [0.0, 0.01, 0.02, 0.0, 0.01, 0.02],
+        },
         index=[f"id_{i}" for i in range(6)],
     )
 
@@ -1018,8 +1157,14 @@ def _write_synthetic_data_multi_batch(root, n_val_eras: int = 42) -> None:
                     "id": f"{era}_{idx}",
                     "f1": f1,
                     "f2": f2,
-                    "target": (0.6 + 0.03 * era) * f1 - (0.3 + 0.01 * era) * f2 + 0.3 * f1 * f1 + 0.05 * era,
-                    "target_alt": (0.2 + 0.02 * era) * f1 + (0.7 - 0.01 * era) * f2 - 0.2 * f2 * f2 - 0.04 * era,
+                    "target": (0.6 + 0.03 * era) * f1
+                    - (0.3 + 0.01 * era) * f2
+                    + 0.3 * f1 * f1
+                    + 0.05 * era,
+                    "target_alt": (0.2 + 0.02 * era) * f1
+                    + (0.7 - 0.01 * era) * f2
+                    - 0.2 * f2 * f2
+                    - 0.04 * era,
                 }
             )
     val = pl.DataFrame(val_rows)
@@ -1059,18 +1204,29 @@ def test_validation_checkpoints_mixed_resume_bit_for_bit(tmp_path, caplog) -> No
     _write_synthetic_data_multi_batch(data_root)
     cfg = ExperimentConfig(
         data=DataConfig(
-            version="vtest", feature_set="small",
-            targets=("target", "target_alt"), data_dir=data_root,
+            version="vtest",
+            feature_set="small",
+            targets=("target", "target_alt"),
+            data_dir=data_root,
         ),
-        split=SplitConfig(scheme="walk_forward", purge_eras=1, embargo_eras=0, n_folds=2),
+        split=SplitConfig(
+            scheme="walk_forward", purge_eras=1, embargo_eras=0, n_folds=2
+        ),
         model=ModelConfig(
-            backend="lightgbm", preset="fast", device="cpu",
+            backend="lightgbm",
+            preset="fast",
+            device="cpu",
             params={"n_estimators": 10, "learning_rate": 0.05, "min_data_in_leaf": 2},
         ),
         evaluation=EvalConfig(
-            backend="custom", main_target="target", validation_scorecard=True
+            backend="custom",
+            main_target="target",
+            payout_policy="classic_legacy_075_225_clip005_v1",
+            validation_scorecard=True,
         ),
-        run=RunConfig(seed=17, artifacts_dir=tmp_path / "artifacts", name="val-ckpt-test"),
+        run=RunConfig(
+            seed=17, artifacts_dir=tmp_path / "artifacts", name="val-ckpt-test"
+        ),
     )
 
     first = ExperimentRunner(cfg).run(deploy=False)

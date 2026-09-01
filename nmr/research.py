@@ -31,7 +31,25 @@ __all__ = [
     "NeutralizationFrontier",
     "neutralization_frontier",
     "feature_exposure_report",
+    "metric_direction",
 ]
+
+_METRIC_DIRECTIONS = {
+    "mean": "maximize",
+    "sharpe": "maximize",
+    "corr_sharpe_ac": "maximize",
+    "std": "minimize",
+    "max_drawdown": "minimize",
+}
+
+
+def metric_direction(metric: str) -> str:
+    try:
+        return _METRIC_DIRECTIONS[metric]
+    except KeyError as exc:
+        raise ValueError(
+            f"metric={metric!r} not in {sorted(_METRIC_DIRECTIONS)}"
+        ) from exc
 
 
 @dataclass(frozen=True)
@@ -51,6 +69,7 @@ class HyperparameterSweep:
     def __init__(self, base_config: ExperimentConfig, *, metric: str = "sharpe"):
         self._base_config = base_config
         self._metric = metric
+        self._direction = metric_direction(metric)
 
     def run(self, space: dict, *, n_trials: int, seed: int) -> SweepResult:
         if n_trials < 1:
@@ -78,9 +97,7 @@ class HyperparameterSweep:
         trials: list[dict[str, Any]] = []
         for trial_idx, params in enumerate(chosen):
             cfg = _override_config(self._base_config, params)
-            metric_value, moments = _held_out_metric_full(
-                cfg, metric_name=self._metric
-            )
+            metric_value, moments = _held_out_metric_full(cfg, metric_name=self._metric)
             trials.append(
                 {
                     "trial_id": trial_idx,
@@ -96,7 +113,8 @@ class HyperparameterSweep:
             )
 
         trial_df = pl.DataFrame(trials).sort(
-            ["metric_value", "trial_id"], descending=[True, False]
+            ["metric_value", "trial_id"],
+            descending=[self._direction == "maximize", False],
         )
         best_row = trial_df.row(0, named=True)
         best_params = json.loads(best_row["params_json"])
@@ -308,9 +326,7 @@ def _held_out_metric_full(
         )
         # numpy feature matrix (zero-copy float32) — the pandas path goes
         # through pyarrow and doubles memory (OOM at 3,555 features)
-        feature_frame = coerce_float32_features(
-            held_out_df, feature_cols
-        ).to_numpy()
+        feature_frame = coerce_float32_features(held_out_df, feature_cols).to_numpy()
         raw_pred = np.asarray(model.predict(feature_frame), dtype=float)
         anchor_predictions.append(
             held_out_df.select(["id", "era"]).with_columns(

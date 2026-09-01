@@ -38,8 +38,14 @@ def _build_train_frame() -> pl.DataFrame:
                     "id": f"{era}_{idx}",
                     "f1": f1,
                     "f2": f2,
-                    "target": (0.6 + 0.03 * era) * f1 - (0.3 + 0.01 * era) * f2 + 0.3 * f1 * f1 + 0.05 * era,
-                    "target_alt": (0.2 + 0.02 * era) * f1 + (0.7 - 0.01 * era) * f2 - 0.2 * f2 * f2 - 0.04 * era,
+                    "target": (0.6 + 0.03 * era) * f1
+                    - (0.3 + 0.01 * era) * f2
+                    + 0.3 * f1 * f1
+                    + 0.05 * era,
+                    "target_alt": (0.2 + 0.02 * era) * f1
+                    + (0.7 - 0.01 * era) * f2
+                    - 0.2 * f2 * f2
+                    - 0.04 * era,
                 }
             )
     return pl.DataFrame(rows)
@@ -70,8 +76,14 @@ def _write_synthetic_data(root) -> None:
                     "id": f"{era}_{idx}",
                     "f1": f1,
                     "f2": f2,
-                    "target": (0.6 + 0.03 * era) * f1 - (0.3 + 0.01 * era) * f2 + 0.3 * f1 * f1 + 0.05 * era,
-                    "target_alt": (0.2 + 0.02 * era) * f1 + (0.7 - 0.01 * era) * f2 - 0.2 * f2 * f2 - 0.04 * era,
+                    "target": (0.6 + 0.03 * era) * f1
+                    - (0.3 + 0.01 * era) * f2
+                    + 0.3 * f1 * f1
+                    + 0.05 * era,
+                    "target_alt": (0.2 + 0.02 * era) * f1
+                    + (0.7 - 0.01 * era) * f2
+                    - 0.2 * f2 * f2
+                    - 0.04 * era,
                 }
             )
     val = pl.DataFrame(val_rows)
@@ -103,9 +115,14 @@ def _config(tmp_path) -> ExperimentConfig:
             params={"n_estimators": 10, "learning_rate": 0.05, "min_data_in_leaf": 2},
         ),
         evaluation=EvalConfig(
-            backend="custom", main_target="target", validation_scorecard=True
+            backend="custom",
+            main_target="target",
+            payout_policy="classic_legacy_075_225_clip005_v1",
+            validation_scorecard=True,
         ),
-        run=RunConfig(seed=17, artifacts_dir=tmp_path / "artifacts", name="layout-test"),
+        run=RunConfig(
+            seed=17, artifacts_dir=tmp_path / "artifacts", name="layout-test"
+        ),
     )
 
 

@@ -34,4 +34,5 @@ model:
 evaluation:
   backend: custom
   main_target: target_cyrusd_20
+  payout_policy: classic_atomic_ender60_r1343_v1
   metrics: [corr, mmc, fnc, sharpe]

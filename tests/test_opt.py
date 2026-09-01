@@ -9,6 +9,26 @@ import polars as pl
 import pytest
 
 from nmr.opt import _parse_space
+from nmr.research import metric_direction
+
+
+@pytest.mark.parametrize(
+    ("metric", "expected"),
+    [
+        ("mean", "maximize"),
+        ("sharpe", "maximize"),
+        ("corr_sharpe_ac", "maximize"),
+        ("std", "minimize"),
+        ("max_drawdown", "minimize"),
+    ],
+)
+def test_metric_direction_is_explicit(metric: str, expected: str) -> None:
+    assert metric_direction(metric) == expected
+
+
+def test_metric_direction_rejects_unknown_metric() -> None:
+    with pytest.raises(ValueError, match="metric"):
+        metric_direction("looks_profitable")
 
 
 def test_parse_space_accepts_all_kinds() -> None:
@@ -28,8 +48,12 @@ def test_parse_space_accepts_all_kinds() -> None:
 
 
 def test_parse_space_int_step() -> None:
-    parsed = {p.name: p for p in _parse_space(
-        {"n_estimators": {"kind": "int", "low": 100, "high": 10000, "step": 100}})}
+    parsed = {
+        p.name: p
+        for p in _parse_space(
+            {"n_estimators": {"kind": "int", "low": 100, "high": 10000, "step": 100}}
+        )
+    }
     assert parsed["n_estimators"].step == 100
 
 
@@ -107,7 +131,9 @@ def _sweep_config(tmp_path, *, n_train_eras: int = 12):
                     "id": f"{era}_{idx}",
                     "f1": f1,
                     "f2": f2,
-                    "target": 0.6 * f1 - 0.3 * f2 + (0.01 + 0.02 * (era % 3)) * np.sin(idx),
+                    "target": 0.6 * f1
+                    - 0.3 * f2
+                    + (0.01 + 0.02 * (era % 3)) * np.sin(idx),
                     "target_alt": 0.2 * f1 + 0.7 * f2 - 0.03 * np.cos(idx),
                 }
             )
@@ -132,7 +158,8 @@ def _sweep_config(tmp_path, *, n_train_eras: int = 12):
                     "id": f"{era}_{idx}",
                     "f1": f1,
                     "f2": f2,
-                    "target": 0.6 * f1 - 0.3 * f2
+                    "target": 0.6 * f1
+                    - 0.3 * f2
                     + (0.01 + 0.02 * ((era - shift) % 3)) * np.sin(idx),
                     "target_alt": 0.2 * f1 + 0.7 * f2 - 0.03 * np.cos(idx),
                 }
@@ -162,13 +189,12 @@ def _sweep_config(tmp_path, *, n_train_eras: int = 12):
             params={"n_estimators": 10, "learning_rate": 0.05, "min_data_in_leaf": 2},
         ),
         evaluation=EvalConfig(
-            backend="custom", main_target="target",
+            backend="custom",
+            main_target="target",
             metrics=("corr", "fnc", "sharpe"),
             validation_scorecard=False,
         ),
-        run=RunConfig(
-            seed=17, artifacts_dir=tmp_path / "artifacts", name="opt-test"
-        ),
+        run=RunConfig(seed=17, artifacts_dir=tmp_path / "artifacts", name="opt-test"),
     )
 
 
@@ -214,8 +240,13 @@ def test_bayesian_sweep_rejects_parallel_trials(tmp_path) -> None:
 
     cfg = _sweep_config(tmp_path)
     with pytest.raises(ValueError, match="n_jobs"):
-        bayesian_sweep(cfg, {"num_leaves": {"kind": "int", "low": 4, "high": 32}},
-                       n_trials=2, seed=7, n_jobs=2)
+        bayesian_sweep(
+            cfg,
+            {"num_leaves": {"kind": "int", "low": 4, "high": 32}},
+            n_trials=2,
+            seed=7,
+            n_jobs=2,
+        )
 
 
 def test_bayesian_sweep_supports_corr_sharpe_ac_metric(tmp_path, monkeypatch) -> None:
@@ -238,10 +269,10 @@ def test_bayesian_sweep_supports_corr_sharpe_ac_metric(tmp_path, monkeypatch) ->
     assert result.trials.get_column("metric").to_list() == ["corr_sharpe_ac"] * 2
     values = result.trials.get_column("metric_value")
     assert values.is_finite().all()
-    assert (values != 0.0).all()          # every trial took the real AC path
+    assert (values != 0.0).all()  # every trial took the real AC path
     series = np.asarray(list(captured["per_era"].values()), dtype=float)
-    assert series.size >= 5               # 20D bandwidth floor: >= 5 held-out eras
-    assert np.std(series) > 0.0           # per-era corr genuinely varies
+    assert series.size >= 5  # 20D bandwidth floor: >= 5 held-out eras
+    assert np.std(series) > 0.0  # per-era corr genuinely varies
 
 
 def test_bayesian_sweep_failed_trial_recorded_and_continues(tmp_path) -> None:
@@ -255,11 +286,14 @@ def test_bayesian_sweep_failed_trial_recorded_and_continues(tmp_path) -> None:
     # (probe-verified), letting the anchored trial 0 SUCCEED. Disabling the
     # anchor keeps every trial inside the invalid range.
     space = {"num_leaves": {"kind": "int", "low": -8, "high": -1}}
-    result = bayesian_sweep(cfg, space, n_trials=3, seed=7, n_startup_trials=2,
-                            enqueue_base_config=False)
-    assert result.trials.height == 3                     # synchronized with study.trials
+    result = bayesian_sweep(
+        cfg, space, n_trials=3, seed=7, n_startup_trials=2, enqueue_base_config=False
+    )
+    assert result.trials.height == 3  # synchronized with study.trials
     assert result.trials.get_column("metric_value").null_count() == 3
-    assert result.best_params == {} or result.best_value is not None  # best may be empty
+    assert (
+        result.best_params == {} or result.best_value is not None
+    )  # best may be empty
 
 
 def test_bayesian_sweep_metrics_reject_unknown(tmp_path) -> None:
@@ -267,8 +301,13 @@ def test_bayesian_sweep_metrics_reject_unknown(tmp_path) -> None:
 
     cfg = _sweep_config(tmp_path)
     with pytest.raises(ValueError, match="metric"):
-        bayesian_sweep(cfg, {"num_leaves": {"kind": "int", "low": 4, "high": 32}},
-                       n_trials=2, seed=7, metric="corr")
+        bayesian_sweep(
+            cfg,
+            {"num_leaves": {"kind": "int", "low": 4, "high": 32}},
+            n_trials=2,
+            seed=7,
+            metric="corr",
+        )
 
 
 def test_bayesian_sweep_disables_baseline_anchor(tmp_path, monkeypatch) -> None:
@@ -292,14 +331,15 @@ def test_bayesian_sweep_disables_baseline_anchor(tmp_path, monkeypatch) -> None:
         orig_enqueue(self, params, *args, **kwargs)
 
     monkeypatch.setattr(optuna.Study, "enqueue_trial", recording)
-    result = bayesian_sweep(cfg, space, n_trials=3, seed=7, n_startup_trials=2,
-                            enqueue_base_config=False)
-    assert enqueue_calls == []                     # anchor never enqueued
+    result = bayesian_sweep(
+        cfg, space, n_trials=3, seed=7, n_startup_trials=2, enqueue_base_config=False
+    )
+    assert enqueue_calls == []  # anchor never enqueued
     resolved = resolve_model_params(cfg.model.preset, cfg.model.params)
     trial0 = json.loads(
         result.trials.filter(pl.col("trial_id") == 0).get_column("params_json")[0]
     )
-    assert trial0["num_leaves"] != resolved["num_leaves"]   # not the baseline
+    assert trial0["num_leaves"] != resolved["num_leaves"]  # not the baseline
 
 
 def test_bayesian_sweep_sampled_params_respect_space(tmp_path) -> None:
@@ -316,14 +356,15 @@ def test_bayesian_sweep_sampled_params_respect_space(tmp_path) -> None:
         "num_leaves": {"kind": "int", "low": 4, "high": 32, "step": 4},
         "boosting": {"kind": "categorical", "choices": ["gbdt", "dart"]},
     }
-    result = bayesian_sweep(cfg, space, n_trials=8, seed=7, n_startup_trials=2,
-                            enqueue_base_config=False)
+    result = bayesian_sweep(
+        cfg, space, n_trials=8, seed=7, n_startup_trials=2, enqueue_base_config=False
+    )
     for row in result.trials.get_column("params_json"):
         params = json.loads(row)
         assert 0.01 <= params["learning_rate"] <= 0.1
         num_leaves = params["num_leaves"]
         assert 4 <= num_leaves <= 32
-        assert (num_leaves - 4) % 4 == 0           # step=4 respected
+        assert (num_leaves - 4) % 4 == 0  # step=4 respected
         assert params["boosting"] in ("gbdt", "dart")
 
 
@@ -354,6 +395,7 @@ def test_bayesian_sweep_forwards_n_startup_trials_to_sampler(
     )
     assert seen["n_startup_trials"] == 2
 
+
 def test_hyperparameter_sweep_trials_carry_held_out_moments(tmp_path) -> None:
     from nmr.research import HyperparameterSweep
 
@@ -366,20 +408,23 @@ def test_hyperparameter_sweep_trials_carry_held_out_moments(tmp_path) -> None:
     assert result.trials["ic_n_eras"].min() >= 1
     assert result.trials["ic_std"].min() > 0.0
 
+
 def test_sweep_dsr_computes_fleet_deflation() -> None:
     from nmr.inference import deflated_sharpe
     from nmr.opt import sweep_dsr
 
-    trials = pl.DataFrame({
-        "trial_id": [0, 1, 2],
-        "metric_value": [0.4, 0.6, 0.5],
-        "ic_sharpe": [0.4, 0.6, 0.5],
-        "ic_skew": [0.0, 0.1, -0.1],
-        "ic_kurt": [3.0, 3.2, 2.9],
-        "ic_n_eras": [600, 649, 620],
-        "ic_std": [0.1, 0.1, 0.1],
-        "metric": ["sharpe", "sharpe", "sharpe"],
-    })
+    trials = pl.DataFrame(
+        {
+            "trial_id": [0, 1, 2],
+            "metric_value": [0.4, 0.6, 0.5],
+            "ic_sharpe": [0.4, 0.6, 0.5],
+            "ic_skew": [0.0, 0.1, -0.1],
+            "ic_kurt": [3.0, 3.2, 2.9],
+            "ic_n_eras": [600, 649, 620],
+            "ic_std": [0.1, 0.1, 0.1],
+            "metric": ["sharpe", "sharpe", "sharpe"],
+        }
+    )
     out = sweep_dsr(trials)
     var = np.var([0.4, 0.6, 0.5], ddof=1)
     expected = deflated_sharpe(
@@ -390,30 +435,37 @@ def test_sweep_dsr_computes_fleet_deflation() -> None:
     assert "dsr_reason" in out.columns
     assert out["dsr_n_trials"][0] == 3
 
+
 def test_sweep_dsr_zero_variance_guard() -> None:
     from nmr.opt import sweep_dsr
 
-    trials = pl.DataFrame({
-        "trial_id": [0, 1, 2],
-        "metric_value": [0.5, 0.5, 0.5],
-        "ic_sharpe": [0.5, 0.5, 0.5],
-        "ic_skew": [0.0, 0.0, 0.0],
-        "ic_kurt": [3.0, 3.0, 3.0],
-        "ic_n_eras": [600, 600, 600],
-        "ic_std": [0.1, 0.1, 0.1],
-        "metric": ["sharpe"] * 3,
-    })
+    trials = pl.DataFrame(
+        {
+            "trial_id": [0, 1, 2],
+            "metric_value": [0.5, 0.5, 0.5],
+            "ic_sharpe": [0.5, 0.5, 0.5],
+            "ic_skew": [0.0, 0.0, 0.0],
+            "ic_kurt": [3.0, 3.0, 3.0],
+            "ic_n_eras": [600, 600, 600],
+            "ic_std": [0.1, 0.1, 0.1],
+            "metric": ["sharpe"] * 3,
+        }
+    )
     out = sweep_dsr(trials)
     assert out["dsr_sweep_aware"].null_count() == 3
     assert (out["dsr_reason"] == "zero_cross_trial_sharpe_variance").all()
+
 
 def test_bayesian_sweep_trials_carry_held_out_moments(tmp_path) -> None:
     from nmr.opt import bayesian_sweep
 
     cfg = _sweep_config(tmp_path)
     result = bayesian_sweep(
-        cfg, {"num_leaves": {"kind": "int", "low": 8, "high": 16}},
-        n_trials=2, seed=7, n_startup_trials=1,
+        cfg,
+        {"num_leaves": {"kind": "int", "low": 8, "high": 16}},
+        n_trials=2,
+        seed=7,
+        n_startup_trials=1,
     )
     for col in ("ic_sharpe", "ic_skew", "ic_kurt", "ic_n_eras", "ic_std"):
         assert col in result.trials.columns, col

@@ -1,24 +1,12 @@
-"""Payout proxy and downside diagnostics for Evaluation Suite v2.
+"""Versioned payout policies and downside diagnostics.
 
-This module converts per-era CORR/MMC series into an economic payout proxy and
-downside shape metrics. Inference statistics (bootstrap CI, AC-adjusted Sharpe,
-Deflated Sharpe) are delegated to `nmr.inference`.
+Current Classic Atomic payout is bound to Ender-60 and computed as
+``clip(3 * CORR60 + 15 * MMC60, -1, 1)``. The legacy payout-factor formula is
+retained only as an explicitly named historical policy.
 
-Per-era payout (Numerai round semantics):
-
-    pi_e = clip(PF_e * (0.75 * CORR_e + 2.25 * MMC_e), -0.05, +0.05)
-
-``PF_e`` is the round's payout factor from ``payout_factor_historic.csv``
-(Numerai's published historic payout factors), aligned by ``int(era) == round``.
-Eras without a recorded factor use the explicit fallback ``PF_e = 1.0`` — a
-fallback/synthetic-test default, never the historical 86-era assumption.
-``payout_report`` derives mean payout, CAGR, drawdown, burn rate, and the other
-economic metrics from the era-specific clipped returns.
-
-Terminal-tranche accounting convention (simulator): tranches still locked at
-the end of the series are carried at par principal in ``final_equity`` and the
-equity curve — no mark-to-market and no unrealized payoff for the final
-``horizon_eras`` tranches.
+Weekly validation-era returns cannot reconstruct Atomic's 64 concurrent daily
+round positions. Atomic reports therefore leave overlapping capital metrics
+unavailable instead of publishing a misleading simulation.
 """
 
 from __future__ import annotations
@@ -30,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from scipy.optimize import minimize_scalar
 
 from nmr.inference import (
     BootstrapCI,
@@ -42,6 +31,11 @@ from nmr.inference import (
 )
 
 __all__ = [
+    "PayoutPolicy",
+    "CLASSIC_ATOMIC_ENDER60_R1343_V1",
+    "CLASSIC_LEGACY_V1",
+    "PAYOUT_POLICIES",
+    "resolve_payout_policy",
     "PayoutSeries",
     "PayoutResult",
     "OverlappingSimulationResult",
@@ -65,6 +59,60 @@ __all__ = [
 
 
 @dataclass(frozen=True)
+class PayoutPolicy:
+    policy_id: str
+    target: str | None
+    scoring_horizon: Horizon | None
+    corr_multiplier: float
+    mmc_multiplier: float
+    clip: float
+    fixed_payout_factor: float | None
+    concurrent_positions: int | None
+    effective_from_round: int | None
+
+
+CLASSIC_ATOMIC_ENDER60_R1343_V1 = PayoutPolicy(
+    policy_id="classic_atomic_ender60_r1343_v1",
+    target="target_ender_60",
+    scoring_horizon="60D",
+    corr_multiplier=3.0,
+    mmc_multiplier=15.0,
+    clip=1.0,
+    fixed_payout_factor=1.0,
+    concurrent_positions=64,
+    effective_from_round=1343,
+)
+
+CLASSIC_LEGACY_V1 = PayoutPolicy(
+    policy_id="classic_legacy_075_225_clip005_v1",
+    target=None,
+    scoring_horizon=None,
+    corr_multiplier=0.75,
+    mmc_multiplier=2.25,
+    clip=0.05,
+    fixed_payout_factor=None,
+    concurrent_positions=None,
+    effective_from_round=None,
+)
+
+PAYOUT_POLICIES = {
+    policy.policy_id: policy
+    for policy in (CLASSIC_ATOMIC_ENDER60_R1343_V1, CLASSIC_LEGACY_V1)
+}
+
+
+def resolve_payout_policy(policy: PayoutPolicy | str) -> PayoutPolicy:
+    if isinstance(policy, PayoutPolicy):
+        return policy
+    try:
+        return PAYOUT_POLICIES[policy]
+    except KeyError as exc:
+        raise ValueError(
+            f"unknown payout policy {policy!r}; valid policies: {tuple(PAYOUT_POLICIES)}"
+        ) from exc
+
+
+@dataclass(frozen=True)
 class PayoutSeries:
     eras: tuple[str, ...]
     raw: np.ndarray
@@ -73,6 +121,9 @@ class PayoutSeries:
 
 @dataclass(frozen=True)
 class PayoutResult:
+    policy_id: str
+    target: str | None
+    scoring_horizon: Horizon
     n_eras: int
     pf: float
     mean_payout: float
@@ -90,6 +141,7 @@ class PayoutResult:
     gain_to_pain_ratio: float
     kelly_fraction: float
     overlapping_sim: OverlappingSimulationResult | None = None
+    capital_metrics_reason: str | None = None
 
 
 def _as_finite_1d(
@@ -174,16 +226,33 @@ def payout_series(
     corr_by_era: Mapping[str, float],
     mmc_by_era: Mapping[str, float],
     *,
-    pf: Mapping[str, float] | float = 1.0,
-    clip: float = 0.05,
+    policy: PayoutPolicy | str,
+    pf: Mapping[str, float] | float | None = None,
+    clip: float | None = None,
 ) -> PayoutSeries:
-    """Per-era payout series: ``raw_e = PF_e * (0.75*CORR_e + 2.25*MMC_e)``.
+    """Compute a per-era payout series under an explicit versioned policy.
 
-    ``pf`` is either a scalar (uniform factor — synthetic-test default) or a
-    per-era mapping keyed by era string; eras absent from the mapping use the
-    explicit fallback ``PF_e = 1.0``. Applied factors must be finite and > 0.
+    Historical payout factors and clip overrides are accepted only by the
+    legacy policy. Atomic fixes both values as part of its economic contract.
     """
-    clip_f = float(clip)
+    resolved = resolve_payout_policy(policy)
+    if resolved.fixed_payout_factor is not None:
+        if pf is not None and pf != resolved.fixed_payout_factor:
+            raise ValueError(
+                f"policy {resolved.policy_id} has fixed payout factor "
+                f"{resolved.fixed_payout_factor}; pf overrides are forbidden"
+            )
+        if clip is not None and float(clip) != resolved.clip:
+            raise ValueError(
+                f"policy {resolved.policy_id} has fixed clip {resolved.clip}; "
+                "clip overrides are forbidden"
+            )
+        effective_pf: Mapping[str, float] | float = resolved.fixed_payout_factor
+        clip_f = resolved.clip
+    else:
+        effective_pf = 1.0 if pf is None else pf
+        clip_f = resolved.clip if clip is None else float(clip)
+
     if not np.isfinite(clip_f) or clip_f <= 0.0:
         raise ValueError("clip must be finite and > 0")
 
@@ -198,21 +267,25 @@ def payout_series(
     if not np.isfinite(corr).all() or not np.isfinite(mmc).all():
         raise ValueError("corr_by_era and mmc_by_era must contain only finite values")
 
-    if isinstance(pf, Mapping):
-        pf_map = {_normalize_era_key(k): float(v) for k, v in pf.items()}
+    if isinstance(effective_pf, Mapping):
+        pf_map = {_normalize_era_key(k): float(v) for k, v in effective_pf.items()}
         for era, value in pf_map.items():
             if not math.isfinite(value) or value <= 0.0:
-                raise ValueError(f"pf for era {era!r} must be finite and > 0, got {value}")
+                raise ValueError(
+                    f"pf for era {era!r} must be finite and > 0, got {value}"
+                )
         pf_values = np.asarray(
             [pf_map.get(_normalize_era_key(era), 1.0) for era in eras], dtype=float
         )
     else:
-        pf_f = float(pf)
+        pf_f = float(effective_pf)
         if not np.isfinite(pf_f) or pf_f <= 0.0:
             raise ValueError("pf must be finite and > 0")
         pf_values = np.full(len(eras), pf_f, dtype=float)
 
-    raw = pf_values * ((0.75 * corr) + (2.25 * mmc))
+    raw = pf_values * (
+        (resolved.corr_multiplier * corr) + (resolved.mmc_multiplier * mmc)
+    )
     clipped = np.clip(raw, -clip_f, clip_f)
     return PayoutSeries(eras=eras, raw=raw, clipped=clipped)
 
@@ -256,21 +329,40 @@ def gain_to_pain_ratio(
 
 
 def kelly_fraction(
-    raw: np.ndarray | list[float] | tuple[float, ...],
+    returns: np.ndarray | list[float] | tuple[float, ...],
 ) -> float:
-    """Bounded discrete Kelly stake fraction: min(1.0, max(0.0, mu / var)).
+    """Bounded stake fraction maximizing empirical mean log growth.
 
-    Computed on the RAW (unclipped) payout series. The clipped series has
-    Popoviciu-bounded variance (sigma^2 <= 0.0025 under the +-5% clip), so
-    mu/sigma^2 there saturates at 1.0 for every viable model and carries no
-    discrimination. ``payout_report`` passes ``series.raw``.
+    The domain is ``0 <= f <= 1`` and is tightened so every observed wealth
+    multiplier ``1 + f*r`` remains strictly positive. Callers must pass the
+    policy-clipped return series, not an unpayable raw score proxy.
     """
-    x = _as_finite_1d(raw, name="raw")
-    mu = float(np.mean(x))
-    var = float(np.var(x, ddof=0))
-    if var == 0.0 or mu <= 0.0:
+    x = _as_finite_1d(returns, name="returns")
+    if float(np.mean(x)) <= 0.0 or np.all(x == x[0]):
         return 0.0
-    return float(min(1.0, max(0.0, mu / var)))
+    negative = x[x < 0.0]
+    upper = 1.0
+    if negative.size:
+        upper = min(upper, float(np.min(-1.0 / negative)))
+        upper = float(np.nextafter(upper, 0.0))
+    if upper <= 0.0:
+        return 0.0
+
+    def objective(fraction: float) -> float:
+        wealth = 1.0 + fraction * x
+        if np.any(wealth <= 0.0):
+            return float("inf")
+        return -float(np.mean(np.log(wealth)))
+
+    result = minimize_scalar(
+        objective,
+        bounds=(0.0, upper),
+        method="bounded",
+        options={"xatol": 1e-12},
+    )
+    candidates = [0.0, upper, float(result.x)]
+    best = min(candidates, key=objective)
+    return float(best if objective(best) < 0.0 else 0.0)
 
 
 def simulate_overlapping_portfolio(
@@ -319,9 +411,7 @@ def simulate_overlapping_portfolio(
         locked_capital = sum(p for _, p in active_stakes)
         total_equity = cash + locked_capital
         equity_curve[t] = total_equity
-        utilization[t] = (
-            locked_capital / total_equity if total_equity > 0 else 0.0
-        )
+        utilization[t] = locked_capital / total_equity if total_equity > 0 else 0.0
 
         allocated = min(cash, total_equity / float(horizon))
         cash -= allocated
@@ -329,8 +419,7 @@ def simulate_overlapping_portfolio(
 
     final_eq = float(equity_curve[-1])
     cagr = (
-        float(final_eq / initial_capital) ** (float(eras_per_year) / float(n))
-        - 1.0
+        float(final_eq / initial_capital) ** (float(eras_per_year) / float(n)) - 1.0
         if final_eq > 0.0
         else -1.0
     )
@@ -383,7 +472,7 @@ def sortino(
 
 def max_drawdown(series: np.ndarray | list[float] | tuple[float, ...]) -> float:
     x = _as_finite_1d(series, name="series")
-    cumulative = np.cumsum(x)
+    cumulative = np.concatenate(([0.0], np.cumsum(x)))
     running_max = np.maximum.accumulate(cumulative)
     drawdowns = running_max - cumulative
     return float(np.max(drawdowns))
@@ -415,7 +504,7 @@ def max_burn_streak(series: np.ndarray | list[float] | tuple[float, ...]) -> int
 
 def time_to_recovery(series: np.ndarray | list[float] | tuple[float, ...]) -> int:
     x = _as_finite_1d(series, name="series")
-    cumulative = np.cumsum(x)
+    cumulative = np.concatenate(([0.0], np.cumsum(x)))
     running_max = np.maximum.accumulate(cumulative)
     underwater = cumulative < running_max
 
@@ -435,18 +524,31 @@ def payout_report(
     corr_by_era: Mapping[str, float],
     mmc_by_era: Mapping[str, float],
     *,
+    policy: PayoutPolicy | str,
     horizon: Horizon,
     n_trials: int,
     seed: int,
-    pf: Mapping[str, float] | float = 1.0,
-    clip: float = 0.05,
+    pf: Mapping[str, float] | float | None = None,
+    clip: float | None = None,
     n_boot: int = 1000,
     alpha: float = 0.05,
     trials_sr_var: float | None = None,
     sr0_benchmark: float = 0.0,
     block_len: int | None = None,
 ) -> PayoutResult:
-    series = payout_series(corr_by_era, mmc_by_era, pf=pf, clip=clip)
+    resolved = resolve_payout_policy(policy)
+    if resolved.scoring_horizon is not None and horizon != resolved.scoring_horizon:
+        raise ValueError(
+            f"policy {resolved.policy_id} requires horizon="
+            f"{resolved.scoring_horizon}, got {horizon}"
+        )
+    series = payout_series(
+        corr_by_era,
+        mmc_by_era,
+        policy=resolved,
+        pf=pf,
+        clip=clip,
+    )
     n = len(series.eras)
     if n < 2:
         raise ValueError("payout_report requires at least 2 overlapping eras")
@@ -458,15 +560,14 @@ def payout_report(
 
     # PayoutResult.pf is a scalar summary: the uniform factor when ``pf`` is a
     # scalar, else the mean of the per-era factors applied on the scored eras.
-    if isinstance(pf, Mapping):
-        pf_map = {_normalize_era_key(k): float(v) for k, v in pf.items()}
+    effective_pf = resolved.fixed_payout_factor if pf is None else pf
+    if isinstance(effective_pf, Mapping):
+        pf_map = {_normalize_era_key(k): float(v) for k, v in effective_pf.items()}
         pf_summary = float(
-            np.mean(
-                [pf_map.get(_normalize_era_key(era), 1.0) for era in series.eras]
-            )
+            np.mean([pf_map.get(_normalize_era_key(era), 1.0) for era in series.eras])
         )
     else:
-        pf_summary = float(pf)
+        pf_summary = float(1.0 if effective_pf is None else effective_pf)
 
     payout_ci = block_bootstrap_ci(
         series.clipped,
@@ -495,8 +596,11 @@ def payout_report(
         raise ValueError("mmc_by_era must contain only finite values on aligned eras")
 
     clipped = series.clipped
-    horizon_eras = _HORIZON_ERAS[horizon]
+    supports_era_level_capital_sim = resolved.concurrent_positions is None
     return PayoutResult(
+        policy_id=resolved.policy_id,
+        target=resolved.target,
+        scoring_horizon=horizon,
         n_eras=n,
         pf=pf_summary,
         mean_payout=float(np.mean(clipped)),
@@ -512,8 +616,15 @@ def payout_report(
         time_to_recovery=time_to_recovery(clipped),
         cagr_1y=annual_compounded_return(clipped),
         gain_to_pain_ratio=gain_to_pain_ratio(clipped),
-        kelly_fraction=kelly_fraction(series.raw),
-        overlapping_sim=simulate_overlapping_portfolio(
-            clipped, horizon_eras=horizon_eras
+        kelly_fraction=kelly_fraction(series.clipped),
+        overlapping_sim=(
+            simulate_overlapping_portfolio(clipped, horizon_eras=_HORIZON_ERAS[horizon])
+            if supports_era_level_capital_sim
+            else None
+        ),
+        capital_metrics_reason=(
+            None
+            if supports_era_level_capital_sim
+            else "round_level_returns_unavailable"
         ),
     )

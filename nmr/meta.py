@@ -18,7 +18,12 @@ import polars as pl
 
 from nmr.config import DataConfig
 from nmr.evaluation import MIN_OVERLAP_ERAS, NonVacuityError
-from nmr.inference import Horizon, block_bootstrap_ci, era_series_stats, resolve_block_len
+from nmr.inference import (
+    Horizon,
+    block_bootstrap_ci,
+    era_series_stats,
+    resolve_block_len,
+)
 
 __all__ = [
     "PairedResult",
@@ -110,9 +115,7 @@ def paired_era_comparison(
         ci_high=ci.hi,
         n_eras=int(diffs.size),
         device_mismatch=(
-            device_a is not None
-            and device_b is not None
-            and device_a != device_b
+            device_a is not None and device_b is not None and device_a != device_b
         ),
         alpha=float(alpha),
         n_boot=int(n_boot),
@@ -150,9 +153,7 @@ def promotion_verdict(
     This is an advisory verdict only — it never writes the registry.
     """
     if metric not in _VERDICT_DIRECTIONS:
-        raise ValueError(
-            f"metric={metric!r} not in {sorted(_VERDICT_DIRECTIONS)}"
-        )
+        raise ValueError(f"metric={metric!r} not in {sorted(_VERDICT_DIRECTIONS)}")
     higher_is_better = _VERDICT_DIRECTIONS[metric]
 
     def _cell(entry: dict) -> tuple[float | None, float | None, float | None]:
@@ -174,6 +175,13 @@ def promotion_verdict(
         )
     if champion is None:
         return "promote"
+    candidate_identity = _policy_identity(candidate)
+    champion_identity = _policy_identity(champion)
+    if candidate_identity != champion_identity:
+        raise ValueError(
+            "cannot compare runs across payout policy identities: "
+            f"candidate={candidate_identity}, champion={champion_identity}"
+        )
     champ_value, champ_lo, champ_hi = _cell(champion)
     if champ_value is None:
         return "promote"
@@ -191,6 +199,15 @@ def promotion_verdict(
         if cand_lo > champ_hi:
             return "hold"
     return "caution"
+
+
+def _policy_identity(entry: dict) -> tuple[object, object, object]:
+    scorecard = entry.get("scorecard") or {}
+    return (
+        scorecard.get("payout_policy_id"),
+        scorecard.get("scoring_target"),
+        scorecard.get("scoring_horizon"),
+    )
 
 
 def fleet_summary(
@@ -236,6 +253,9 @@ def fleet_summary(
                 "metric_ci_low": scorecard.get(f"{metric}_ci_low"),
                 "metric_ci_high": scorecard.get(f"{metric}_ci_high"),
                 "metric_n_eras": scorecard.get(f"{metric}_n_eras"),
+                "payout_policy_id": scorecard.get("payout_policy_id"),
+                "scoring_target": scorecard.get("scoring_target"),
+                "scoring_horizon": scorecard.get("scoring_horizon"),
                 "deflated_sharpe": scorecard.get("deflated_sharpe"),
                 "dsr_pass": bool(
                     scorecard.get("deflated_sharpe") is not None
@@ -270,10 +290,14 @@ def fleet_summary(
         )
     frame = pl.DataFrame(rows)
     if frame.height > 0:
+        higher_is_better = _VERDICT_DIRECTIONS.get(metric, True)
         frame = frame.sort(
-            ["metric", "run_id"], descending=[True, False], nulls_last=True
+            ["metric", "run_id"],
+            descending=[higher_is_better, False],
+            nulls_last=True,
         )
     return frame
+
 
 @dataclass(frozen=True)
 class CampaignEvidence:
@@ -345,19 +369,28 @@ def _assemble_pairwise(
                 continue
             try:
                 res = paired_era_comparison(
-                    ic_frames[key_a], ic_frames[key_b],
+                    ic_frames[key_a],
+                    ic_frames[key_b],
                     metric_fn=_identity_era_ic,
                     horizon="20D",
                     n_boot=n_boot,
                     seed=seed,
                     min_overlap_eras=min_overlap_eras,
                     device_a=next(
-                        (r["device"] for r in variant_rows
-                         if r.get("variant") == key_a), None
+                        (
+                            r["device"]
+                            for r in variant_rows
+                            if r.get("variant") == key_a
+                        ),
+                        None,
                     ),
                     device_b=next(
-                        (r["device"] for r in variant_rows
-                         if r.get("variant") == key_b), None
+                        (
+                            r["device"]
+                            for r in variant_rows
+                            if r.get("variant") == key_b
+                        ),
+                        None,
                     ),
                 )
             except NonVacuityError as exc:
@@ -443,9 +476,7 @@ def _attach_campaign_dsr(
         attached["dsr_trials_sr_var"] = trials_var
         if entry is not None:
             dsr_value = float(entry["dsr"])
-            attached["dsr_campaign_aware"] = (
-                None if np.isnan(dsr_value) else dsr_value
-            )
+            attached["dsr_campaign_aware"] = None if np.isnan(dsr_value) else dsr_value
             attached["dsr_pass_campaign"] = bool(
                 attached["dsr_campaign_aware"] is not None
                 and attached["dsr_campaign_aware"] >= 0.95
@@ -502,9 +533,7 @@ def campaign_evidence(
         raise ValueError(f"{log_path}: campaign log contains no runs")
 
     agent = IngestionAgent(data)
-    targets = agent.scan(
-        "validation", columns=["era", "id", main_target]
-    ).collect()
+    targets = agent.scan("validation", columns=["era", "id", main_target]).collect()
     medium_cols = agent.features(fne_reference_set)
     val_medium = agent.scan(
         "validation", columns=["era", "id", *medium_cols, main_target]
@@ -518,16 +547,22 @@ def campaign_evidence(
         if entry.get("status") != "recorded" or run_id is None:
             err_msg = entry.get("error")
             variant_rows.append(
-                {"variant": label, "status": str(entry.get("status")),
-                 "error": err_msg if err_msg else f"status={entry.get('status')!r}"}
+                {
+                    "variant": label,
+                    "status": str(entry.get("status")),
+                    "error": err_msg if err_msg else f"status={entry.get('status')!r}",
+                }
             )
             continue
         try:
             slug = _resolve_run_slug(Path(registry_root), run_id)
         except ValueError:
             variant_rows.append(
-                {"variant": label, "status": "recorded",
-                 "error": f"run.json missing for {run_id}"}
+                {
+                    "variant": label,
+                    "status": "recorded",
+                    "error": f"run.json missing for {run_id}",
+                }
             )
             continue
         run_json = Path(registry_root) / slug / "runs" / run_id / "run.json"
@@ -540,16 +575,17 @@ def campaign_evidence(
         )
         if not preds_path.exists():
             variant_rows.append(
-                {"variant": label, "status": "recorded",
-                 "error": f"validation_preds.parquet missing for {run_id}"}
+                {
+                    "variant": label,
+                    "status": "recorded",
+                    "error": f"validation_preds.parquet missing for {run_id}",
+                }
             )
             continue
         preds = pl.read_parquet(preds_path)
 
         joined = preds.join(targets, on=["era", "id"], how="inner")
-        corrs, degenerate = _per_era_pearson(
-            joined, ["prediction"], main_target, "era"
-        )
+        corrs, degenerate = _per_era_pearson(joined, ["prediction"], main_target, "era")
         # Numeric chronological order — lexicographic sort on era strings
         # scrambles the series (e.g. "1000" < "999") and corrupts the
         # block-bootstrap block structure (regression class 2026-08-11).
@@ -573,22 +609,25 @@ def campaign_evidence(
         ic_ci_lo = ic_ci_hi = None
         if n_eras >= 2:
             ci = block_bootstrap_ci(
-                ics, np.mean,
+                ics,
+                np.mean,
                 block_len=resolve_block_len(n_eras, "20D"),
-                n_boot=n_boot, seed=seed,
+                n_boot=n_boot,
+                seed=seed,
             )
             ic_ci_lo, ic_ci_hi = ci.lo, ci.hi
 
         fne_joined = preds.join(val_medium, on=["era", "id"], how="inner")
         fne_series = neutralized_ic_series(
             fne_joined.partition_by("era", maintain_order=True),
-            ["prediction"], medium_cols, main_target,
+            ["prediction"],
+            medium_cols,
+            main_target,
             proportion=1.0,
         )
         # chronological order for the block bootstrap (see series above)
         fne_series = (
-            fne_series
-            .with_columns(pl.col("era").cast(pl.Int64).alias("_era_idx"))
+            fne_series.with_columns(pl.col("era").cast(pl.Int64).alias("_era_idx"))
             .sort("_era_idx")
             .drop("_era_idx")
         )
@@ -596,9 +635,11 @@ def campaign_evidence(
         fne_ci_lo = fne_ci_hi = None
         if int(fne_ics.size) >= 2:
             fci = block_bootstrap_ci(
-                fne_ics, np.mean,
+                fne_ics,
+                np.mean,
                 block_len=resolve_block_len(int(fne_ics.size), "20D"),
-                n_boot=n_boot, seed=seed,
+                n_boot=n_boot,
+                seed=seed,
             )
             fne_ci_lo, fne_ci_hi = fci.lo, fci.hi
 

@@ -92,6 +92,7 @@ def test_seed_determinism():
 
 def test_risk_section_validates_proportion() -> None:
     from nmr.config import RiskConfig
+
     assert RiskConfig().neutralization_proportion == 1.0
     assert RiskConfig(neutralization_proportion=0.0).neutralization_proportion == 0.0
     with pytest.raises(ValueError):
@@ -100,6 +101,7 @@ def test_risk_section_validates_proportion() -> None:
 
 def test_ensemble_section_validates_method() -> None:
     from nmr.config import EnsembleConfig
+
     assert EnsembleConfig().method == "ridge"
     assert EnsembleConfig(method="non_negative").method == "non_negative"
     with pytest.raises(ValueError):
@@ -108,6 +110,7 @@ def test_ensemble_section_validates_method() -> None:
 
 def test_set_global_seeds_does_not_touch_hash_env() -> None:
     import os
+
     os.environ.pop("PYTHONHASHSEED", None)
     set_global_seeds(42)
     assert "PYTHONHASHSEED" not in os.environ
@@ -157,7 +160,9 @@ def test_model_config_device_validation() -> None:
 
 def test_eval_metrics_rejects_unknown_names() -> None:
     with pytest.raises(ValueError, match="metrics"):
-        EvalConfig(metrics=("cor",))  # typo must fail loudly, not silently compute nothing
+        EvalConfig(
+            metrics=("cor",)
+        )  # typo must fail loudly, not silently compute nothing
 
 
 def test_eval_metrics_accepts_known_names() -> None:
@@ -165,9 +170,36 @@ def test_eval_metrics_accepts_known_names() -> None:
         assert EvalConfig(metrics=names).metrics == tuple(names)
 
 
+def test_atomic_payout_policy_is_the_explicit_evaluation_default() -> None:
+    config = ExperimentConfig()
+
+    assert config.evaluation.payout_policy == "classic_atomic_ender60_r1343_v1"
+    assert config.evaluation.main_target == "target"
+    assert config.data.targets == ("target",)
+
+
+def test_unknown_payout_policy_is_rejected() -> None:
+    with pytest.raises(ValueError, match="payout policy"):
+        EvalConfig(payout_policy="future_unverified_policy")
+
+
+def test_ensemble_main_target_must_be_a_trained_component() -> None:
+    from nmr.config import config_from_dict
+
+    with pytest.raises(ValueError, match="main_target"):
+        config_from_dict(
+            {
+                "data": {"targets": ["target_cyrusd_20"], "horizon": "20D"},
+                "evaluation": {"main_target": "target_ender_20"},
+            }
+        )
+
+
 def _cfg_dict(*, data: dict | None = None, split: dict | None = None) -> dict:
-    base: dict = {"data": {"feature_set": "small", "targets": ["target"]},
-                  "split": {"purge_eras": 8}}
+    base: dict = {
+        "data": {"feature_set": "small", "targets": ["target"]},
+        "split": {"purge_eras": 8},
+    }
     base["data"].update(data or {})
     base["split"].update(split or {})
     return base
@@ -211,18 +243,22 @@ def test_target_name_horizon_agreement() -> None:
     # target_cyrusd_60 with declared 20D — contradiction, rejected.
     with pytest.raises(ValueError, match="encodes horizon"):
         config_from_dict(
-            _cfg_dict(data={"horizon": "20D", "targets": ["target", "target_cyrusd_60"]})
+            _cfg_dict(
+                data={"horizon": "20D", "targets": ["target", "target_cyrusd_60"]}
+            )
         )
     # agreement: 60D target with 60D horizon + purge 16 — accepted.
     cfg = config_from_dict(
         _cfg_dict(
-            data={"horizon": "60D", "targets": ["target_cyrusd_60"]},
+            data={"horizon": "60D", "targets": ["target", "target_cyrusd_60"]},
             split={"purge_eras": 16},
         )
     )
     assert cfg.data.horizon == "60D"
     # un-encoded names impose no constraint.
-    assert config_from_dict(_cfg_dict(data={"targets": ["target"]})).data.horizon == "20D"
+    assert (
+        config_from_dict(_cfg_dict(data={"targets": ["target"]})).data.horizon == "20D"
+    )
 
 
 def test_embargo_eras_must_be_zero() -> None:

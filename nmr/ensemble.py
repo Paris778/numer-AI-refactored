@@ -16,11 +16,9 @@ logger = logging.getLogger("nmr.ensemble")
 __all__ = ["Ensembler"]
 
 # Ridge weight-learning regularization (audit SEV-3 "no magic values"): the
-# ridge penalty on the rank-gaussianized OOF design matrix. Evidence: on the
-# era-rank-normalized blend design, alpha=1.0 keeps the solved weights near
-# the equal-weight prior for correlated targets while preventing the
-# ill-conditioned solve from exploding (gram is a correlation matrix in
-# (0, n_components] scale, so alpha=1.0 is a unit-scale penalty).
+# ridge penalty on the mean-squared-error objective over the rank-gaussianized
+# OOF design. Normalizing X'X and X'y by row count keeps alpha's meaning stable
+# when the same era population is replicated or the validation window grows.
 _RIDGE_ALPHA = 1.0
 
 
@@ -95,8 +93,9 @@ class Ensembler:
 
         if method == "ridge":
             alpha = _RIDGE_ALPHA
-            gram = design.T @ design
-            rhs = design.T @ target
+            sample_count = float(len(target))
+            gram = (design.T @ design) / sample_count
+            rhs = (design.T @ target) / sample_count
             weights = np.linalg.solve(
                 gram + alpha * np.eye(gram.shape[0], dtype=float),
                 rhs,

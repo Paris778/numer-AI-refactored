@@ -45,9 +45,7 @@ def resolve_feature_sets(features_json: Path) -> dict[str, list[str]]:
         if not isinstance(values, list) or not all(
             isinstance(value, str) for value in values
         ):
-            raise ValueError(
-                f"{path}: feature set {name!r} must be a list of strings"
-            )
+            raise ValueError(f"{path}: feature set {name!r} must be a list of strings")
         result[name] = list(values)
     return result
 
@@ -81,8 +79,13 @@ DEFAULT_MIN_MEAN_CORR = 0.01
 DEFAULT_MAX_ABS_DECAY = 0.001
 
 _SCREEN_COLUMNS = (
-    "feature", "mean_corr", "corr_std", "decay_slope",
-    "cross_regime_variance", "n_eras", "stable",
+    "feature",
+    "mean_corr",
+    "corr_std",
+    "decay_slope",
+    "cross_regime_variance",
+    "n_eras",
+    "stable",
 )
 
 
@@ -193,7 +196,7 @@ def feature_stability_screen(
     (mean), ``corr_std`` (population std), ``decay_slope`` (linear slope of
     CORR vs era index), ``cross_regime_variance`` (variance of first-half vs
     second-half era-window mean CORR — a regime-drift proxy). ``stable`` is
-    True when ``mean_corr >= min_mean_corr`` and ``|decay_slope| <=
+    True when ``|mean_corr| >= min_mean_corr`` and ``|decay_slope| <=
     max_abs_decay`` and ``n_eras >= 2``. When no valid eras exist, numeric
     aggregates are None and ``stable`` is False.
     """
@@ -226,9 +229,7 @@ def _aggregate_screen(
     aggregates — see :func:`feature_stability_screen` for column semantics.
     """
     if not per_era:
-        return pl.DataFrame(
-            {name: [] for name in _SCREEN_COLUMNS}
-        )
+        return pl.DataFrame({name: [] for name in _SCREEN_COLUMNS})
 
     eras = [e for e in sorted(per_era, key=int) if e not in degenerate]
     if not eras:
@@ -252,16 +253,14 @@ def _aggregate_screen(
     for i, feature in enumerate(feature_list):
         series = matrix[i]
         era_index = np.arange(len(eras), dtype=float)
-        slope = (
-            float(np.polyfit(era_index, series, 1)[0]) if len(series) >= 2 else 0.0
-        )
+        slope = float(np.polyfit(era_index, series, 1)[0]) if len(series) >= 2 else 0.0
         mid = len(series) // 2
         first = float(np.mean(series[:mid])) if mid > 0 else 0.0
         second = float(np.mean(series[mid:])) if len(series) - mid > 0 else 0.0
         cross_regime = 0.25 * (first - second) ** 2
         mean_corr = float(np.mean(series))
         stable = (
-            mean_corr >= min_mean_corr
+            abs(mean_corr) >= min_mean_corr
             and abs(slope) <= max_abs_decay
             and len(series) >= 2
         )
@@ -291,7 +290,7 @@ def select_stable_features(
     if missing:
         raise ValueError(f"screen missing required columns: {sorted(missing)}")
     kept = screen.filter(
-        (pl.col("mean_corr") >= min_mean_corr)
+        (pl.col("mean_corr").abs() >= min_mean_corr)
         & (pl.col("decay_slope").abs() <= max_abs_decay)
         & (pl.col("n_eras") >= 2)
     )

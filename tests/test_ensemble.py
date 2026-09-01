@@ -207,7 +207,7 @@ def test_learn_weights_non_negative_returns_non_negative_tuple() -> None:
 
 
 def test_learn_weights_ridge_satisfies_normal_equations() -> None:
-    """The ridge solution must satisfy (X^T X + I) w = X^T y exactly."""
+    """The ridge solution must satisfy (X^T X / n + I) w = X^T y / n."""
     df = _ensemble_frame().with_columns(
         [
             (pl.col("target") + 0.02 * pl.col("pred_a")).alias("pred_good"),
@@ -228,10 +228,40 @@ def test_learn_weights_ridge_satisfies_normal_equations() -> None:
     design = normalized.select(["pred_good", "pred_bad"]).cast(pl.Float64).to_numpy()
     target = normalized.get_column("target").cast(pl.Float64).to_numpy()
 
-    gram = design.T @ design + np.eye(design.shape[1])
-    rhs = design.T @ target
+    gram = (design.T @ design) / len(target) + np.eye(design.shape[1])
+    rhs = (design.T @ target) / len(target)
     residual = gram @ np.asarray(weights) - rhs
     assert np.allclose(residual, 0.0, atol=1e-8)
+
+
+def test_learn_weights_ridge_is_invariant_to_replicated_eras() -> None:
+    frame = _ensemble_frame().with_columns(
+        [
+            (pl.col("target") + 0.02 * pl.col("pred_a")).alias("pred_good"),
+            (-pl.col("target") + 0.01 * pl.col("pred_c")).alias("pred_bad"),
+        ]
+    )
+    replicated = pl.concat(
+        [
+            frame,
+            frame.with_columns((pl.col("era").cast(pl.Int64) + 10).cast(pl.String)),
+        ]
+    )
+
+    base_weights = Ensembler().learn_weights(
+        frame,
+        pred_cols=["pred_good", "pred_bad"],
+        target_col="target",
+        method="ridge",
+    )
+    replicated_weights = Ensembler().learn_weights(
+        replicated,
+        pred_cols=["pred_good", "pred_bad"],
+        target_col="target",
+        method="ridge",
+    )
+
+    assert replicated_weights == pytest.approx(base_weights, abs=1e-12)
 
 
 def test_learn_weights_ridge_minimizes_ridge_objective() -> None:
@@ -257,7 +287,7 @@ def test_learn_weights_ridge_minimizes_ridge_objective() -> None:
     target = normalized.get_column("target").cast(pl.Float64).to_numpy()
 
     def objective(w: np.ndarray) -> float:
-        return float(np.sum((design @ w - target) ** 2) + np.sum(w**2))
+        return float(np.mean((design @ w - target) ** 2) + np.sum(w**2))
 
     assert objective(weights) <= objective(np.array([0.0, 0.0])) + 1e-9
     assert objective(weights) <= objective(np.array([1.0, -1.0])) + 1e-9
@@ -346,6 +376,4 @@ def test_learn_weights_validation_branches() -> None:
             method="svm",
         )
     with pytest.raises(ValueError, match="weights must be finite"):
-        ensembler.blend(
-            df, pred_cols=["pred_a", "pred_b"], weights=[0.5, float("nan")]
-        )
+        ensembler.blend(df, pred_cols=["pred_a", "pred_b"], weights=[0.5, float("nan")])

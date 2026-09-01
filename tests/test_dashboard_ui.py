@@ -579,11 +579,15 @@ def test_row_html_renders_lifecycle_badge() -> None:
         "gate_deflated_sharpe": None,
         "has_full_version": False,
     }
-    degraded = dict(base, lifecycle_stage="degraded", current_full_status="degraded", stale=True)
+    degraded = dict(
+        base, lifecycle_stage="degraded", current_full_status="degraded", stale=True
+    )
     html_out = report._row_html(degraded)
     assert "DEGRADED" in html_out
     assert "STALE" in html_out
-    staked = dict(base, lifecycle_stage="staked", current_full_status="full", stale=False)
+    staked = dict(
+        base, lifecycle_stage="staked", current_full_status="full", stale=False
+    )
     staked_html = report._row_html(staked)
     assert "STAKED" in staked_html
     assert "STALE" not in staked_html
@@ -611,16 +615,23 @@ def _registry_entry(run_id: str) -> dict:
                     "targets": ["target"],
                 },
                 "model": {"backend": "lightgbm", "preset": "fast"},
+                "evaluation": {
+                    "main_target": "target",
+                    "payout_policy": "classic_atomic_ender60_r1343_v1",
+                },
                 "risk": {"neutralization_proportion": 1.0},
                 "run": {"name": "sample-run"},
             },
         },
         "scorecard": {
+            "payout_policy_id": "classic_atomic_ender60_r1343_v1",
+            "scoring_target": "target_ender_60",
+            "scoring_horizon": "60D",
             "corr": 0.12,
             "corr_ci_low": 0.05,
             "corr_ci_high": 0.19,
             "corr_n_eras": 30,
-            "corr_sharpe_ac": 0.8,
+            "corr_sharpe_ac": 0.87,
             "corr_sharpe_ac_ci_low": 0.6,
             "corr_sharpe_ac_ci_high": 1.0,
             "max_drawdown": 0.1,

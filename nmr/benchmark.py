@@ -15,6 +15,7 @@ import gc
 import hashlib
 import json
 import logging
+import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from types import MappingProxyType
@@ -28,7 +29,12 @@ from sklearn.linear_model import Ridge
 from nmr.ensemble import Ensembler
 from nmr.features import resolve_feature_sets, resolve_small_feature_set
 from nmr.models import construct_tree_model
-from nmr.payout import PAYOUT_FACTOR_FILENAME, era_payout_factors
+from nmr.payout import (
+    CLASSIC_LEGACY_V1,
+    PAYOUT_FACTOR_FILENAME,
+    era_payout_factors,
+    resolve_payout_policy,
+)
 from nmr.risk import NeutralizationEngine
 from nmr.scorecard import MetricScorecard, evaluate_model
 
@@ -122,16 +128,22 @@ def _freeze_mapping(value: Any, *, name: str) -> Mapping[str, Any]:
 
 @dataclasses.dataclass(frozen=True)
 class Tier4GateConfig:
+    payout_policy_id: str
+    scoring_target: str
+    scoring_horizon: str
     corr_min: float
     corr_sharpe_ac_min: float
     fnc_min: float
-    deflated_sharpe_min: float
     gain_to_pain_min: float
-    cagr_min: float
-    turnover_max: float
 
     def __post_init__(self) -> None:
+        for name in ("payout_policy_id", "scoring_target", "scoring_horizon"):
+            value = getattr(self, name)
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"Tier4GateConfig.{name} must be a non-empty string")
         for field in dataclasses.fields(self):
+            if field.name in {"payout_policy_id", "scoring_target", "scoring_horizon"}:
+                continue
             value = getattr(self, field.name)
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ValueError(
@@ -141,8 +153,6 @@ class Tier4GateConfig:
                 raise ValueError(f"Tier4GateConfig.{field.name} must be finite")
         if not (-1.0 <= self.corr_min <= 1.0):
             raise ValueError(f"corr_min out of range: {self.corr_min!r}")
-        if self.turnover_max < 0.0:
-            raise ValueError(f"turnover_max must be >= 0: {self.turnover_max!r}")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -162,7 +172,9 @@ class BenchmarkCellConfig:
 
     def __post_init__(self) -> None:
         if not self.benchmark_id or not isinstance(self.benchmark_id, str):
-            raise ValueError(f"benchmark_id must be a non-empty string: {self.benchmark_id!r}")
+            raise ValueError(
+                f"benchmark_id must be a non-empty string: {self.benchmark_id!r}"
+            )
         if self.tier not in VALID_BENCHMARK_TIERS:
             raise ValueError(f"tier={self.tier!r} not in {VALID_BENCHMARK_TIERS}")
         if self.input_space not in VALID_INPUT_SPACES:
@@ -178,8 +190,11 @@ class BenchmarkCellConfig:
                 "null_feature_mean requires input_space='small', "
                 f"got {self.input_space!r}"
             )
-        if self.model_kind in NULL_KINDS and self.input_space != "none" \
-                and self.model_kind != "null_feature_mean":
+        if (
+            self.model_kind in NULL_KINDS
+            and self.input_space != "none"
+            and self.model_kind != "null_feature_mean"
+        ):
             raise ValueError(
                 f"{self.model_kind} requires input_space='none', "
                 f"got {self.input_space!r}"
@@ -219,9 +234,7 @@ class BenchmarkFileConfig:
 
     def __post_init__(self) -> None:
         if self.tier not in VALID_BENCHMARK_TIERS:
-            raise ValueError(
-                f"tier={self.tier!r} not in {VALID_BENCHMARK_TIERS}"
-            )
+            raise ValueError(f"tier={self.tier!r} not in {VALID_BENCHMARK_TIERS}")
         if self.tier == 4:
             if self.gate is None:
                 raise ValueError("tier 4 config requires a 'gate' section")
@@ -234,11 +247,11 @@ class BenchmarkFileConfig:
                 )
         else:
             if not self.cells:
-                raise ValueError(
-                    f"tier {self.tier} config requires non-empty cells"
-                )
+                raise ValueError(f"tier {self.tier} config requires non-empty cells")
             if self.gate is not None:
-                raise ValueError(f"gate section only allowed for tier 4, got tier {self.tier}")
+                raise ValueError(
+                    f"gate section only allowed for tier 4, got tier {self.tier}"
+                )
         ids = [cell.benchmark_id for cell in self.cells]
         if len(set(ids)) != len(ids):
             raise ValueError(f"duplicate benchmark ids in file: {ids}")
@@ -246,9 +259,7 @@ class BenchmarkFileConfig:
 
 def _build_benchmark_cell(data: Any, tier: int) -> BenchmarkCellConfig:
     if not isinstance(data, dict):
-        raise ValueError(
-            f"benchmark cell must be a mapping, got {type(data).__name__}"
-        )
+        raise ValueError(f"benchmark cell must be a mapping, got {type(data).__name__}")
     if "benchmark_id" not in data:
         raise ValueError(f"benchmark cell missing 'benchmark_id': {data!r}")
     if "tier" in data and int(data["tier"]) != int(tier):
@@ -266,7 +277,9 @@ def load_benchmark_file(path: str | Path) -> BenchmarkFileConfig:
     """Load and validate a single benchmark tier config file."""
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
-        raise ValueError(f"benchmark config must be a mapping, got {type(raw).__name__}")
+        raise ValueError(
+            f"benchmark config must be a mapping, got {type(raw).__name__}"
+        )
     _reject_unknown_keys(BenchmarkFileConfig, raw)
     if not isinstance(raw.get("cells", []), list):
         raise ValueError("cells must be a list")
@@ -284,8 +297,7 @@ def load_benchmark_file(path: str | Path) -> BenchmarkFileConfig:
     return BenchmarkFileConfig(
         tier=int(raw["tier"]),
         cells=tuple(
-            _build_benchmark_cell(c, int(raw["tier"]))
-            for c in raw.get("cells", [])
+            _build_benchmark_cell(c, int(raw["tier"])) for c in raw.get("cells", [])
         ),
         reference_column=raw.get("reference_column"),
         reference_columns=reference_columns,
@@ -340,9 +352,7 @@ def _ordered_numeric_eras(eras: Sequence[str]) -> list[str]:
     mapping: dict[int, str] = {}
     for era in eras:
         if not isinstance(era, str):
-            raise ValueError(
-                f"Era labels must be strings, got {type(era).__name__}"
-            )
+            raise ValueError(f"Era labels must be strings, got {type(era).__name__}")
         try:
             era_num = int(era)
         except ValueError as exc:
@@ -377,7 +387,11 @@ def train_validation_purged_split(
     remaining train eras strictly precede validation eras, and exactly
     ``purge_eras`` eras separate the trimmed train tail from validation.
     """
-    if isinstance(purge_eras, bool) or not isinstance(purge_eras, int) or purge_eras < 0:
+    if (
+        isinstance(purge_eras, bool)
+        or not isinstance(purge_eras, int)
+        or purge_eras < 0
+    ):
         raise ValueError(f"purge_eras must be a non-negative int, got {purge_eras!r}")
 
     ordered_train = _ordered_numeric_eras(train_eras)
@@ -430,11 +444,7 @@ def generate_null_predictions(
     if missing_keys:
         raise ValueError(f"prediction_index missing required columns: {missing_keys}")
 
-    index = (
-        prediction_index.select([era_col, id_col])
-        .unique()
-        .sort([era_col, id_col])
-    )
+    index = prediction_index.select([era_col, id_col]).unique().sort([era_col, id_col])
     n = index.height
     rng = np.random.default_rng(seed)
 
@@ -458,9 +468,7 @@ def generate_null_predictions(
             how="inner",
         )
         if joined.height != n:
-            raise ValueError(
-                f"null_feature_mean join dropped {n - joined.height} rows"
-            )
+            raise ValueError(f"null_feature_mean join dropped {n - joined.height} rows")
         values = (
             joined.select(
                 pl.mean_horizontal(
@@ -526,11 +534,15 @@ def generate_ridge_predictions(
 
     train_rows = train.filter(pl.col(era_col).is_in(trimmed_train_eras))
     val_rows = val.sort([era_col, id_col])
-    missing_feats = [c for c in feature_cols if c not in train.columns or c not in val.columns]
+    missing_feats = [
+        c for c in feature_cols if c not in train.columns or c not in val.columns
+    ]
     if missing_feats:
         raise ValueError(f"missing feature columns: {missing_feats}")
 
-    x_train_raw = train_rows.select(feature_cols).cast(pl.Float32).to_numpy(writable=True)
+    x_train_raw = (
+        train_rows.select(feature_cols).cast(pl.Float32).to_numpy(writable=True)
+    )
     x_val_raw = val_rows.select(feature_cols).cast(pl.Float32).to_numpy(writable=True)
 
     # Extract targets and the val index up front, then release the polars frames
@@ -611,7 +623,9 @@ def generate_tree_predictions(
     val_rows = val.sort([era_col, id_col])
     if target not in train.columns:
         raise ValueError(f"missing target column: {target!r}")
-    missing_feats = [c for c in feature_cols if c not in train.columns or c not in val.columns]
+    missing_feats = [
+        c for c in feature_cols if c not in train.columns or c not in val.columns
+    ]
     if missing_feats:
         raise ValueError(f"missing feature columns: {missing_feats}")
 
@@ -619,11 +633,16 @@ def generate_tree_predictions(
     y = train_rows.get_column(target).cast(pl.Float64).to_numpy()
     mask = np.isfinite(y)
     if mask.sum() < 2:
-        raise ValueError(f"target {target!r} has fewer than 2 finite train rows after purge")
+        raise ValueError(
+            f"target {target!r} has fewer than 2 finite train rows after purge"
+        )
     x_val = val_rows.select(feature_cols).cast(pl.Float32).to_pandas()
 
     model = construct_tree_model(
-        backend, dict(params), seed=seed, n_features=len(feature_cols),
+        backend,
+        dict(params),
+        seed=seed,
+        n_features=len(feature_cols),
         device="cpu",
     )
     model.fit(x_train[mask], y[mask])
@@ -662,9 +681,16 @@ def generate_canonical_predictions(
 
     if len(targets) == 1:
         out = generate_tree_predictions(
-            train, val, target=targets[0], feature_cols=feature_cols,
-            backend="lightgbm", params=params, seed=seed,
-            purge_eras=purge_eras, era_col=era_col, id_col=id_col,
+            train,
+            val,
+            target=targets[0],
+            feature_cols=feature_cols,
+            backend="lightgbm",
+            params=params,
+            seed=seed,
+            purge_eras=purge_eras,
+            era_col=era_col,
+            id_col=id_col,
             pred_col=pred_col,
         )
     else:
@@ -672,9 +698,16 @@ def generate_canonical_predictions(
         for index, target in enumerate(targets):
             parts.append(
                 generate_tree_predictions(
-                    train, val, target=target, feature_cols=feature_cols,
-                    backend="lightgbm", params=params, seed=seed + index,
-                    purge_eras=purge_eras, era_col=era_col, id_col=id_col,
+                    train,
+                    val,
+                    target=target,
+                    feature_cols=feature_cols,
+                    backend="lightgbm",
+                    params=params,
+                    seed=seed + index,
+                    purge_eras=purge_eras,
+                    era_col=era_col,
+                    id_col=id_col,
                     pred_col=pred_col,
                 ).rename({pred_col: f"__component_{index}"})
             )
@@ -684,15 +717,19 @@ def generate_canonical_predictions(
         component_cols = [f"__component_{index}" for index in range(len(targets))]
         weights = [1.0 / len(targets)] * len(targets)
         ensembler = Ensembler()
-        out = ensembler.blend(
-            Ensembler.rank_normalize(
-                stacked, pred_cols=component_cols, era_col=era_col
-            ),
-            pred_cols=component_cols,
-            weights=weights,
-            era_col=era_col,
-            out_col=pred_col,
-        ).select([era_col, id_col, pred_col]).sort([era_col, id_col])
+        out = (
+            ensembler.blend(
+                Ensembler.rank_normalize(
+                    stacked, pred_cols=component_cols, era_col=era_col
+                ),
+                pred_cols=component_cols,
+                weights=weights,
+                era_col=era_col,
+                out_col=pred_col,
+            )
+            .select([era_col, id_col, pred_col])
+            .sort([era_col, id_col])
+        )
 
     if float(neutralization) > 0.0:
         # NeutralizationEngine requires the feature columns present in-frame.
@@ -702,13 +739,17 @@ def generate_canonical_predictions(
             how="inner",
         )
         engine = NeutralizationEngine()
-        out = engine.neutralize(
-            with_features,
-            pred_col=pred_col,
-            feature_cols=list(feature_cols),
-            era_col=era_col,
-            proportion=float(neutralization),
-        ).select([era_col, id_col, pred_col]).sort([era_col, id_col])
+        out = (
+            engine.neutralize(
+                with_features,
+                pred_col=pred_col,
+                feature_cols=list(feature_cols),
+                era_col=era_col,
+                proportion=float(neutralization),
+            )
+            .select([era_col, id_col, pred_col])
+            .sort([era_col, id_col])
+        )
     return out
 
 
@@ -771,27 +812,39 @@ def assert_tier0_null_floor(
 
 def _tier4_gate_rows(
     scorecard: MetricScorecard, gate: Tier4GateConfig
-) -> list[tuple[str, float | None, float, bool | None]]:
-    """(field, observed, threshold, strict) rows for the 7 tier-4 fields.
-
-    ``strict=None`` marks display-only fields (deflated_sharpe, A6) that are
-    never pass/fail; ``observed=None`` marks structurally unavailable fields
-    (turnover on v5.3).
-    """
+) -> list[tuple[str, float, float, bool]]:
+    """Enforceable `(field, observed, threshold, strict)` gate rows."""
+    observed_identity = (
+        scorecard.payout_policy_id,
+        scorecard.scoring_target,
+        scorecard.scoring_horizon,
+    )
+    expected_identity = (
+        gate.payout_policy_id,
+        gate.scoring_target,
+        gate.scoring_horizon,
+    )
+    if observed_identity != expected_identity:
+        raise ValueError(
+            f"tier-4 gate policy mismatch: expected {expected_identity}, "
+            f"got {observed_identity}"
+        )
     card = scorecard
     return [
         ("corr", float(card.corr.value), float(gate.corr_min), False),
-        ("corr_sharpe_ac", float(card.corr_sharpe_ac.value),
-         float(gate.corr_sharpe_ac_min), False),
+        (
+            "corr_sharpe_ac",
+            float(card.corr_sharpe_ac.value),
+            float(gate.corr_sharpe_ac_min),
+            False,
+        ),
         ("fnc", float(card.fnc), float(gate.fnc_min), False),
-        ("deflated_sharpe", float(card.deflated_sharpe),
-         float(gate.deflated_sharpe_min), None),
-        ("gain_to_pain_ratio", float(card.gain_to_pain_ratio),
-         float(gate.gain_to_pain_min), False),
-        ("cagr_1y", float(card.cagr_1y), float(gate.cagr_min), True),
-        ("turnover_mean",
-         None if card.turnover_mean is None else float(card.turnover_mean),
-         float(gate.turnover_max), False),
+        (
+            "gain_to_pain_ratio",
+            float(card.gain_to_pain_ratio),
+            float(gate.gain_to_pain_min),
+            False,
+        ),
     ]
 
 
@@ -802,11 +855,7 @@ def tier4_gate_verdict(
     _assert_scorecard_finite(scorecard, model_id=scorecard.model_id)
     verdict: dict[str, bool | None] = {}
     for field, observed, threshold, strict in _tier4_gate_rows(scorecard, gate):
-        if observed is None or strict is None:
-            verdict[field] = None
-        elif field == "turnover_mean":
-            verdict[field] = observed <= threshold
-        elif strict:
+        if strict:
             verdict[field] = observed > threshold
         else:
             verdict[field] = observed >= threshold
@@ -814,27 +863,14 @@ def tier4_gate_verdict(
 
 
 def assert_tier4_gate(scorecard: MetricScorecard, gate: Tier4GateConfig) -> None:
-    """Production capital gate: reject candidates below the 7 hard thresholds.
+    """Production capital gate: reject candidates below the four hard thresholds.
 
-    ``turnover_mean`` is structurally unavailable on v5.3 (disjoint era
-    universes — consecutive validation eras share zero ids), so a ``None``
-    turnover is reported by ``gate_report_frame`` but is not a hard failure.
+    Only fields with measurable, policy-comparable evidence are configured.
     """
     _assert_scorecard_finite(scorecard, model_id=scorecard.model_id)
     violations: list[str] = []
     for field, observed, threshold, strict in _tier4_gate_rows(scorecard, gate):
-        if observed is None or strict is None:
-            continue
-        if field == "turnover_mean":
-            # turnover is an upper bound (<=), not a lower bound (>=); the
-            # generic branches below would report a low turnover as a
-            # violation, which would change hard-gate behavior.
-            if observed > threshold:
-                violations.append(
-                    "turnover_mean: "
-                    f"observed={observed:.8f}, need <= {threshold:.4f}"
-                )
-        elif strict:
+        if strict:
             if observed <= threshold:
                 violations.append(
                     f"{field}: observed={observed:.8f}, need > {threshold:.8f}"
@@ -1036,6 +1072,7 @@ def _sanitize_json_payload(value: object) -> object:
 # Hierarchy orchestration
 # ---------------------------------------------------------------------------
 
+
 @dataclasses.dataclass(frozen=True)
 class BenchmarkData:
     meta_model: pl.DataFrame
@@ -1048,8 +1085,13 @@ class BenchmarkData:
 def load_benchmark_data(data_dir: str | Path) -> BenchmarkData:
     """Load the lightweight shared domains; heavy parquets stay lazy."""
     directory = Path(data_dir)
-    for name in ("meta_model.parquet", "validation_benchmark_models.parquet",
-                 "features.json", "train.parquet", "validation.parquet"):
+    for name in (
+        "meta_model.parquet",
+        "validation_benchmark_models.parquet",
+        "features.json",
+        "train.parquet",
+        "validation.parquet",
+    ):
         if not (directory / name).exists():
             raise FileNotFoundError(f"Missing benchmark data asset: {directory / name}")
     meta_model = pl.read_parquet(directory / "meta_model.parquet").select(
@@ -1126,9 +1168,20 @@ class BenchmarkHierarchy:
         self._min_overlap_eras = int(min_overlap_eras)
         self._fast_mode = bool(fast_mode)
         self._schema_cols = pl.read_parquet_schema(data.validation_path).names()
-        self._target_cols = ["era", "id"] + [
-            c for c in self._schema_cols if c == "target" or c.startswith("target_")
-        ]
+        target_cols = ["era", "id", "target"]
+        reference = spec.reference_column or ""
+        match = re.search(r"_([a-zA-Z0-9]+)(?:20|60)$", reference)
+        if match is not None:
+            target_name = match.group(1)
+            target_cols.extend(
+                column
+                for column in (
+                    f"target_{target_name}_20",
+                    f"target_{target_name}_60",
+                )
+                if column in self._schema_cols
+            )
+        self._target_cols = list(dict.fromkeys(target_cols))
 
     def _feature_cols(self, cell: BenchmarkCellConfig) -> list[str]:
         return resolve_benchmark_feature_cols(
@@ -1160,9 +1213,7 @@ class BenchmarkHierarchy:
     ) -> tuple[pl.DataFrame, pl.DataFrame]:
         """Return (predictions, val_feature_frame) for one benchmark cell."""
         feature_cols = self._feature_cols(cell)
-        val_id = pl.read_parquet(
-            self._data.validation_path, columns=["era", "id"]
-        )
+        val_id = pl.read_parquet(self._data.validation_path, columns=["era", "id"])
         params = self._cell_params(cell)
 
         if cell.model_kind in NULL_KINDS:
@@ -1172,8 +1223,11 @@ class BenchmarkHierarchy:
                     columns=["era", "id", *feature_cols],
                 )
                 preds = generate_null_predictions(
-                    val_id, kind=cell.model_kind, seed=cell.seed,
-                    features=val_features, feature_cols=feature_cols,
+                    val_id,
+                    kind=cell.model_kind,
+                    seed=cell.seed,
+                    features=val_features,
+                    feature_cols=feature_cols,
                 )
             else:
                 preds = generate_null_predictions(
@@ -1196,22 +1250,32 @@ class BenchmarkHierarchy:
                 )
             alpha = float(params["alpha"])
             preds = generate_ridge_predictions(
-                train, val, targets=list(cell.targets),
+                train,
+                val,
+                targets=list(cell.targets),
                 feature_cols=feature_cols,
                 alpha=alpha,
                 seed=cell.seed,
             )
         elif cell.model_kind == "lightgbm":
             preds = generate_canonical_predictions(
-                train, val, targets=list(cell.targets),
-                feature_cols=feature_cols, params=params, seed=cell.seed,
+                train,
+                val,
+                targets=list(cell.targets),
+                feature_cols=feature_cols,
+                params=params,
+                seed=cell.seed,
                 neutralization=cell.neutralization,
             )
         elif cell.model_kind == "xgboost":
             preds = generate_tree_predictions(
-                train, val, target=cell.targets[0],
-                feature_cols=feature_cols, backend="xgboost",
-                params=params, seed=cell.seed,
+                train,
+                val,
+                target=cell.targets[0],
+                feature_cols=feature_cols,
+                backend="xgboost",
+                params=params,
+                seed=cell.seed,
             )
         else:
             raise ValueError(f"Unsupported benchmark model kind: {cell.model_kind!r}")
@@ -1230,11 +1294,21 @@ class BenchmarkHierarchy:
         pf_map = era_payout_factors(
             Path(self._data.validation_path).parent / PAYOUT_FACTOR_FILENAME
         )
+        gate_policy = (
+            resolve_payout_policy(self._spec.gate.payout_policy_id)
+            if self._spec.gate is not None
+            else CLASSIC_LEGACY_V1
+        )
+        scoring_target = gate_policy.target or "target"
+        scoring_horizon = gate_policy.scoring_horizon or self._horizon
+        scoring_pf = pf_map if gate_policy.fixed_payout_factor is None else None
 
         for cell in self._spec.cells:
             logger.info(
-                "[hierarchy] tier %d: %s (kind=%s)", cell.tier,
-                cell.benchmark_id, cell.model_kind,
+                "[hierarchy] tier %d: %s (kind=%s)",
+                cell.tier,
+                cell.benchmark_id,
+                cell.model_kind,
             )
             preds, val_features = self._predictions_for_cell(cell)
             scorecards[cell.benchmark_id] = evaluate_model(
@@ -1245,10 +1319,11 @@ class BenchmarkHierarchy:
                 targets=val_targets,
                 n_trials=1,
                 seed=cell.seed,
-                horizon=self._horizon,
-                main_target="target",
+                payout_policy=gate_policy,
+                horizon=scoring_horizon,
+                main_target=scoring_target,
                 benchmark_col=self._spec.reference_column,
-                pf=pf_map,
+                pf=scoring_pf,
                 n_boot=self._n_boot,
                 min_overlap_eras=self._min_overlap_eras,
                 model_id=cell.benchmark_id,
@@ -1258,12 +1333,16 @@ class BenchmarkHierarchy:
                 measured_corr = float(scorecards[cell.benchmark_id].corr.value)
                 logger.info(
                     "[hierarchy] tier %d: %s anchors — measured corr=%.6f",
-                    cell.tier, cell.benchmark_id, measured_corr,
+                    cell.tier,
+                    cell.benchmark_id,
+                    measured_corr,
                 )
                 for key, anchor in cell.anchors.items():
                     logger.info(
                         "    anchor %s=%.4f (measured=%.6f)",
-                        key, float(anchor), measured_corr,
+                        key,
+                        float(anchor),
+                        measured_corr,
                     )
 
         reference_id = "v53_lgbm_ender60"
@@ -1294,19 +1373,18 @@ class BenchmarkHierarchy:
                     targets=val_targets,
                     n_trials=1,
                     seed=self._seed + index,
-                    horizon=self._horizon,
-                    main_target="target",
+                    payout_policy=gate_policy,
+                    horizon=scoring_horizon,
+                    main_target=scoring_target,
                     benchmark_col=self._spec.reference_column,
-                    pf=pf_map,
+                    pf=scoring_pf,
                     n_boot=self._n_boot,
                     min_overlap_eras=self._min_overlap_eras,
                     model_id=ref_col,
                 )
                 tier_of[ref_col] = 4
 
-        null_cards = {
-            mid: scorecards[mid] for mid in NULL_KINDS if mid in scorecards
-        }
+        null_cards = {mid: scorecards[mid] for mid in NULL_KINDS if mid in scorecards}
         null_floor_ok, null_floor_errors = True, ()
         try:
             assert_tier0_null_floor(null_cards)
@@ -1348,9 +1426,10 @@ def hierarchy_frame(result: BenchmarkHierarchyResult) -> pl.DataFrame:
         }
     )
     frame = frame.join(tier_rows, on="model_id", how="left").with_columns(
-        pl.col("tier").cast(pl.Int64).map_elements(
-            lambda t: f"tier{int(t)}", return_dtype=pl.String
-        ).alias("strategy_group")
+        pl.col("tier")
+        .cast(pl.Int64)
+        .map_elements(lambda t: f"tier{int(t)}", return_dtype=pl.String)
+        .alias("strategy_group")
     )
     return frame.sort(["tier", "model_id"])
 
@@ -1380,11 +1459,13 @@ def gate_report_frame(result: BenchmarkHierarchyResult) -> pl.DataFrame:
             passed = measured > threshold
         else:
             passed = measured >= threshold
-        out_rows.append({
-            "model_id": reference_id,
-            "field": field,
-            "threshold": threshold,
-            "measured": measured,
-            "pass": passed,
-        })
+        out_rows.append(
+            {
+                "model_id": reference_id,
+                "field": field,
+                "threshold": threshold,
+                "measured": measured,
+                "pass": passed,
+            }
+        )
     return pl.DataFrame(out_rows)

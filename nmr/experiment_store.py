@@ -9,6 +9,7 @@ validation scorecard ran) alongside the run.json built by ``record_run`` —
 the run-immutability preflight runs BEFORE any artifact write, so a rejected
 re-record never mutates the heavy parquets.
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -18,6 +19,7 @@ import logging
 import os
 import re
 import shutil
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -40,12 +42,17 @@ def _validate_run_id(run_id: str) -> str:
     return run_id
 
 
-def _write_scaffold(slug: str, *, display_name: str, base_config: dict[str, Any]) -> Path:
+def _write_scaffold(
+    slug: str, *, display_name: str, base_config: dict[str, Any]
+) -> Path:
     exp = paths.experiment_dir(slug)
     exp.mkdir(parents=True, exist_ok=True)
     meta_path = exp / "meta.json"
     if not meta_path.exists():
-        atomic_write_text(meta_path, json.dumps({"display_name": display_name, "staked": None}, sort_keys=True))
+        atomic_write_text(
+            meta_path,
+            json.dumps({"display_name": display_name, "staked": None}, sort_keys=True),
+        )
     base_cfg = exp / "base_config.yaml"
     if not base_cfg.exists():
         import yaml
@@ -53,7 +60,10 @@ def _write_scaffold(slug: str, *, display_name: str, base_config: dict[str, Any]
         atomic_write_text(base_cfg, yaml.safe_dump(base_config, sort_keys=False))
     readme = exp / "README.md"
     if not readme.exists():
-        atomic_write_text(readme, f"# {slug}\n\n<!-- human record: what was done, decisions, results -->\n")
+        atomic_write_text(
+            readme,
+            f"# {slug}\n\n<!-- human record: what was done, decisions, results -->\n",
+        )
     return exp
 
 
@@ -165,7 +175,9 @@ def record_run_result(slug: str, result: RunResult) -> Path:
     _validate_run_id(result.run_id)
     payload = _result_payload(result)
     _check_run_immutable(
-        slug, result.run_id, json.dumps(payload, sort_keys=True),
+        slug,
+        result.run_id,
+        json.dumps(payload, sort_keys=True),
         paths.run_json_path(slug, result.run_id),
     )
     run_dir = paths.run_dir(slug, result.run_id)
@@ -183,30 +195,38 @@ def stage_export(slug: str, scope: str, run_id: str) -> Path:
     _validate_run_id(run_id)
     parent = paths.export_dir(slug, scope, run_id).parent
     parent.mkdir(parents=True, exist_ok=True)
-    staging = parent / f".tmp-{run_id}"
-    if staging.exists():
-        shutil.rmtree(staging)
-    staging.mkdir(parents=True)
+    staging = parent / f".tmp-{run_id}-{uuid.uuid4().hex}"
+    staging.mkdir()
     return staging
 
 
-def discard_staged_export(slug: str, scope: str, run_id: str) -> None:
+def _validate_staging_path(slug: str, scope: str, run_id: str, staging: Path) -> Path:
     _validate_run_id(run_id)
-    staging = paths.export_dir(slug, scope, run_id).parent / f".tmp-{run_id}"
-    if staging.exists():
-        shutil.rmtree(staging)
+    expected_parent = paths.export_dir(slug, scope, run_id).parent.resolve()
+    candidate = Path(staging).resolve()
+    if candidate.parent != expected_parent or not candidate.name.startswith(
+        f".tmp-{run_id}-"
+    ):
+        raise ValueError(f"staging path is not owned by this export: {staging}")
+    return candidate
 
 
-def publish_staged_export(slug: str, scope: str, run_id: str) -> Path:
+def discard_staged_export(slug: str, scope: str, run_id: str, *, staging: Path) -> None:
+    owned = _validate_staging_path(slug, scope, run_id, staging)
+    if owned.exists():
+        shutil.rmtree(owned)
+
+
+def publish_staged_export(slug: str, scope: str, run_id: str, *, staging: Path) -> Path:
     """Atomically rename the staged dir into the final slot. Raises ValueError
     when the slot already exists (exports are immutable — spec §6)."""
     _validate_run_id(run_id)
     final = paths.export_dir(slug, scope, run_id)
-    staging = final.parent / f".tmp-{run_id}"
-    if not staging.is_dir():
-        raise FileNotFoundError(f"no staged export at {staging}")
+    owned = _validate_staging_path(slug, scope, run_id, staging)
+    if not owned.is_dir():
+        raise FileNotFoundError(f"no staged export at {owned}")
     if final.exists():
-        discard_staged_export(slug, scope, run_id)
+        discard_staged_export(slug, scope, run_id, staging=owned)
         raise ValueError(f"export slot {final} already exists; exports are immutable")
-    os.replace(staging, final)  # single directory rename; target is absent
+    os.replace(owned, final)  # single directory rename; target is absent
     return final

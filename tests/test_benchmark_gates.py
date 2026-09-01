@@ -19,16 +19,17 @@ from nmr.benchmark import (
     tier4_gate_verdict,
     tier_max_corrs,
 )
+from nmr.payout import CLASSIC_LEGACY_V1
 from nmr.scorecard import MetricScorecard, evaluate_model
 
 GATE = Tier4GateConfig(
+    payout_policy_id="classic_legacy_075_225_clip005_v1",
+    scoring_target="target",
+    scoring_horizon="20D",
     corr_min=0.0286,
     corr_sharpe_ac_min=1.50,
     fnc_min=0.020,
-    deflated_sharpe_min=0.95,
     gain_to_pain_min=1.50,
-    cagr_min=0.0,
-    turnover_max=0.35,
 )
 
 
@@ -41,14 +42,17 @@ def _synthetic_inputs(n_eras: int = 60, rows_per_era: int = 16, seed: int = 7):
             f1 = float(rng.normal())
             latent = 0.8 * f1 + float(rng.normal(0.0, 0.7))
             target = float(np.clip(0.5 + 0.2 * latent, 0.0, 1.0))
-            rows.append({
-                "era": era, "id": f"{era}_{idx}",
-                "prediction": float(rng.random()),
-                "numerai_meta_model": float(0.55 * target + 0.45 * rng.random()),
-                "target": target,
-                "f1": f1,
-                "bench": float(0.6 * target + 0.4 * rng.random()),
-            })
+            rows.append(
+                {
+                    "era": era,
+                    "id": f"{era}_{idx}",
+                    "prediction": float(rng.random()),
+                    "numerai_meta_model": float(0.55 * target + 0.45 * rng.random()),
+                    "target": target,
+                    "f1": f1,
+                    "bench": float(0.6 * target + 0.4 * rng.random()),
+                }
+            )
     full = pl.DataFrame(rows)
     return (
         full.select(["era", "id", "prediction"]),
@@ -62,9 +66,17 @@ def _synthetic_inputs(n_eras: int = 60, rows_per_era: int = 16, seed: int = 7):
 def _make_scorecard(**overrides: float) -> MetricScorecard:
     predictions, meta_model, benchmarks, features, targets = _synthetic_inputs()
     scorecard = evaluate_model(
-        predictions, meta_model=meta_model, benchmarks=benchmarks,
-        features=features, targets=targets, n_trials=1, seed=77,
-        benchmark_col="bench", n_boot=50, min_overlap_eras=20,
+        predictions,
+        meta_model=meta_model,
+        benchmarks=benchmarks,
+        features=features,
+        targets=targets,
+        n_trials=1,
+        seed=77,
+        payout_policy=CLASSIC_LEGACY_V1,
+        benchmark_col="bench",
+        n_boot=50,
+        min_overlap_eras=20,
         model_id="probe",
     )
     return dataclasses.replace(scorecard, **overrides)
@@ -209,7 +221,7 @@ def test_tier4_gate_reports_every_violation() -> None:
     with pytest.raises(ValueError) as excinfo:
         assert_tier4_gate(card, GATE)
     message = str(excinfo.value)
-    assert "corr" in message and "fnc" in message and "turnover" in message
+    assert "corr" in message and "fnc" in message
 
 
 def test_tier4_gate_allows_unavailable_turnover() -> None:
@@ -229,36 +241,6 @@ def test_tier4_gate_allows_unavailable_turnover() -> None:
     assert_tier4_gate(card, GATE)
 
 
-def test_tier4_gate_ignores_deflated_sharpe() -> None:
-    """A6 (audit SEV-2 #4): deflated_sharpe is display-only — at n_trials=1 no
-    deflation occurs and there is no search history at gate time, so gating on
-    it provided false assurance (a tier-0 null scored 0.99999). The gate must
-    pass on strong hard fields regardless of deflated_sharpe, and the report
-    must mark it display-only (never a pass/fail)."""
-    card = _make_scorecard(
-        corr=dataclasses.replace(_make_scorecard().corr, value=0.04),
-        corr_sharpe_ac=dataclasses.replace(_make_scorecard().corr_sharpe_ac, value=1.8),
-        fnc=0.03,
-        deflated_sharpe=0.0,  # would fail the old 0.95 threshold
-        gain_to_pain_ratio=2.0,
-        cagr_1y=0.1,
-        turnover_mean=0.1,
-    )
-    assert_tier4_gate(card, GATE)  # must NOT raise on deflated_sharpe
-
-    from nmr.benchmark import BenchmarkHierarchyResult, gate_report_frame
-
-    result = BenchmarkHierarchyResult(
-        scorecards={"probe": card}, tier_of={"probe": 4}, gate=GATE,
-        null_floor_ok=True, null_floor_errors=(), tier4_violations=(),
-        monotone_ok=True, monotone_error=None,
-    )
-    frame = gate_report_frame(result)
-    row = frame.filter(pl.col("field") == "deflated_sharpe").row(0, named=True)
-    assert row["measured"] == 0.0
-    assert row["pass"] is None  # display-only, never a pass/fail
-
-
 def _corr_ladder(
     scalars: list[tuple[int, float]],
 ) -> tuple[dict[str, MetricScorecard], dict[str, int]]:
@@ -275,16 +257,12 @@ def _corr_ladder(
 
 
 def test_monotone_ordering_passes_on_escalating_tiers() -> None:
-    cards, tier_of = _corr_ladder(
-        [(0, 0.0), (1, 0.2), (2, 0.4), (3, 0.6), (4, 0.7)]
-    )
+    cards, tier_of = _corr_ladder([(0, 0.0), (1, 0.2), (2, 0.4), (3, 0.6), (4, 0.7)])
     assert_hierarchy_monotone(cards, tier_of=tier_of)
 
 
 def test_monotone_rejects_inverted_tiers() -> None:
-    cards, tier_of = _corr_ladder(
-        [(0, 0.5), (1, 0.4), (2, 0.3), (3, 0.2), (4, 0.1)]
-    )
+    cards, tier_of = _corr_ladder([(0, 0.5), (1, 0.4), (2, 0.3), (3, 0.2), (4, 0.1)])
     with pytest.raises(ValueError, match="monotone|ordering|tier"):
         assert_hierarchy_monotone(cards, tier_of=tier_of)
 
@@ -338,9 +316,7 @@ def make_scorecard(
     return dataclasses.replace(
         card,
         corr=dataclasses.replace(card.corr, value=float(corr)),
-        corr_sharpe_ac=dataclasses.replace(
-            card.corr_sharpe_ac, value=float(sharpe)
-        ),
+        corr_sharpe_ac=dataclasses.replace(card.corr_sharpe_ac, value=float(sharpe)),
         fnc=float(fnc),
         gain_to_pain_ratio=float(gpr),
         cagr_1y=float(cagr),
@@ -350,9 +326,13 @@ def make_scorecard(
 
 def _gate() -> Tier4GateConfig:
     return Tier4GateConfig(
-        corr_min=0.0286, corr_sharpe_ac_min=0.78, fnc_min=0.020,
-        deflated_sharpe_min=0.95, gain_to_pain_min=1.50,
-        cagr_min=0.0, turnover_max=0.35,
+        payout_policy_id="classic_legacy_075_225_clip005_v1",
+        scoring_target="target",
+        scoring_horizon="20D",
+        corr_min=0.0286,
+        corr_sharpe_ac_min=0.78,
+        fnc_min=0.020,
+        gain_to_pain_min=1.50,
     )
 
 
@@ -362,27 +342,29 @@ def test_tier4_gate_verdict_shape_and_pass() -> None:
     )
     verdict = tier4_gate_verdict(card, _gate())
     assert verdict == {
-        "corr": True, "corr_sharpe_ac": True, "fnc": True,
-        "deflated_sharpe": None, "gain_to_pain_ratio": True,
-        "cagr_1y": True, "turnover_mean": True,
+        "corr": True,
+        "corr_sharpe_ac": True,
+        "fnc": True,
+        "gain_to_pain_ratio": True,
     }
 
 
-def test_tier4_gate_verdict_cagr_strict_and_turnover_none() -> None:
-    card = make_scorecard(
-        corr=0.03, sharpe=0.8, fnc=0.02, gpr=1.5, cagr=0.0, turnover=None
+def test_tier4_gate_rejects_payout_policy_mismatch() -> None:
+    card = dataclasses.replace(
+        make_scorecard(
+            corr=0.03,
+            sharpe=0.8,
+            fnc=0.02,
+            gpr=1.5,
+            cagr=0.01,
+            turnover=0.1,
+        ),
+        payout_policy_id="classic_atomic_ender60_r1343_v1",
+        scoring_target="target_ender_60",
+        scoring_horizon="60D",
     )
-    verdict = tier4_gate_verdict(card, _gate())
-    assert verdict["cagr_1y"] is False          # strict >, not >=
-    assert verdict["turnover_mean"] is None     # structurally unavailable
-
-
-def test_tier4_gate_verdict_turnover_high_fails() -> None:
-    card = make_scorecard(
-        corr=0.03, sharpe=0.8, fnc=0.02, gpr=1.5, cagr=0.01, turnover=0.9
-    )
-    verdict = tier4_gate_verdict(card, _gate())
-    assert verdict["turnover_mean"] is False   # <= max, not >=
+    with pytest.raises(ValueError, match="policy mismatch"):
+        tier4_gate_verdict(card, _gate())
 
 
 def test_tier_max_corrs_orders_by_tier() -> None:

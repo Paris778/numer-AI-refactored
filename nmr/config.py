@@ -17,6 +17,8 @@ from typing import Any
 
 import yaml
 
+from nmr.payout import PAYOUT_POLICIES
+
 # Repo root = the parent of the `nmr` package directory.
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -80,6 +82,7 @@ def enforce_purge_horizon_law(era_count: int, config: ExperimentConfig) -> None:
             f"{PURGE_ERAS_60D} for 60D)"
         )
 
+
 __all__ = [
     "REPO_ROOT",
     "DataConfig",
@@ -122,9 +125,7 @@ class DataConfig:
         object.__setattr__(self, "targets", tuple(self.targets))
         object.__setattr__(self, "data_dir", _resolve_path(self.data_dir))
         if self.horizon not in VALID_HORIZONS:
-            raise ValueError(
-                f"data.horizon={self.horizon!r} not in {VALID_HORIZONS}"
-            )
+            raise ValueError(f"data.horizon={self.horizon!r} not in {VALID_HORIZONS}")
         if self.supplemental_feature_sets is not None:
             object.__setattr__(
                 self,
@@ -153,7 +154,9 @@ class DataConfig:
         ``feature_subset`` names are validated against ``features.json`` at
         ingestion time (fail loud, fail late — ``IngestionAgent.features``).
         """
-        return self.feature_subset if self.feature_subset is not None else self.feature_set
+        return (
+            self.feature_subset if self.feature_subset is not None else self.feature_set
+        )
 
     def path(self, filename: str) -> Path:
         """Absolute path to a dataset file for this version, e.g. ``train.parquet``."""
@@ -228,6 +231,7 @@ class EvalConfig:
 
     backend: str = "custom"
     main_target: str = "target"
+    payout_policy: str = "classic_atomic_ender60_r1343_v1"
     metrics: tuple[str, ...] = ("corr", "mmc", "fnc", "sharpe")
     validation_scorecard: bool = True
 
@@ -236,6 +240,11 @@ class EvalConfig:
         if self.backend not in VALID_EVAL_BACKENDS:
             raise ValueError(
                 f"evaluation.backend={self.backend!r} not in {VALID_EVAL_BACKENDS}"
+            )
+        if self.payout_policy not in PAYOUT_POLICIES:
+            raise ValueError(
+                f"evaluation.payout_policy={self.payout_policy!r} is not a known "
+                f"payout policy; valid policies: {tuple(PAYOUT_POLICIES)}"
             )
         if not self.metrics:
             raise ValueError("evaluation.metrics must contain at least one metric")
@@ -347,6 +356,11 @@ def config_from_dict(raw: dict[str, Any]) -> ExperimentConfig:
         }
     )
     _validate_purge_vs_horizon(config)
+    if config.evaluation.main_target not in config.data.targets:
+        raise ValueError(
+            f"evaluation.main_target={config.evaluation.main_target!r} must be "
+            "present in data.targets because it is the ensemble weight-learning target"
+        )
     return config
 
 

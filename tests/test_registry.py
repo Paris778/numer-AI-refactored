@@ -8,6 +8,7 @@ write stays inside the fixture.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 
@@ -48,21 +49,53 @@ def _scorecard(sharpe_ac: float, *, max_drawdown: float = 0.1) -> MetricScorecar
         return MetricCell(value=v, ci_low=None, ci_high=None, n_eras=10)
 
     return MetricScorecard(
-        model_id="m", n_eras=10, rank_scalar=0.0, deflated_sharpe=0.0,
-        mean_payout=cell(0.0), corr=cell(0.0), mmc=cell(0.0), fnc=0.0,
-        corr_sharpe_ac=cell(sharpe_ac), cvar5=0.0, max_drawdown=max_drawdown,
-        burn_rate=0.0, mmc_sharpe_ac=0.0, sortino=0.0, calmar=0.0,
-        std_corr=0.1, max_burn_streak=0, time_to_recovery=0,
-        horizon_stability=None, horizon_reason=None, regime_corr=None,
-        regime_reason=None, perturbation=None, max_feature_exposure=0.0,
-        bmc=None, bmc_reason=None, cwmm=None, cwmm_reason=None,
+        model_id="m",
+        payout_policy_id="classic_legacy_075_225_clip005_v1",
+        scoring_target="target",
+        scoring_horizon="20D",
+        n_eras=10,
+        rank_scalar=0.0,
+        deflated_sharpe=0.0,
+        mean_payout=cell(0.0),
+        corr=cell(0.0),
+        mmc=cell(0.0),
+        fnc=0.0,
+        corr_sharpe_ac=cell(sharpe_ac),
+        cvar5=0.0,
+        max_drawdown=max_drawdown,
+        burn_rate=0.0,
+        mmc_sharpe_ac=0.0,
+        sortino=0.0,
+        calmar=0.0,
+        std_corr=0.1,
+        max_burn_streak=0,
+        time_to_recovery=0,
+        horizon_stability=None,
+        horizon_reason=None,
+        regime_corr=None,
+        regime_reason=None,
+        perturbation=None,
+        max_feature_exposure=0.0,
+        bmc=None,
+        bmc_reason=None,
+        cwmm=None,
+        cwmm_reason=None,
         book_correlation=None,
-        cagr_1y=0.0, gain_to_pain_ratio=0.0, kelly_fraction=0.0,
-        mmc_down=None, mmc_down_n_eras=0, mmc_down_reason=None,
-        turnover_mean=None, turnover_std=None, turnover_reason=None,
-        sim_portfolio_cagr=0.0, sim_portfolio_mdd=0.0,
+        cagr_1y=0.0,
+        gain_to_pain_ratio=0.0,
+        kelly_fraction=0.0,
+        mmc_down=None,
+        mmc_down_n_eras=0,
+        mmc_down_reason=None,
+        turnover_mean=None,
+        turnover_std=None,
+        turnover_reason=None,
+        sim_portfolio_cagr=0.0,
+        sim_portfolio_mdd=0.0,
         sim_capital_utilization=0.0,
-        metric_timing_seconds=None, eval_total_seconds=0.0,
+        capital_metrics_reason=None,
+        metric_timing_seconds=None,
+        eval_total_seconds=0.0,
     )
 
 
@@ -71,8 +104,11 @@ def _result_with_scorecard(
 ) -> RunResult:
     result = _result(run_id, sharpe=0.5, name=name)
     return RunResult(
-        run_id=result.run_id, oof=result.oof, metrics=result.metrics,
-        artifact=result.artifact, manifest=result.manifest,
+        run_id=result.run_id,
+        oof=result.oof,
+        metrics=result.metrics,
+        artifact=result.artifact,
+        manifest=result.manifest,
         scorecard=_scorecard(sharpe_ac, max_drawdown=max_drawdown),
     )
 
@@ -93,19 +129,62 @@ def test_cross_family_list_and_best(registry) -> None:
     experiment_store.record_run(
         "fam-a",
         "a" * 64,
-        {"run_id": "a" * 64, "manifest": {"config": {"run": {"name": "fam-a"}}}, "scorecard": {"corr_sharpe_ac": 0.5}},
+        {
+            "run_id": "a" * 64,
+            "manifest": {"config": {"run": {"name": "fam-a"}}},
+            "scorecard": {"corr_sharpe_ac": 0.5},
+        },
     )
     experiment_store.record_run(
         "fam-b",
         "b" * 64,
-        {"run_id": "b" * 64, "manifest": {"config": {"run": {"name": "fam-b"}}}, "scorecard": {"corr_sharpe_ac": 0.9}},
+        {
+            "run_id": "b" * 64,
+            "manifest": {"config": {"run": {"name": "fam-b"}}},
+            "scorecard": {"corr_sharpe_ac": 0.9},
+        },
     )
     assert set(registry.list()) == {"a" * 64, "b" * 64}
     assert registry.best() == ("b" * 64, "fam-b")
 
 
+def test_best_rejects_mixed_policy_population_without_cohort(registry) -> None:
+    first = _result_with_scorecard("a" * 64, sharpe_ac=0.8, name="fam-a")
+    second = _result_with_scorecard("b" * 64, sharpe_ac=0.9, name="fam-b")
+    second = dataclasses.replace(
+        second,
+        scorecard=dataclasses.replace(
+            second.scorecard,
+            payout_policy_id="classic_atomic_ender60_r1343_v1",
+            scoring_target="target_ender_60",
+            scoring_horizon="60D",
+        ),
+    )
+    _record(first)
+    _record(second)
+
+    with pytest.raises(ValueError, match="requires policy_identity"):
+        registry.best()
+    assert registry.best(
+        policy_identity=(
+            "classic_atomic_ender60_r1343_v1",
+            "target_ender_60",
+            "60D",
+        )
+    ) == ("b" * 64, "fam-b")
+
+
+def test_best_rejects_non_finite_metric(registry) -> None:
+    result = _result_with_scorecard("a" * 64, sharpe_ac=float("inf"))
+    _record(result)
+    with pytest.raises(ValueError, match="non-finite"):
+        registry.best()
+
+
 def test_champion_pointer_has_slug(registry) -> None:
-    experiment_store.record_run("fam-a", "a" * 64, {"run_id": "a" * 64, "scorecard": {}})
+    experiment_store.record_run(
+        "fam-a", "a" * 64, {"run_id": "a" * 64, "scorecard": {}}
+    )
     path = registry.promote("a" * 64, "fam-a")
     payload = json.loads(path.read_text())
     assert payload == {
@@ -116,8 +195,12 @@ def test_champion_pointer_has_slug(registry) -> None:
 
 
 def test_list_returns_all_run_ids_sorted(registry) -> None:
-    experiment_store.record_run("fam-b", "b" * 64, {"run_id": "b" * 64, "scorecard": {}})
-    experiment_store.record_run("fam-a", "a" * 64, {"run_id": "a" * 64, "scorecard": {}})
+    experiment_store.record_run(
+        "fam-b", "b" * 64, {"run_id": "b" * 64, "scorecard": {}}
+    )
+    experiment_store.record_run(
+        "fam-a", "a" * 64, {"run_id": "a" * 64, "scorecard": {}}
+    )
     assert registry.list() == ["a" * 64, "b" * 64]
 
 
@@ -126,7 +209,9 @@ def test_best_skips_runs_without_metric_and_empty_registry(registry) -> None:
     experiment_store.record_run(
         "fam-a", "a" * 64, {"run_id": "a" * 64, "scorecard": {"corr_sharpe_ac": 0.3}}
     )
-    experiment_store.record_run("fam-b", "b" * 64, {"run_id": "b" * 64, "scorecard": {}})  # no metric
+    experiment_store.record_run(
+        "fam-b", "b" * 64, {"run_id": "b" * 64, "scorecard": {}}
+    )  # no metric
     assert registry.best() == ("a" * 64, "fam-a")
     assert registry.best("mmc") is None  # no run carries mmc
 
@@ -181,6 +266,22 @@ def test_promote_if_better_explicit_slug_cross_family(registry) -> None:
     path, promoted = registry.promote_if_better("b" * 64, "fam-b")
     assert promoted is True
     assert json.loads(path.read_text(encoding="utf-8"))["experiment_slug"] == "fam-b"
+
+
+def test_promote_if_better_rejects_cross_policy_comparison(registry) -> None:
+    _record(_result_with_scorecard("a" * 64, sharpe_ac=0.8))
+    registry.promote("a" * 64)
+    result = _result_with_scorecard("b" * 64, sharpe_ac=0.9)
+    atomic_scorecard = dataclasses.replace(
+        result.scorecard,
+        payout_policy_id="classic_atomic_ender60_r1343_v1",
+        scoring_target="target_ender_60",
+        scoring_horizon="60D",
+    )
+    _record(dataclasses.replace(result, scorecard=atomic_scorecard))
+
+    with pytest.raises(ValueError, match="payout policy identities"):
+        registry.promote_if_better("b" * 64)
 
 
 def test_promote_if_better_direction_lower_is_better_for_drawdown(registry) -> None:

@@ -14,7 +14,9 @@ def _frame(n_eras: int = 24) -> pl.DataFrame:
     rows = []
     for era in range(1, n_eras + 1):
         for idx in range(10):
-            rows.append({"era": str(era), "id": f"{era}_{idx}", "prediction": idx * 0.1})
+            rows.append(
+                {"era": str(era), "id": f"{era}_{idx}", "prediction": idx * 0.1}
+            )
     return pl.DataFrame(rows)
 
 
@@ -30,7 +32,11 @@ def test_paired_comparison_estimates_mean_difference_with_ci() -> None:
     a = _frame()
     b = _frame()
     result = paired_era_comparison(
-        a, b, metric_fn=_era_index_metric, seed=7, n_boot=50,
+        a,
+        b,
+        metric_fn=_era_index_metric,
+        seed=7,
+        n_boot=50,
     )
     assert result.mean_diff == pytest.approx(0.0, abs=1e-9)
     assert result.n_eras == 24
@@ -49,7 +55,9 @@ def test_paired_comparison_sign_using_prediction_means() -> None:
         return out
 
     a = _frame()  # prediction = idx * 0.1 -> era mean 0.45
-    b = a.with_columns((pl.col("prediction") + 1.0).alias("prediction"))  # era mean 1.45
+    b = a.with_columns(
+        (pl.col("prediction") + 1.0).alias("prediction")
+    )  # era mean 1.45
     result = paired_era_comparison(a, b, metric_fn=mean_pred, seed=7, n_boot=50)
     assert result.mean_diff == pytest.approx(-1.0, abs=1e-9)  # a - b == -1.0
 
@@ -83,13 +91,21 @@ def test_paired_comparison_intersects_eras_and_raises_below_overlap_floor() -> N
 
 def test_paired_comparison_device_mismatch_flag() -> None:
     result = paired_era_comparison(
-        _frame(), _frame(), metric_fn=_era_index_metric, seed=7,
-        device_a="gpu", device_b="cpu",
+        _frame(),
+        _frame(),
+        metric_fn=_era_index_metric,
+        seed=7,
+        device_a="gpu",
+        device_b="cpu",
     )
     assert result.device_mismatch is True
     same = paired_era_comparison(
-        _frame(), _frame(), metric_fn=_era_index_metric, seed=7,
-        device_a="cpu", device_b="cpu",
+        _frame(),
+        _frame(),
+        metric_fn=_era_index_metric,
+        seed=7,
+        device_a="cpu",
+        device_b="cpu",
     )
     assert same.device_mismatch is False
 
@@ -115,14 +131,25 @@ def test_paired_comparison_honors_renamed_era_col() -> None:
     a = _frame().rename({"era": "epoch"})
     b = _frame().rename({"era": "epoch"})
     result = paired_era_comparison(
-        a, b, metric_fn=metric_on_epoch, era_col="epoch", seed=7, n_boot=50,
+        a,
+        b,
+        metric_fn=metric_on_epoch,
+        era_col="epoch",
+        seed=7,
+        n_boot=50,
     )
     assert result.n_eras == 24
     assert result.mean_diff == pytest.approx(0.0, abs=1e-9)
 
 
-def _entry(run_id: str, metric: str = "corr_sharpe_ac", *, value: float | None = None,
-           lo: float | None = None, hi: float | None = None) -> dict:
+def _entry(
+    run_id: str,
+    metric: str = "corr_sharpe_ac",
+    *,
+    value: float | None = None,
+    lo: float | None = None,
+    hi: float | None = None,
+) -> dict:
     scorecard: dict = {}
     if value is not None:
         scorecard[metric] = value
@@ -137,6 +164,28 @@ def test_verdict_promotes_when_candidate_ci_clears_champion() -> None:
     champion = _entry("c" * 64, value=0.10, lo=0.05, hi=0.15)
     candidate = _entry("d" * 64, value=0.25, lo=0.20, hi=0.30)
     assert promotion_verdict(candidate, champion) == "promote"
+
+
+def test_verdict_rejects_cross_policy_comparison() -> None:
+    champion = _entry("c" * 64, value=0.10, lo=0.05, hi=0.15)
+    candidate = _entry("d" * 64, value=0.25, lo=0.20, hi=0.30)
+    champion["scorecard"].update(
+        {
+            "payout_policy_id": "classic_legacy_075_225_clip005_v1",
+            "scoring_target": "target",
+            "scoring_horizon": "20D",
+        }
+    )
+    candidate["scorecard"].update(
+        {
+            "payout_policy_id": "classic_atomic_ender60_r1343_v1",
+            "scoring_target": "target_ender_60",
+            "scoring_horizon": "60D",
+        }
+    )
+
+    with pytest.raises(ValueError, match="payout policy identities"):
+        promotion_verdict(candidate, champion)
 
 
 def test_verdict_holds_when_candidate_ci_below_champion() -> None:
@@ -221,11 +270,25 @@ def test_fleet_summary_columns_and_flags() -> None:
     frame = fleet_summary(runs, n_trials=2)
     assert frame.height == 2
     assert set(frame.columns) >= {
-        "run_id", "metric", "metric_ci_low", "metric_ci_high", "metric_n_eras",
-        "deflated_sharpe", "dsr_pass", "max_feature_exposure", "oof_device",
-        "preset", "feature_set", "feature_subset", "neutralization_proportion",
-        "has_bmc", "has_horizon", "has_perturb", "has_regime",
-        "policy_n_trials", "policy_dsr_confidence",
+        "run_id",
+        "metric",
+        "metric_ci_low",
+        "metric_ci_high",
+        "metric_n_eras",
+        "deflated_sharpe",
+        "dsr_pass",
+        "max_feature_exposure",
+        "oof_device",
+        "preset",
+        "feature_set",
+        "feature_subset",
+        "neutralization_proportion",
+        "has_bmc",
+        "has_horizon",
+        "has_perturb",
+        "has_regime",
+        "policy_n_trials",
+        "policy_dsr_confidence",
     }
     first = frame.filter(pl.col("run_id") == "a" * 64).row(0, named=True)
     assert first["dsr_pass"] is True
@@ -257,11 +320,14 @@ def test_fleet_summary_exposure_definition_boundary() -> None:
 def test_fleet_summary_flags_legacy_runs_without_scorecard() -> None:
     legacy = {
         "run_id": "c" * 64,
-        "manifest": {"oof_device": "cpu", "config": {
-            "data": {"feature_set": "all", "feature_subset": None},
-            "model": {"preset": "deep"},
-            "risk": {"neutralization_proportion": 0.5},
-        }},
+        "manifest": {
+            "oof_device": "cpu",
+            "config": {
+                "data": {"feature_set": "all", "feature_subset": None},
+                "model": {"preset": "deep"},
+                "risk": {"neutralization_proportion": 0.5},
+            },
+        },
         "scorecard": None,
     }
     frame = fleet_summary([legacy], n_trials=1)
@@ -292,8 +358,14 @@ def test_neutralized_ic_series_parity_with_profile() -> None:
             f1, f2 = float(rng.normal()), float(rng.normal())
             y = 0.6 * f1 + 0.4 * f2 + float(rng.normal(scale=0.3))
             rows.append(
-                {"era": era, "id": f"{era}_{i}", "f1": f1, "f2": f2,
-                 "prediction": y, "target": y}
+                {
+                    "era": era,
+                    "id": f"{era}_{i}",
+                    "f1": f1,
+                    "f2": f2,
+                    "prediction": y,
+                    "target": y,
+                }
             )
     frame = pl.DataFrame(rows)
     chunks = frame.partition_by("era", maintain_order=True)
@@ -339,22 +411,30 @@ def _evidence_environment(tmp_path: Path) -> tuple[Path, Path, Path]:
         for i in range(15):
             f1, f2 = float(rng.normal()), float(rng.normal())
             rows.append(
-                {"era": era, "id": f"{era}_{i}", "f1": f1, "f2": f2,
-                 "target": 0.7 * f1 + 0.3 * f2 + float(rng.normal(scale=0.5))}
+                {
+                    "era": era,
+                    "id": f"{era}_{i}",
+                    "f1": f1,
+                    "f2": f2,
+                    "target": 0.7 * f1 + 0.3 * f2 + float(rng.normal(scale=0.5)),
+                }
             )
     pl.DataFrame(rows).write_parquet(d / "validation.parquet")
 
     exp = tmp_path / "experiments"
     for slug, run_id, pred_fn in (
-        ("lgbm_v2", "a" * 64, lambda r: 0.7 * r["f1"]),                    # v2: linear only
-        ("lgbm_v3", "b" * 64, lambda r: 0.7 * r["f1"] + 0.25 * r["f2"]),   # v3: + nonlinear-ish
+        ("lgbm_v2", "a" * 64, lambda r: 0.7 * r["f1"]),  # v2: linear only
+        (
+            "lgbm_v3",
+            "b" * 64,
+            lambda r: 0.7 * r["f1"] + 0.25 * r["f2"],
+        ),  # v3: + nonlinear-ish
     ):
         rd = exp / slug / "runs" / run_id
         rd.mkdir(parents=True)
         preds = pl.DataFrame(
             [
-                {"era": r["era"], "id": r["id"],
-                 "prediction": float(pred_fn(r))}
+                {"era": r["era"], "id": r["id"], "prediction": float(pred_fn(r))}
                 for r in rows
             ]
         )
@@ -371,9 +451,7 @@ def _evidence_environment(tmp_path: Path) -> tuple[Path, Path, Path]:
                         "n_eras": 6,
                     },
                     "manifest": {
-                        "config": {
-                            "model": {"backend": "lightgbm", "device": "cpu"}
-                        },
+                        "config": {"model": {"backend": "lightgbm", "device": "cpu"}},
                         "feature_cols": ["f1"],
                     },
                 }
@@ -423,7 +501,9 @@ def test_campaign_evidence_assembles_variants_and_pairwise(
 
     data_root, exp, log = _evidence_environment(tmp_path)
     evidence = campaign_evidence(
-        log, exp, data=DataConfig(version="v0test", data_dir=data_root),
+        log,
+        exp,
+        data=DataConfig(version="v0test", data_dir=data_root),
         min_overlap_eras=2,
     )
 
@@ -460,12 +540,18 @@ def test_campaign_evidence_assembles_variants_and_pairwise(
     assert row["ci_high"] < 0.0
     assert row["ci_low"] <= row["mean_diff"] <= row["ci_high"]
 
+
 def _variant_row(label, sharpe, skew, kurt, n_eras, std=0.1, status="recorded"):
     return {
-        "variant": label, "status": status,
-        "ic_sharpe": sharpe, "ic_std": std, "ic_skew": skew,
-        "ic_kurt": kurt, "n_eras": n_eras,
+        "variant": label,
+        "status": status,
+        "ic_sharpe": sharpe,
+        "ic_std": std,
+        "ic_skew": skew,
+        "ic_kurt": kurt,
+        "n_eras": n_eras,
     }
+
 
 def test_attach_campaign_dsr_computes_fleet_deflation() -> None:
     import numpy as np
@@ -489,6 +575,7 @@ def test_attach_campaign_dsr_computes_fleet_deflation() -> None:
     assert out["a"]["dsr_n_trials"] == 3
     assert out["a"]["dsr_trials_sr_var"] == pytest.approx(var)
 
+
 def test_attach_campaign_dsr_zero_variance_guard() -> None:
     from nmr.meta import _attach_campaign_dsr
 
@@ -500,6 +587,7 @@ def test_attach_campaign_dsr_zero_variance_guard() -> None:
         assert r["dsr_campaign_aware"] is None
         assert r["dsr_pass_campaign"] is False
         assert r["dsr_reason"] == "zero_cross_trial_sharpe_variance"
+
 
 def test_attach_campaign_dsr_degenerate_and_error_rows() -> None:
     from nmr.meta import _attach_campaign_dsr
@@ -580,10 +668,18 @@ def test_assemble_pairwise_skips_missing_v2_and_tolerates_error_rows() -> None:
     }
     variant_rows = [
         {"variant": "lgbm_v2", "status": "error", "error": "empty subset"},
-        {"variant": "lgbm_v3", "status": "recorded", "backend": "lightgbm",
-         "device": "auto"},
-        {"variant": "lgbm_v4", "status": "recorded", "backend": "lightgbm",
-         "device": "auto"},
+        {
+            "variant": "lgbm_v3",
+            "status": "recorded",
+            "backend": "lightgbm",
+            "device": "auto",
+        },
+        {
+            "variant": "lgbm_v4",
+            "status": "recorded",
+            "backend": "lightgbm",
+            "device": "auto",
+        },
     ]
     rows = _assemble_pairwise(
         ic_frames, variant_rows, n_boot=50, seed=0, min_overlap_eras=2
@@ -606,10 +702,18 @@ def test_assemble_pairwise_records_vacuity_as_error_row() -> None:
         ),
     }
     variant_rows = [
-        {"variant": "lgbm_v3", "status": "recorded", "backend": "lightgbm",
-         "device": "auto"},
-        {"variant": "lgbm_v4", "status": "recorded", "backend": "lightgbm",
-         "device": "auto"},
+        {
+            "variant": "lgbm_v3",
+            "status": "recorded",
+            "backend": "lightgbm",
+            "device": "auto",
+        },
+        {
+            "variant": "lgbm_v4",
+            "status": "recorded",
+            "backend": "lightgbm",
+            "device": "auto",
+        },
     ]
     rows = _assemble_pairwise(
         ic_frames, variant_rows, n_boot=50, seed=0, min_overlap_eras=2

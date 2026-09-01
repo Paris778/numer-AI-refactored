@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import uuid
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -27,7 +28,9 @@ __all__ = ["NeutralizationEngine"]
 
 _INTERCEPT_AWARE = True
 
-DEFAULT_CACHE_MAX_BYTES = 8 * 2**30  # 8 GiB (per-era pinv cache; bigger = fewer recomputes on repeated runs)
+DEFAULT_CACHE_MAX_BYTES = (
+    8 * 2**30
+)  # 8 GiB (per-era pinv cache; bigger = fewer recomputes on repeated runs)
 
 
 class NeutralizationEngine:
@@ -45,16 +48,16 @@ class NeutralizationEngine:
             else REPO_ROOT / "artifacts" / "cache" / "neutralization"
         )
         self._max_cache_bytes = (
-            DEFAULT_CACHE_MAX_BYTES
-            if max_cache_bytes is None
-            else int(max_cache_bytes)
+            DEFAULT_CACHE_MAX_BYTES if max_cache_bytes is None else int(max_cache_bytes)
         )
         if self._max_cache_bytes < 0:
             raise ValueError("max_cache_bytes must be >= 0")
         total = self.cache_size_bytes()
         logger.info(
             "[neutralization] cache dir=%s max_bytes=%d current_bytes=%d",
-            self._cache_dir, self._max_cache_bytes, total,
+            self._cache_dir,
+            self._max_cache_bytes,
+            total,
         )
 
     def neutralize(
@@ -209,11 +212,18 @@ class NeutralizationEngine:
             row_ids = [str(idx) for idx in era_df.get_column("__row_idx__").to_list()]
 
         row_ids_payload = json.dumps(row_ids, separators=(",", ":")).encode("utf-8")
+        feature_matrix = np.ascontiguousarray(
+            era_df.select(list(feature_cols)).cast(pl.Float64).to_numpy(),
+            dtype=np.float64,
+        )
         return {
             "era": era_label,
             "feature_cols": list(feature_cols),
             "row_count": int(era_df.height),
             "row_ids_sha256": hashlib.sha256(row_ids_payload).hexdigest(),
+            "feature_values_sha256": hashlib.sha256(
+                feature_matrix.tobytes(order="C")
+            ).hexdigest(),
             "intercept": _INTERCEPT_AWARE,
         }
 
@@ -228,25 +238,44 @@ class NeutralizationEngine:
     def cache_size_bytes(self) -> int:
         if not self._cache_dir.exists():
             return 0
-        return sum(
-            path.stat().st_size for path in self._cache_dir.iterdir() if path.is_file()
+        total = 0
+        for path in self._cache_dir.iterdir():
+            if not self._is_final_cache_file(path):
+                continue
+            try:
+                total += path.stat().st_size
+            except OSError:
+                continue
+        return total
+
+    @staticmethod
+    def _is_final_cache_file(path: Path) -> bool:
+        return (
+            path.suffix in {".npy", ".json"}
+            and ".tmp." not in path.name
+            and path.is_file()
         )
 
     def _evict_to_budget(self) -> None:
         if not self._cache_dir.exists():
             return
-        files = sorted(
-            (p for p in self._cache_dir.iterdir() if p.is_file()),
-            key=lambda p: p.stat().st_mtime,
-        )
-        total = sum(p.stat().st_size for p in files)
-        for path in files:
+        files: list[tuple[Path, float, int]] = []
+        for path in self._cache_dir.iterdir():
+            if not self._is_final_cache_file(path):
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            files.append((path, stat.st_mtime, stat.st_size))
+        files.sort(key=lambda item: item[1])
+        total = sum(size for _, _, size in files)
+        for path, _, recorded_size in files:
             if total <= self._max_cache_bytes:
                 break
             try:
-                size = path.stat().st_size
                 path.unlink()
-                total -= size
+                total -= recorded_size
             except OSError:
                 continue
         if total > self._max_cache_bytes:
@@ -299,7 +328,7 @@ class NeutralizationEngine:
         # np.save appends `.npy` when the target name lacks it, so the temp
         # file must keep the `.npy` suffix or the replace below would miss it.
         tmp_array = array_path.with_name(
-            f"{array_path.stem}.tmp.{os.getpid()}{array_path.suffix}"
+            f"{array_path.stem}.tmp.{os.getpid()}.{uuid.uuid4().hex}{array_path.suffix}"
         )
         try:
             np.save(tmp_array, np.asarray(array, dtype=float))

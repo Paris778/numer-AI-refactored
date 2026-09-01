@@ -20,7 +20,12 @@ import polars as pl
 
 from nmr.config import ExperimentConfig
 from nmr.models import resolve_model_params
-from nmr.research import SweepResult, _held_out_metric_full, _override_config
+from nmr.research import (
+    SweepResult,
+    _held_out_metric_full,
+    _override_config,
+    metric_direction,
+)
 
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
@@ -80,18 +85,23 @@ def _parse_space(space: dict[str, dict[str, Any]]) -> list[_SpaceParam]:
                     f"parameter {name!r}: log=True and step are mutually exclusive"
                 )
             parsed.append(
-                _SpaceParam(kind=kind, name=name, low=low, high=high,
-                            log=log, step=step)
+                _SpaceParam(
+                    kind=kind, name=name, low=low, high=high, log=log, step=step
+                )
             )
         else:
             choices = spec.get("choices")
             if not isinstance(choices, list) or not choices:
-                raise ValueError(f"parameter {name!r}: choices must be a non-empty list")
+                raise ValueError(
+                    f"parameter {name!r}: choices must be a non-empty list"
+                )
             if not all(isinstance(c, _JSON_PRIMITIVES) for c in choices):
                 raise ValueError(
                     f"parameter {name!r}: categorical choices must be str/int/float/bool"
                 )
-            parsed.append(_SpaceParam(kind="categorical", name=name, choices=list(choices)))
+            parsed.append(
+                _SpaceParam(kind="categorical", name=name, choices=list(choices))
+            )
     return parsed
 
 
@@ -137,15 +147,20 @@ def bayesian_sweep(
         )
     if metric not in _VALID_METRICS:
         raise ValueError(f"metric={metric!r} not in {sorted(_VALID_METRICS)}")
+    direction = metric_direction(metric)
 
     parsed = _parse_space(space)
     study = optuna.create_study(
-        direction="maximize",
-        sampler=optuna.samplers.TPESampler(seed=seed, n_startup_trials=n_startup_trials),
+        direction=direction,
+        sampler=optuna.samplers.TPESampler(
+            seed=seed, n_startup_trials=n_startup_trials
+        ),
         storage=optuna.storages.InMemoryStorage(),
     )
     if enqueue_base_config:
-        resolved = resolve_model_params(base_config.model.preset, base_config.model.params)
+        resolved = resolve_model_params(
+            base_config.model.preset, base_config.model.params
+        )
         anchor = {p.name: resolved[p.name] for p in parsed if p.name in resolved}
         if anchor:
             study.enqueue_trial(anchor)
@@ -190,7 +205,11 @@ def bayesian_sweep(
     trial_df = (
         pl.DataFrame(rows)
         .with_columns(pl.col("metric_value").cast(pl.Float64))
-        .sort(["metric_value", "trial_id"], descending=[True, False], nulls_last=True)
+        .sort(
+            ["metric_value", "trial_id"],
+            descending=[direction == "maximize", False],
+            nulls_last=True,
+        )
     )
     best = study.best_trial if len(study.best_trials) > 0 else None
     return SweepResult(
@@ -214,7 +233,12 @@ def sweep_dsr(trials: pl.DataFrame) -> pl.DataFrame:
     from nmr.inference import deflated_sharpe_fleet
 
     required = {
-        "trial_id", "ic_sharpe", "ic_skew", "ic_kurt", "ic_n_eras", "ic_std",
+        "trial_id",
+        "ic_sharpe",
+        "ic_skew",
+        "ic_kurt",
+        "ic_n_eras",
+        "ic_std",
     }
     missing = required - set(trials.columns)
     if missing:
@@ -257,11 +281,14 @@ def sweep_dsr(trials: pl.DataFrame) -> pl.DataFrame:
             pl.Series("dsr_pass_sweep", (dsr_arr >= 0.95).astype(bool)),
             pl.Series("dsr_reason", reason_arr).alias("dsr_reason"),
             pl.Series(
-                "dsr_n_trials", [n_trials if n_trials >= 2 else None] * trials.height,
+                "dsr_n_trials",
+                [n_trials if n_trials >= 2 else None] * trials.height,
                 dtype=pl.Int64,
             ).alias("dsr_n_trials"),
             pl.Series(
-                "dsr_trials_sr_var", [trials_var] * trials.height, dtype=pl.Float64,
+                "dsr_trials_sr_var",
+                [trials_var] * trials.height,
+                dtype=pl.Float64,
             ).alias("dsr_trials_sr_var"),
         ]
     )

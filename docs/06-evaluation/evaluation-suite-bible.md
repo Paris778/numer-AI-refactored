@@ -171,20 +171,20 @@ where $\gamma_e \approx 0.5772$ is the Euler–Mascheroni constant and $e$ is Eu
 
 Tier 1 is small on purpose. One scalar to rank; the rest can only veto. Every Tier-1 quantity is reported **with** its bootstrap CI (§4.1) and, where it is a Sharpe, its **AC-adjusted** form (§4.2). The headline rank scalar is **deflated** (§4.3).
 
-### 5.0 THE rank scalar — Deflated Payout Proxy
+### 5.0 Policy-Bound Payout Scalar
 
 This is the single number we sort models by. It is a per-era proxy of real tournament economics, aggregated, then deflated.
 
-Per era $e$:
+Every scorecard declares `payout_policy_id`, `scoring_target`, and `scoring_horizon`; values from different identity tuples are incomparable. Current Classic Atomic scorecards use Ender-60 and, per era $e$:
 
 $$
-\pi_e = \operatorname{clip}\!\big(\,\text{pf}\cdot(0.75\,\text{CORR}_e + 2.25\,\text{MMC}_e),\ -0.05,\ +0.05\,\big)
+\pi_e = \operatorname{clip}\!\big(3\,\text{CORR60}_e + 15\,\text{MMC60}_e,\ -1,\ +1\big)
 $$
 
-- $\text{pf}$ = payout factor (default $1.0$; configurable to model real stake-threshold throttling, see [`../01-canon/06-staking-legacy.md`](../01-canon/06-staking-legacy.md)).
-- Weights $0.75 / 2.25$ and the $\pm 0.05$ clip match the current canonical payout (see `../DOCS_README.md`).
+- Atomic payout factor is fixed at $1$ and the clip is $\pm1$; historical payout-factor maps are forbidden under this policy.
+- `classic_legacy_075_225_clip005_v1` retains $\text{PF}_e(0.75\,\text{CORR}+2.25\,\text{MMC})$ clipped to $\pm0.05$ only for explicitly labeled historical replay.
 - **Mean payout proxy** $\bar\pi = \tfrac{1}{n}\sum_e \pi_e$ is the raw scalar; the **reported rank scalar** is $\bar\pi$ wrapped by the inference layer: report $(\bar\pi,\ \text{CI}_{95\%}(\bar\pi),\ \text{DSR})$. **We rank on the deflated, CI-aware payout proxy.**
-- **Clipped vs unclipped — a hard rule for the DSR.** The economic point estimates (mean payout $\bar\pi$, burn rate, CVaR, drawdown) use the **clipped** series $\pi_e$, because $\pm0.05$ is what you are actually paid. But the **Deflated Sharpe Ratio must be computed entirely on the *unclipped* raw series** $\pi_{\text{raw},e} = \text{pf}\cdot(0.75\,\text{CORR}_e + 2.25\,\text{MMC}_e)$ — its $\widehat{SR}$, $\gamma_3$, **and** $\gamma_4$ together, consistently from the same distribution. The clip masses probability at $\pm0.05$, truncating the tails and biasing sample kurtosis, which violates the continuity assumption underlying the Bailey–López de Prado framework and would make the rank scalar fluctuate erratically. **Do not** mix a clipped-series Sharpe with unclipped moments in the same DSR denominator — that combines moments from two different distributions and is its own error. Unclipped end-to-end for the DSR; clipped for the economic headline.
+- Point estimates use policy-clipped returns. DSR uses one internally consistent raw policy-score distribution for its Sharpe, skew, and kurtosis; never mix moments from clipped and raw distributions.
 - **Edge cases:** degenerate predictions (constant) ⇒ $\text{CORR}_e=0$, $\text{MMC}_e=0$ ⇒ $\pi_e=0$. Empty/!=overlap eras are excluded and `n_eras` is surfaced.
 
 ### 5.1 CORR — Numerai rank correlation
@@ -468,8 +468,8 @@ Every slice is graded with the same discipline that exposed real bugs in S7–S1
 | $e$, $n$ | an era; number of eras |
 | $\text{CORR}_e$ | Numerai rank correlation in era $e$ |
 | $\text{MMC}_e$ | meta-model contribution in era $e$ |
-| $\pi_e$ | per-era payout proxy $\operatorname{clip}(\text{pf}(0.75\,\text{CORR}_e + 2.25\,\text{MMC}_e),\pm0.05)$ |
-| pf | payout factor, $\min(1, \text{threshold}/\text{total\_at\_risk})$; default 1.0 |
+| $\pi_e$ | policy-bound per-era payout; current Atomic Classic is $\operatorname{clip}(3\,\text{CORR60}_e+15\,\text{MMC60}_e,\pm1)$ |
+| PF | fixed at 1 for Atomic; historical mappings apply only to the explicitly labeled legacy policy |
 | $\widehat{SR}$ | naïve Sharpe $\hat\mu/\hat\sigma$ (ddof=0; 0 if $\hat\sigma=0$) |
 | $SR_{\text{adj}}$ | autocorrelation-adjusted Sharpe (Lo 2002) |
 | DSR | Deflated Sharpe Ratio (Bailey–López de Prado 2014) |
@@ -501,19 +501,27 @@ Logged, non-blocking. Revisit deliberately, not by accident.
 
 ## 16) v2.5 Capital-Readiness Metrics
 
-Added 2026-08-15. Six new metrics extend the payout proxy and the scorecard to judge capital readiness: compounded annual growth, gain-to-pain, a bounded Kelly stake, downside-MMC, prediction turnover, and a multi-round lockup simulator. This section is the locked mathematical contract and evaluation spec of record. Let $r_t = \operatorname{clip}(\text{pf}\cdot(0.75\,\text{CORR}_t + 2.25\,\text{MMC}_t), \pm 0.05)$ be the clipped round return and $\text{raw}_t$ the same sum unclipped.
+These diagnostics operate on the clipped return $r_t$ supplied by the scorecard's explicit payout policy. For current Atomic Classic, $r_t=\operatorname{clip}(3\,\text{CORR60}_t+15\,\text{MMC60}_t,\pm1)$.
 
 **CAGR 1Y** (`nmr.payout.annual_compounded_return`; scorecard column `cagr_1y`). Geometric compounded growth of the clipped series annualized at 52 eras/year: $\text{CAGR} = (\prod_t (1 + r_t))^{52/n} - 1$ when $\prod_t (1 + r_t) > 0$. A non-positive wealth product — total ruin, which the geometric form could not otherwise express — maps to $-1.0$. Fewer than 2 observations return 0.0. All arithmetic is float64 on the finite-only validated input (`_as_finite_1d`: 1-D, non-empty, finite-only, else `ValueError`).
 
 **Gain-to-pain ratio** (`nmr.payout.gain_to_pain_ratio`; `gain_to_pain_ratio`). $\text{GPR} = \sum_t \max(0, r_t) \,/\, \sum_t |\min(0, r_t)|$. Zero-pain conventions: $+\infty$ when the pain denominator is 0 while gains are positive (precedented — `calmar` already returns `+inf` for zero MDD with positive mean), and 0.0 when the series is entirely flat. The canonical JSON sanitizer maps non-finite floats to `"Infinity"` strings in canonical bytes; parquet/CSV carry `inf` natively. No crash path.
 
-**Kelly fraction** (`nmr.payout.kelly_fraction`; `kelly_fraction`) — director-locked. Bounded discrete Kelly on the **raw** (unclipped) payout series: $\min(1.0, \max(0.0, \mu / \sigma^2))$ with population variance (ddof=0), and 0.0 when $\sigma^2 = 0$ or $\mu \le 0$ — always in [0, 1]. The raw-series input is deliberate: the clipped series has Popoviciu-bounded variance ($\sigma^2 \le 0.0025$ under the ±5% clip), so $\mu/\sigma^2$ there saturates at 1.0 for every viable model and carries no discrimination between candidates. `payout_report` passes `series.raw`.
+**Kelly fraction** (`nmr.payout.kelly_fraction`; `kelly_fraction`). Empirical bounded log-growth optimum on policy-clipped returns:
+
+$$
+f^*=\arg\max_{0\le f\le1}\frac1n\sum_t\log(1+f r_t),
+$$
+
+with the domain tightened so every observed $1+fr_t$ is strictly positive. Non-positive mean or a constant series returns 0. `payout_report` passes `series.clipped`; the retired raw $\mu/\sigma^2$ approximation could recommend fractions that produce non-positive wealth and is not a capital metric.
 
 **MMC-down** (`nmr.evaluation.downside_era_indices`; columns `mmc_down`, `mmc_down_n_eras`, `mmc_down_reason`) — director-locked. Let $E_{\text{down}} = \{ t : \text{CORR}_{\text{meta}}(t) < 0.0 \}$ — the **strict** inequality, using the same custom per-era CORR path as the model's own CORR against the main target. $\text{mmc\_down} = \operatorname{mean}(\text{MMC}_t : t \in E_{\text{down}})$ when $|E_{\text{down}}| \ge 5$ (`_MMC_DOWN_MIN_ERAS`); otherwise `mmc_down = None` and `mmc_down_reason = "insufficient_downside_eras"`. `mmc_down_n_eras` always records $|E_{\text{down}}|$, and the reason is `None` whenever the metric is computable.
 
 **Turnover** (`nmr.evaluation.per_era_turnover`; `turnover_mean`, `turnover_std`, `turnover_reason`). For each consecutive chronological era pair $(e_{k-1}, e_k)$, Spearman $\rho_k$ between the two eras' predictions over the shared stock-ID intersection; per-era turnover is $1 - \rho_k$, bounded in [0, 2]. Transitions with fewer than `_TURNOVER_MIN_SHARED_IDS` (10) shared IDs are skipped; a non-finite (degenerate) $\rho_k$ maps to 0.0, yielding turnover 1.0. Missing `era_col`/`id_col`/`pred_col` raise `ValueError`. The scorecard aggregates mean and population std (ddof=0) over the valid transitions; fewer than 2 valid transitions (or a missing id column in the join) yield both `None`, with reason `"insufficient_transitions"` or `"id column unavailable"`.
 
-**Overlapping lockup simulator** (`nmr.payout.simulate_overlapping_portfolio`; `sim_portfolio_cagr`, `sim_portfolio_mdd`, `sim_capital_utilization`). Multi-round concurrent capital lockup with dynamic reinvestment. At each era, tranches maturing at $t$ pay $\text{principal} \cdot (1 + r_{t-K})$ — the **initiating** era's return, correct Numerai round semantics — then $\min(\text{cash}, \text{total\_equity}/K)$ is deployed as a new tranche maturing at $t + K$. Equity and utilization are recorded **before** the era's deployment. Tranches initiated in the final $K$ eras remain locked at series end and are carried at par principal (at-cost convention: no mark-to-market, no unrealized payoff) in `final_equity` and the equity curve. The horizon $K$ derives from the report's `horizon` argument via `_HORIZON_ERAS = {"20D": 20, "60D": 60}`; a series shorter than the horizon returns a zeroed result. Outputs: `portfolio_cagr` (geometric growth of final equity, annualized), `portfolio_max_drawdown` (peak-to-trough of the equity curve), `avg_capital_utilization` (mean locked/total-equity), `final_equity`.
+**Overlapping lockup simulator** (`nmr.payout.simulate_overlapping_portfolio`). This remains an explicitly legacy era-level diagnostic. Weekly validation eras cannot represent Atomic's five rounds per week and 64 concurrent positions, so Atomic scorecards set `sim_portfolio_cagr`, `sim_portfolio_mdd`, and `sim_capital_utilization` to `None` with `capital_metrics_reason="round_level_returns_unavailable"`. No Atomic capital claim may be derived from this simulator without round-level returns and timestamps.
+
+**Drawdown baseline.** Cumulative-return drawdown and recovery paths are prefixed with initial equity zero, so a loss in the first observation is counted rather than treated as a new peak.
 
 **Determinism & canonical bytes.** All twelve new scorecard fields are deterministic functions of the input frame — float64 pure math, rank-based Spearman invariant to row order within an era, no wall-clock, no RNG — and are therefore included in the canonical scorecard bytes. Only the `timing_*` / `quality_metric_*` columns remain stripped from canonical serialization.
 

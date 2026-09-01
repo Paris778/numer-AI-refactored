@@ -92,16 +92,17 @@ research → partial → upload → compare → full → stake
    validation-era window, local-vs-platform. **The partial is the honest
    cross-check instrument** — it never saw validation during training, so its
    local diagnostics are a fair expectation of what the platform should report.
-   Both paths use the **same per-era payout factors**: the research validation
-   scorecard and the partial cross-check apply `PF_e` from
-   `data/v5.3/payout_factor_historic.csv` (aligned by `int(era) == round`),
-   falling back to `PF_e = 1.0` only for eras the CSV does not cover.
-5. **Full** — `promote_model.py` (the writer's default `scope="full"`) trains on
-   train+validation and publishes the immutable slot `exports/full/<run_id>/`,
-   repointing the atomic `current.json` pointer. The family moves to `full`.
+  Both paths use the run's explicit payout policy. Current Atomic Classic
+  evaluates `target_ender_60` with 60D inference and fixed PF=1; historical
+  payout-factor files are accepted only by the explicitly labeled legacy policy.
+5. **Full** — `promote_model.py` trains on train+validation in writer-owned
+  staging, validates the raw artifact against live features and benchmark
+  inputs, and only then publishes the immutable slot. `current.json` is
+  written only when gate, policy, scorecard, component, data-content, and
+  acceptance evidence all verify. Overrides and rehearsals are quarantined.
 6. **Stake** — a manual act: record the stake in `experiments/<slug>/meta.json`
    (`staked: {run_id, scope: "full", numerai_model_id, staked_at, status}`),
-   bound to a **valid full export** (the artifact actually uploaded).
+  bound to an **activation-eligible full export** (the artifact actually uploaded).
 
 **The in-sample warning — never skip step 4's meaning.** A full-history model
 was trained on train+validation, so the validation eras are **in-sample** for

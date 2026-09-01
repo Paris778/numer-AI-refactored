@@ -224,12 +224,20 @@ def test_proportion_midpoint_property(tmp_path) -> None:
     """neutralize(0.5) is exactly the midpoint of pred and neutralize(1.0)."""
     df = _risk_frame()
     engine = NeutralizationEngine(cache_dir=tmp_path)
-    full = engine.neutralize(
-        df, pred_col="pred", feature_cols=["f1", "f2"], proportion=1.0
-    ).get_column("pred").to_numpy()
-    half = engine.neutralize(
-        df, pred_col="pred", feature_cols=["f1", "f2"], proportion=0.5
-    ).get_column("pred").to_numpy()
+    full = (
+        engine.neutralize(
+            df, pred_col="pred", feature_cols=["f1", "f2"], proportion=1.0
+        )
+        .get_column("pred")
+        .to_numpy()
+    )
+    half = (
+        engine.neutralize(
+            df, pred_col="pred", feature_cols=["f1", "f2"], proportion=0.5
+        )
+        .get_column("pred")
+        .to_numpy()
+    )
     raw = df.get_column("pred").to_numpy()
     assert np.allclose(half, 0.5 * (raw + full), atol=1e-12)
 
@@ -303,6 +311,19 @@ def test_eviction_over_budget_warning_when_unlink_fails(
     assert any("still above budget" in record.message for record in caplog.records)
 
 
+def test_cache_eviction_ignores_transient_writer_files(tmp_path) -> None:
+    transient = tmp_path / "era_1_hash.tmp.1234.deadbeef.npy"
+    transient.write_bytes(b"in flight")
+    final = tmp_path / "era_1_hash.npy"
+    final.write_bytes(b"final")
+    engine = NeutralizationEngine(cache_dir=tmp_path, max_cache_bytes=0)
+
+    engine._evict_to_budget()
+
+    assert transient.read_bytes() == b"in flight"
+    assert not final.exists()
+
+
 def test_neutralize_array_cached_matches_uncached(tmp_path) -> None:
     df = _risk_frame().filter(pl.col("era") == "1")
     engine = NeutralizationEngine(cache_dir=tmp_path)
@@ -315,6 +336,27 @@ def test_neutralize_array_cached_matches_uncached(tmp_path) -> None:
     features = df.select(["f1", "f2"]).to_numpy()
     direct = neutralize_array(pred, features, 1.0, pseudo_inverse=None)
     assert np.allclose(result.get_column("pred").to_numpy(), direct, atol=1e-12)
+
+
+def test_cache_identity_changes_when_feature_values_change(tmp_path) -> None:
+    base = _risk_frame().filter(pl.col("era") == "1")
+    changed = base.with_columns((pl.col("f1") ** 2 + 0.17).alias("f1"))
+    engine = NeutralizationEngine(cache_dir=tmp_path)
+
+    engine.neutralize(base, pred_col="pred", feature_cols=["f1", "f2"], proportion=1.0)
+    cached = engine.neutralize(
+        changed, pred_col="pred", feature_cols=["f1", "f2"], proportion=1.0
+    )
+    uncached = NeutralizationEngine(cache_dir=None).neutralize(
+        changed, pred_col="pred", feature_cols=["f1", "f2"], proportion=1.0
+    )
+
+    assert np.allclose(
+        cached.get_column("pred").to_numpy(),
+        uncached.get_column("pred").to_numpy(),
+        atol=1e-12,
+    )
+    assert len(list(tmp_path.glob("*.npy"))) == 2
 
 
 def test_neutralize_array_zero_variance_returns_unchanged() -> None:
@@ -380,9 +422,12 @@ def test_zero_variance_era_keeps_rows_and_is_logged(tmp_path, caplog) -> None:
         }
     )
     import logging
+
     engine = NeutralizationEngine(cache_dir=tmp_path)
     with caplog.at_level(logging.WARNING, logger="nmr.risk"):
-        result = engine.neutralize(df, pred_col="pred", feature_cols=["f1"], proportion=1.0)
+        result = engine.neutralize(
+            df, pred_col="pred", feature_cols=["f1"], proportion=1.0
+        )
     assert result.height == 4
     era1 = result.filter(pl.col("era") == "1").get_column("pred").to_numpy()
     assert np.array_equal(era1, np.array([0.5, 0.5]))

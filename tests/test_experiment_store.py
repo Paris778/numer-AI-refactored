@@ -59,7 +59,9 @@ def _result(
             else manifest
         ),
         validation_predictions=(
-            pl.DataFrame({"era": ["0575", "0575"], "id": ["x", "y"], "prediction": [0.2, 0.8]})
+            pl.DataFrame(
+                {"era": ["0575", "0575"], "id": ["x", "y"], "prediction": [0.2, 0.8]}
+            )
             if with_validation_preds
             else None
         ),
@@ -169,10 +171,12 @@ def test_stage_publish_atomic(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", tmp_path / "experiments")
     run_id = "a" * 64
     staging = experiment_store.stage_export("f", "partial", run_id)
-    assert staging.name == f".tmp-{run_id}"
+    assert staging.name.startswith(f".tmp-{run_id}-")
     (staging / "predict.pkl").write_bytes(b"x")
     (staging / "export.json").write_text("{}")
-    final = experiment_store.publish_staged_export("f", "partial", run_id)
+    final = experiment_store.publish_staged_export(
+        "f", "partial", run_id, staging=staging
+    )
     assert final == paths.export_dir("f", "partial", run_id)
     assert not staging.exists()
     assert (final / "predict.pkl").read_bytes() == b"x"
@@ -182,16 +186,31 @@ def test_discard_staged(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", tmp_path / "experiments")
     staging = experiment_store.stage_export("f", "full", "a" * 64)
     (staging / "x").write_text("x")
-    experiment_store.discard_staged_export("f", "full", "a" * 64)
+    experiment_store.discard_staged_export("f", "full", "a" * 64, staging=staging)
     assert not staging.exists()
 
 
 def test_republish_rejected(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", tmp_path / "experiments")
     run_id = "a" * 64
-    experiment_store.stage_export("f", "full", run_id)
-    experiment_store.publish_staged_export("f", "full", run_id)
+    first = experiment_store.stage_export("f", "full", run_id)
+    experiment_store.publish_staged_export("f", "full", run_id, staging=first)
     staging = experiment_store.stage_export("f", "full", run_id)
     (staging / "x").write_text("x")
     with pytest.raises(ValueError):
-        experiment_store.publish_staged_export("f", "full", run_id)  # slot exists
+        experiment_store.publish_staged_export(
+            "f", "full", run_id, staging=staging
+        )  # slot exists
+
+
+def test_stage_export_is_writer_owned(tmp_path, monkeypatch):
+    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", tmp_path / "experiments")
+    run_id = "a" * 64
+    first = experiment_store.stage_export("f", "full", run_id)
+    marker = first / "writer-one"
+    marker.write_text("in progress", encoding="utf-8")
+    second = experiment_store.stage_export("f", "full", run_id)
+
+    assert first != second
+    assert marker.read_text(encoding="utf-8") == "in progress"
+    assert second.is_dir()

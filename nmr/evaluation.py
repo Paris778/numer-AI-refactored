@@ -125,9 +125,7 @@ def per_era_turnover(
         return {}
 
     parts = {
-        str(part.get_column(era_col).to_list()[0]): part.select(
-            [id_col, pred_col]
-        )
+        str(part.get_column(era_col).to_list()[0]): part.select([id_col, pred_col])
         for part in df.partition_by(era_col, maintain_order=True)
     }
 
@@ -314,7 +312,7 @@ class EvaluationEngine:
         std = float(np.std(ordered_values, ddof=0))
         sharpe = 0.0 if std == 0.0 else float(mean / std)
 
-        cumulative = np.cumsum(ordered_values)
+        cumulative = np.concatenate(([0.0], np.cumsum(ordered_values)))
         running_max = np.maximum.accumulate(cumulative)
         drawdowns = running_max - cumulative
         max_drawdown = float(np.max(drawdowns))

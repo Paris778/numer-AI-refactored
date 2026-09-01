@@ -66,9 +66,7 @@ def test_resolve_feature_sets_rejects_missing_or_empty_feature_sets(tmp_path) ->
 
 
 def test_resolve_feature_sets_rejects_non_dict_top_level(tmp_path) -> None:
-    (tmp_path / "list.json").write_text(
-        json.dumps(["f1", "f2"]), encoding="utf-8"
-    )
+    (tmp_path / "list.json").write_text(json.dumps(["f1", "f2"]), encoding="utf-8")
     (tmp_path / "string.json").write_text(json.dumps("oops"), encoding="utf-8")
     with pytest.raises(ValueError, match="feature_sets"):
         resolve_feature_sets(tmp_path / "list.json")
@@ -85,8 +83,8 @@ def _screen_frame() -> pl.DataFrame:
                 {
                     "era": str(era),
                     "id": f"{era}_{idx}",
-                    "f_good": idx * 0.02,                      # CORR +1 all eras
-                    "f_bad": -idx * (0.02 - era * 0.001),      # CORR ~ -1 -> 0 (decay)
+                    "f_good": idx * 0.02,  # CORR +1 all eras
+                    "f_bad": -idx * (0.02 - era * 0.001),  # CORR ~ -1 -> 0 (decay)
                     "target": idx * 0.02 + 0.5,
                 }
             )
@@ -122,8 +120,8 @@ def test_screen_flags_stability_by_default_thresholds() -> None:
 
 def test_screen_all_degenerate_eras_yield_null_stats() -> None:
     rows = [
-        {"era": "1", "id": "a", "f": 1.0, "target": 0.5},   # 1 row: degenerate
-        {"era": "1", "id": "b", "f": 1.0, "target": 0.5},   # zero variance
+        {"era": "1", "id": "a", "f": 1.0, "target": 0.5},  # 1 row: degenerate
+        {"era": "1", "id": "b", "f": 1.0, "target": 0.5},  # zero variance
         {"era": "2", "id": "c", "f": float("nan"), "target": 0.5},  # non-finite
         {"era": "3", "id": "d", "f": 0.2, "target": 0.9},
     ]
@@ -174,6 +172,33 @@ def test_select_stable_features_filters_on_thresholds() -> None:
     assert strict == ["f_good"]
 
 
+def test_stable_inverse_feature_is_retained_with_signed_correlation() -> None:
+    rows = [
+        {
+            "era": str(era),
+            "id": f"{era}_{index}",
+            "inverse": -float(index),
+            "target": float(index),
+        }
+        for era in range(1, 6)
+        for index in range(20)
+    ]
+    screen = feature_stability_screen(
+        pl.DataFrame(rows),
+        feature_cols=["inverse"],
+        target_col="target",
+        min_mean_corr=0.1,
+        max_abs_decay=0.01,
+    )
+    row = screen.row(0, named=True)
+
+    assert row["mean_corr"] == pytest.approx(-1.0)
+    assert row["stable"] is True
+    assert select_stable_features(screen, min_mean_corr=0.1, max_abs_decay=0.01) == [
+        "inverse"
+    ]
+
+
 def test_select_stable_features_rejects_screen_without_required_columns() -> None:
     bad = pl.DataFrame({"feature": ["f1"], "mean_corr": [0.5]})
     with pytest.raises(ValueError, match="decay_slope"):
@@ -196,15 +221,23 @@ def _write_features_with_sunshine(tmp_path) -> None:
         encoding="utf-8",
     )
     pl.DataFrame(
-        {"era": ["1", "1"], "id": ["a", "b"], "f1": [0.1, 0.2], "f2": [0.3, 0.4],
-         "f3": [0.5, 0.6], "target": [0.2, 0.3]}
+        {
+            "era": ["1", "1"],
+            "id": ["a", "b"],
+            "f1": [0.1, 0.2],
+            "f2": [0.3, 0.4],
+            "f3": [0.5, 0.6],
+            "target": [0.2, 0.3],
+        }
     ).write_parquet(version_dir / "train.parquet")
 
 
 def test_ingestion_resolves_feature_subset_from_features_json(tmp_path) -> None:
     _write_features_with_sunshine(tmp_path)
     cfg = DataConfig(
-        version="vtest", feature_set="small", feature_subset="sunshine",
+        version="vtest",
+        feature_set="small",
+        feature_subset="sunshine",
         data_dir=tmp_path,
     )
     agent = IngestionAgent(cfg)
@@ -214,7 +247,10 @@ def test_ingestion_resolves_feature_subset_from_features_json(tmp_path) -> None:
 def test_ingestion_rejects_unknown_feature_subset_with_valid_options(tmp_path) -> None:
     _write_features_with_sunshine(tmp_path)
     cfg = DataConfig(
-        version="vtest", feature_set="small", feature_subset="nope", data_dir=tmp_path,
+        version="vtest",
+        feature_set="small",
+        feature_subset="nope",
+        data_dir=tmp_path,
     )
     agent = IngestionAgent(cfg)
     with pytest.raises(ValueError, match="sunshine"):

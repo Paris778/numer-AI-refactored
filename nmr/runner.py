@@ -47,10 +47,7 @@ from nmr.deployment import DeploymentArtifact, serialize_predict
 from nmr.ensemble import Ensembler
 from nmr.evaluation import EvaluationEngine, MetricSummary
 from nmr.models import ModelOrchestrator
-from nmr.payout import (
-    PAYOUT_FACTOR_FILENAME,
-    era_payout_factors,
-)
+from nmr.payout import PAYOUT_FACTOR_FILENAME, era_payout_factors, resolve_payout_policy
 from nmr.risk import NeutralizationEngine
 from nmr.scorecard import MetricScorecard, evaluate_model
 from nmr.splitter import PurgedEraSplitter
@@ -257,6 +254,7 @@ def _predict_validation_era_batches(
         chunks.append(chunk)
     return pl.concat(chunks)
 
+
 __all__ = ["RunResult", "ExperimentRunner"]
 
 
@@ -279,6 +277,7 @@ class ExperimentRunner:
         # never drift from the run-id data term (a re-computation at run() time
         # could differ if the data files change between construction and run).
         self._data_fingerprint = _data_fingerprint(config)
+        self._promotion_data_fingerprint = _promotion_data_fingerprint(config)
         # The portable environment identity (pinned package versions, no paths
         # or timestamps) — computed once so run.json and every checkpoint
         # manifest record the same value (spec §3.1).
@@ -289,7 +288,10 @@ class ExperimentRunner:
 
     def run(self, *, deploy: bool = False) -> RunResult:
         requested_metrics = set(self._config.evaluation.metrics)
-        if "mmc" in requested_metrics and not self._config.evaluation.validation_scorecard:
+        if (
+            "mmc" in requested_metrics
+            and not self._config.evaluation.validation_scorecard
+        ):
             raise ValueError(
                 "evaluation.metrics includes 'mmc' but the validation scorecard stage "
                 "is disabled (evaluation.validation_scorecard=false). MMC requires the "
@@ -359,9 +361,7 @@ class ExperimentRunner:
             weights = tuple(1.0 / len(pred_cols) for _ in pred_cols)
             weight_learning_eras: list[str] = []
         else:
-            weight_learning_eras = [
-                era for fold in folds[:-1] for era in fold.val_eras
-            ]
+            weight_learning_eras = [era for fold in folds[:-1] for era in fold.val_eras]
             weight_df = joined.filter(pl.col("era").is_in(weight_learning_eras))
             weights = ensembler.learn_weights(
                 weight_df.select(["era", *pred_cols, main_target]),
@@ -375,8 +375,12 @@ class ExperimentRunner:
             if len(folds) < 2
             else list(folds[-1].val_eras)
         )
-        logger.info("[run] ensemble weights: %s (learned on %d eras, scored on %d)",
-                    dict(zip(pred_cols, weights)), len(weight_learning_eras), len(scoring_eras))
+        logger.info(
+            "[run] ensemble weights: %s (learned on %d eras, scored on %d)",
+            dict(zip(pred_cols, weights)),
+            len(weight_learning_eras),
+            len(scoring_eras),
+        )
         blended = ensembler.blend(
             joined,
             pred_cols=pred_cols,
@@ -471,8 +475,10 @@ class ExperimentRunner:
                     environment=self._environment,
                 )
             )
-            logger.info("[run] validation scorecard ready: corr_sharpe_ac=%.5f",
-                        scorecard.corr_sharpe_ac.value)
+            logger.info(
+                "[run] validation scorecard ready: corr_sharpe_ac=%.5f",
+                scorecard.corr_sharpe_ac.value,
+            )
 
         artifact = None
         if deploy:
@@ -502,6 +508,7 @@ class ExperimentRunner:
             # pipeline_device is the config knob, oof_device the actual fit
             # device (post-fit resolved_device, config fallback).
             "data_fingerprint": self._data_fingerprint,
+            "promotion_data_fingerprint": self._promotion_data_fingerprint,
             "code_fingerprint": _compute_code_fingerprint(),
             "environment": self._environment,
             "pipeline_device": str(self._config.model.device),
@@ -583,19 +590,29 @@ class ExperimentRunner:
         environment: str | None = None,
     ) -> tuple[MetricScorecard, pl.DataFrame, int]:
         data = self._config.data
+        payout_policy = resolve_payout_policy(self._config.evaluation.payout_policy)
+        scoring_target = payout_policy.target or self._config.evaluation.main_target
+        scoring_horizon = payout_policy.scoring_horizon or data.horizon
         agent = IngestionAgent(data)
         # Config targets + main target + every horizon target column present in
         # the validation schema (benchmark_runner convention). Horizon stability
         # (and BMC) can only run when the scorecard receives the target_*_20/60
         # pairs; loading only config targets silently disabled the flagship
         # diagnostic on every runner-produced scorecard.
-        schema_cols = list(pl.read_parquet_schema(data.path("validation.parquet")).keys())
+        schema_cols = list(
+            pl.read_parquet_schema(data.path("validation.parquet")).keys()
+        )
         schema_target_cols = [
             c for c in schema_cols if c == "target" or c.startswith("target_")
         ]
         target_cols = list(
             dict.fromkeys(
-                [*self._config.data.targets, self._config.evaluation.main_target, *schema_target_cols]
+                [
+                    *self._config.data.targets,
+                    self._config.evaluation.main_target,
+                    scoring_target,
+                    *schema_target_cols,
+                ]
             )
         )
         val_df = agent.load(
@@ -607,28 +624,36 @@ class ExperimentRunner:
                 f"validation_scorecard=true requires {meta_path}; disable the "
                 "validation stage or provide the meta model"
             )
-        meta_model = pl.read_parquet(meta_path).select(["era", "id", "numerai_meta_model"])
+        meta_model = pl.read_parquet(meta_path).select(
+            ["era", "id", "numerai_meta_model"]
+        )
 
         bench_path = data.path("validation_benchmark_models.parquet")
-        benchmarks = (
-            pl.read_parquet(bench_path) if bench_path.exists() else None
-        )
+        benchmarks = pl.read_parquet(bench_path) if bench_path.exists() else None
         if benchmarks is None:
-            logger.warning("[validation] benchmark models missing; BMC/horizon disabled")
+            logger.warning(
+                "[validation] benchmark models missing; BMC/horizon disabled"
+            )
 
-        purge = self._config.split.purge_eras
+        policy_overlap = (
+            16
+            if payout_policy.scoring_horizon == "60D"
+            else 8 if payout_policy.scoring_horizon == "20D" else 0
+        )
+        purge = max(self._config.split.purge_eras, policy_overlap)
         all_eras = sorted({int(e) for e in val_df.get_column("era").unique().to_list()})
         if purge > 0:
             # Compare on the NUMERIC era index: the era column is zero-padded
             # ("0583"), so str(int) strings would match nothing below 1000 and
             # silently truncate the window to eras >= 1000 (regression: the
             # validation stage scored only 232 of 649 eras).
-            val_df = val_df.filter(
-                pl.col("era").cast(pl.Int32).is_in(all_eras[purge:])
-            )
+            val_df = val_df.filter(pl.col("era").cast(pl.Int32).is_in(all_eras[purge:]))
         logger.info(
-            "[validation] dropping first %d validation eras (20D-target overlap); "
-            "%d eras scored", purge, val_df.select(pl.col("era").n_unique()).item()
+            "[validation] dropping first %d validation eras (%s scoring overlap); "
+            "%d eras scored",
+            purge,
+            scoring_horizon,
+            val_df.select(pl.col("era").n_unique()).item(),
         )
 
         preds = _predict_validation_era_batches(
@@ -649,25 +674,24 @@ class ExperimentRunner:
             targets=val_df.select(["era", "id", *target_cols]),
             n_trials=1,
             seed=self._config.run.seed,
-            horizon="20D",
-            main_target=self._config.evaluation.main_target,
+            payout_policy=payout_policy,
+            horizon=scoring_horizon,
+            main_target=scoring_target,
             benchmark_col=(
                 # First non-join column (same convention as benchmark_runner) —
                 # never positional index 2, which assumes column order.
                 next(
-                    (
-                        col
-                        for col in benchmarks.columns
-                        if col not in {"era", "id"}
-                    ),
+                    (col for col in benchmarks.columns if col not in {"era", "id"}),
                     None,
                 )
                 if benchmarks is not None
                 else None
             ),
             backend=self._config.evaluation.backend,
-            pf=era_payout_factors(
-                self._config.data.path(PAYOUT_FACTOR_FILENAME)
+            pf=(
+                era_payout_factors(self._config.data.path(PAYOUT_FACTOR_FILENAME))
+                if payout_policy.fixed_payout_factor is None
+                else None
             ),
             model_id=self._run_id,
         )
@@ -693,7 +717,9 @@ class ExperimentRunner:
             # the data term. See _data_fingerprint for detection limits.
             "data_fingerprint": data_fingerprint,
             "code_fingerprint": ExperimentRunner._code_fingerprint(),
-            "environment": ExperimentRunner._environment_fingerprint(config.model.backend),
+            "environment": ExperimentRunner._environment_fingerprint(
+                config.model.backend
+            ),
         }
         # Content identity for derived feature sets: the absolute path is
         # stripped above (never hashed), while the resolved file's SHA256 is
@@ -863,13 +889,9 @@ def _build_deploy_pipeline(
                         f"directory to force a full refit."
                     )
     for target in target_cols:
-        pkl_path = (
-            deploy_root / f"{target}.pkl" if deploy_root is not None else None
-        )
+        pkl_path = deploy_root / f"{target}.pkl" if deploy_root is not None else None
         per_target_manifest = (
-            deploy_root / f"{target}.manifest.json"
-            if deploy_root is not None
-            else None
+            deploy_root / f"{target}.manifest.json" if deploy_root is not None else None
         )
         if pkl_path is not None and pkl_path.exists():
             if per_target_manifest is None or not per_target_manifest.is_file():
@@ -957,8 +979,7 @@ def _build_deploy_pipeline(
         del live_benchmark_models
         frame = live_features.loc[:, ordered_features]
         components = [
-            np.asarray(trained[t].predict(frame), dtype=float)
-            for t in target_order
+            np.asarray(trained[t].predict(frame), dtype=float) for t in target_order
         ]
         design = np.column_stack(components)
         if "era" in live_features.columns:
@@ -1025,6 +1046,7 @@ def _package_version(name: str) -> str | None:
 
 
 _DATA_FINGERPRINT_CACHE_NAME = "data_fingerprint.json"
+_PROMOTION_DATA_FINGERPRINT_CACHE_NAME = "promotion_data_fingerprint.json"
 
 
 def _sha256_file(path: Path) -> str:
@@ -1145,6 +1167,48 @@ def _data_fingerprint(config: ExperimentConfig) -> str:
     atomic_write_text(
         cache_path,
         json.dumps({"key": key, "fingerprint": fingerprint}, sort_keys=True),
+    )
+    return fingerprint
+
+
+def _promotion_data_fingerprint(config: ExperimentConfig) -> str:
+    """Cached byte-content identity for files that can affect a promoted fit.
+
+    Unlike ``_data_fingerprint`` this is intentionally compression-sensitive
+    and excluded from ``run_id``. It catches same-shape value changes between
+    research and promotion.
+    """
+    paths_to_hash = [
+        config.data.path("train.parquet"),
+        config.data.path("validation.parquet"),
+        config.data.path("features.json"),
+    ]
+    for path in paths_to_hash:
+        if not path.is_file():
+            raise ValueError(f"promotion data fingerprint requires {path}")
+    cache_key_parts = []
+    for path in paths_to_hash:
+        stat = path.stat()
+        cache_key_parts.append(f"{path.name}:{stat.st_mtime_ns}:{stat.st_size}")
+    cache_key = hashlib.sha256("\n".join(cache_key_parts).encode("utf-8")).hexdigest()
+    cache_path = (
+        config.run.artifacts_dir / "cache" / _PROMOTION_DATA_FINGERPRINT_CACHE_NAME
+    )
+    try:
+        cached = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        cached = {}
+    if cached.get("key") == cache_key:
+        return str(cached["fingerprint"])
+    records = [
+        {"name": path.name, "sha256": _sha256_file(path)} for path in paths_to_hash
+    ]
+    fingerprint = hashlib.sha256(
+        json.dumps(records, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    atomic_write_text(
+        cache_path,
+        json.dumps({"key": cache_key, "fingerprint": fingerprint}, sort_keys=True),
     )
     return fingerprint
 

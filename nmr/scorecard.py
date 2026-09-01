@@ -33,7 +33,7 @@ from nmr.inference import (
     era_series_stats,
     resolve_block_len,
 )
-from nmr.payout import payout_report
+from nmr.payout import PayoutPolicy, payout_report, resolve_payout_policy
 from nmr.research import feature_exposure_report
 from nmr.robustness import (
     HorizonStabilityResult,
@@ -68,6 +68,9 @@ class MetricCell:
 @dataclass(frozen=True)
 class MetricScorecard:
     model_id: str
+    payout_policy_id: str
+    scoring_target: str
+    scoring_horizon: Horizon
     n_eras: int
     rank_scalar: float
     deflated_sharpe: float
@@ -109,9 +112,10 @@ class MetricScorecard:
     turnover_mean: float | None
     turnover_std: float | None
     turnover_reason: str | None
-    sim_portfolio_cagr: float
-    sim_portfolio_mdd: float
-    sim_capital_utilization: float
+    sim_portfolio_cagr: float | None
+    sim_portfolio_mdd: float | None
+    sim_capital_utilization: float | None
+    capital_metrics_reason: str | None
 
     metric_timing_seconds: dict[str, float] | None
     eval_total_seconds: float
@@ -128,6 +132,9 @@ class MetricScorecard:
     def to_frame(self) -> pl.DataFrame:
         row: dict[str, Any] = {
             "model_id": self.model_id,
+            "payout_policy_id": self.payout_policy_id,
+            "scoring_target": self.scoring_target,
+            "scoring_horizon": self.scoring_horizon,
             "n_eras": self.n_eras,
             "rank_scalar": self.rank_scalar,
             "deflated_sharpe": self.deflated_sharpe,
@@ -155,6 +162,7 @@ class MetricScorecard:
             "sim_portfolio_cagr": self.sim_portfolio_cagr,
             "sim_portfolio_mdd": self.sim_portfolio_mdd,
             "sim_capital_utilization": self.sim_capital_utilization,
+            "capital_metrics_reason": self.capital_metrics_reason,
             "quality_metric_total_seconds": self.eval_total_seconds,
             "n_degenerate_eras": self.n_degenerate_eras,
         }
@@ -287,15 +295,11 @@ class CrossCheckResult:
     raw_sharpe: float
 
 
-# Fixed replay constants (spec §7) — the cross-check never varies these.
-# ``n_boot``/``alpha``/``pf``/``clip``/``sr0_benchmark`` equal
-# ``evaluate_model``'s defaults (pinned so the persisted ``scorecard.json``
-# replay record is authoritative, not documentation).
+# Fixed statistical replay constants; payout economics come from the explicit
+# versioned policy persisted in the cross-check receipt.
 CROSSCHECK_N_TRIALS = 1
 CROSSCHECK_N_BOOT = 1000
 CROSSCHECK_ALPHA = 0.05
-CROSSCHECK_PF = 1.0
-CROSSCHECK_CLIP = 0.05
 CROSSCHECK_SR0_BENCHMARK = 0.0
 
 
@@ -420,15 +424,24 @@ def _build_joined_base(
     if main_target not in targets.columns:
         raise ValueError(f"Missing required columns: ['{main_target}']")
 
-    join_keys = [era_col]
-    for frame in (predictions, meta_model, features, targets):
+    frames = {
+        "predictions": predictions,
+        "meta_model": meta_model,
+        "features": features,
+        "targets": targets,
+    }
+    for name, frame in frames.items():
         if era_col not in frame.columns:
             raise ValueError(f"Missing required columns: ['{era_col}']")
-    if all(
-        id_col in frame.columns
-        for frame in (predictions, meta_model, features, targets)
-    ):
-        join_keys = [era_col, id_col]
+        if id_col not in frame.columns:
+            raise ValueError(
+                f"id column must be present in every scorecard frame; "
+                f"{name} lacks {id_col!r}"
+            )
+    join_keys = [era_col, id_col]
+    for name, frame in frames.items():
+        if frame.select(join_keys).n_unique() != frame.height:
+            raise ValueError(f"{name} must have unique ({era_col}, {id_col}) keys")
 
     base = (
         predictions.select([*join_keys, pred_col])
@@ -439,6 +452,10 @@ def _build_joined_base(
     if base.is_empty():
         raise ValueError(
             "No overlap rows after joining predictions, meta_model, targets, and features"
+        )
+    if base.height > predictions.height:
+        raise ValueError(
+            "scorecard joins expanded row cardinality; inputs must be one-to-one"
         )
 
     feature_cols = [c for c in features.columns if c not in set(join_keys)]
@@ -520,14 +537,15 @@ def evaluate_model(
     targets: pl.DataFrame,
     n_trials: int,
     seed: int,
+    payout_policy: PayoutPolicy | str,
     horizon: Horizon = "20D",
     main_target: str = "target",
     benchmark_col: str | None = None,
     backend: str = "custom",
     regime_labels: pl.DataFrame | None = None,
     perturbation: PerturbationResult | None = None,
-    pf: Mapping[str, float] | float = 1.0,
-    clip: float = 0.05,
+    pf: Mapping[str, float] | float | None = None,
+    clip: float | None = None,
     n_boot: int = 1000,
     alpha: float = 0.05,
     min_overlap_eras: int = MIN_OVERLAP_ERAS,
@@ -539,6 +557,20 @@ def evaluate_model(
     trials_sr_var: float | None = None,
     sr0_benchmark: float = 0.0,
 ) -> MetricScorecard:
+    resolved_policy = resolve_payout_policy(payout_policy)
+    if resolved_policy.target is not None and main_target != resolved_policy.target:
+        raise ValueError(
+            f"payout policy {resolved_policy.policy_id} requires main_target="
+            f"{resolved_policy.target!r}, got {main_target!r}"
+        )
+    if (
+        resolved_policy.scoring_horizon is not None
+        and horizon != resolved_policy.scoring_horizon
+    ):
+        raise ValueError(
+            f"payout policy {resolved_policy.policy_id} requires horizon="
+            f"{resolved_policy.scoring_horizon}, got {horizon}"
+        )
     eval_start = time.perf_counter()
     metric_timing_seconds: dict[str, float] = {}
 
@@ -622,8 +654,7 @@ def evaluate_model(
             id_col=id_col,
         )
         turnover_values = [
-            turnover_by_era[e]
-            for e in sorted_era_labels(list(turnover_by_era.keys()))
+            turnover_by_era[e] for e in sorted_era_labels(list(turnover_by_era.keys()))
         ]
         if len(turnover_values) >= 2:
             turnover_mean = float(np.mean(turnover_values))
@@ -639,6 +670,7 @@ def evaluate_model(
     payout = payout_report(
         corr_by_era,
         mmc_by_era,
+        policy=resolved_policy,
         horizon=horizon,
         n_trials=n_trials,
         seed=seed,
@@ -833,6 +865,9 @@ def evaluate_model(
 
     return MetricScorecard(
         model_id=model_id,
+        payout_policy_id=payout.policy_id,
+        scoring_target=main_target,
+        scoring_horizon=horizon,
         n_eras=payout.n_eras,
         rank_scalar=payout.mean_payout,
         deflated_sharpe=payout.deflated_sharpe,
@@ -870,9 +905,22 @@ def evaluate_model(
         turnover_mean=turnover_mean,
         turnover_std=turnover_std,
         turnover_reason=turnover_reason,
-        sim_portfolio_cagr=payout.overlapping_sim.portfolio_cagr,
-        sim_portfolio_mdd=payout.overlapping_sim.portfolio_max_drawdown,
-        sim_capital_utilization=payout.overlapping_sim.avg_capital_utilization,
+        sim_portfolio_cagr=(
+            payout.overlapping_sim.portfolio_cagr
+            if payout.overlapping_sim is not None
+            else None
+        ),
+        sim_portfolio_mdd=(
+            payout.overlapping_sim.portfolio_max_drawdown
+            if payout.overlapping_sim is not None
+            else None
+        ),
+        sim_capital_utilization=(
+            payout.overlapping_sim.avg_capital_utilization
+            if payout.overlapping_sim is not None
+            else None
+        ),
+        capital_metrics_reason=payout.capital_metrics_reason,
         metric_timing_seconds=metric_timing_seconds,
         eval_total_seconds=eval_total_seconds,
         degenerate_eras=degenerate_eras,
@@ -885,10 +933,11 @@ def evaluate_cross_check(
     meta_model: pl.DataFrame,
     features: pl.DataFrame,
     targets: pl.DataFrame,
+    payout_policy: PayoutPolicy | str,
     horizon: Horizon = "20D",
     main_target: str = "target",
     seed: int = 42,
-    pf: Mapping[str, float] | float = CROSSCHECK_PF,
+    pf: Mapping[str, float] | float | None = None,
 ) -> CrossCheckResult:
     """Era-grouped official-backend cross-check of a partial export.
 
@@ -930,13 +979,13 @@ def evaluate_cross_check(
         targets=targets,
         n_trials=CROSSCHECK_N_TRIALS,
         seed=seed,
+        payout_policy=payout_policy,
         horizon=horizon,
         main_target=main_target,
         backend="official",
         n_boot=CROSSCHECK_N_BOOT,
         alpha=CROSSCHECK_ALPHA,
         pf=pf,
-        clip=CROSSCHECK_CLIP,
         sr0_benchmark=CROSSCHECK_SR0_BENCHMARK,
     )
     raw_sharpe = _plain_sharpe(list(corr_by_era.values()))
