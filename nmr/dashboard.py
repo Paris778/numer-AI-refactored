@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,11 +49,15 @@ __all__ = [
     "load_benchmark_frame",
     "load_unified_leaderboard",
     "load_model_detail",
+    "model_description",
     "read_champion_pointer",
     "reconcile_capital_metrics",
     "rank_leaderboard",
     "rank_map_by_metric",
     "resolve_benchmark_path",
+    "row_tier_label",
+    "row_type_label",
+    "row_type_labels",
 ]
 
 REPORTS_DIR = REPO_ROOT / "artifacts" / "reports"
@@ -165,7 +168,7 @@ DASHBOARD_METRICS: tuple[DashboardMetricSpec, ...] = (
     DashboardMetricSpec("max_drawdown", "Max Drawdown", False),
     DashboardMetricSpec("turnover_mean", "Mean Turnover", False),
 )
-DEFAULT_RANK_METRIC = "mmc"
+DEFAULT_RANK_METRIC = "cagr_1y"
 _DASHBOARD_METRIC_BY_NAME = {spec.name: spec for spec in DASHBOARD_METRICS}
 
 
@@ -196,6 +199,214 @@ def dashboard_cohort(row: Mapping[str, Any]) -> str:
             pass
         return "benchmark"
     return "unknown"
+
+
+# Model-kind badge STACK per stable benchmark model_id (rationale:
+# configs/benchmarks/*.yaml — tier 0 null invariants, tier 1 Ridge, tier 2
+# shallow LGBM/XGB trees, tier 3 canonical LGBM baselines, tier 4 official
+# LGBM Ender references). Ensembles stack a base kind with an ``ensemble``
+# modifier (an XGB ensemble is both XGB and an ensemble).
+_BENCHMARK_KINDS_BY_ID: dict[str, list[str]] = {
+    # Null baselines carry no architecture badge (just their heuristic cohort
+    # tag) — the "NULL" pill was removed by design (dashboard feedback).
+    "linear_ridge_medium": ["ridge"],
+    "linear_ridge_multitarget": ["ridge", "ensemble"],
+    "linear_ridge_small": ["ridge"],
+    "tree_lgbm_fast_medium": ["lgbm"],
+    "tree_lgbm_shallow_small": ["lgbm"],
+    "tree_xgb_shallow_medium": ["xgb"],
+    "canon_hello_numerai": ["lgbm"],
+    "canon_neutralized_50": ["lgbm"],
+    "canon_sunshine_ensemble": ["lgbm", "ensemble"],
+    "v53_lgbm_ender20": ["lgbm"],
+    "v53_lgbm_ender60": ["lgbm"],
+}
+
+
+def _trained_primary_kind(row: Mapping[str, Any]) -> str:
+    """Base-kind token for a trained row from its model backend."""
+    backend = str(row.get("backend") or "").lower()
+    if backend in ("lgbm", "lightgbm") or "lgbm" in backend:
+        return "lgbm"
+    if backend in ("xgb", "xgboost") or "xgb" in backend:
+        return "xgb"
+    if backend in ("catboost", "cat"):
+        return "catboost"
+    if backend in ("ridge", "linear", "linear_ridge"):
+        return "ridge"
+    return "trained"
+
+
+def row_type_labels(row: Mapping[str, Any]) -> list[str]:
+    """Ordered type badge stack for a dashboard row.
+
+    Presentation-derived (like ``cohort``), never a registry field. Ensembles
+    stack a base-kind badge (``ridge`` / ``lgbm`` / ``xgb`` / ``catboost`` /
+    ``trained``) with an ``ensemble`` modifier because the two facts are
+    orthogonal. Benchmark-hierarchy rows ALSO lead with their cohort tag —
+    ``benchmark`` (tiers 3–4: canonical + official references) or
+    ``heuristic`` (tiers 0–2: null, Ridge, shallow trees) — so the arena shows
+    the group AND the kind at a glance (e.g. ``[benchmark, lgbm]``,
+    ``[heuristic, ridge, ensemble]``). Trained rows carry no cohort tag;
+    ``full``/``partial`` keep their diagnostic identity.
+    """
+    source = row.get("source")
+    if source == "full":
+        return ["full"]
+    if source == "partial":
+        return ["partial"]
+    if source == "benchmark":
+        cohort = dashboard_cohort(row)  # "benchmark" (tiers 3-4) | "heuristic"
+        kinds = _BENCHMARK_KINDS_BY_ID.get(str(row.get("model_id") or ""))
+        stack = list(kinds) if kinds else []
+        if cohort not in stack:
+            stack.insert(0, cohort)
+        return stack
+    # trained (or unknown) rows: base kind + ensemble modifier when named.
+    kinds = [_trained_primary_kind(row)]
+    name = " ".join(
+        str(row.get(field) or "") for field in ("family", "run_name", "display_name")
+    ).lower()
+    if "ensemble" in name and kinds[0] != "ensemble":
+        kinds.append("ensemble")
+    return kinds
+
+
+def row_type_label(row: Mapping[str, Any]) -> str:
+    """Primary type badge token (first of the stacked labels) — the Type-column
+    sort key and the fallback single badge."""
+    return row_type_labels(row)[0]
+
+
+def row_tier_label(row: Mapping[str, Any]) -> str | None:
+    """`Tier 4` badge label for any benchmark-hierarchy row (tiers 0–4, i.e.
+    both heuristic and benchmark cohorts); None for trained rows."""
+    if str(row.get("source") or "") != "benchmark":
+        return None
+    return _benchmark_tier_label(row)
+
+
+# Curated, human-readable "what is this model?" blurbs for the benchmark
+# hierarchy (grounded in configs/benchmarks/*.yaml). Used in the model dossier
+# ("focus mode") card; trained rows get a derived description instead.
+_BENCHMARK_DESCRIPTIONS: dict[str, str] = {
+    "null_constant_05": (
+        "Null baseline that predicts a constant 0.5 for every era — the trivial "
+        "floor any real model must beat."
+    ),
+    "null_feature_mean": (
+        "Null baseline that predicts the cross-sectional feature mean — a "
+        "statistical floor, not a real model."
+    ),
+    "null_gaussian_rand": (
+        "Null baseline emitting Gaussian noise — sanity check for the scoring "
+        "pipeline."
+    ),
+    "null_uniform_rand": (
+        "Null baseline emitting uniform noise — sanity check for the scoring "
+        "pipeline."
+    ),
+    "linear_ridge_medium": (
+        "Convex linear baseline: a single Ridge fit on the medium (780-feature) "
+        "universe."
+    ),
+    "linear_ridge_multitarget": (
+        "Linear ensemble: four independent Ridge fits on four targets, "
+        "equal-weight rank-Gaussian blended."
+    ),
+    "linear_ridge_small": (
+        "Convex linear baseline: a single Ridge fit on the small (42-feature) "
+        "universe."
+    ),
+    "tree_lgbm_fast_medium": (
+        "Non-linear tree baseline: fast-preset LightGBM on the medium universe."
+    ),
+    "tree_lgbm_shallow_small": (
+        "Non-linear tree baseline: shallow LightGBM (depth 3) on the small " "universe."
+    ),
+    "tree_xgb_shallow_medium": (
+        "Non-linear tree baseline: shallow XGBoost (depth 4) on the medium " "universe."
+    ),
+    "canon_hello_numerai": (
+        "Canonical community baseline: the classic Hello Numerai LightGBM "
+        "tutorial model on the small universe."
+    ),
+    "canon_neutralized_50": (
+        "Canonical community baseline: LightGBM with 50% feature neutralization "
+        "on the medium universe."
+    ),
+    "canon_sunshine_ensemble": (
+        "Canonical community baseline: multi-target LightGBM ensemble (the "
+        "Sunshine strategy) on the medium universe."
+    ),
+    "v53_lgbm_ender20": (
+        "Official Numerai reference (20D): the v5.3 Ender LightGBM benchmark — "
+        "informational tier-4 row."
+    ),
+    "v53_lgbm_ender60": (
+        "Official Numerai reference (60D): the v5.3 Ender LightGBM benchmark — "
+        "the production capital gate."
+    ),
+}
+
+
+def _trained_description(row: Mapping[str, Any]) -> str:
+    """Derive a factual description for a trained row from its config facts."""
+    backend = str(row.get("backend") or "unknown")
+    preset = str(row.get("preset") or "unknown preset")
+    feature_set = str(row.get("feature_set") or "unknown feature set")
+    n_targets = row.get("n_targets")
+    neutralization = row.get("neutralization_proportion")
+    name = " ".join(
+        str(row.get(field) or "") for field in ("family", "run_name", "display_name")
+    ).lower()
+    is_ensemble = "ensemble" in name
+    text = (
+        f"Trained {'ensemble' if is_ensemble else 'model'} built on {backend} "
+        f"({preset} preset, {feature_set} feature set"
+    )
+    if n_targets:
+        text += f", {n_targets} target" + ("s" if n_targets != 1 else "")
+    if neutralization is not None:
+        text += f", {neutralization:g} neutralization"
+    return text + ")."
+
+
+def _generic_benchmark_description(row: Mapping[str, Any]) -> str:
+    """Fallback description for benchmark rows without a curated blurb."""
+    kinds = [
+        kind for kind in row_type_labels(row) if kind not in ("benchmark", "heuristic")
+    ]
+    label = " + ".join(kinds) if kinds else "benchmark"
+    tier = row_tier_label(row) or "benchmark"
+    return f"{tier} benchmark baseline ({label} family)."
+
+
+def model_description(row: Mapping[str, Any]) -> str | None:
+    """Human-readable 'what is this model?' text for the dossier card.
+
+    Curated per benchmark model_id; derived from config facts for trained
+    rows; explicit diagnostic wording for full/partial exports. None when the
+    row is unrecognized.
+    """
+    source = row.get("source")
+    model_id = str(row.get("model_id") or "")
+    if source == "benchmark":
+        curated = _BENCHMARK_DESCRIPTIONS.get(model_id)
+        return curated if curated else _generic_benchmark_description(row)
+    if source in ("trained", "trained_legacy"):
+        return _trained_description(row)
+    if source == "full":
+        return (
+            "Full-lineage (in-sample) export of the trained model — diagnostic "
+            "only, never ranked."
+        )
+    if source == "partial":
+        return (
+            "Train-only (partial) export with a cross-check scorecard — "
+            "diagnostic only, never ranked."
+        )
+    return None
 
 
 def _finite_metric_value(row: Mapping[str, Any], metric: str) -> float | None:
@@ -564,6 +775,10 @@ _ROW_FIELDS = (
     "current_full_status",
     "stale",
     "cohort",
+    "type_label",
+    "type_labels",
+    "tier_label",
+    "description",
     "family",
     "backend",
     "preset",
@@ -753,6 +968,10 @@ def build_tournament_payload(
             "current_full_status": row.get("current_full_status"),
             "stale": row.get("stale"),
             "cohort": cohort,
+            "type_label": row_type_label(row),
+            "type_labels": row_type_labels(row),
+            "tier_label": row_tier_label(row),
+            "description": model_description(row),
             "family": row.get("family"),
             "backend": row.get("backend"),
             "preset": row.get("preset"),
@@ -893,29 +1112,70 @@ def resolve_benchmark_path(
     return None
 
 
-def _benchmark_display_label(row: Mapping[str, Any]) -> str:
-    """Unique human label for a benchmark row.
+# Curated human display names for the benchmark hierarchy (rationale: the
+# per-tier configs in configs/benchmarks/*.yaml — tier 0 null/statistical
+# invariants, tier 1 convex Ridge baselines, tier 2 shallow non-linear trees,
+# tier 3 canonical community/tutorial baselines, tier 4 official Numerai
+# references). Keyed by the stable benchmark model_id so a human rename is
+# impossible to miss and never breaks series identity.
+_BENCHMARK_HUMAN_NAMES: dict[str, str] = {
+    "null_constant_05": "Constant 0.5",
+    "null_feature_mean": "Feature Mean",
+    "null_gaussian_rand": "Gaussian Random",
+    "null_uniform_rand": "Uniform Random",
+    "linear_ridge_medium": "Ridge · Medium",
+    "linear_ridge_multitarget": "Ridge · Multi-Target",
+    "linear_ridge_small": "Ridge · Small",
+    "tree_lgbm_fast_medium": "LGBM · Fast · Medium",
+    "tree_lgbm_shallow_small": "LGBM · Shallow · Small",
+    "tree_xgb_shallow_medium": "XGB · Shallow · Medium",
+    "canon_hello_numerai": "Hello Numerai",
+    "canon_neutralized_50": "Neutralized 50",
+    "canon_sunshine_ensemble": "Sunshine Ensemble",
+    "v53_lgbm_ender20": "Ender 20D",
+    "v53_lgbm_ender60": "Ender 60D",
+}
 
-    The tier-4 reference pair (``v53_lgbm_ender20`` / ``v53_lgbm_ender60``)
-    shares the generic ``strategy_group`` value ``tier4``; derive a
-    disambiguated label from the model id (which remains the stable identity)
-    so no two rows display identically: ``Tier 4 · Ender 20D``. Rows carrying a
-    distinct strategy label (e.g. ``ref``) keep it unchanged.
-    """
+
+def _benchmark_human_name(row: Mapping[str, Any]) -> str:
+    """Curated display name for a benchmark model (stable model_id key);
+    falls back to a readable slug derived from the model id."""
+    model_id = str(row.get("model_id") or "")
+    curated = _BENCHMARK_HUMAN_NAMES.get(model_id)
+    if curated:
+        return curated
+    if not model_id:
+        return "Benchmark"
+    return model_id.replace("_", " ").strip().capitalize()
+
+
+def _benchmark_tier_label(row: Mapping[str, Any]) -> str | None:
+    """`Tier 4` badge label for a benchmark row; None when no tier is set."""
+    tier = row.get("tier")
+    if tier is None:
+        return None
+    try:
+        return f"Tier {int(tier)}"
+    except (TypeError, ValueError):
+        return None
+
+
+def _benchmark_display_label(row: Mapping[str, Any]) -> str:
+    """Unique human label for a benchmark row (used as ``run_name`` and
+    series/bar labels): ``Tier 4 · Ender 60D``. The tier is carried separately
+    on the dashboard row payload as ``tier_label`` so the renderer can badge
+    it instead of embedding it in the name. Rows carrying a distinct custom
+    strategy label (e.g. ``ref``) keep it unchanged (legacy contract)."""
     strategy = row.get("strategy_group")
     tier = row.get("tier")
-    base = strategy or (f"tier{int(tier)}" if tier is not None else "benchmark")
-    model_id = str(row.get("model_id") or "")
-    collides = not strategy or (
-        tier is not None and str(strategy).lower() == f"tier{int(tier)}"
-    )
-    if tier is not None and str(tier) == "4" and collides and model_id:
-        suffix = model_id.rsplit("_", 1)[-1]
-        match = re.fullmatch(r"([a-z]+)(\d{2})", suffix)
-        if match:
-            return f"Tier 4 · {match.group(1).capitalize()} {match.group(2)}D"
-        return f"Tier 4 · {suffix.capitalize()}"
-    return base
+    generic = f"tier{int(tier)}" if tier is not None else None
+    if strategy and str(strategy).strip() and str(strategy).lower() != generic:
+        return str(strategy)
+    tier_label = _benchmark_tier_label(row)
+    human = _benchmark_human_name(row)
+    if tier_label:
+        return f"{tier_label} · {human}"
+    return human
 
 
 def load_benchmark_frame(benchmark_path: Path) -> pl.DataFrame:
@@ -943,6 +1203,7 @@ def load_benchmark_frame(benchmark_path: Path) -> pl.DataFrame:
                 "training_scope": None,
                 "has_full_version": False,
                 "run_name": _benchmark_display_label(row),
+                "display_name": _benchmark_human_name(row),
                 "backend": "benchmark",
                 "preset": "benchmark",
                 "feature_set": "all",

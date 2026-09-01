@@ -8,33 +8,27 @@ Do new benchmark models (simple and trivial)
 
 Update libraries (lgbm etc) 
 
-For a personal project, this is above-average and very respectable; for a team or production system, it still has too much research-code entropy and too little platform discipline. (maybe give to a powerful model to restructure etc, do better modules etc.)
+-----------------------------
+| Family / method            | Where it wins                          | Caveat in low-signal tabular regression            |
+|----------------------------|----------------------------------------|----------------------------------------------------|
+| **Stacked GBM ensembles**  | Best overall on many tabular benchmarks| More complex, harder to maintain                   |
+| **TabPFN / foundation models** | Top single models on TabArena        | Need GPU, still young ecosystem                    |
+| **CatBoost (single booster)** | Often top among tree ensembles        | Slightly slower, fewer knobs than LGBM/XGB         |
+| **LightGBM (single booster)** | Near‑top, best speed/scale            | Can overfit if not carefully regularized           |
+| **Random forest / bagging**   | Very stable baseline                  | Usually slightly worse raw accuracy than tuned GBM |
 
+### Direct answer
 
-Deliberately deferred — consciously ignored
+There isn’t a single universal “winner”, but if you force a ranking for **low‑signal, large tabular regression**:
 
-   • test_analysis.py monolith and duplicated MetricScorecard builders — works fine; split only when editing that subsystem.
-     Churn without functional gain.
-   • Private cross-module imports (meta.py:480 et al.) — promote during the next features.py refactor, not standalone.
-   • Dead placeholders (book_correlation, redundancy metrics) — E6-deferred by plan; add TODO markers if touched.
-   • Duplicate _train_multi_target_oof — consolidate when one of the two copies next changes.
-   • _gpu axis semantics, opt.py broad except, era_col plumbing — edge or deliberate today; revisit on first contact, not
-     proactively.
-   • Warning volume, O(n²) set rebuild, open_browser default — cosmetic; fold into future edits.
-   • evaluation-bible v5.2 facts, canon target-name staleness, skill command nits, docs/superpowers mapping — batch into the
-     next docs-hygiene pass.
+1. **Stacked/ensembled boosters (AutoGluon‑style, or custom stacking of CatBoost + LightGBM + XGBoost + linear models)**  
+   - Consistently give the **best performance** when you care about out‑of‑sample stability, not just one lucky split.  
+   - This is what most serious competition/quant setups converge to: multiple strong but different GBMs, plus a simple meta‑learner.
 
+2. **TabPFN‑style foundation models (on benchmarks like TabArena)**  
+   - As *single* models, they now beat or match tuned GBMs across many datasets, including low‑signal ones.  
+   - They’re very strong, but operationally heavier (GPU, new tooling) than classic boosters.
 
-    ----------
+3. **Among classic single GBMs, CatBoost very slightly edges out LightGBM/XGBoost on average**, especially when signal is weak and categorical/interaction structure matters, with **LightGBM** usually next and **XGBoost** the most stable but rarely the absolute top.
 
-     > TODO : Augment the dashboard with Gemini , 
-     > TODO : refactor and put all the front end stuff into one directory for logical isolation 
-     > TODO : remove all    │
- │   the legacy stuff and don't use plotly and integrated graphs. Use html css and javascript from scratch. One       │
- │   module is only responsible for front end stuff. Self contained.   
-
-
- -----------------
-
- Is there any benefit to the cofig model style ? Why not python files ? 
- The current config does not allow for custom feature neutralisation , or feature engineering - Refactor potentially 
+So: for a Numerai‑like regime, the best-performing *practical* choice is usually **a stacked ensemble of diverse GBMs (CatBoost + LGBM + XGB) plus a regularized linear meta‑model**, not any single booster or bagger on its own.

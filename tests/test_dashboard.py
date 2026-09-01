@@ -1618,7 +1618,7 @@ def test_evaluable_rows_predicate() -> None:
 def test_dashboard_metric_specs_make_direction_and_default_explicit() -> None:
     specs = {spec.name: spec for spec in dash.DASHBOARD_METRICS}
 
-    assert dash.DEFAULT_RANK_METRIC == "mmc"
+    assert dash.DEFAULT_RANK_METRIC == "cagr_1y"
     assert specs["cagr_1y"].label == "Profitability (CAGR 1Y)"
     assert specs["mmc"].window == "standardized meta-overlap"
     assert specs["mmc"].higher_is_better is True
@@ -1792,9 +1792,9 @@ def test_tournament_payload_contains_ranked_rows_details_and_offline_metadata(
     benchmark = _write_benchmark_csv(
         tmp_path,
         "model_id,corr,mmc,corr_sharpe_ac,strategy_group,tier,"
-        "payout_policy_id,scoring_target,scoring_horizon\n"
+        "payout_policy_id,scoring_target,scoring_horizon,cagr_1y\n"
         "simple_baseline,0.01,0.02,0.1,ridge,1,"
-        "classic_legacy_075_225_clip005_v1,target,20D\n",
+        "classic_legacy_075_225_clip005_v1,target,20D,0.1\n",
     )
     frame = dash.load_unified_leaderboard(
         tmp_path, benchmark_path=benchmark, models_dir=tmp_path / "models"
@@ -1811,7 +1811,7 @@ def test_tournament_payload_contains_ranked_rows_details_and_offline_metadata(
         "data_version": "v5.3",
         "evaluation_window": {"start": "0001", "end": "0002", "n_eras": 2},
         "offline_only": True,
-        "default_rank_metric": "mmc",
+        "default_rank_metric": "cagr_1y",
         "metric_window": "standardized meta-overlap",
     }
     row_map = [dict(zip(payload["row_fields"], row)) for row in payload["rows"]]
@@ -1829,7 +1829,10 @@ def test_tournament_payload_contains_ranked_rows_details_and_offline_metadata(
     seed_index = payload["provenance_fields"].index("seed")
     provenance_pairs = payload["details"][trained_index][1]
     assert all(pair[0] != seed_index for pair in provenance_pairs)
-    assert payload["advantage"]["vs_heuristic"]["absolute_edge"] == pytest.approx(0.18)
+    # default rank metric is CAGR 1Y (higher is better): edge vs the 0.1
+    # heuristic baseline on cagr_1y = 1.5 - 0.1.
+    assert payload["advantage"]["metric"] == "cagr_1y"
+    assert payload["advantage"]["vs_heuristic"]["absolute_edge"] == pytest.approx(1.4)
 
 
 def test_tournament_payload_keeps_sub_micro_ranks_distinct() -> None:
@@ -2158,3 +2161,159 @@ def test_benchmark_tier4_labels_unique_per_model(tmp_path: Path) -> None:
     assert by_id["v53_lgbm_ender20"] == "Tier 4 " + chr(0xB7) + " Ender 20D"
     assert by_id["v53_lgbm_ender60"] == "Tier 4 " + chr(0xB7) + " Ender 60D"
     assert len({row["run_name"] for row in labels}) == len(labels)
+
+
+def test_benchmark_hierarchy_curated_display_names(tmp_path: Path) -> None:
+    """The full benchmark hierarchy gets curated human display names, tier
+    labels, and stable type badges (tiers 0-2 = heuristic, 3-4 = benchmark)."""
+    csv_path = _write_benchmark_csv(
+        tmp_path,
+        "model_id,strategy_group,tier\n"
+        "null_constant_05,tier0,0\n"
+        "null_feature_mean,tier0,0\n"
+        "null_gaussian_rand,tier0,0\n"
+        "null_uniform_rand,tier0,0\n"
+        "linear_ridge_medium,tier1,1\n"
+        "linear_ridge_multitarget,tier1,1\n"
+        "linear_ridge_small,tier1,1\n"
+        "tree_lgbm_fast_medium,tier2,2\n"
+        "tree_lgbm_shallow_small,tier2,2\n"
+        "tree_xgb_shallow_medium,tier2,2\n"
+        "canon_hello_numerai,tier3,3\n"
+        "canon_neutralized_50,tier3,3\n"
+        "canon_sunshine_ensemble,tier3,3\n"
+        "v53_lgbm_ender20,tier4,4\n"
+        "v53_lgbm_ender60,tier4,4\n",
+    )
+    frame = dash.load_benchmark_frame(csv_path)
+    rows = {row["model_id"]: row for row in frame.to_dicts()}
+    assert rows["null_constant_05"]["display_name"] == "Constant 0.5"
+    assert rows["null_gaussian_rand"]["display_name"] == "Gaussian Random"
+    assert rows["linear_ridge_medium"]["display_name"] == "Ridge · Medium"
+    assert rows["linear_ridge_multitarget"]["display_name"] == "Ridge · Multi-Target"
+    assert rows["tree_lgbm_fast_medium"]["display_name"] == "LGBM · Fast · Medium"
+    assert rows["tree_xgb_shallow_medium"]["display_name"] == "XGB · Shallow · Medium"
+    assert rows["canon_neutralized_50"]["display_name"] == "Neutralized 50"
+    assert rows["canon_sunshine_ensemble"]["display_name"] == "Sunshine Ensemble"
+    assert rows["v53_lgbm_ender60"]["display_name"] == "Ender 60D"
+    assert rows["tree_lgbm_fast_medium"]["run_name"] == (
+        "Tier 2 · LGBM · Fast · Medium"
+    )
+    assert rows["v53_lgbm_ender60"]["run_name"] == "Tier 4 · Ender 60D"
+    run_names = [row["run_name"] for row in frame.to_dicts()]
+    assert len(set(run_names)) == len(run_names)
+    assert dash.row_tier_label(rows["null_constant_05"]) == "Tier 0"
+    assert dash.row_tier_label(rows["tree_xgb_shallow_medium"]) == "Tier 2"
+    assert dash.row_tier_label(rows["v53_lgbm_ender60"]) == "Tier 4"
+    # type badge STACKS lead with the cohort tag: benchmark (tiers 3-4) or
+    # heuristic (tiers 0-2), then the model kind (+ ensemble modifier).
+    expected_kinds = {
+        # Null baselines carry no architecture badge — just the heuristic tag.
+        "null_constant_05": ["heuristic"],
+        "null_feature_mean": ["heuristic"],
+        "null_gaussian_rand": ["heuristic"],
+        "null_uniform_rand": ["heuristic"],
+        "linear_ridge_medium": ["heuristic", "ridge"],
+        "linear_ridge_multitarget": ["heuristic", "ridge", "ensemble"],
+        "linear_ridge_small": ["heuristic", "ridge"],
+        "tree_lgbm_fast_medium": ["heuristic", "lgbm"],
+        "tree_lgbm_shallow_small": ["heuristic", "lgbm"],
+        "tree_xgb_shallow_medium": ["heuristic", "xgb"],
+        "canon_hello_numerai": ["benchmark", "lgbm"],
+        "canon_neutralized_50": ["benchmark", "lgbm"],
+        "canon_sunshine_ensemble": ["benchmark", "lgbm", "ensemble"],
+        "v53_lgbm_ender20": ["benchmark", "lgbm"],
+        "v53_lgbm_ender60": ["benchmark", "lgbm"],
+    }
+    for row in frame.to_dicts():
+        assert dash.row_type_labels(row) == expected_kinds[row["model_id"]]
+        # primary label (sort key / single-badge fallback) = first token.
+        assert dash.row_type_label(row) == expected_kinds[row["model_id"]][0]
+    assert dash.row_type_labels(rows["canon_sunshine_ensemble"]) == [
+        "benchmark",
+        "lgbm",
+        "ensemble",
+    ]
+    assert dash.row_type_labels(rows["linear_ridge_multitarget"]) == [
+        "heuristic",
+        "ridge",
+        "ensemble",
+    ]
+    # cohort tag leads: benchmark rows never sort/lead as a plain kind.
+    assert dash.row_type_label(rows["v53_lgbm_ender60"]) == "benchmark"
+    assert dash.row_type_label(rows["tree_lgbm_fast_medium"]) == "heuristic"
+    # curated human descriptions for the dossier card.
+    assert dash.model_description(rows["v53_lgbm_ender60"]) is not None
+    assert "Ender" in dash.model_description(rows["v53_lgbm_ender60"]) or ""
+    assert "Hello Numerai" in dash.model_description(rows["canon_hello_numerai"])
+
+
+def test_row_type_label_unknown_benchmark_falls_back(tmp_path: Path) -> None:
+    """An unrecognized benchmark model_id still carries a type badge."""
+    csv_path = _write_benchmark_csv(
+        tmp_path,
+        "model_id,strategy_group,tier\n" "custom_baseline,ref,3\n",
+    )
+    row = dash.load_benchmark_frame(csv_path).row(0, named=True)
+    assert dash.row_type_label(row) == "benchmark"
+    assert dash.row_tier_label(row) == "Tier 3"
+    assert row["display_name"] == "Custom baseline"
+
+
+def test_row_type_label_trained_resolves_family_and_backend(tmp_path: Path) -> None:
+    """Trained rows resolve to base-kind badge stacks (ensembles stack)."""
+    specs = [
+        ("a" * 64, "sample-lgbm", "lightgbm", ["lgbm"]),
+        ("b" * 64, "sample-xgb", "xgboost", ["xgb"]),
+        ("c" * 64, "sample-cat", "catboost", ["catboost"]),
+        ("d" * 64, "fa_lgbm_ensemble", "lightgbm", ["lgbm", "ensemble"]),
+        ("e" * 64, "sample-ridge", "ridge", ["ridge"]),
+        ("f" * 64, "fa_ridge_ensemble", "ridge", ["ridge", "ensemble"]),
+    ]
+    entries = []
+    for run_id, name, backend, _expected in specs:
+        entry = _registry_entry(run_id)
+        entry["manifest"]["config"]["run"]["name"] = name
+        entry["manifest"]["config"]["model"]["backend"] = backend
+        entries.append(entry)
+    _write_registry(tmp_path, entries)
+    frame = dash.load_unified_leaderboard(tmp_path, benchmark_path=False)
+    rows = {row["model_id"]: row for row in frame.to_dicts()}
+    for run_id, _name, _backend, expected in specs:
+        assert dash.row_type_labels(rows[run_id]) == expected
+        assert dash.row_type_label(rows[run_id]) == expected[0]
+        assert dash.row_tier_label(rows[run_id]) is None
+        desc = dash.model_description(rows[run_id])
+        assert desc is not None and "Trained" in desc
+
+
+def test_tournament_payload_carries_type_and_tier_labels(tmp_path: Path) -> None:
+    """The renderer contract: every row payload carries the badge fields."""
+    trained_id = "a" * 64
+    _write_registry(tmp_path, [_registry_entry(trained_id)])
+    benchmark = _write_benchmark_csv(
+        tmp_path,
+        "model_id,corr,mmc,corr_sharpe_ac,strategy_group,tier\n"
+        "null_feature_mean,0.001,0.001,0.1,tier0,0\n"
+        "v53_lgbm_ender60,0.029,0.013,0.78,tier4,4\n",
+    )
+    frame = dash.load_unified_leaderboard(
+        tmp_path, benchmark_path=benchmark, models_dir=tmp_path / "models"
+    )
+    payload = dash.build_tournament_payload(frame, evaluation_eras=["0001"])
+    row_map = [dict(zip(payload["row_fields"], row)) for row in payload["rows"]]
+    by_id = {row["model_id"]: row for row in row_map}
+    assert by_id[trained_id]["type_label"] == "lgbm"
+    assert by_id[trained_id]["type_labels"] == ["lgbm"]
+    assert by_id[trained_id]["tier_label"] is None
+    assert by_id[trained_id]["description"] is not None
+    assert "Trained" in by_id[trained_id]["description"]
+    assert by_id["null_feature_mean"]["type_label"] == "heuristic"
+    assert by_id["null_feature_mean"]["type_labels"] == ["heuristic"]
+    assert by_id["null_feature_mean"]["tier_label"] == "Tier 0"
+    assert by_id["v53_lgbm_ender60"]["type_label"] == "benchmark"
+    assert by_id["v53_lgbm_ender60"]["type_labels"] == ["benchmark", "lgbm"]
+    assert by_id["v53_lgbm_ender60"]["tier_label"] == "Tier 4"
+    assert "Ender" in by_id["v53_lgbm_ender60"]["description"]
+    for field in ("type_label", "type_labels", "tier_label", "description"):
+        assert field in payload["row_fields"]

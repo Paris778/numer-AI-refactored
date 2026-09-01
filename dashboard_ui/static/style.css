@@ -112,7 +112,7 @@ button { cursor: pointer; }
 .snapshot-meta { display: grid; gap: 5px; color: var(--text-dim); font: .6rem "JetBrains Mono", "Cascadia Mono", monospace; text-align: right; }
 .snapshot-meta strong { color: var(--coral); font-size: .58rem; font-weight: 600; }
 .signal-orb { display: inline-flex; width: 36px; height: 36px; align-items: center; justify-content: center; border: 1px solid var(--border); border-radius: 50%; background: var(--bg-panel); }
-.signal-orb span { width: 8px; height: 8px; border-radius: 50%; background: var(--gold); box-shadow: 0 0 0 5px rgba(245, 185, 33, .12); }
+.signal-orb span { width: 8px; height: 8px; border-radius: 50%; background: var(--gold); box-shadow: 0 0 0 5px rgba(245, 185, 33, .12); animation: orbPulse 2.6s ease-in-out infinite; }
 
 .toolbar {
   display: flex;
@@ -175,36 +175,135 @@ table { width: 100%; border-collapse: collapse; }
 .tournament-table { min-width: 1030px; }
 th, td { padding: 11px 12px; border-bottom: 1px solid var(--border-soft); text-align: left; vertical-align: middle; }
 th { color: var(--text-dim); background: var(--bg-panel-3); font-size: .58rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; white-space: nowrap; }
+th.sortable { cursor: pointer; user-select: none; transition: color .12s ease; }
+th.sortable:hover { color: var(--text-mid); }
+th.sortable.sorted { color: var(--gold); }
+th.sortable .sort-ind { display: inline-block; margin-left: 5px; color: var(--gold); font-size: .5rem; line-height: 1; }
 td { color: var(--text-mid); font-size: .72rem; }
 .num, .mono { font-family: "JetBrains Mono", "Cascadia Mono", "SFMono-Regular", monospace; font-variant-numeric: tabular-nums; }
+.metric-return { font-family: "JetBrains Mono", "Cascadia Mono", "SFMono-Regular", monospace; font-variant-numeric: tabular-nums; font-weight: 600; letter-spacing: -0.01em; }
+.return-neg { color: #f87171; }
+.return-neutral { color: #94a3b8; }
+.return-low { color: #6ee7b7; }
+.return-mid { color: #34d399; }
+.return-tier4-peak { color: #10b981; font-weight: 700; text-shadow: 0 0 10px rgba(16, 185, 129, 0.45); }
+.return-alpha-breakthrough { color: #c084fc; font-weight: 700; text-shadow: 0 0 12px rgba(192, 132, 252, 0.50); }
 .num { text-align: right; white-space: nowrap; }
 .selected-head, .selected-value { color: var(--gold); }
-.model-row { cursor: pointer; transition: background-color .15s ease; }
-.model-row:hover { background: rgba(245, 185, 33, .045); }
-.model-row.benchmark-row { background: rgba(126, 218, 163, .055); box-shadow: inset 3px 0 0 rgba(126, 218, 163, .55); }
-.model-row.benchmark-row:hover { background: rgba(126, 218, 163, .105); }
+.model-row { cursor: pointer; transition: background-color .15s ease, box-shadow .15s ease; animation: rowIn .2s ease-out both; }
+.model-row:hover { background: rgba(245, 185, 33, .055); box-shadow: inset 3px 0 0 rgba(245, 185, 33, .5); }
+.model-row.benchmark-row { background: rgba(129, 140, 248, .13); box-shadow: inset 3px 0 0 rgba(129, 140, 248, .55); }
+.model-row.benchmark-row:hover { background: rgba(129, 140, 248, .20); box-shadow: inset 3px 0 0 rgba(129, 140, 248, .6); }
 .model-row.heuristic-row { background: rgba(154, 154, 164, .035); }
 .model-row.heuristic-row:hover { background: rgba(154, 154, 164, .075); }
 .model-row.champion-row { background: rgba(245, 185, 33, .075); box-shadow: inset 3px 0 0 var(--gold); }
 .model-row.champion-row.benchmark-row { box-shadow: inset 3px 0 0 var(--gold); }
 .model-row.full-row { background: rgba(245, 185, 33, .025); }
+
+/* Podium row accents: top-3 anchored across the whole row. The left edge uses
+   box-shadow inset + a background gradient — the ONLY <tr>-safe styling.
+   NEVER position/overflow/border the <tr>: each breaks border-collapse
+   horizontal rules (a recurring bug). The #1 "shine" lives on the gold medal,
+   not on the row. */
+.model-row.row-rank-1 { box-shadow: inset 3px 0 0 rgba(250, 204, 21, .9); background-image: linear-gradient(90deg, rgba(250, 204, 21, .06) 0%, transparent 55%); }
+.model-row.row-rank-2 { box-shadow: inset 3px 0 0 rgba(226, 232, 240, .7); background-image: linear-gradient(90deg, rgba(226, 232, 240, .04) 0%, transparent 55%); }
+.model-row.row-rank-3 { box-shadow: inset 3px 0 0 rgba(249, 115, 22, .85); background-image: linear-gradient(90deg, rgba(249, 115, 22, .05) 0%, transparent 55%); }
 .model-cell { min-width: 240px; }
 .model-cell strong { display: block; color: var(--text-hi); font-size: .77rem; font-weight: 600; }
 .model-cell small { display: block; max-width: 270px; margin-top: 4px; overflow: hidden; color: var(--text-dim); font: .58rem "JetBrains Mono", "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
-.type-marker { color: var(--text-lo); font-size: .64rem; white-space: nowrap; }
-.type-marker.trained { color: var(--gold); }
-.type-marker.heuristic { color: var(--text-lo); }
-.type-marker.full { color: var(--gold-deep); }
-.type-marker.partial { color: var(--coral); }
+/* Type badges sit up to 2 per row, then wrap to the next line. A 2-column
+   grid keeps the column narrow (≈2 pills). The <td> itself must stay a real
+   table-cell — display:grid on the <td> stops it stretching to the row height
+   and misaligns its bottom border (the row-separator line). The grid lives on
+   the inner .type-stack wrapper instead. */
+.type-cell {
+  white-space: normal;
+  vertical-align: middle;
+}
+.type-cell .type-stack {
+  display: grid;
+  grid-template-columns: repeat(2, max-content);
+  justify-content: start;
+  gap: 4px 6px;
+}
+.type-badge {
+  display: inline-block;
+  padding: 2px 9px;
+  border: 1px solid;
+  border-radius: 999px;
+  font: 700 .56rem/1.15 "JetBrains Mono", "Cascadia Mono", monospace;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.type-cell .type-badge { display: inline-flex; align-items: center; justify-content: center; }
+.type-cell .type-badge + .type-badge { margin: 0; }
+
+/* --- Layer 2: Category Type badges (neutral structure layer) ---
+   Monochrome so they provide context without competing with tier or
+   architecture colors. BENCHMARK = solid subtle fill; HEURISTIC = ghost. */
+.type-benchmark { color: #E2E8F0; border-color: rgba(226, 232, 240, 0.18); background: rgba(226, 232, 240, 0.10); }
+.type-heuristic { color: #64748B; border-color: rgba(100, 116, 139, 0.25); background: transparent; }
+
+/* --- Layer 3: Model Architecture badges (categorical palette) ---
+   Distinct high-contrast hues per algorithm family. */
+.type-null { color: #6B7280; border-color: rgba(107, 114, 128, 0.20); background: rgba(107, 114, 128, 0.08); }
+.type-ridge { color: #818CF8; border-color: rgba(129, 140, 248, 0.25); background: rgba(129, 140, 248, 0.10); }
+.type-lgbm { color: #2DD4BF; border-color: rgba(45, 212, 191, 0.25); background: rgba(45, 212, 191, 0.10); }
+.type-xgb { color: #FB923C; border-color: rgba(251, 146, 60, 0.25); background: rgba(251, 146, 60, 0.10); }
+.type-catboost { color: #60A5FA; border-color: rgba(96, 165, 250, 0.25); background: rgba(96, 165, 250, 0.10); }
+.type-ensemble { color: #F472B6; border-color: rgba(244, 114, 182, 0.25); background: rgba(244, 114, 182, 0.10); }
+.type-trained { color: #94A3B8; border-color: rgba(148, 163, 184, 0.20); background: rgba(148, 163, 184, 0.08); }
+.type-full { color: #E2E8F0; border-color: rgba(226, 232, 240, 0.16); background: rgba(226, 232, 240, 0.08); }
+.type-partial { color: #64748B; border-color: rgba(100, 116, 139, 0.20); background: transparent; }
+
+.tier-badge {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 2px 7px;
+  border: 1px solid;
+  border-radius: 6px;
+  font: 700 .54rem/1.1 "JetBrains Mono", "Cascadia Mono", monospace;
+  letter-spacing: .05em;
+  vertical-align: 1px;
+  white-space: nowrap;
+}
+
+/* --- Layer 1: Tier Hierarchy badges (sequential heat scale) ---
+   Intensity signals progression from baseline (tier 0) to production
+   apex (tier 4). */
+.tier-0 { color: #94A3B8; border-color: rgba(148, 163, 184, 0.20); background: rgba(148, 163, 184, 0.08); }
+.tier-1 { color: #38BDF8; border-color: rgba(56, 189, 248, 0.25); background: rgba(56, 189, 248, 0.10); }
+.tier-2 { color: #34D399; border-color: rgba(52, 211, 153, 0.25); background: rgba(52, 211, 153, 0.10); }
+.tier-3 { color: #A78BFA; border-color: rgba(167, 139, 250, 0.30); background: rgba(167, 139, 250, 0.12); }
+.tier-4 { color: #F59E0B; border-color: rgba(245, 158, 11, 0.40); background: rgba(245, 158, 11, 0.15); }
+.tier-x { color: #94A3B8; border-color: rgba(148, 163, 184, 0.20); background: rgba(148, 163, 184, 0.08); }
 .badge.lifecycle { display: inline-block; margin-left: 6px; padding: 2px 6px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-lo); font: 700 .54rem "JetBrains Mono", "Cascadia Mono", monospace; letter-spacing: .04em; white-space: nowrap; }
 .badge.lifecycle.full, .badge.lifecycle.staked { color: var(--gold); border-color: rgba(245, 185, 33, .45); }
 .badge.lifecycle.degraded { color: var(--coral); border-color: rgba(255, 122, 122, .5); }
 .champion-mark { display: inline-block; margin-left: 6px; color: var(--gold); font: 700 .55rem "JetBrains Mono", "Cascadia Mono", monospace; letter-spacing: .04em; }
-.medal { display: inline-flex; min-width: 31px; height: 25px; align-items: center; justify-content: center; border: 1px solid; border-radius: 8px; font: 700 .67rem "JetBrains Mono", "Cascadia Mono", monospace; }
-.medal-gold { border-color: var(--gold); background: rgba(245, 185, 33, .16); color: var(--gold); box-shadow: 0 0 14px rgba(245, 185, 33, .12); }
-.medal-silver { border-color: #b8bcc8; background: rgba(184, 188, 200, .12); color: #d3d5dc; }
-.medal-bronze { border-color: #cd7f51; background: rgba(205, 127, 81, .14); color: #e19b73; }
-.medal-rank { display: block; margin-top: 3px; color: var(--text-dim); font-size: .54rem; text-align: center; }
+/* Rank numbers are round Olympic medals (single digits are circles; wider
+   ranks round to a pill). Olympic colors + glow; muted outline for #4+. */
+.rank-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid;
+  border-radius: 999px;
+  font-family: "JetBrains Mono", "Cascadia Mono", "SFMono-Regular", monospace;
+  font-size: .68rem;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  vertical-align: middle;
+}
+.rank-1 { color: #facc15; border-color: rgba(250, 204, 21, 0.55); background: linear-gradient(145deg, rgba(250, 204, 21, 0.22), rgba(245, 158, 11, 0.08)); text-shadow: 0 0 10px rgba(250, 204, 21, 0.45); animation: medalGlow 3.2s ease-in-out infinite; }
+.rank-2 { color: #e2e8f0; border-color: rgba(226, 232, 240, 0.45); background: rgba(226, 232, 240, 0.10); text-shadow: 0 0 10px rgba(226, 232, 240, 0.35); }
+.rank-3 { color: #f97316; border-color: rgba(249, 115, 22, 0.50); background: rgba(249, 115, 22, 0.12); text-shadow: 0 0 10px rgba(249, 115, 22, 0.40); box-shadow: 0 0 12px rgba(249, 115, 22, 0.22); }
+.rank-default { color: #64748b; border-color: rgba(100, 116, 139, 0.35); background: transparent; font-weight: 500; text-shadow: none; box-shadow: none; }
 .secondary-number { display: block; margin-top: 3px; color: var(--text-dim); font-size: .6rem; }
 .empty-state, .empty-note { color: var(--text-dim); text-align: center; }
 .empty-state { padding: 46px 16px; background: var(--bg-panel-2); }
@@ -266,13 +365,16 @@ pre { overflow: auto; color: var(--text-lo); font: .66rem "JetBrains Mono", "Cas
 .legacy-render-hooks { display: none; }
 .model-drawer[hidden] { display: none; }
 .model-drawer { position: fixed; inset: 0; z-index: 20; }
-.drawer-backdrop { position: absolute; inset: 0; background: rgba(0, 0, 0, .68); }
-.drawer-panel { position: absolute; top: 0; right: 0; width: min(590px, 94vw); height: 100%; overflow-y: auto; padding: 28px; border-left: 1px solid var(--border); background: var(--bg-panel); box-shadow: -16px 0 42px rgba(0, 0, 0, .48); }
+.drawer-backdrop { position: absolute; inset: 0; background: rgba(0, 0, 0, .68); animation: drawerBackdropIn .2s ease-out both; }
+.drawer-panel { position: absolute; top: 0; right: 0; width: min(590px, 94vw); height: 100%; overflow-y: auto; padding: 28px; border-left: 1px solid var(--border); background: var(--bg-panel); box-shadow: -16px 0 42px rgba(0, 0, 0, .48); animation: drawerPanelIn .28s cubic-bezier(.2, .7, .3, 1) both; }
 .drawer-close { float: right; min-height: 32px; padding: 0 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); color: var(--text-lo); background: var(--bg-panel-2); cursor: pointer; font-size: .66rem; }
 .drawer-close:hover { border-color: var(--gold); color: var(--gold); }
 .drawer-kicker { clear: both; padding-top: 30px; color: var(--gold); font: 600 .62rem "JetBrains Mono", "Cascadia Mono", monospace; letter-spacing: .08em; text-transform: uppercase; }
 .drawer-id { overflow-wrap: anywhere; color: var(--text-dim); font-size: .64rem; }
 .drawer-meta { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 10px 0; border-top: 1px solid var(--border-soft); border-bottom: 1px solid var(--border-soft); color: var(--text-dim); font: .62rem "JetBrains Mono", "Cascadia Mono", monospace; }
+.drawer-description { margin: 14px 0; padding: 12px 14px; border: 1px solid rgba(245, 185, 33, .18); border-left: 3px solid var(--gold); border-radius: var(--radius-sm); background: var(--bg-panel-3); }
+.drawer-description h3 { margin-bottom: 6px; color: var(--gold); }
+.drawer-description p { margin: 0; color: var(--text-mid); font-size: .74rem; line-height: 1.55; }
 .rank-list { display: flex; flex-wrap: wrap; gap: 6px 14px; color: var(--text-lo); font: .62rem "JetBrains Mono", "Cascadia Mono", monospace; }
 .rank-list b { color: var(--gold); }
 .dossier-table { border: 1px solid var(--border-soft); border-radius: var(--radius-md); overflow: hidden; }
@@ -291,8 +393,28 @@ a:hover { color: var(--gold); }
   50% { opacity: 1; }
 }
 
+@keyframes rowIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes medalGlow {
+  0%, 100% { box-shadow: 0 0 8px rgba(250, 204, 21, 0.18); }
+  50% { box-shadow: 0 0 18px rgba(250, 204, 21, 0.42); }
+}
+
+@keyframes orbPulse {
+  0%, 100% { box-shadow: 0 0 0 5px rgba(245, 185, 33, .12); }
+  50% { box-shadow: 0 0 0 7px rgba(245, 185, 33, .22), 0 0 14px rgba(245, 185, 33, .35); }
+}
+
+@keyframes drawerBackdropIn { from { opacity: 0; } to { opacity: 1; } }
+@keyframes drawerPanelIn { from { transform: translateX(40px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+
 @media (prefers-reduced-motion: reduce) {
   .landscape-point.is-hovered, .landscape-point:hover { animation: none; transition: none; }
+  .model-row, .rank-1, .signal-orb span, .drawer-backdrop, .drawer-panel { animation: none !important; }
+  .model-row { transition: none; }
 }
 
 @media (max-width: 1180px) {

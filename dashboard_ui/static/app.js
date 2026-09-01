@@ -22,11 +22,12 @@
     return row;
   });
   var state = {
-    metric: (payload.meta || {}).default_rank_metric || "mmc",
+    metric: (payload.meta || {}).default_rank_metric || "cagr_1y",
     cohort: "all",
     search: "",
     shortcut: null,
-    selected: null
+    selected: null,
+    sort: null
   };
   var cohortColors = {trained: "#4f46e5", heuristic: "#64748b", benchmark: "#9aa5b1", full: "#a96500"};
   var chartColors = ["#f5b921", "#7edaa3", "#ff7a7a", "#9d8cff", "#53b5d8", "#ef9d5a"];
@@ -234,29 +235,119 @@
         return bScore - aScore || compareLowerMetric(a, b, "std_corr") || compareLowerMetric(a, b, "max_drawdown") || compareIds(a.model_id, b.model_id);
       });
     }
+    if (state.sort && state.sort.field !== "rank") return applyColumnSort(visible);
     return sortedRows(visible);
+  }
+
+  function columnSortValue(row, field) {
+    if (field === "model") return modelTitle(row).toLowerCase();
+    if (field === "type") {
+      var primary = row.type_label || (row.type_labels && row.type_labels[0]) || row.cohort;
+      return typeLabel(primary).toLowerCase();
+    }
+    if (field === "eras") return finite(ciValue(row, 2)) ? Number(ciValue(row, 2)) : null;
+    return metricValue(row, field);
+  }
+
+  function compareColumn(a, b, field, dir) {
+    var av = columnSortValue(a, field), bv = columnSortValue(b, field);
+    var an = !finite(av), bn = !finite(bv);
+    if (an && bn) return compareIds(a.model_id, b.model_id);
+    if (an) return 1; // nulls always last
+    if (bn) return -1;
+    var cmp;
+    if (field === "model" || field === "type") cmp = String(av).localeCompare(String(bv));
+    else cmp = Number(av) - Number(bv);
+    if (cmp === 0) return compareIds(a.model_id, b.model_id);
+    return dir === "asc" ? cmp : -cmp;
+  }
+
+  function applyColumnSort(input) {
+    var field = state.sort && state.sort.field;
+    if (!field || field === "rank") return input;
+    var dir = state.sort.dir;
+    return input.slice().sort(function (a, b) {
+      if (a.cohort === "full" && b.cohort !== "full") return 1;
+      if (b.cohort === "full" && a.cohort !== "full") return -1;
+      return compareColumn(a, b, field, dir);
+    });
+  }
+
+  function bestFirstDir(field) {
+    if (field === "model" || field === "type") return "asc";
+    if (field === "rank") return "desc";
+    return specFor(field).higher_is_better ? "desc" : "asc";
+  }
+
+  function cycleColumnSort(field) {
+    state.shortcut = null;
+    if (field === "rank") {
+      state.sort = null;
+    } else if (!state.sort || state.sort.field !== field) {
+      state.sort = {field: field, dir: bestFirstDir(field)};
+    } else if (state.sort.dir === bestFirstDir(field)) {
+      state.sort = {field: field, dir: state.sort.dir === "desc" ? "asc" : "desc"};
+    } else {
+      state.sort = null;
+    }
+    renderAll();
+  }
+
+  function sortArrow(field) {
+    if (!state.sort || state.sort.field !== field) return "";
+    return "<span class=\"sort-ind\">" + (state.sort.dir === "asc" ? "&#9650;" : "&#9660;") + "</span>";
+  }
+
+  function headerCell(field, label, extraClass) {
+    var active = state.sort && state.sort.field === field;
+    var cls = "sortable" + (extraClass ? " " + extraClass : "") + (active ? " sorted" : "");
+    var aria = active ? " aria-sort=\"" + (state.sort.dir === "asc" ? "ascending" : "descending") + "\"" : "";
+    return "<th data-sort=\"" + esc(field) + "\" class=\"" + cls + "\" role=\"columnheader\" tabindex=\"0\"" + aria + ">" + label + sortArrow(field) + "</th>";
   }
 
   function valueText(row, metric) {
     return fmt(metricValue(row, metric), metric === "cagr_1y" || metric === "max_drawdown");
   }
 
-  function medalRank(row) {
-    if (row.cohort !== "trained") return null;
-    var candidates = sortedRows(rows.filter(function (item) {
-      return item.cohort === "trained" && finite(metricValue(item, state.metric));
-    }));
-    var index = candidates.indexOf(row);
-    return index >= 0 && index < 3 ? index + 1 : null;
+  // Olympic rank coloring: #1 gold, #2 silver, #3 bronze, #4+ muted slate.
+  function rankClass(rank) {
+    return rank === 1 ? "rank-1" : rank === 2 ? "rank-2" : rank === 3 ? "rank-3" : "rank-default";
+  }
+
+  // Tier-4 benchmark CAGR = the apex return the heat scale is anchored to.
+  function tier4MaxReturn() {
+    var max = null;
+    rows.forEach(function (row) {
+      if (row.tier_label === "Tier 4") {
+        var v = metricValue(row, "cagr_1y");
+        if (finite(v) && (max === null || v > max)) max = v;
+      }
+    });
+    return max === null ? 0.12 : max;
+  }
+
+  function returnClass(value, tier4Max) {
+    if (!finite(value)) return "return-neutral";
+    if (value < 0) return "return-neg";
+    if (value === 0) return "return-neutral";
+    if (value > tier4Max) return "return-alpha-breakthrough";
+    if (value >= tier4Max * 0.90) return "return-tier4-peak";
+    if (value >= tier4Max * 0.40) return "return-mid";
+    return "return-low";
+  }
+
+  function returnValueText(row) {
+    var value = metricValue(row, "cagr_1y");
+    if (!finite(value)) return valueText(row, "cagr_1y");
+    var cls = returnClass(value, tier4MaxReturn());
+    var sign = value > 0 ? "+" : "";
+    return "<span class=\"metric-return " + cls + "\">" + sign + fmt(value, true) + "</span>";
   }
 
   function rankCell(row) {
     var rank = rankValue(row, state.metric);
-    var rankText = rank === null || rank === undefined ? "&#8212;" : "#" + rank;
-    var medal = medalRank(row);
-    if (!medal) return rankText;
-    var medalName = medal === 1 ? "gold" : medal === 2 ? "silver" : "bronze";
-    return "<span class=\"medal medal-" + medalName + "\" title=\"Top trained model by selected metric\">" + medal + "</span><small class=\"medal-rank\">" + rankText + "</small>";
+    if (rank === null || rank === undefined) return "<span class=\"rank-number rank-default\" title=\"Unranked\">&#8212;</span>";
+    return "<span class=\"rank-number " + rankClass(rank) + "\" title=\"#" + rank + " by " + esc(specFor(state.metric).label) + "\">" + rank + "</span>";
   }
 
   function ciText(row) {
@@ -265,12 +356,30 @@
     return valueText(row, "corr_sharpe_ac") + " [" + fmt(low, false) + "&#8211;" + fmt(high, false) + "]";
   }
 
-  function marker(row) {
-    if (row.cohort === "heuristic") return "<span class=\"type-marker heuristic\">&#9670; heuristic</span>";
-    if (row.cohort === "benchmark") return "<span class=\"type-marker benchmark\">&#8212; benchmark</span>";
-    if (row.cohort === "full") return "<span class=\"type-marker full\">&#9671; full lineage</span>";
-    if (row.cohort === "partial") return "<span class=\"type-marker partial\">&#9673; train-only</span>";
-    return "<span class=\"type-marker trained\">&#9679; trained</span>";
+  var typeLabels = {null: "Null", ridge: "Ridge", benchmark: "Bench", heuristic: "Heuristic", ensemble: "Ensemble", lgbm: "LGBM", xgb: "XGB", catboost: "CatBoost", trained: "Trained", full: "Full", partial: "Partial"};
+
+  function typeLabel(type) {
+    return typeLabels[type] || "Trained";
+  }
+
+  function typeBadge(row) {
+    var kinds = (row.type_labels && row.type_labels.length) ? row.type_labels : [row.type_label || (row.cohort === "benchmark" ? "benchmark" : row.cohort === "heuristic" ? "heuristic" : row.cohort)];
+    return kinds.map(function (type) {
+      return "<span class=\"type-badge type-" + esc(type) + "\" title=\"" + esc(typeLabel(type)) + "\">" + typeLabel(type) + "</span>";
+    }).join("");
+  }
+
+  function tierBadge(row) {
+    if (!row.tier_label) return "";
+    var num = String(row.tier_label).match(/\d+/);
+    var cls = num ? "tier-" + num[0] : "tier-x";
+    return "<span class=\"tier-badge " + cls + "\" title=\"Benchmark tier\">" + esc(row.tier_label) + "</span> ";
+  }
+
+  function modelTitle(row) {
+    // Benchmark/heuristic rows keep the tier context in their rich name.
+    if (row.cohort === "benchmark" || row.cohort === "heuristic") return row.run_name || row.display_name || row.model_id;
+    return row.display_name || row.run_name || row.model_id;
   }
 
   function renderMasterLeaderboard() {
@@ -281,22 +390,35 @@
     empty.hidden = visible.length !== 0;
     if (!visible.length) { host.innerHTML = ""; return; }
     var spec = specFor(state.metric), showRankedMetric = ["cagr_1y", "mmc", "corr", "corr_sharpe_ac", "max_drawdown"].indexOf(state.metric) === -1;
-    var rankedLabel = state.metric === "mmc" ? "RANKED: MMC (CORE)" : "RANKED: " + spec.label;
+    var rankedLabel = state.metric === "cagr_1y" ? "RANKED: CAGR 1Y" : (state.metric === "mmc" ? "RANKED: MMC (CORE)" : "RANKED: " + spec.label);
     var html = "<table class=\"tournament-table\"><thead><tr>" +
-      "<th>Rank</th><th>Model</th><th>Type</th><th" + (state.metric === "cagr_1y" ? " class=\"selected-head\"" : "") + ">" + (state.metric === "cagr_1y" ? esc(rankedLabel) : "CAGR 1Y") + "</th><th" + (state.metric === "mmc" ? " class=\"selected-head\"" : "") + ">" + (state.metric === "mmc" ? esc(rankedLabel) : "MMC (CORE)") + "</th><th" + (state.metric === "corr" ? " class=\"selected-head\"" : "") + ">" + (state.metric === "corr" ? esc(rankedLabel) : "CORR") + "</th><th" + (state.metric === "corr_sharpe_ac" ? " class=\"selected-head\"" : "") + ">" + (state.metric === "corr_sharpe_ac" ? esc(rankedLabel) : "CORR Sharpe + CI") + "</th><th" + (state.metric === "max_drawdown" ? " class=\"selected-head\"" : "") + ">" + (state.metric === "max_drawdown" ? esc(rankedLabel) : "Max DD") + "</th>" +
-      (showRankedMetric ? "<th class=\"selected-head\">" + esc(rankedLabel) + "</th>" : "") +
-      "<th>G:P</th><th>Eras</th></tr></thead><tbody>";
+      headerCell("rank", "Rank") +
+      headerCell("model", "Model") +
+      headerCell("type", "Type") +
+      headerCell("cagr_1y", state.metric === "cagr_1y" ? esc(rankedLabel) : "CAGR 1Y", state.metric === "cagr_1y" ? "selected-head" : "") +
+      headerCell("mmc", state.metric === "mmc" ? esc(rankedLabel) : "MMC (CORE)", state.metric === "mmc" ? "selected-head" : "") +
+      headerCell("corr", state.metric === "corr" ? esc(rankedLabel) : "CORR", state.metric === "corr" ? "selected-head" : "") +
+      headerCell("corr_sharpe_ac", state.metric === "corr_sharpe_ac" ? esc(rankedLabel) : "CORR Sharpe + CI", state.metric === "corr_sharpe_ac" ? "selected-head" : "") +
+      headerCell("max_drawdown", state.metric === "max_drawdown" ? esc(rankedLabel) : "Max DD", state.metric === "max_drawdown" ? "selected-head" : "") +
+      (showRankedMetric ? headerCell(state.metric, esc(rankedLabel), "selected-head") : "") +
+      headerCell("gain_to_pain_ratio", "G:P") +
+      headerCell("eras", "Eras") +
+      "</tr></thead><tbody>";
     visible.forEach(function (row) {
       var rowClass = row.champion ? " champion-row" : "";
       if (row.cohort === "full") rowClass += " full-row";
       if (row.cohort === "benchmark") rowClass += " benchmark-row";
       if (row.cohort === "heuristic") rowClass += " heuristic-row";
+      var rowRank = rankValue(row, state.metric);
+      if (rowRank === 1) rowClass += " row-rank-1";
+      else if (rowRank === 2) rowClass += " row-rank-2";
+      else if (rowRank === 3) rowClass += " row-rank-3";
       html += "<tr class=\"model-row" + rowClass + "\" data-model-id=\"" + esc(row.model_id) + "\" tabindex=\"0\">";
-      html += "<td class=\"rank-cell mono\">" + rankCell(row) + "</td><td class=\"model-cell\"><strong>" + esc(row.display_name || row.run_name || row.model_id) + "</strong>";
+      html += "<td class=\"rank-cell mono\">" + rankCell(row) + "</td><td class=\"model-cell\"><strong>" + tierBadge(row) + esc(row.display_name || row.run_name || row.model_id) + "</strong>";
       html += row.champion ? " <span class=\"champion-mark\">CHAMPION</span>" : "";
       html += lifecycleBadge(row);
-      html += "<small>" + esc(row.model_id) + "</small></td><td>" + marker(row) + "</td>";
-      html += "<td class=\"num\">" + valueText(row, "cagr_1y") + "</td><td class=\"num\">" + valueText(row, "mmc") + "</td>";
+      html += "<small>" + esc(row.model_id) + "</small></td><td class=\"type-cell\"><span class=\"type-stack\">" + typeBadge(row) + "</span></td>";
+      html += "<td class=\"num\">" + returnValueText(row) + "</td><td class=\"num\">" + valueText(row, "mmc") + "</td>";
       html += "<td class=\"num\">" + valueText(row, "corr") + "</td><td class=\"num\">" + ciText(row) + "</td>";
       html += "<td class=\"num\">" + valueText(row, "max_drawdown") + "</td>";
       if (showRankedMetric) html += "<td class=\"num selected-value\">" + valueText(row, state.metric) + "</td>";
@@ -306,6 +428,10 @@
     host.querySelectorAll(".model-row").forEach(function (node) {
       node.addEventListener("click", function () { openDossier(node.getAttribute("data-model-id")); });
       node.addEventListener("keydown", function (event) { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openDossier(node.getAttribute("data-model-id")); } });
+    });
+    host.querySelectorAll("th.sortable").forEach(function (node) {
+      node.addEventListener("click", function () { cycleColumnSort(node.getAttribute("data-sort")); });
+      node.addEventListener("keydown", function (event) { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); cycleColumnSort(node.getAttribute("data-sort")); } });
     });
   }
 
@@ -332,7 +458,7 @@
     host.innerHTML = "<div class=\"advantage-title\"><span>ML ADVANTAGE</span><small>Best trained vs simple alternatives &middot; " + esc(spec.label) + "</small></div>" +
       "<div class=\"advantage-track\"><div><span>Trained</span><strong>" + (trained ? valueText(trained, metric) : "&#8212;") + "</strong><small>" + esc(trained ? (trained.display_name || trained.run_name) : "Unavailable") + "</small></div>" +
       "<div><span>Heuristic</span><strong>" + (heuristic ? valueText(heuristic, metric) : "&#8212;") + "</strong><small>" + esc(heuristic ? (heuristic.display_name || heuristic.run_name) : "Unavailable") + "</small></div>" +
-      "<div><span>Benchmark</span><strong>" + (benchmark ? valueText(benchmark, metric) : "&#8212;") + "</strong><small>" + esc(benchmark ? (benchmark.display_name || benchmark.run_name) : "Unavailable") + "</small></div></div>" +
+      "<div><span>Bench</span><strong>" + (benchmark ? valueText(benchmark, metric) : "&#8212;") + "</strong><small>" + esc(benchmark ? (benchmark.display_name || benchmark.run_name) : "Unavailable") + "</small></div></div>" +
       "<div class=\"advantage-edges\"><span>Edge vs heuristic <b class=\"" + edgeClass(trained, heuristic, metric) + "\">" + edgeText(trained, heuristic, metric) + "</b></span><span>Edge vs benchmark <b class=\"" + edgeClass(trained, benchmark, metric) + "\">" + edgeText(trained, benchmark, metric) + "</b></span></div>";
   }
 
@@ -384,7 +510,7 @@
     var svg = byId("profile-svg"), label = byId("profile-label"); if (!svg || !label) return;
     svg.textContent = "";
     if (!row) { label.textContent = "Select a row"; svg.appendChild(textNode(svg, "Select a model", 380, 180)); return; }
-    label.textContent = row.display_name || row.run_name || row.model_id;
+    label.textContent = modelTitle(row);
     var available = metricSpecs.filter(function (spec) { return finite(metricValue(row, spec.name)); });
     if (!available.length) { svg.appendChild(textNode(svg, "Metric profile unavailable", 380, 180)); return; }
     var max = Math.max.apply(null, available.map(function (spec) { return Math.abs(Number(metricValue(row, spec.name))); }).concat([.000001]));
@@ -424,8 +550,9 @@
     if (!evidenceRef && row.cohort === "trained") evidenceRef = "registry/" + row.model_id + "/run.json";
     var ref = evidenceRef ? "<a href=\"" + esc(evidenceRef) + "\">Open immutable evidence</a>" : "<span class=\"missing\">Evidence link unavailable</span>";
     var meta = payload.meta || {}, window = meta.evaluation_window || {};
-    host.innerHTML = "<div class=\"drawer-kicker\">" + esc(row.cohort) + " &middot; " + esc(row.status || "RESEARCH") + "</div><h2 id=\"drawer-title\">" + esc(row.display_name || row.run_name || row.model_id) + "</h2><p class=\"drawer-id mono\">" + esc(row.model_id) + "</p>" +
+    host.innerHTML = "<div class=\"drawer-kicker\">" + esc(row.cohort) + " &middot; " + esc(row.status || "RESEARCH") + "</div><h2 id=\"drawer-title\">" + esc(modelTitle(row)) + "</h2><p class=\"drawer-id mono\">" + esc(row.model_id) + "</p>" +
       "<div class=\"drawer-meta\"><span>Suite " + safeText(meta.suite_version) + "</span><span>Window " + safeText(window.start) + " &rarr; " + safeText(window.end) + "</span><span>Timestamp " + safeText(provenance.timestamp) + "</span></div>" +
+      (row.description ? "<div class=\"drawer-description\"><h3>About this model</h3><p>" + esc(row.description) + "</p></div>" : "") +
       "<h3>Rank across metrics</h3><div class=\"rank-list\">" + (ranks || "<span>&#8212;</span>") + "</div><h3>Full scorecard evidence</h3><table class=\"dossier-table\"><tbody>" + scorecardHtml + "</tbody></table>" +
       "<h3>Provenance / lineage</h3><div class=\"provenance-list\">" + provenanceHtml + "</div><p class=\"evidence-link\">" + ref + "</p><p class=\"drawer-note\">Missing values remain unavailable; this dossier contains offline evaluation evidence only.</p>";
   }

@@ -289,9 +289,10 @@ def test_renderer_supports_pointer_tooltips_axes_benchmark_rows_and_medals() -> 
         assert token in js or token in layout
     for token in (
         ".benchmark-row",
-        ".medal-gold",
-        ".medal-silver",
-        ".medal-bronze",
+        ".rank-number",
+        ".rank-1",
+        ".rank-2",
+        ".rank-3",
         ".chart-tooltip",
         ".timeseries-legend",
         ".legend-item",
@@ -600,6 +601,158 @@ def test_app_js_renders_lifecycle_badge_and_display_name() -> None:
     assert "display_name" in js
     assert "STALE" in js
     assert "DEGRADED" in js
+
+
+def test_renderer_has_type_and_tier_badges() -> None:
+    """The renderer emits colored type badges (from the engine's type_label)
+    and tier badges, plus the rich model title used in drawer/profile."""
+    js = report._read_asset("app.js")
+    css = report._read_asset("style.css")
+    min_js = report._read_asset("app.min.js")
+    for token in (
+        "type_label",
+        "type_labels",
+        "tier_label",
+        "typeBadge",
+        "tierBadge",
+        "typeLabel",
+        "type-badge",
+        "tier-badge",
+        "modelTitle",
+        "description",
+        "drawer-description",
+        "About this model",
+        # cohort tags render from the stack: benchmark (short "Bench") / heuristic.
+        'benchmark: "Bench"',
+        'heuristic: "Heuristic"',
+    ):
+        assert token in js
+    for token in (
+        ".type-badge",
+        ".type-badge + .type-badge",
+        ".tier-badge",
+        ".type-null",
+        ".type-ridge",
+        ".type-benchmark",
+        ".type-heuristic",
+        ".type-ensemble",
+        ".type-lgbm",
+        ".type-xgb",
+        ".type-catboost",
+        ".type-trained",
+        ".tier-0",
+        ".tier-1",
+        ".tier-2",
+        ".tier-3",
+        ".tier-4",
+        ".type-cell",
+        ".drawer-description",
+    ):
+        assert token in css
+    # minified renderer must stay encoding-safe and carry the badge classes.
+    assert "type-badge" in min_js
+    assert "tier-badge" in min_js
+
+
+def test_badge_color_layers_are_distinct() -> None:
+    """Three visual layers avoid collision: sequential heat tiers, neutral
+    category types (benchmark fill / heuristic ghost), categorical arches."""
+    css = report._read_asset("style.css")
+    # Tier = sequential heat scale (distinct hexes, apex at tier 4).
+    for token in ("#94A3B8", "#38BDF8", "#34D399", "#A78BFA", "#F59E0B"):
+        assert token in css
+    # Category types are neutral: benchmark has a fill, heuristic is ghost.
+    assert ".type-benchmark" in css and ".type-heuristic" in css
+    assert "background: rgba(226, 232, 240, 0.10)" in css
+    assert ".type-heuristic { color: #64748B" in css
+    assert "background: transparent" in css
+    # Architecture palette is categorical (teal LGBM, orange XGB, indigo ridge).
+    for token in ("#2DD4BF", "#FB923C", "#818CF8", "#F472B6", "#6B7280"):
+        assert token in css
+
+
+def test_rank_and_return_are_color_coded() -> None:
+    """Olympic rank colors + podium row accents + return heat scale."""
+    js = report._read_asset("app.js")
+    css = report._read_asset("style.css")
+    min_js = report._read_asset("app.min.js")
+    for token in (
+        "rankClass",
+        "rank-1",
+        "rank-2",
+        "rank-3",
+        "rank-default",
+        "row-rank-1",
+        "tier4MaxReturn",
+        "returnClass",
+        "metric-return",
+        "return-neg",
+        "return-tier4-peak",
+        "return-alpha-breakthrough",
+    ):
+        assert token in js
+    for token in (
+        ".rank-1",
+        ".rank-2",
+        ".rank-3",
+        ".rank-default",
+        ".row-rank-1",
+        ".row-rank-2",
+        ".row-rank-3",
+        ".metric-return",
+        ".return-neg",
+        ".return-low",
+        ".return-mid",
+        ".return-tier4-peak",
+        ".return-alpha-breakthrough",
+    ):
+        assert token in css
+    assert "rank-1" in min_js
+    assert "return-tier4-peak" in min_js
+
+
+def test_leaderboard_columns_are_sortable() -> None:
+    """Column headers carry sort metadata; the renderer has the sort cycle,
+    comparator, and indicator plumbing."""
+    js = report._read_asset("app.js")
+    css = report._read_asset("style.css")
+    min_js = report._read_asset("app.min.js")
+    for token in (
+        "data-sort",
+        "cycleColumnSort",
+        "applyColumnSort",
+        "compareColumn",
+        "columnSortValue",
+        "bestFirstDir",
+        "sortArrow",
+        "headerCell",
+        "th.sortable",
+        "state.sort",
+        "aria-sort",
+    ):
+        assert token in js
+    for token in ("th.sortable", "th.sortable.sorted", "sort-ind", "cursor: pointer"):
+        assert token in css
+    assert "data-sort" in min_js
+
+
+def test_motion_polish_has_reduced_motion_guard() -> None:
+    """Subtle motion polish (row entrance, medal glow, orb pulse, drawer slide)
+    — all gated behind prefers-reduced-motion."""
+    css = report._read_asset("style.css")
+    for token in (
+        "@keyframes rowIn",
+        "@keyframes medalGlow",
+        "@keyframes orbPulse",
+        "@keyframes drawerPanelIn",
+        "@keyframes drawerBackdropIn",
+        "prefers-reduced-motion",
+        "animation: rowIn",
+        "animation: orbPulse",
+        "animation: drawerPanelIn",
+    ):
+        assert token in css
+    assert "animation: none !important" in css
 
 
 def _registry_entry(run_id: str) -> dict:
