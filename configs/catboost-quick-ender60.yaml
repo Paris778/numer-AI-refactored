@@ -1,0 +1,42 @@
+# Quick exploratory CatBoost model on the Ender-60 target (medium universe).
+# Shallow trees, low iteration count, CatBoost defaults for feature sampling
+# (rsm=1.0). No deploy artifact, no champion promotion.
+
+run:
+  name: catboost-quick-ender60
+  seed: 20260901
+
+data:
+  version: v5.3
+  feature_set: medium
+  targets:
+    - target_ender_60
+  horizon: 60D
+
+split:
+  scheme: walk_forward
+  purge_eras: 16          # 60D leakage floor
+  embargo_eras: 0         # inert knob (A2): must be 0
+  n_folds: 4
+
+model:
+  backend: catboost
+  preset: fast
+  device: cpu             # CatBoost is CPU-only by design in nmr
+  params:
+    iterations: 300
+    learning_rate: 0.02
+    depth: 3
+    l2_leaf_reg: 10
+    random_strength: 0.5
+    bootstrap_type: Bayesian
+    bagging_temperature: 0.5
+    boosting_type: Ordered  # grow_policy omitted: Ordered needs symmetric trees (default)
+    rsm: 1.0              # CatBoost default: no feature sampling
+
+evaluation:
+  backend: custom
+  main_target: target_ender_60
+  payout_policy: classic_atomic_ender60_r1343_v1
+  metrics: [corr, mmc, fnc, sharpe]
+  validation_scorecard: true

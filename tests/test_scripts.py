@@ -443,3 +443,9 @@ def test_dashboard_defaults_point_at_experiments_root() -> None:
 
     assert dashboard.DEFAULT_REGISTRY_DIR == paths.EXPERIMENTS_ROOT
     assert dashboard_app._DEFAULT_REGISTRY_DIR == paths.EXPERIMENTS_ROOT
+
+
+def test_train_catboost_quick_import_surface() -> None:
+    import train_catboost_quick  # noqa: F401  (import-time smoke)
+
+    assert callable(train_catboost_quick.main)

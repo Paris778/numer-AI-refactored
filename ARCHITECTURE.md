@@ -322,6 +322,7 @@ def predict(live_features: pd.DataFrame, live_benchmark_models: pd.DataFrame | N
 | Script | What it does |
 |---|---|
 | [train_first_model.py](train_first_model.py) | `load_config("configs/first_model.yaml")` → `ExperimentRunner.run(deploy=True)` → `experiment_store.record_run_result` + `promote_if_better` (prints promotion verdict) → prints summary, writes `summary.json` |
+| [train_catboost_quick.py](train_catboost_quick.py) | Quick single-target CatBoost (ender60) control plane: `load_config("configs/catboost-quick-ender60.yaml")` → `ExperimentRunner.run(deploy=False)` → `experiment_store.record_run_result` (no champion promotion); prints OOF metrics + validation scorecard cells |
 | [benchmark_runner.py](benchmark_runner.py) | 5-tier hierarchy control plane: `--data-dir`, `--configs`, `--seed`, `--n-boot`, `--fast-mode`; writes `artifacts/reports/benchmark_hierarchy_scorecard.csv` + `benchmark_gate_report.csv`; exit 1 on hard-gate failure |
 | [generate_dashboard.py](generate_dashboard.py) | **Thin entry wrapper** — all logic in `dashboard_ui/report.py`; compiles the deterministic offline Model Tournament `artifacts/dashboard.html` (112 KiB artifact budget, enforced by `dashboard_ui.report.MAX_ARTIFACT_BYTES`) on the `nmr/dashboard.py` engine; CLI surface unchanged (`python generate_dashboard.py`) |
 | [dashboard_app.py](dashboard_app.py) | **Thin entry wrapper** — calls `dashboard_ui.app.main`; embeds the same vanilla Model Tournament renderer with `st.components.v1.html`; read-only; launch: `streamlit run dashboard_app.py` |

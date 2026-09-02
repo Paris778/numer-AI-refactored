@@ -271,3 +271,19 @@ def test_embargo_eras_must_be_zero() -> None:
 
     with pytest.raises(ValueError, match="embargo_eras"):
         config_from_dict(_cfg_dict(split={"embargo_eras": 4}))
+
+
+def test_catboost_quick_ender60_config_loads():
+    cfg = load_config(REPO_ROOT / "configs" / "catboost-quick-ender60.yaml")
+    assert cfg.data.feature_set == "medium"
+    assert cfg.data.targets == ("target_ender_60",)
+    assert cfg.data.horizon == "60D"
+    assert cfg.split.purge_eras == 16
+    assert cfg.model.backend == "catboost"
+    assert cfg.model.preset == "fast"
+    assert cfg.model.device == "cpu"
+    assert cfg.model.params["iterations"] == 300
+    assert cfg.model.params["depth"] == 3
+    assert cfg.model.params["rsm"] == 1.0
+    assert cfg.evaluation.main_target == "target_ender_60"
+    assert cfg.evaluation.validation_scorecard is True
