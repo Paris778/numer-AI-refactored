@@ -33,9 +33,8 @@ from nmr.config import (
 )
 from nmr.data import IngestionAgent
 from nmr.deployment import load_predict
-from nmr.promote import PromotionResult
+from nmr.promote import PromotionResult, promote_full_version, rehearse_promotion
 from nmr.promote import _full_history_frame as _orig_full_history_frame
-from nmr.promote import promote_full_version, rehearse_promotion
 from nmr.runner import ExperimentRunner
 from nmr.scorecard import CROSSCHECK_N_TRIALS
 

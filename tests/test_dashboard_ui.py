@@ -156,6 +156,7 @@ def test_build_dashboard_payload_metric_first_standard_only() -> None:
                 "corr_sharpe_ac": 0.8,
                 "corr_sharpe_ac_ci_low": 0.6,
                 "corr_sharpe_ac_ci_high": 1.0,
+                "mean_payout": 0.125,
                 "cagr_1y": 0.5,
                 "max_drawdown": 0.1,
                 "deflated_sharpe": 0.97,
@@ -181,6 +182,8 @@ def test_build_dashboard_payload_metric_first_standard_only() -> None:
     assert payload["eras"] == ["0001", "0002"]
     assert payload["meta_downside_mask"] == [False, True]
     assert payload["leaderboard"][0]["sharpe"] == 0.8
+    assert payload["leaderboard"][0]["mean_payout"] == 0.125
+    assert "cagr_1y" not in payload["leaderboard"][0]
     assert payload["leaderboard"][0]["champion"] is True
     assert payload["similarity"] == {"labels": ["a"], "matrix": [[1.0]]}
     assert payload["hurdle_sharpe"] == 0.78
@@ -244,7 +247,68 @@ def test_static_renderer_sources_are_encoding_safe_and_have_valid_row_markup() -
             marker in text for marker in ("\u00d4", "\u252c", "\u00e5\u00c6", "\u00c7")
         )
     assert 'data-model-id=\\"" + esc(row.model_id) + "\\" tabindex=\\"0\\">' in js
+    assert 'default_rank_metric || "mean_payout"' in js
+    assert 'default_rank_metric||"mean_payout"' in min_js
+    assert "policyContext" in js
+    assert "metric-unavailable" in js
+    assert "Max DD (proxy)" in js
     assert "RANKED: " in js
+
+
+def test_static_renderer_uses_per_era_payout_proxy_column() -> None:
+    from dashboard_ui import report
+
+    js = report._read_asset("app.js")
+    min_js = report._read_asset("app.min.js")
+
+    assert 'headerCell("mean_payout"' in js
+    assert "PAYOUT / ERA" in js
+    assert "CAGR 1Y" not in js
+    assert "cagr_1y" not in js
+    assert 'metricValue(row, "mean_payout")' in js
+    assert "mean_payout" in min_js
+    assert "cagr_1y" not in min_js
+    assert "not annual return" in min_js
+    assert "Best Payout / Era (proxy)" in report._kpi_cards_html(_kpis_for_test())
+    assert "column_tooltips" in js
+    assert "metric-info" in js
+    assert "metric-tooltip" in js
+    assert "aria-expanded" in js
+
+
+def test_table_headers_have_metric_tooltips() -> None:
+    from dashboard_ui import report
+
+    rows = pl.DataFrame(
+        [
+            {
+                "model_id": "a" * 64,
+                "source": "trained",
+                "run_name": "sample-run",
+                "status": "RESEARCH",
+                "mean_payout": 0.05,
+                "corr_sharpe_ac": 0.5,
+            }
+        ]
+    )
+
+    html_text = report._table_html(rows, champion=None)
+
+    for field in (
+        "status",
+        "model",
+        "mean_payout",
+        "corr_sharpe_ac",
+        "sharpe_ci",
+        "max_drawdown",
+        "gain_to_pain_ratio",
+        "mmc_down",
+        "deflated_sharpe",
+    ):
+        assert f'data-metric="{field}"' in html_text
+    assert "Policy-clipped mean payout per eligible scored era" in html_text
+    assert "Higher is better" in html_text
+    assert "Lower is better" in html_text
 
 
 def test_renderer_supports_pointer_tooltips_axes_benchmark_rows_and_medals() -> None:
@@ -267,7 +331,6 @@ def test_renderer_supports_pointer_tooltips_axes_benchmark_rows_and_medals() -> 
         "hover-guide",
         "matrix-alpha",
         "data-sim-row",
-        "CAGR 1Y",
         "rankCell",
         "decodeSeries",
         "metrics.model_ids",
@@ -352,10 +415,11 @@ def _kpis_for_test() -> dict:
         "champion_label": "champ · abc12345",
         "champion_detail": "Active",
         "top_contender_label": "top · def67890",
+        "top_contender_payout": 0.12,
         "top_contender_sharpe": 0.9,
         "hurdle_sharpe": 0.78,
         "gap": 0.12,
-        "fleet_best_cagr": 0.15,
+        "fleet_best_payout": 0.15,
         "worst_drawdown": -0.2,
         "capital_ready_count": 1,
         "fleet_count": 3,
@@ -594,11 +658,37 @@ def test_row_html_renders_lifecycle_badge() -> None:
     assert "STALE" not in staked_html
 
 
+def test_row_html_renders_new_badge() -> None:
+    row = {
+        "model_id": "a" * 64,
+        "run_name": "latest-run",
+        "source": "trained",
+        "status": "RESEARCH",
+        "corr_sharpe_ac": 0.5,
+        "corr_sharpe_ac_ci_low": None,
+        "corr_sharpe_ac_ci_high": None,
+        "max_drawdown": None,
+        "gain_to_pain_ratio": None,
+        "mmc_down": None,
+        "deflated_sharpe": None,
+        "gate_corr_sharpe_ac": None,
+        "gate_gain_to_pain_ratio": None,
+        "gate_deflated_sharpe": None,
+        "has_full_version": False,
+        "is_new": True,
+    }
+    html_out = report._row_html(row)
+    assert 'class="new-badge"' in html_out
+    assert ">NEW</span>" in html_out
+
+
 def test_app_js_renders_lifecycle_badge_and_display_name() -> None:
     js = report._read_asset("app.js")
     assert "lifecycle_stage" in js
     assert "current_full_status" in js
     assert "display_name" in js
+    assert "is_new" in js
+    assert "newBadge" in js
     assert "STALE" in js
     assert "DEGRADED" in js
 
@@ -647,6 +737,7 @@ def test_renderer_has_type_and_tier_badges() -> None:
         ".tier-4",
         ".type-cell",
         ".drawer-description",
+        ".new-badge",
     ):
         assert token in css
     # minified renderer must stay encoding-safe and carry the badge classes.
@@ -855,6 +946,32 @@ def test_generate_dashboard_empty_registry_compiles(tmp_path: Path) -> None:
     text = out.read_text(encoding="utf-8")
     assert "ALPHA GENERATION" in text
     assert 'id="dashboard-data"' in text
+
+
+def test_generate_dashboard_isolates_custom_registry_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from nmr import paths
+
+    isolated = tmp_path / "isolated"
+    global_root = tmp_path / "global"
+    isolated_id = "a" * 64
+    global_id = "b" * 64
+    _write_registry(isolated, [_registry_entry(isolated_id)])
+    global_run = global_root / "global-family" / "runs" / global_id
+    global_run.mkdir(parents=True)
+    (global_run / "run.json").write_text(
+        json.dumps(_registry_entry(global_id)), encoding="utf-8"
+    )
+    monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", global_root)
+
+    text = report.build_dashboard_html(
+        registry_dir=isolated,
+        benchmark_path=False,
+    )
+
+    assert isolated_id in text
+    assert global_id not in text
 
 
 def test_technical_entries_summary_only(tmp_path: Path) -> None:

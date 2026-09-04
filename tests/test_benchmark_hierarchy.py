@@ -168,6 +168,15 @@ def test_hierarchy_runs_and_emits_frames(tmp_path: Path) -> None:
         "tier3",
         "tier4",
     }
+    scorecard_path = tmp_path / "scorecard.csv"
+    frame.write_csv(scorecard_path)
+    from nmr.dashboard import load_benchmark_frame
+
+    loaded = load_benchmark_frame(scorecard_path)
+    assert loaded.height == frame.height
+    assert loaded.select(
+        ["payout_policy_id", "scoring_target", "scoring_horizon"]
+    ).null_count().row(0) == (0, 0, 0)
     report = gate_report_frame(result)
     assert report.height == 4
     assert set(report.get_column("field")) == {

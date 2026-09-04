@@ -26,6 +26,12 @@ Targets can look forward 20 or 60 market days while historical eras arrive weekl
 
 In the live tournament, a new live era is released each day. Live eras are one day apart.
 
+### Comparable validation overlap
+
+For comparable model payout and MMC reporting, use only the eligible intersection of `validation.parquet` and `meta_model.parquet`. The overlap is derived from the current data snapshot, not hard-coded: rows with an unavailable selected target are excluded, and the resulting `n_eras` is part of the scorecard/dashboard evidence. In v5.3 the current Meta Model coverage begins at era 1133, so the present overlap is 86 eras; a data refresh can move or expand that window.
+
+Models are fit on `train.parquet` and scored on the held-out validation/meta overlap. Do not extend an Atomic payout proxy to the full validation period when Meta Model coverage is absent, and do not annualize the weekly-era mean payout. The payout policy and the distinction between this per-era proxy and account-level Atomic settlement returns are defined in the evaluation specification ([`evaluation-suite-bible.md`](../06-evaluation/evaluation-suite-bible.md) §5.0 and §16).
+
 ## Features
 
 Features include fundamentals, technical signals, market data, analyst information, and other engineered signals. Feature values for an era represent attributes as of that era. Numerai designs features to be point-in-time to avoid leakage.

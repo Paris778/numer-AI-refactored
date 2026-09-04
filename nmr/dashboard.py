@@ -11,6 +11,7 @@ import json
 import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ from nmr.config import REPO_ROOT
 from nmr.ensemble import Ensembler
 from nmr.evaluation import EvaluationEngine, downside_era_indices, sorted_era_labels
 from nmr.payout import (
+    CLASSIC_ATOMIC_ENDER60_R1343_V1,
     CLASSIC_LEGACY_V1,
     PAYOUT_FACTOR_FILENAME,
     annual_compounded_return,
@@ -79,6 +81,8 @@ UNIFIED_SCHEMA = pl.Schema(
         "lifecycle_stage": pl.String,
         "current_full_status": pl.String,
         "stale": pl.Boolean,
+        "trained_at": pl.String,
+        "is_new": pl.Boolean,
         "training_scope": pl.String,
         "has_full_version": pl.Boolean,
         "backend": pl.String,
@@ -109,6 +113,9 @@ UNIFIED_SCHEMA = pl.Schema(
         "bmc": pl.Float64,
         "cwmm": pl.Float64,
         "mean_payout": pl.Float64,
+        "mean_payout_ci_low": pl.Float64,
+        "mean_payout_ci_high": pl.Float64,
+        "mean_payout_n_eras": pl.Int64,
         "cagr_1y": pl.Float64,
         "gain_to_pain_ratio": pl.Float64,
         "kelly_fraction": pl.Float64,
@@ -153,7 +160,7 @@ class DashboardMetricSpec:
 
 
 DASHBOARD_METRICS: tuple[DashboardMetricSpec, ...] = (
-    DashboardMetricSpec("cagr_1y", "Profitability (CAGR 1Y)", True),
+    DashboardMetricSpec("mean_payout", "Payout / Era (proxy)", True),
     DashboardMetricSpec("mmc", "MMC", True),
     DashboardMetricSpec("corr", "CORR", True),
     DashboardMetricSpec("corr_sharpe_ac", "CORR Sharpe (AC)", True),
@@ -163,13 +170,72 @@ DASHBOARD_METRICS: tuple[DashboardMetricSpec, ...] = (
     DashboardMetricSpec("mmc_down", "Downside MMC", True),
     DashboardMetricSpec("cwmm", "CWMM", True),
     DashboardMetricSpec("gain_to_pain_ratio", "Gain-to-Pain Ratio", True),
-    DashboardMetricSpec("mean_payout", "Mean Payout", True),
     DashboardMetricSpec("std_corr", "CORR Volatility", False),
-    DashboardMetricSpec("max_drawdown", "Max Drawdown", False),
+    DashboardMetricSpec("max_drawdown", "Max Drawdown (proxy)", False),
     DashboardMetricSpec("turnover_mean", "Mean Turnover", False),
 )
-DEFAULT_RANK_METRIC = "cagr_1y"
+DEFAULT_RANK_METRIC = "mean_payout"
 _DASHBOARD_METRIC_BY_NAME = {spec.name: spec for spec in DASHBOARD_METRICS}
+_DASHBOARD_COLUMN_TOOLTIPS: dict[str, str] = {
+    "rank": "Rank within the active metric and matching policy cohort. Lower is better.",
+    "model": "Model identity, lifecycle state, and payout-policy context. No higher or lower value.",
+    "type": (
+        "Cohort and model family. Heuristic means a named programmatic null or "
+        "statistical baseline; benchmark means a model experiment or "
+        "canonical/official reference."
+    ),
+    "mean_payout": (
+        "Policy-clipped mean payout per eligible scored era. Higher is better; "
+        "this is not annual return."
+    ),
+    "mmc": (
+        "Meta Model Contribution per era. Higher positive values indicate more "
+        "independent signal; lower or negative values indicate weaker contribution."
+    ),
+    "corr": "Per-era rank correlation with the selected target. Higher is better.",
+    "corr_sharpe_ac": (
+        "Autocorrelation-adjusted Sharpe of per-era CORR, with uncertainty "
+        "context. Higher indicates stronger, more stable signal."
+    ),
+    "fnc": (
+        "Feature-neutral correlation after removing linear feature exposure. "
+        "Higher means more residual signal survives neutralization."
+    ),
+    "bmc": (
+        "Benchmark Model Contribution per era. Higher positive values indicate "
+        "more contribution beyond the benchmark reference."
+    ),
+    "cwmm": (
+        "Crowding With the Meta Model. Higher means more overlap with the Meta "
+        "Model; interpret it with MMC because crowding can reduce independence."
+    ),
+    "std_corr": "Population volatility of per-era CORR. Lower means more stable performance.",
+    "turnover_mean": (
+        "Mean change in rank ordering between consecutive eras. Lower means less "
+        "turnover and lower trading churn."
+    ),
+    "max_drawdown": "Largest peak-to-trough loss in the cumulative payout-proxy path. Lower is better.",
+    "gain_to_pain_ratio": "Total positive payout divided by total negative payout magnitude. Higher is better.",
+    "eras": (
+        "Number of usable scored eras behind the row's evidence. More coverage "
+        "improves confidence, not performance itself."
+    ),
+    "status": "Lifecycle and gate state, not a performance metric. Capital Ready means the configured gate passed.",
+    "sharpe_ci": (
+        "95% bootstrap interval around autocorrelation-adjusted CORR Sharpe. "
+        "Narrower intervals indicate more precise evidence."
+    ),
+    "mmc_down": (
+        "MMC measured in eras where the Meta Model is down. Higher is better; "
+        "unavailable when downside coverage is insufficient."
+    ),
+    "deflated_sharpe": "Deflated Sharpe ratio after multiple-testing and non-normality adjustments. Higher is better.",
+}
+_BENCHMARK_IDENTITY_FIELDS = (
+    "payout_policy_id",
+    "scoring_target",
+    "scoring_horizon",
+)
 
 
 def _dashboard_metric_spec(metric: str) -> DashboardMetricSpec:
@@ -181,8 +247,16 @@ def _dashboard_metric_spec(metric: str) -> DashboardMetricSpec:
         ) from exc
 
 
+_HEURISTIC_BENCHMARK_IDS = (
+    "null_constant_05",
+    "null_feature_mean",
+    "null_gaussian_rand",
+    "null_uniform_rand",
+)
+
+
 def dashboard_cohort(row: Mapping[str, Any]) -> str:
-    """Derive a display cohort from the unified source and benchmark tier."""
+    """Derive a display cohort from source and explicit benchmark identity."""
     source = row.get("source")
     if source in ("trained", "trained_legacy"):
         return "trained"
@@ -191,21 +265,17 @@ def dashboard_cohort(row: Mapping[str, Any]) -> str:
     if source == "partial":
         return "partial"
     if source == "benchmark":
-        tier = row.get("tier")
-        try:
-            if tier is not None and int(tier) <= 2:
-                return "heuristic"
-        except (TypeError, ValueError):
-            pass
+        if str(row.get("model_id") or "") in _HEURISTIC_BENCHMARK_IDS:
+            return "heuristic"
         return "benchmark"
     return "unknown"
 
 
 # Model-kind badge STACK per stable benchmark model_id (rationale:
-# configs/benchmarks/*.yaml — tier 0 null invariants, tier 1 Ridge, tier 2
-# shallow LGBM/XGB trees, tier 3 canonical LGBM baselines, tier 4 official
-# LGBM Ender references). Ensembles stack a base kind with an ``ensemble``
-# modifier (an XGB ensemble is both XGB and an ensemble).
+# configs/benchmarks/*.yaml — named tier-0 null invariants are heuristics;
+# Ridge, shallow LGBM/XGB trees, canonical baselines, and official Ender
+# references are benchmark experiments). Ensembles stack a base kind with an
+# ``ensemble`` modifier (an XGB ensemble is both XGB and an ensemble).
 _BENCHMARK_KINDS_BY_ID: dict[str, list[str]] = {
     # Null baselines carry no architecture badge (just their heuristic cohort
     # tag) — the "NULL" pill was removed by design (dashboard feedback).
@@ -244,10 +314,10 @@ def row_type_labels(row: Mapping[str, Any]) -> list[str]:
     stack a base-kind badge (``ridge`` / ``lgbm`` / ``xgb`` / ``catboost`` /
     ``trained``) with an ``ensemble`` modifier because the two facts are
     orthogonal. Benchmark-hierarchy rows ALSO lead with their cohort tag —
-    ``benchmark`` (tiers 3–4: canonical + official references) or
-    ``heuristic`` (tiers 0–2: null, Ridge, shallow trees) — so the arena shows
-    the group AND the kind at a glance (e.g. ``[benchmark, lgbm]``,
-    ``[heuristic, ridge, ensemble]``). Trained rows carry no cohort tag;
+    ``benchmark`` (model experiments and canonical/official references) or
+    ``heuristic`` (named null/statistical baselines) — so the arena shows the
+    group AND the kind at a glance (e.g. ``[benchmark, lgbm]``,
+    ``[heuristic]``). Trained rows carry no cohort tag;
     ``full``/``partial`` keep their diagnostic identity.
     """
     source = row.get("source")
@@ -418,6 +488,16 @@ def _finite_metric_value(row: Mapping[str, Any], metric: str) -> float | None:
     except (TypeError, ValueError):
         return None
     return numeric if np.isfinite(numeric) else None
+
+
+def _dashboard_cagr(row: Mapping[str, Any]) -> float | None:
+    """Return CAGR only when the row has account-level periodic returns."""
+    if (
+        row.get("payout_policy_id") == CLASSIC_ATOMIC_ENDER60_R1343_V1.policy_id
+        or row.get("capital_metrics_reason") == "round_level_returns_unavailable"
+    ):
+        return None
+    return row.get("cagr_1y")
 
 
 def _dashboard_sort_key(
@@ -680,7 +760,6 @@ _CORE_DISPLAY_FIELDS = (
     "corr_sharpe_ac_ci_low",
     "corr_sharpe_ac_ci_high",
     "corr_sharpe_ac_n_eras",
-    "cagr_1y",
     "gain_to_pain_ratio",
     "max_drawdown",
     "n_eras",
@@ -721,7 +800,6 @@ _ALL_SCORECARD_FIELDS = (
     "max_drawdown",
     "std_corr",
     "max_feature_exposure",
-    "cagr_1y",
     "gain_to_pain_ratio",
     "kelly_fraction",
     "mmc_down",
@@ -733,6 +811,7 @@ _ALL_SCORECARD_FIELDS = (
     "sim_portfolio_cagr",
     "sim_portfolio_mdd",
     "sim_capital_utilization",
+    "capital_metrics_reason",
     "horizon_target_name",
     "horizon_n_eras",
     "horizon_model_sharpe_20",
@@ -774,6 +853,8 @@ _ROW_FIELDS = (
     "lifecycle_stage",
     "current_full_status",
     "stale",
+    "trained_at",
+    "is_new",
     "cohort",
     "type_label",
     "type_labels",
@@ -787,6 +868,9 @@ _ROW_FIELDS = (
     "targets",
     "neutralization_proportion",
     "oof_device",
+    "payout_policy_id",
+    "scoring_target",
+    "scoring_horizon",
     "status",
     "champion",
     "values",
@@ -845,7 +929,13 @@ def _detail_provenance(manifest: Mapping[str, Any]) -> dict[str, Any]:
         "timestamp": next(
             (
                 manifest.get(key)
-                for key in ("timestamp", "created_at", "completed_at", "promoted_at")
+                for key in (
+                    "trained_at",
+                    "timestamp",
+                    "created_at",
+                    "completed_at",
+                    "promoted_at",
+                )
                 if manifest.get(key) is not None
             ),
             None,
@@ -967,6 +1057,8 @@ def build_tournament_payload(
             "lifecycle_stage": row.get("lifecycle_stage"),
             "current_full_status": row.get("current_full_status"),
             "stale": row.get("stale"),
+            "trained_at": row.get("trained_at"),
+            "is_new": row.get("is_new"),
             "cohort": cohort,
             "type_label": row_type_label(row),
             "type_labels": row_type_labels(row),
@@ -980,6 +1072,9 @@ def build_tournament_payload(
             "targets": row.get("targets"),
             "neutralization_proportion": row.get("neutralization_proportion"),
             "oof_device": row.get("oof_device"),
+            "payout_policy_id": row.get("payout_policy_id"),
+            "scoring_target": row.get("scoring_target"),
+            "scoring_horizon": row.get("scoring_horizon"),
             "status": row.get("status"),
             "champion": champion,
             "values": [
@@ -1074,6 +1169,7 @@ def build_tournament_payload(
         "rows": [[row.get(field) for field in _ROW_FIELDS] for row in rows],
         "details": details,
         "metric_fields": [spec.name for spec in DASHBOARD_METRICS],
+        "column_tooltips": dict(_DASHBOARD_COLUMN_TOOLTIPS),
         "row_value_scale": _ROW_VALUE_SCALE,
         "strict_beats": _strict_beats_by_metric(leaderboard),
         "ci_fields": ["corr_sharpe_ac_ci_low", "corr_sharpe_ac_ci_high", "n_eras"],
@@ -1113,10 +1209,10 @@ def resolve_benchmark_path(
 
 
 # Curated human display names for the benchmark hierarchy (rationale: the
-# per-tier configs in configs/benchmarks/*.yaml — tier 0 null/statistical
-# invariants, tier 1 convex Ridge baselines, tier 2 shallow non-linear trees,
-# tier 3 canonical community/tutorial baselines, tier 4 official Numerai
-# references). Keyed by the stable benchmark model_id so a human rename is
+# per-tier configs in configs/benchmarks/*.yaml — tier 0 named null/statistical
+# baselines, tier 1 Ridge experiments, tier 2 shallow non-linear trees, tier 3
+# canonical community/tutorial baselines, tier 4 official Numerai references.
+# Keyed by the stable benchmark model_id so a human rename is
 # impossible to miss and never breaks series identity.
 _BENCHMARK_HUMAN_NAMES: dict[str, str] = {
     "null_constant_05": "Constant 0.5",
@@ -1191,9 +1287,27 @@ def load_benchmark_frame(benchmark_path: Path) -> pl.DataFrame:
     df = pl.read_csv(path)
     if df.height == 0:
         return pl.DataFrame(schema=UNIFIED_SCHEMA)
+    missing_identity = [
+        field for field in _BENCHMARK_IDENTITY_FIELDS if field not in df.columns
+    ]
+    if missing_identity:
+        raise ValueError(
+            f"benchmark scorecard {path} is missing mandatory comparison identity "
+            f"columns: {missing_identity}"
+        )
 
     rows: list[dict] = []
     for row in df.to_dicts():
+        invalid_identity = [
+            field
+            for field in _BENCHMARK_IDENTITY_FIELDS
+            if row.get(field) is None or not str(row[field]).strip()
+        ]
+        if invalid_identity:
+            raise ValueError(
+                f"benchmark scorecard {path} has missing comparison identity "
+                f"in row {row.get('model_id')!r}: {invalid_identity}"
+            )
         tier_value = row.get("tier")
         rows.append(
             {
@@ -1206,6 +1320,8 @@ def load_benchmark_frame(benchmark_path: Path) -> pl.DataFrame:
                 "display_name": _benchmark_human_name(row),
                 "backend": "benchmark",
                 "preset": "benchmark",
+                "trained_at": None,
+                "is_new": False,
                 "feature_set": "all",
                 "feature_subset": None,
                 "n_targets": 1,
@@ -1232,13 +1348,21 @@ def load_benchmark_frame(benchmark_path: Path) -> pl.DataFrame:
                 "bmc": row.get("bmc"),
                 "cwmm": row.get("cwmm"),
                 "mean_payout": row.get("mean_payout"),
-                "cagr_1y": row.get("cagr_1y"),
+                "mean_payout_ci_low": row.get("mean_payout_ci_low"),
+                "mean_payout_ci_high": row.get("mean_payout_ci_high"),
+                "mean_payout_n_eras": row.get("mean_payout_n_eras"),
+                "cagr_1y": _dashboard_cagr(row),
                 "gain_to_pain_ratio": row.get("gain_to_pain_ratio"),
                 "kelly_fraction": row.get("kelly_fraction"),
                 "sim_portfolio_cagr": row.get("sim_portfolio_cagr"),
                 "sim_portfolio_mdd": row.get("sim_portfolio_mdd"),
                 "sim_capital_utilization": row.get("sim_capital_utilization"),
-                "capital_metrics_reason": row.get("capital_metrics_reason"),
+                "capital_metrics_reason": (
+                    "round_level_returns_unavailable"
+                    if row.get("payout_policy_id")
+                    == CLASSIC_ATOMIC_ENDER60_R1343_V1.policy_id
+                    else row.get("capital_metrics_reason")
+                ),
                 "mmc_down": row.get("mmc_down"),
                 "mmc_down_reason": row.get("mmc_down_reason"),
                 "turnover_mean": row.get("turnover_mean"),
@@ -1287,6 +1411,8 @@ def _registry_row(payload: dict[str, Any], run_file: Path) -> dict[str, Any]:
         "source": "trained" if scorecard else "trained_legacy",
         "run_name": run_cfg.get("name", "unknown"),
         "family": run_cfg.get("name", "unknown"),
+        "trained_at": manifest.get("trained_at"),
+        "is_new": False,
         "training_scope": "research",
         "has_full_version": False,
         "backend": model_cfg.get("backend", "unknown"),
@@ -1319,13 +1445,21 @@ def _registry_row(payload: dict[str, Any], run_file: Path) -> dict[str, Any]:
         "bmc": scorecard.get("bmc"),
         "cwmm": scorecard.get("cwmm"),
         "mean_payout": scorecard.get("mean_payout"),
-        "cagr_1y": scorecard.get("cagr_1y"),
+        "mean_payout_ci_low": scorecard.get("mean_payout_ci_low"),
+        "mean_payout_ci_high": scorecard.get("mean_payout_ci_high"),
+        "mean_payout_n_eras": scorecard.get("mean_payout_n_eras"),
+        "cagr_1y": _dashboard_cagr(scorecard),
         "gain_to_pain_ratio": scorecard.get("gain_to_pain_ratio"),
         "kelly_fraction": scorecard.get("kelly_fraction"),
         "sim_portfolio_cagr": scorecard.get("sim_portfolio_cagr"),
         "sim_portfolio_mdd": scorecard.get("sim_portfolio_mdd"),
         "sim_capital_utilization": scorecard.get("sim_capital_utilization"),
-        "capital_metrics_reason": scorecard.get("capital_metrics_reason"),
+        "capital_metrics_reason": (
+            "round_level_returns_unavailable"
+            if scorecard.get("payout_policy_id")
+            == CLASSIC_ATOMIC_ENDER60_R1343_V1.policy_id
+            else scorecard.get("capital_metrics_reason")
+        ),
         "mmc_down": scorecard.get("mmc_down"),
         "mmc_down_reason": scorecard.get("mmc_down_reason"),
         "turnover_mean": scorecard.get("turnover_mean"),
@@ -1387,6 +1521,41 @@ def _partial_cross_check_cells(slot_dir: Path) -> dict[str, Any]:
     return cells
 
 
+def _parse_training_timestamp(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(UTC)
+
+
+def _mark_latest_trained(rows: list[dict[str, Any]]) -> None:
+    latest: tuple[datetime, str] | None = None
+    for row in rows:
+        row["is_new"] = False
+        if row.get("source") not in ("trained", "trained_legacy"):
+            continue
+        timestamp = _parse_training_timestamp(row.get("trained_at"))
+        if timestamp is None:
+            continue
+        candidate = (timestamp, str(row.get("model_id") or ""))
+        if latest is None or candidate > latest:
+            latest = candidate
+    if latest is None:
+        return
+    for row in rows:
+        if (
+            row.get("source") in ("trained", "trained_legacy")
+            and _parse_training_timestamp(row.get("trained_at")) == latest[0]
+            and str(row.get("model_id") or "") == latest[1]
+        ):
+            row["is_new"] = True
+
+
 def _export_row(
     version: lifecycle.ExportVersion, family: str, info: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1405,6 +1574,8 @@ def _export_row(
             "lifecycle_stage": info["lifecycle_stage"],
             "current_full_status": info["current_full_status"],
             "stale": info["stale"],
+            "trained_at": None,
+            "is_new": False,
             "training_scope": version.scope,
             "has_full_version": False,
             "backend": cfg_model.get("backend"),
@@ -1574,6 +1745,7 @@ def load_unified_leaderboard(
 
     if not rows:
         return pl.DataFrame(schema=UNIFIED_SCHEMA)
+    _mark_latest_trained(rows)
     return pl.DataFrame(rows, schema=UNIFIED_SCHEMA, strict=False)
 
 
@@ -1632,8 +1804,8 @@ def evaluate_gate_status(
     file's reference column, ``BENCHMARK`` otherwise); registry rows are
     ``CHAMPION`` (champion.json pointer), ``CAPITAL READY`` (all hard
     hurdles), or ``RESEARCH``. Per-field receipts mirror
-    ``assert_tier4_gate``: >= for most fields, strict > for cagr_1y, turnover
-    exempt when None.
+    ``assert_tier4_gate`` for the configured hard fields; unavailable fields
+    remain ``None`` and do not satisfy the gate.
     """
     from nmr.benchmark import load_benchmark_file
 
@@ -1642,6 +1814,11 @@ def evaluate_gate_status(
     if gate is None:
         raise ValueError(f"gate config {gate_config_path} has no gate section")
     reference_column = file_cfg.reference_column
+    expected_identity = (
+        gate.payout_policy_id,
+        gate.scoring_target,
+        gate.scoring_horizon,
+    )
     champion_id = read_champion_pointer(champion_path)
 
     rows: list[dict] = []
@@ -1652,12 +1829,15 @@ def evaluate_gate_status(
         elif row["source"] == "partial":
             status = "PARTIAL"  # train-only cross-check — never gated
         elif row["source"] == "benchmark":
+            if model_id == reference_column:
+                observed_identity = _row_policy_identity(row)
+                if observed_identity != expected_identity:
+                    raise ValueError(
+                        "tier-4 reference benchmark identity mismatch: "
+                        f"expected {expected_identity}, got {observed_identity}"
+                    )
             status = "GATE HURDLE" if model_id == reference_column else "BENCHMARK"
-        elif _row_policy_identity(row) != (
-            gate.payout_policy_id,
-            gate.scoring_target,
-            gate.scoring_horizon,
-        ):
+        elif _row_policy_identity(row) != expected_identity:
             status = "RESEARCH"
         elif all(_gate_receipt(f, row, gate) is True for f in _GATE_FIELDS):
             status = "CHAMPION" if model_id == champion_id else "CAPITAL READY"
@@ -1679,6 +1859,8 @@ _CAPITAL_SCALAR_CELLS = ("cagr_1y", "gain_to_pain_ratio", "kelly_fraction")
 
 
 def _has_stored_capital_block(row: dict) -> bool:
+    if row.get("payout_policy_id") == CLASSIC_ATOMIC_ENDER60_R1343_V1.policy_id:
+        return True
     return all(row.get(c) is not None for c in _CAPITAL_SCALAR_CELLS)
 
 
@@ -1828,6 +2010,10 @@ def reconcile_capital_metrics(
     oracle-parity evaluation/payout paths. Registry files are never written.
     """
     rows = leaderboard.to_dicts()
+    for row in rows:
+        if row.get("payout_policy_id") == CLASSIC_ATOMIC_ENDER60_R1343_V1.policy_id:
+            row["cagr_1y"] = None
+            row["capital_metrics_reason"] = "round_level_returns_unavailable"
     needs_recompute = [
         row
         for row in rows
@@ -1835,7 +2021,7 @@ def reconcile_capital_metrics(
         and not _has_stored_capital_block(row)
     ]
     if not needs_recompute:
-        return leaderboard
+        return pl.DataFrame(rows, schema=UNIFIED_SCHEMA, strict=False)
 
     lookups = _load_shared_lookups(data_dir)
     if lookups is None:
@@ -1886,11 +2072,11 @@ def reconcile_capital_metrics(
     return pl.DataFrame(rows, schema=UNIFIED_SCHEMA, strict=False)
 
 
-def _family_display_name(family: str) -> str:
+def _family_display_name(family: str, registry_dir: Path) -> str:
     """meta.json display_name for a family slug; falls back to the slug."""
     if not paths.SLUG_RE.fullmatch(family):
         return family
-    meta = _read_json_mapping(paths.experiment_dir(family) / "meta.json")
+    meta = _read_json_mapping(Path(registry_dir) / family / "meta.json")
     if isinstance(meta, dict) and meta.get("display_name"):
         return str(meta["display_name"])
     return family
@@ -1901,8 +2087,7 @@ def _series_label(registry_dir: Path, run_id: str) -> str:
     if not run_file.exists():
         # Task-11 bridge: experiments runs live under experiments/<family>/runs/
         run_file = next(
-            iter(paths.EXPERIMENTS_ROOT.glob(f"*/runs/{run_id}/run.json")),
-            run_file,
+            iter(Path(registry_dir).glob(f"*/runs/{run_id}/run.json")), run_file
         )
     name = "unknown"
     if run_file.exists():
@@ -1913,7 +2098,9 @@ def _series_label(registry_dir: Path, run_id: str) -> str:
         if isinstance(payload, dict):
             manifest = payload.get("manifest") or {}
             name = (manifest.get("config") or {}).get("run", {}).get("name", "unknown")
-    display = _family_display_name(name) if name != "unknown" else name
+    display = (
+        _family_display_name(name, Path(registry_dir)) if name != "unknown" else name
+    )
     return f"{display} · {run_id[:8]}"
 
 

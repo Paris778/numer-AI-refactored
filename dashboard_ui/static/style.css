@@ -175,6 +175,12 @@ table { width: 100%; border-collapse: collapse; }
 .tournament-table { min-width: 1030px; }
 th, td { padding: 11px 12px; border-bottom: 1px solid var(--border-soft); text-align: left; vertical-align: middle; }
 th { color: var(--text-dim); background: var(--bg-panel-3); font-size: .58rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; white-space: nowrap; }
+th.metric-header { position: relative; }
+.header-label { display: inline-flex; align-items: center; gap: 5px; vertical-align: middle; }
+.metric-info { position: relative; display: inline-grid; width: 16px; height: 16px; margin-left: 5px; padding: 0; place-items: center; border: 1px solid rgba(245, 185, 33, .38); border-radius: 50%; background: transparent; color: var(--text-dim); font: 600 .58rem/1 "JetBrains Mono", "Cascadia Mono", monospace; letter-spacing: 0; text-transform: none; cursor: help; vertical-align: middle; }
+.metric-info:hover, .metric-info:focus-visible, .metric-info.is-open { border-color: var(--gold); color: var(--gold); outline: none; }
+.metric-tooltip { position: absolute; top: calc(100% + 9px); left: 50%; z-index: 30; width: 240px; max-width: min(260px, calc(100vw - 32px)); padding: 9px 11px; border: 1px solid rgba(245, 185, 33, .32); border-radius: var(--radius-sm); background: rgba(32, 32, 40, .98); color: var(--text-hi); font: 500 .65rem/1.5 "JetBrains Mono", "Cascadia Mono", monospace; letter-spacing: 0; text-align: left; text-transform: none; white-space: normal; opacity: 0; visibility: hidden; transform: translate(-50%, -4px); transition: opacity .14s ease, transform .14s ease, visibility .14s ease; pointer-events: none; box-shadow: 0 12px 28px rgba(0, 0, 0, .38), 0 0 18px rgba(245, 185, 33, .08); }
+.metric-info:hover .metric-tooltip, .metric-info:focus-visible .metric-tooltip, .metric-info.is-open .metric-tooltip { opacity: 1; visibility: visible; transform: translate(-50%, 0); }
 th.sortable { cursor: pointer; user-select: none; transition: color .12s ease; }
 th.sortable:hover { color: var(--text-mid); }
 th.sortable.sorted { color: var(--gold); }
@@ -211,6 +217,8 @@ td { color: var(--text-mid); font-size: .72rem; }
 .model-cell { min-width: 240px; }
 .model-cell strong { display: block; color: var(--text-hi); font-size: .77rem; font-weight: 600; }
 .model-cell small { display: block; max-width: 270px; margin-top: 4px; overflow: hidden; color: var(--text-dim); font: .58rem "JetBrains Mono", "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
+.model-cell small.policy-context { color: var(--gold); }
+.metric-unavailable { color: var(--text-dim); cursor: help; }
 /* Type badges sit up to 2 per row, then wrap to the next line. A 2-column
    grid keeps the column narrow (≈2 pills). The <td> itself must stay a real
    table-cell — display:grid on the <td> stops it stretching to the row height
@@ -281,6 +289,7 @@ td { color: var(--text-mid); font-size: .72rem; }
 .badge.lifecycle { display: inline-block; margin-left: 6px; padding: 2px 6px; border: 1px solid var(--border); border-radius: 999px; color: var(--text-lo); font: 700 .54rem "JetBrains Mono", "Cascadia Mono", monospace; letter-spacing: .04em; white-space: nowrap; }
 .badge.lifecycle.full, .badge.lifecycle.staked { color: var(--gold); border-color: rgba(245, 185, 33, .45); }
 .badge.lifecycle.degraded { color: var(--coral); border-color: rgba(255, 122, 122, .5); }
+.new-badge { display: inline-block; margin-left: 6px; padding: 2px 6px; border: 1px solid rgba(126, 218, 163, .48); border-radius: 999px; color: var(--mint); background: rgba(126, 218, 163, .10); font: 700 .54rem/1.1 "JetBrains Mono", "Cascadia Mono", monospace; letter-spacing: .08em; vertical-align: 1px; white-space: nowrap; }
 .champion-mark { display: inline-block; margin-left: 6px; color: var(--gold); font: 700 .55rem "JetBrains Mono", "Cascadia Mono", monospace; letter-spacing: .04em; }
 /* Rank numbers are round Olympic medals (single digits are circles; wider
    ranks round to a pill). Olympic colors + glow; muted outline for #4+. */

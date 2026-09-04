@@ -20,6 +20,7 @@ import os
 import re
 import shutil
 import uuid
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -138,6 +139,8 @@ def _result_payload(result: RunResult) -> dict[str, Any]:
     wall-clock durations that differ across processes and are excluded from
     canonical serialization (AGENTS.md timing-hazard).
     """
+    if not result.manifest.get("trained_at"):
+        result.manifest["trained_at"] = datetime.now(UTC).isoformat()
     scorecard_block = None
     if result.scorecard is not None:
         row = result.scorecard.to_frame().to_dicts()[0]

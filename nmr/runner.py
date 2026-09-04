@@ -10,6 +10,7 @@ import platform
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
@@ -343,6 +344,9 @@ class ExperimentRunner:
             data_fingerprint=self._data_fingerprint,
             environment=self._environment,
         )
+        oof_device = str(
+            model_orchestrator.resolved_device or self._config.model.device
+        )
 
         joined = train_df.select(["id", "era", main_target, *feature_cols]).join(
             cv_oof,
@@ -512,9 +516,8 @@ class ExperimentRunner:
             "code_fingerprint": _compute_code_fingerprint(),
             "environment": self._environment,
             "pipeline_device": str(self._config.model.device),
-            "oof_device": str(
-                model_orchestrator.resolved_device or self._config.model.device
-            ),
+            "oof_device": oof_device,
+            "trained_at": datetime.now(UTC).isoformat(),
             # Present for every run whose validation/deploy closure ends with
             # the per-era (0,1) tie_kept_rank step. Absent in pre-fix legacy
             # rows: their max_feature_exposure was measured on unranked

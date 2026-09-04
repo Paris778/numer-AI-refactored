@@ -1,0 +1,49 @@
+# Competitive multi-target rank ensemble for the v5.3 Ender-60 gate.
+# All components share the 60D horizon; blending is rank-domain and ridge-learned.
+# The small feature universe is intentional: the overnight GPU is 4 GiB VRAM.
+
+run:
+  name: xgb-gpu-60d-ensemble-standard
+  seed: 20260903
+
+data:
+  version: v5.3
+  feature_set: small
+  targets:
+    - target_ender_60
+    - target_cyrusd_60
+    - target_sam_60
+    - target_teager2b_60
+  horizon: 60D
+
+split:
+  scheme: walk_forward
+  purge_eras: 16
+  embargo_eras: 0
+  n_folds: 4
+
+model:
+  backend: xgboost
+  preset: standard
+  device: gpu
+  params:
+    n_estimators: 5000
+    learning_rate: 0.004
+    max_depth: 7
+    num_leaves: 128
+    colsample_bytree: 0.25
+    subsample: 0.8
+    reg_lambda: 10.0
+
+evaluation:
+  backend: custom
+  main_target: target_ender_60
+  payout_policy: classic_atomic_ender60_r1343_v1
+  metrics: [corr, mmc, fnc, sharpe]
+  validation_scorecard: true
+
+ensemble:
+  method: ridge
+
+risk:
+  neutralization_proportion: 0.5

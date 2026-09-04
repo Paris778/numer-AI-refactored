@@ -63,6 +63,8 @@ def test_unified_schema_contains_leaderboard_projection() -> None:
         "targets",
         "neutralization_proportion",
         "oof_device",
+        "trained_at",
+        "is_new",
         "corr",
         "corr_ci_low",
         "corr_ci_high",
@@ -89,6 +91,9 @@ def test_unified_schema_contains_leaderboard_projection() -> None:
         "fnc",
         "mmc",
         "mean_payout",
+        "mean_payout_ci_low",
+        "mean_payout_ci_high",
+        "mean_payout_n_eras",
         "n_eras",
         "tier",
         "turnover_mean",
@@ -108,9 +113,10 @@ def test_load_benchmark_frame_full_and_minimal(tmp_path: Path) -> None:
         "model_id,corr,corr_ci_low,corr_ci_high,corr_sharpe_ac,"
         "corr_sharpe_ac_ci_low,corr_sharpe_ac_ci_high,std_corr,max_drawdown,"
         "deflated_sharpe,fnc,cagr_1y,gain_to_pain_ratio,kelly_fraction,"
-        "mmc_down,strategy_group,tier\n"
+        "mmc_down,payout_policy_id,scoring_target,scoring_horizon,strategy_group,tier\n"
         "v53_lgbm_ender60,0.029,0.022,0.036,0.78,0.61,0.95,0.02,0.04,"
-        "1.0,0.027,4.88,44.28,1.0,0.009,ref,4\n",
+        "1.0,0.027,4.88,44.28,1.0,0.009,"
+        "classic_legacy_075_225_clip005_v1,target,20D,ref,4\n",
     )
     frame = dash.load_benchmark_frame(full)
     assert frame.height == 1
@@ -125,7 +131,9 @@ def test_load_benchmark_frame_full_and_minimal(tmp_path: Path) -> None:
 
     minimal = _write_benchmark_csv(
         tmp_path,
-        "model_id,corr,corr_sharpe_ac,strategy_group\n" "bench_a,0.05,0.5,linear\n",
+        "model_id,corr,corr_sharpe_ac,strategy_group,"
+        "payout_policy_id,scoring_target,scoring_horizon\n"
+        "bench_a,0.05,0.5,linear,classic_legacy_075_225_clip005_v1,target,20D\n",
     )
     row = dash.load_benchmark_frame(minimal).row(0, named=True)
     assert row["corr_sharpe_ac_ci_low"] is None
@@ -133,6 +141,47 @@ def test_load_benchmark_frame_full_and_minimal(tmp_path: Path) -> None:
     assert row["max_drawdown"] is None
     assert row["fnc"] is None
     assert row["has_bmc"] is False
+
+
+def test_load_benchmark_frame_rejects_unscoped_scorecard(tmp_path: Path) -> None:
+    csv_path = _write_benchmark_csv(
+        tmp_path,
+        "model_id,corr,corr_sharpe_ac\nbench_a,0.05,0.5\n",
+    )
+
+    with pytest.raises(ValueError, match="mandatory comparison identity"):
+        dash.load_benchmark_frame(csv_path)
+
+
+def test_load_benchmark_frame_rejects_blank_identity(tmp_path: Path) -> None:
+    csv_path = _write_benchmark_csv(
+        tmp_path,
+        "model_id,payout_policy_id,scoring_target,scoring_horizon\n"
+        "bench_a,classic_atomic_ender60_r1343_v1,,60D\n",
+    )
+
+    with pytest.raises(ValueError, match="missing comparison identity"):
+        dash.load_benchmark_frame(csv_path)
+
+
+def test_load_benchmark_frame_hides_atomic_proxy_cagr(tmp_path: Path) -> None:
+    csv_path = _write_benchmark_csv(
+        tmp_path,
+        "model_id,payout_policy_id,scoring_target,scoring_horizon,cagr_1y,"
+        "mean_payout,mean_payout_ci_low,mean_payout_ci_high,mean_payout_n_eras,"
+        "gain_to_pain_ratio\n"
+        "v53_lgbm_ender60,classic_atomic_ender60_r1343_v1,target_ender_60,60D,"
+        "999999.0,0.125,0.1,0.15,86,47.0\n",
+    )
+
+    row = dash.load_benchmark_frame(csv_path).row(0, named=True)
+
+    assert row["cagr_1y"] is None
+    assert row["mean_payout"] == pytest.approx(0.125)
+    assert row["mean_payout_ci_low"] == pytest.approx(0.1)
+    assert row["mean_payout_ci_high"] == pytest.approx(0.15)
+    assert row["mean_payout_n_eras"] == 86
+    assert row["capital_metrics_reason"] == "round_level_returns_unavailable"
 
 
 def test_load_benchmark_frame_missing_file_returns_empty_schema_frame(
@@ -185,6 +234,7 @@ def _registry_entry(run_id: str, *, scorecard: bool = True) -> dict:
                 "bmc": 0.02,
                 "fnc": 0.05,
                 "n_eras": 30,
+                "mean_payout": 0.1,
                 "cagr_1y": 1.5,
                 "gain_to_pain_ratio": 2.0,
                 "kelly_fraction": 0.4,
@@ -233,6 +283,47 @@ def test_load_unified_leaderboard_registry_only(tmp_path: Path) -> None:
     assert incomplete_row["max_drawdown"] is None
 
 
+def test_load_unified_leaderboard_hides_stored_atomic_proxy_cagr(
+    tmp_path: Path,
+) -> None:
+    entry = _registry_entry("e" * 64)
+    entry["scorecard"].update(
+        {
+            "payout_policy_id": "classic_atomic_ender60_r1343_v1",
+            "scoring_target": "target_ender_60",
+            "scoring_horizon": "60D",
+            "cagr_1y": 999999.0,
+            "capital_metrics_reason": None,
+        }
+    )
+    _write_registry(tmp_path, [entry])
+
+    row = dash.load_unified_leaderboard(
+        tmp_path, benchmark_path=False, models_dir=tmp_path / "models"
+    ).row(0, named=True)
+
+    assert row["cagr_1y"] is None
+    assert row["capital_metrics_reason"] == "round_level_returns_unavailable"
+
+
+def test_latest_timestamped_trained_row_gets_new_badge(tmp_path: Path) -> None:
+    latest = _registry_entry("a" * 64)
+    latest["manifest"]["trained_at"] = "2026-09-03T12:00:00+00:00"
+    older = _registry_entry("b" * 64)
+    older["manifest"]["trained_at"] = "2026-09-02T12:00:00+00:00"
+    legacy = _registry_entry("c" * 64, scorecard=False)
+    _write_registry(tmp_path, [latest, older, legacy])
+
+    frame = dash.load_unified_leaderboard(
+        tmp_path, benchmark_path=False, models_dir=tmp_path / "models"
+    )
+    rows = {row["model_id"]: row for row in frame.to_dicts()}
+
+    assert rows["a" * 64]["is_new"] is True
+    assert rows["b" * 64]["is_new"] is False
+    assert rows["c" * 64]["is_new"] is False
+
+
 def test_load_unified_leaderboard_zero_scorecard_value_not_legacy(
     tmp_path: Path,
 ) -> None:
@@ -275,8 +366,10 @@ def test_load_unified_leaderboard_merges_benchmarks(tmp_path: Path) -> None:
     _write_registry(tmp_path, [_registry_entry("f" * 64)])
     bench = _write_benchmark_csv(
         tmp_path,
-        "model_id,corr,corr_sharpe_ac,std_corr,max_drawdown,strategy_group,tier\n"
-        "bench_a,0.05,0.5,0.3,0.2,linear,1\n",
+        "model_id,corr,corr_sharpe_ac,std_corr,max_drawdown,strategy_group,tier,"
+        "payout_policy_id,scoring_target,scoring_horizon\n"
+        "bench_a,0.05,0.5,0.3,0.2,linear,1,"
+        "classic_legacy_075_225_clip005_v1,target,20D\n",
     )
     frame = dash.load_unified_leaderboard(
         tmp_path, benchmark_path=bench, models_dir=tmp_path / "models"
@@ -411,6 +504,9 @@ def test_gate_status_benchmark_rows_never_capital_ready(tmp_path: Path) -> None:
     ref = {
         "model_id": "v53_lgbm_ender60",
         "source": "benchmark",
+        "payout_policy_id": "classic_atomic_ender60_r1343_v1",
+        "scoring_target": "target_ender_60",
+        "scoring_horizon": "60D",
         "corr": 0.029,
         "corr_sharpe_ac": 0.87,
         "fnc": 0.027,
@@ -426,6 +522,25 @@ def test_gate_status_benchmark_rows_never_capital_ready(tmp_path: Path) -> None:
     assert statuses["null_constant_05"] == "BENCHMARK"
     ref_row = frame.filter(pl.col("model_id") == "v53_lgbm_ender60").row(0, named=True)
     assert ref_row["gate_corr_sharpe_ac"] is True
+
+
+def test_gate_status_rejects_wrong_identity_for_reference_benchmark(
+    tmp_path: Path,
+) -> None:
+    row = {
+        "model_id": "v53_lgbm_ender60",
+        "source": "benchmark",
+        "payout_policy_id": "classic_legacy_075_225_clip005_v1",
+        "scoring_target": "target",
+        "scoring_horizon": "20D",
+        "corr": 0.03,
+        "corr_sharpe_ac": 0.9,
+        "fnc": 0.03,
+        "gain_to_pain_ratio": 2.0,
+    }
+
+    with pytest.raises(ValueError, match="reference benchmark identity mismatch"):
+        _status_frame(tmp_path, [row])
 
 
 def test_gate_status_turnover_is_diagnostic_only(tmp_path: Path) -> None:
@@ -902,6 +1017,7 @@ def test_kpi_cards_stale_champion_pointer_degrades(
                 "source": "trained",
                 "run_name": "sample-run",
                 "corr_sharpe_ac": 0.8,
+                "mean_payout": 0.1,
                 "cagr_1y": 1.5,
                 "max_drawdown": 0.1,
                 "status": "RESEARCH",
@@ -1566,7 +1682,8 @@ def test_series_label_prefers_display_name(
     entry = _registry_entry("a" * 64)
     entry["manifest"]["config"]["run"]["name"] = "brb1-xgb-v6"
     _write_registry(registry, [entry])
-    _write_family_meta(experiments, "brb1-xgb-v6", display_name="Brb1 XGB v6")
+    _write_family_meta(experiments, "brb1-xgb-v6", display_name="Global name")
+    _write_family_meta(registry, "brb1-xgb-v6", display_name="Brb1 XGB v6")
     assert dash._series_label(registry, "a" * 64) == "Brb1 XGB v6 · " + "a" * 8
     # no experiments meta -> falls back to the run name
     assert dash._series_label(registry, "z" * 64) == "unknown · " + "z" * 8
@@ -1618,14 +1735,97 @@ def test_evaluable_rows_predicate() -> None:
 def test_dashboard_metric_specs_make_direction_and_default_explicit() -> None:
     specs = {spec.name: spec for spec in dash.DASHBOARD_METRICS}
 
-    assert dash.DEFAULT_RANK_METRIC == "cagr_1y"
-    assert specs["cagr_1y"].label == "Profitability (CAGR 1Y)"
+    assert dash.DEFAULT_RANK_METRIC == "mean_payout"
+    assert dash.DASHBOARD_METRICS[0].name == "mean_payout"
+    assert "cagr_1y" not in specs
+    assert specs["mean_payout"].label == "Payout / Era (proxy)"
     assert specs["mmc"].window == "standardized meta-overlap"
     assert specs["mmc"].higher_is_better is True
     assert specs["corr"].higher_is_better is True
+    assert specs["max_drawdown"].label == "Max Drawdown (proxy)"
     assert specs["max_drawdown"].higher_is_better is False
     assert specs["turnover_mean"].higher_is_better is False
     assert specs["std_corr"].higher_is_better is False
+
+
+def test_default_rank_uses_payout_proxy_over_weekly_cagr_diagnostic() -> None:
+    frame = pl.DataFrame(
+        [
+            {
+                "model_id": "atomic-candidate",
+                "source": "trained",
+                "corr_sharpe_ac": 0.20,
+                "mean_payout": 0.04,
+                "cagr_1y": 2.44,
+                "payout_policy_id": "classic_atomic_ender60_r1343_v1",
+                "scoring_target": "target_ender_60",
+                "scoring_horizon": "60D",
+            },
+            {
+                "model_id": "atomic-reference",
+                "source": "benchmark",
+                "tier": 4,
+                "corr_sharpe_ac": 0.78,
+                "mean_payout": 0.03,
+                "cagr_1y": 0.33,
+                "payout_policy_id": "classic_atomic_ender60_r1343_v1",
+                "scoring_target": "target_ender_60",
+                "scoring_horizon": "60D",
+            },
+        ],
+        schema=dash.UNIFIED_SCHEMA,
+        strict=False,
+    )
+
+    ranked = dash.rank_leaderboard(frame)
+
+    assert ranked.get_column("model_id").to_list() == [
+        "atomic-candidate",
+        "atomic-reference",
+    ]
+
+
+def test_default_rank_determines_payout_podium() -> None:
+    frame = pl.DataFrame(
+        [
+            {
+                "model_id": "sharpe-winner",
+                "source": "trained",
+                "mean_payout": 0.01,
+                "corr_sharpe_ac": 0.99,
+            },
+            {
+                "model_id": "payout-winner",
+                "source": "trained",
+                "mean_payout": 0.04,
+                "corr_sharpe_ac": 0.10,
+            },
+            {
+                "model_id": "payout-second",
+                "source": "trained",
+                "mean_payout": 0.03,
+                "corr_sharpe_ac": 0.20,
+            },
+            {
+                "model_id": "payout-third",
+                "source": "trained",
+                "mean_payout": 0.02,
+                "corr_sharpe_ac": 0.30,
+            },
+        ],
+        schema=dash.UNIFIED_SCHEMA,
+        strict=False,
+    )
+
+    ranked = dash.rank_leaderboard(frame)
+
+    assert ranked.get_column("model_id").to_list() == [
+        "payout-winner",
+        "payout-second",
+        "payout-third",
+        "sharpe-winner",
+    ]
+    assert ranked.get_column("rank").to_list() == [1, 2, 3, 4]
 
 
 def test_dashboard_cohort_uses_source_and_benchmark_tier() -> None:
@@ -1633,8 +1833,30 @@ def test_dashboard_cohort_uses_source_and_benchmark_tier() -> None:
     assert dash.dashboard_cohort({"source": "trained_legacy"}) == "trained"
     assert dash.dashboard_cohort({"source": "full"}) == "full"
     assert dash.dashboard_cohort({"source": "partial"}) == "partial"
-    assert dash.dashboard_cohort({"source": "benchmark", "tier": 0}) == "heuristic"
-    assert dash.dashboard_cohort({"source": "benchmark", "tier": 2}) == "heuristic"
+    assert (
+        dash.dashboard_cohort(
+            {"source": "benchmark", "model_id": "null_constant_05", "tier": 0}
+        )
+        == "heuristic"
+    )
+    assert (
+        dash.dashboard_cohort(
+            {"source": "benchmark", "model_id": "null_feature_mean", "tier": 0}
+        )
+        == "heuristic"
+    )
+    assert (
+        dash.dashboard_cohort(
+            {"source": "benchmark", "model_id": "linear_ridge_medium", "tier": 1}
+        )
+        == "benchmark"
+    )
+    assert (
+        dash.dashboard_cohort(
+            {"source": "benchmark", "model_id": "tree_lgbm_fast_medium", "tier": 2}
+        )
+        == "benchmark"
+    )
     assert dash.dashboard_cohort({"source": "benchmark", "tier": 3}) == "benchmark"
     assert dash.dashboard_cohort({"source": "benchmark", "tier": 4}) == "benchmark"
     assert dash.dashboard_cohort({"source": "benchmark", "tier": None}) == "benchmark"
@@ -1646,7 +1868,7 @@ def test_rank_leaderboard_is_direction_aware_null_safe_and_deterministic() -> No
         {"model_id": "a", "source": "trained", "mmc": 0.2, "max_drawdown": 0.2},
         {"model_id": "null", "source": "trained", "mmc": None, "max_drawdown": None},
         {
-            "model_id": "h",
+            "model_id": "linear_ridge_medium",
             "source": "benchmark",
             "tier": 1,
             "mmc": 0.3,
@@ -1657,10 +1879,16 @@ def test_rank_leaderboard_is_direction_aware_null_safe_and_deterministic() -> No
     frame = pl.DataFrame(rows, schema=dash.UNIFIED_SCHEMA, strict=False)
 
     ranked = dash.rank_leaderboard(frame, metric="mmc")
-    assert ranked.get_column("model_id").to_list() == ["h", "a", "b", "null", "full"]
+    assert ranked.get_column("model_id").to_list() == [
+        "linear_ridge_medium",
+        "a",
+        "b",
+        "null",
+        "full",
+    ]
     assert ranked.get_column("rank").to_list() == [1, 2, 3, None, None]
     assert ranked.get_column("cohort").to_list() == [
-        "heuristic",
+        "benchmark",
         "trained",
         "trained",
         "trained",
@@ -1668,7 +1896,13 @@ def test_rank_leaderboard_is_direction_aware_null_safe_and_deterministic() -> No
     ]
 
     lower = dash.rank_leaderboard(frame, metric="max_drawdown")
-    assert lower.get_column("model_id").to_list() == ["b", "a", "h", "null", "full"]
+    assert lower.get_column("model_id").to_list() == [
+        "b",
+        "a",
+        "linear_ridge_medium",
+        "null",
+        "full",
+    ]
     assert lower.get_column("rank").to_list() == [1, 2, 3, None, None]
 
 
@@ -1761,7 +1995,12 @@ def test_ml_advantage_reports_directional_edges_and_missing_baselines() -> None:
     frame = pl.DataFrame(
         [
             {"model_id": "trained", "source": "trained", "mmc": 0.20},
-            {"model_id": "heuristic", "source": "benchmark", "tier": 2, "mmc": 0.10},
+            {
+                "model_id": "null_feature_mean",
+                "source": "benchmark",
+                "tier": 0,
+                "mmc": 0.10,
+            },
             {"model_id": "benchmark", "source": "benchmark", "tier": 4, "mmc": 0.05},
         ],
         schema=dash.UNIFIED_SCHEMA,
@@ -1770,7 +2009,7 @@ def test_ml_advantage_reports_directional_edges_and_missing_baselines() -> None:
     advantage = dash.compute_ml_advantage(frame, metric="mmc")
 
     assert advantage["trained"]["model_id"] == "trained"
-    assert advantage["heuristic"]["model_id"] == "heuristic"
+    assert advantage["heuristic"]["model_id"] == "null_feature_mean"
     assert advantage["benchmark"]["model_id"] == "benchmark"
     assert advantage["vs_heuristic"]["absolute_edge"] == pytest.approx(0.10)
     assert advantage["vs_heuristic"]["relative_percent"] == pytest.approx(100.0)
@@ -1787,14 +2026,16 @@ def test_tournament_payload_contains_ranked_rows_details_and_offline_metadata(
 ) -> None:
     trained_id = "a" * 64
     trained_entry = _registry_entry(trained_id)
+    trained_entry["manifest"]["trained_at"] = "2026-09-03T12:00:00+00:00"
     trained_entry["scorecard"]["mmc"] = 0.20
+    trained_entry["scorecard"]["mean_payout"] = 0.20
     _write_registry(tmp_path, [trained_entry])
     benchmark = _write_benchmark_csv(
         tmp_path,
         "model_id,corr,mmc,corr_sharpe_ac,strategy_group,tier,"
-        "payout_policy_id,scoring_target,scoring_horizon,cagr_1y\n"
-        "simple_baseline,0.01,0.02,0.1,ridge,1,"
-        "classic_legacy_075_225_clip005_v1,target,20D,0.1\n",
+        "payout_policy_id,scoring_target,scoring_horizon,cagr_1y,mean_payout\n"
+        "null_feature_mean,0.01,0.02,0.1,mean,0,"
+        "classic_legacy_075_225_clip005_v1,target,20D,0.1,0.1\n",
     )
     frame = dash.load_unified_leaderboard(
         tmp_path, benchmark_path=benchmark, models_dir=tmp_path / "models"
@@ -1811,12 +2052,18 @@ def test_tournament_payload_contains_ranked_rows_details_and_offline_metadata(
         "data_version": "v5.3",
         "evaluation_window": {"start": "0001", "end": "0002", "n_eras": 2},
         "offline_only": True,
-        "default_rank_metric": "cagr_1y",
+        "default_rank_metric": "mean_payout",
         "metric_window": "standardized meta-overlap",
     }
     row_map = [dict(zip(payload["row_fields"], row)) for row in payload["rows"]]
     assert [row["cohort"] for row in row_map] == ["trained", "heuristic"]
-    assert payload["model_ids"] == [trained_id, "simple_baseline"]
+    assert payload["model_ids"] == [trained_id, "null_feature_mean"]
+    assert row_map[0]["trained_at"] is not None
+    assert row_map[0]["is_new"] is True
+    assert "cagr_1y" not in payload["metric_fields"]
+    assert "mean_payout" in payload["column_tooltips"]
+    assert "Higher is better" in payload["column_tooltips"]["mean_payout"]
+    assert set(payload["metric_fields"]) <= set(payload["column_tooltips"])
     assert payload["rank_values"][0][payload["metric_fields"].index("mmc")] == 1
     assert row_map[0]["champion"] is True
     trained_index = next(
@@ -1829,10 +2076,10 @@ def test_tournament_payload_contains_ranked_rows_details_and_offline_metadata(
     seed_index = payload["provenance_fields"].index("seed")
     provenance_pairs = payload["details"][trained_index][1]
     assert all(pair[0] != seed_index for pair in provenance_pairs)
-    # default rank metric is CAGR 1Y (higher is better): edge vs the 0.1
-    # heuristic baseline on cagr_1y = 1.5 - 0.1.
-    assert payload["advantage"]["metric"] == "cagr_1y"
-    assert payload["advantage"]["vs_heuristic"]["absolute_edge"] == pytest.approx(1.4)
+    # default rank metric is policy-clipped payout per era (higher is better):
+    # edge vs the 0.1 heuristic baseline is 0.2 - 0.1.
+    assert payload["advantage"]["metric"] == "mean_payout"
+    assert payload["advantage"]["vs_heuristic"]["absolute_edge"] == pytest.approx(0.1)
 
 
 def test_tournament_payload_keeps_sub_micro_ranks_distinct() -> None:
@@ -1939,12 +2186,14 @@ def _lb_row(
     run_name: str,
     sharpe: float | None = None,
     has_full: bool = False,
+    payout: float | None = None,
 ) -> dict:
     return {
         "model_id": model_id,
         "source": source,
         "run_name": run_name,
         "corr_sharpe_ac": sharpe,
+        "mean_payout": payout,
         "has_full_version": has_full,
     }
 
@@ -1986,8 +2235,8 @@ def test_generate_dashboard_bar_input_includes_benchmark_excludes_diagnostic_row
     None
 ):
     rows = [
-        _lb_row("a" * 64, "trained", "r1", 0.5),
-        _lb_row("bench_a", "benchmark", "ref", 0.78),
+        _lb_row("a" * 64, "trained", "r1", 0.9, payout=0.1),
+        _lb_row("bench_a", "benchmark", "ref", 0.1, payout=0.2),
         _lb_row("brb1-xgb-v6::full", "full", "brb1-xgb-v6"),
         _lb_row("brb1-xgb-v6::partial", "partial", "brb1-xgb-v6", 0.9),
     ]
@@ -2149,10 +2398,14 @@ def test_benchmark_tier4_labels_unique_per_model(tmp_path: Path) -> None:
     derived display labels must be unique per model id."""
     csv_path = tmp_path / "bench.csv"
     csv_path.write_text(
-        "model_id,strategy_group,tier,horizon_target_name,mean_payout\n"
-        "v53_lgbm_ender20,tier4,4,ender,0.01\n"
-        "v53_lgbm_ender60,tier4,4,ender,0.02\n"
-        "null_constant_05,null,0,,0.0\n",
+        "model_id,strategy_group,tier,horizon_target_name,payout_policy_id,"
+        "scoring_target,scoring_horizon,mean_payout\n"
+        "v53_lgbm_ender20,tier4,4,ender,classic_atomic_ender60_r1343_v1,"
+        "target_ender_60,60D,0.01\n"
+        "v53_lgbm_ender60,tier4,4,ender,classic_atomic_ender60_r1343_v1,"
+        "target_ender_60,60D,0.02\n"
+        "null_constant_05,null,0,,classic_atomic_ender60_r1343_v1,"
+        "target_ender_60,60D,0.0\n",
         encoding="utf-8",
     )
     frame = dash.load_benchmark_frame(csv_path)
@@ -2165,25 +2418,25 @@ def test_benchmark_tier4_labels_unique_per_model(tmp_path: Path) -> None:
 
 def test_benchmark_hierarchy_curated_display_names(tmp_path: Path) -> None:
     """The full benchmark hierarchy gets curated human display names, tier
-    labels, and stable type badges (tiers 0-2 = heuristic, 3-4 = benchmark)."""
+    labels, and stable type badges (named null baselines = heuristic)."""
     csv_path = _write_benchmark_csv(
         tmp_path,
-        "model_id,strategy_group,tier\n"
-        "null_constant_05,tier0,0\n"
-        "null_feature_mean,tier0,0\n"
-        "null_gaussian_rand,tier0,0\n"
-        "null_uniform_rand,tier0,0\n"
-        "linear_ridge_medium,tier1,1\n"
-        "linear_ridge_multitarget,tier1,1\n"
-        "linear_ridge_small,tier1,1\n"
-        "tree_lgbm_fast_medium,tier2,2\n"
-        "tree_lgbm_shallow_small,tier2,2\n"
-        "tree_xgb_shallow_medium,tier2,2\n"
-        "canon_hello_numerai,tier3,3\n"
-        "canon_neutralized_50,tier3,3\n"
-        "canon_sunshine_ensemble,tier3,3\n"
-        "v53_lgbm_ender20,tier4,4\n"
-        "v53_lgbm_ender60,tier4,4\n",
+        "model_id,strategy_group,tier,payout_policy_id,scoring_target,scoring_horizon\n"
+        "null_constant_05,tier0,0,classic_atomic_ender60_r1343_v1,target_ender_60,60D\n"
+        "null_feature_mean,tier0,0,classic_atomic_ender60_r1343_v1,target_ender_60,60D\n"
+        "null_gaussian_rand,tier0,0,classic_atomic_ender60_r1343_v1,target_ender_60,60D\n"
+        "null_uniform_rand,tier0,0,classic_atomic_ender60_r1343_v1,target_ender_60,60D\n"
+        "linear_ridge_medium,tier1,1,classic_atomic_ender60_r1343_v1,target_ender_60,60D\n"
+        "linear_ridge_multitarget,tier1,1,classic_atomic_ender60_r1343_v1,target_ender_60,60D\n"
+        "linear_ridge_small,tier1,1,classic_atomic_ender60_r1343_v1,target_ender_60,60D\n"
+        "tree_lgbm_fast_medium,tier2,2,classic_atomic_ender60_r1343_v1,target_ender_60,60D\n"
+        "tree_lgbm_shallow_small,tier2,2,classic_atomic_ender60_r1343_v1,target_ender_60,60D\n"
+        "tree_xgb_shallow_medium,tier2,2,classic_atomic_ender60_r1343_v1,target_ender_60,60D\n"
+        "canon_hello_numerai,tier3,3,classic_atomic_ender60_r1343_v1,target_ender_60,60D\n"
+        "canon_neutralized_50,tier3,3,classic_atomic_ender60_r1343_v1,target_ender_60,60D\n"
+        "canon_sunshine_ensemble,tier3,3,classic_atomic_ender60_r1343_v1,target_ender_60,60D\n"
+        "v53_lgbm_ender20,tier4,4,classic_atomic_ender60_r1343_v1,target_ender_60,60D\n"
+        "v53_lgbm_ender60,tier4,4,classic_atomic_ender60_r1343_v1,target_ender_60,60D\n",
     )
     frame = dash.load_benchmark_frame(csv_path)
     rows = {row["model_id"]: row for row in frame.to_dicts()}
@@ -2206,19 +2459,20 @@ def test_benchmark_hierarchy_curated_display_names(tmp_path: Path) -> None:
     assert dash.row_tier_label(rows["tree_xgb_shallow_medium"]) == "Tier 2"
     assert dash.row_tier_label(rows["v53_lgbm_ender60"]) == "Tier 4"
     # type badge STACKS lead with the cohort tag: benchmark (tiers 3-4) or
-    # heuristic (tiers 0-2), then the model kind (+ ensemble modifier).
+    # heuristic null baselines lead with heuristic; model benchmarks lead with
+    # benchmark, then the model kind (+ ensemble modifier).
     expected_kinds = {
         # Null baselines carry no architecture badge — just the heuristic tag.
         "null_constant_05": ["heuristic"],
         "null_feature_mean": ["heuristic"],
         "null_gaussian_rand": ["heuristic"],
         "null_uniform_rand": ["heuristic"],
-        "linear_ridge_medium": ["heuristic", "ridge"],
-        "linear_ridge_multitarget": ["heuristic", "ridge", "ensemble"],
-        "linear_ridge_small": ["heuristic", "ridge"],
-        "tree_lgbm_fast_medium": ["heuristic", "lgbm"],
-        "tree_lgbm_shallow_small": ["heuristic", "lgbm"],
-        "tree_xgb_shallow_medium": ["heuristic", "xgb"],
+        "linear_ridge_medium": ["benchmark", "ridge"],
+        "linear_ridge_multitarget": ["benchmark", "ridge", "ensemble"],
+        "linear_ridge_small": ["benchmark", "ridge"],
+        "tree_lgbm_fast_medium": ["benchmark", "lgbm"],
+        "tree_lgbm_shallow_small": ["benchmark", "lgbm"],
+        "tree_xgb_shallow_medium": ["benchmark", "xgb"],
         "canon_hello_numerai": ["benchmark", "lgbm"],
         "canon_neutralized_50": ["benchmark", "lgbm"],
         "canon_sunshine_ensemble": ["benchmark", "lgbm", "ensemble"],
@@ -2235,13 +2489,13 @@ def test_benchmark_hierarchy_curated_display_names(tmp_path: Path) -> None:
         "ensemble",
     ]
     assert dash.row_type_labels(rows["linear_ridge_multitarget"]) == [
-        "heuristic",
+        "benchmark",
         "ridge",
         "ensemble",
     ]
     # cohort tag leads: benchmark rows never sort/lead as a plain kind.
     assert dash.row_type_label(rows["v53_lgbm_ender60"]) == "benchmark"
-    assert dash.row_type_label(rows["tree_lgbm_fast_medium"]) == "heuristic"
+    assert dash.row_type_label(rows["tree_lgbm_fast_medium"]) == "benchmark"
     # curated human descriptions for the dossier card.
     assert dash.model_description(rows["v53_lgbm_ender60"]) is not None
     assert "Ender" in dash.model_description(rows["v53_lgbm_ender60"]) or ""
@@ -2252,7 +2506,8 @@ def test_row_type_label_unknown_benchmark_falls_back(tmp_path: Path) -> None:
     """An unrecognized benchmark model_id still carries a type badge."""
     csv_path = _write_benchmark_csv(
         tmp_path,
-        "model_id,strategy_group,tier\n" "custom_baseline,ref,3\n",
+        "model_id,strategy_group,tier,payout_policy_id,scoring_target,scoring_horizon\n"
+        "custom_baseline,ref,3,classic_atomic_ender60_r1343_v1,target_ender_60,60D\n",
     )
     row = dash.load_benchmark_frame(csv_path).row(0, named=True)
     assert dash.row_type_label(row) == "benchmark"
@@ -2293,9 +2548,12 @@ def test_tournament_payload_carries_type_and_tier_labels(tmp_path: Path) -> None
     _write_registry(tmp_path, [_registry_entry(trained_id)])
     benchmark = _write_benchmark_csv(
         tmp_path,
-        "model_id,corr,mmc,corr_sharpe_ac,strategy_group,tier\n"
-        "null_feature_mean,0.001,0.001,0.1,tier0,0\n"
-        "v53_lgbm_ender60,0.029,0.013,0.78,tier4,4\n",
+        "model_id,corr,mmc,corr_sharpe_ac,strategy_group,tier,"
+        "payout_policy_id,scoring_target,scoring_horizon\n"
+        "null_feature_mean,0.001,0.001,0.1,tier0,0,"
+        "classic_atomic_ender60_r1343_v1,target_ender_60,60D\n"
+        "v53_lgbm_ender60,0.029,0.013,0.78,tier4,4,"
+        "classic_atomic_ender60_r1343_v1,target_ender_60,60D\n",
     )
     frame = dash.load_unified_leaderboard(
         tmp_path, benchmark_path=benchmark, models_dir=tmp_path / "models"
@@ -2315,5 +2573,11 @@ def test_tournament_payload_carries_type_and_tier_labels(tmp_path: Path) -> None
     assert by_id["v53_lgbm_ender60"]["type_labels"] == ["benchmark", "lgbm"]
     assert by_id["v53_lgbm_ender60"]["tier_label"] == "Tier 4"
     assert "Ender" in by_id["v53_lgbm_ender60"]["description"]
+    assert by_id["v53_lgbm_ender60"]["payout_policy_id"] == (
+        "classic_atomic_ender60_r1343_v1"
+    )
+    assert by_id["v53_lgbm_ender60"]["scoring_target"] == "target_ender_60"
+    assert by_id["v53_lgbm_ender60"]["scoring_horizon"] == "60D"
+    assert "capital_metrics_reason" in payload["scorecard_fields"]
     for field in ("type_label", "type_labels", "tier_label", "description"):
         assert field in payload["row_fields"]

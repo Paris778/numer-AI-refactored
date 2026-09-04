@@ -8,6 +8,7 @@ slots, discard, and immutability (re-publish rejected).
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import polars as pl
 import pytest
@@ -93,6 +94,9 @@ def test_record_run_result_is_idempotent(tmp_path, monkeypatch) -> None:
     original = (run_dir / "run.json").read_text(encoding="utf-8")
     assert experiment_store.record_run_result("fam-a", result) == run_dir
     assert (run_dir / "run.json").read_text(encoding="utf-8") == original
+    persisted = json.loads(original)
+    trained_at = persisted["manifest"]["trained_at"]
+    assert datetime.fromisoformat(trained_at).astimezone(UTC).tzinfo == UTC
 
 
 def test_record_run_result_rejected_rerecord_leaves_run_dir_byte_identical(

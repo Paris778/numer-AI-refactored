@@ -19,10 +19,10 @@ from nmr.payout import (
     annual_compounded_return,
     gain_to_pain_ratio,
     kelly_fraction,
+    simulate_overlapping_portfolio,
 )
 from nmr.payout import payout_report as _payout_report
 from nmr.payout import payout_series as _payout_series
-from nmr.payout import simulate_overlapping_portfolio
 from nmr.scorecard import MetricScorecard
 from nmr.scorecard import evaluate_cross_check as _evaluate_cross_check
 from nmr.scorecard import evaluate_model as _evaluate_model
@@ -188,8 +188,10 @@ def test_atomic_scorecard_persists_policy_target_and_horizon() -> None:
     assert score.payout_policy_id == CLASSIC_ATOMIC_ENDER60_R1343_V1.policy_id
     assert score.scoring_target == "target_ender_60"
     assert score.scoring_horizon == "60D"
+    assert score.cagr_1y is None
     assert score.sim_portfolio_cagr is None
     assert score.capital_metrics_reason == "round_level_returns_unavailable"
+    assert row["cagr_1y"] is None
     assert row["payout_policy_id"] == score.payout_policy_id
     assert row["scoring_target"] == score.scoring_target
     assert row["scoring_horizon"] == score.scoring_horizon

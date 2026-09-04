@@ -165,9 +165,81 @@ class TestLeaderboardFrame:
         # Non-None values should come first when descending
         assert sorted_lb.rows[0].corr_sharpe_ac == 1.23
 
+    def test_default_sort_by_metric_uses_payout_per_era(self):
+        rows = [
+            LeaderboardRowModel(
+                model_id="sharpe-winner",
+                source="trained",
+                run_name="config-a",
+                run_dir="/tmp/a",
+                mean_payout=0.0,
+                corr_sharpe_ac=1.0,
+            ),
+            LeaderboardRowModel(
+                model_id="payout-winner",
+                source="trained",
+                run_name="config-b",
+                run_dir="/tmp/b",
+                mean_payout=0.2,
+                corr_sharpe_ac=0.1,
+            ),
+        ]
+        leaderboard = LeaderboardFrame(rows=rows, total_rows=2, evaluable_rows=2)
+
+        sorted_leaderboard = leaderboard.sort_by_metric()
+
+        assert [row.model_id for row in sorted_leaderboard.rows] == [
+            "payout-winner",
+            "sharpe-winner",
+        ]
+
 
 class TestDashboardDataService:
     """Test DashboardDataService data loading and caching."""
+
+    def test_load_leaderboard_isolates_custom_registry_root(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from nmr import paths
+
+        isolated = tmp_path / "isolated"
+        global_root = tmp_path / "global"
+        isolated_id = "a" * 64
+        global_id = "b" * 64
+        isolated_run = isolated / isolated_id
+        isolated_run.mkdir(parents=True)
+        (isolated_run / "run.json").write_text(
+            json.dumps(
+                {
+                    "run_id": isolated_id,
+                    "manifest": {"config": {"run": {"name": "isolated"}}},
+                    "scorecard": {"corr": 0.1},
+                }
+            ),
+            encoding="utf-8",
+        )
+        global_run = global_root / "global-family" / "runs" / global_id
+        global_run.mkdir(parents=True)
+        (global_run / "run.json").write_text(
+            json.dumps(
+                {
+                    "run_id": global_id,
+                    "manifest": {"config": {"run": {"name": "global"}}},
+                    "scorecard": {"corr": 0.2},
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", global_root)
+
+        service = DashboardDataService(
+            registry_dir=isolated,
+            benchmark_path=tmp_path / "missing-benchmark.csv",
+        )
+
+        assert [row.model_id for row in service.load_leaderboard().rows] == [
+            isolated_id
+        ]
 
     def test_leaderboard_lifecycle_fields_round_trip(
         self, tmp_path, monkeypatch
@@ -294,7 +366,10 @@ class TestDashboardDataService:
 
     def test_cache_invalidation(self, temp_registry_dir: Path):
         """Test source-fingerprint cache invalidation."""
-        service = DashboardDataService(registry_dir=temp_registry_dir)
+        service = DashboardDataService(
+            registry_dir=temp_registry_dir,
+            benchmark_path=temp_registry_dir / "no_benchmark.csv",
+        )
 
         # Cache should be invalid initially
         assert not service._check_cache_valid()
@@ -311,7 +386,10 @@ class TestDashboardDataService:
         self, temp_registry_dir: Path
     ):
         """A registry change (new run record) invalidates the cache."""
-        service = DashboardDataService(registry_dir=temp_registry_dir)
+        service = DashboardDataService(
+            registry_dir=temp_registry_dir,
+            benchmark_path=temp_registry_dir / "no_benchmark.csv",
+        )
         first = service.load_leaderboard()
         run_dir = temp_registry_dir / "fam" / "runs" / ("b" * 64)
         run_dir.mkdir(parents=True)
@@ -324,7 +402,10 @@ class TestDashboardDataService:
 
     def test_refresh_clears_all_caches(self, tmp_path):
         """refresh() drops leaderboard + timeseries + full-history caches."""
-        service = DashboardDataService(registry_dir=Path(tmp_path))
+        service = DashboardDataService(
+            registry_dir=Path(tmp_path),
+            benchmark_path=Path(tmp_path) / "no_benchmark.csv",
+        )
         service.load_leaderboard()
         service._timeseries_cache[("a",)] = {"eras": []}
         service._full_history_cache[("b",)] = {"series": {}}
@@ -456,21 +537,24 @@ class TestLeaderboardFramePydanticSerialization:
 class TestTopPerformers:
     """Test compute_top_performers."""
 
-    def test_top_performers_ranks_by_sharpe(self):
-        """Test ranking by Sharpe with real registry data."""
+    def test_top_performers_ranks_by_payout(self):
+        """Test default ranking by payout per era with real registry data."""
         service = DashboardDataService()
         result = service.compute_top_performers(top_n=5)
         if not result.rows:
             pytest.skip("No registry models")
 
         assert len(result) > 0
-        assert result.sort_metric == "corr_sharpe_ac"
+        assert result.sort_metric == "mean_payout"
         assert result.champion is not None
         # Ranks should be sequential 1..N and sorted descending
         for i, row in enumerate(result.rows, start=1):
             assert row.rank == i
-        sharpes = [r.corr_sharpe_ac or -1 for r in result.rows]
-        assert sharpes == sorted(sharpes, reverse=True)
+        payouts = [
+            row.mean_payout if row.mean_payout is not None else float("-inf")
+            for row in result.rows
+        ]
+        assert payouts == sorted(payouts, reverse=True)
 
     def test_top_performers_sharpe_floor(self):
         """Test the min_sharpe floor filters weak models."""

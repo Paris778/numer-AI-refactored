@@ -287,3 +287,56 @@ def test_catboost_quick_ender60_config_loads():
     assert cfg.model.params["rsm"] == 1.0
     assert cfg.evaluation.main_target == "target_ender_60"
     assert cfg.evaluation.validation_scorecard is True
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected_targets", "expected_preset", "expected_estimators"),
+    [
+        (
+            "xgb-gpu-calibration-ender60.yaml",
+            ("target_ender_60",),
+            "fast",
+            50,
+        ),
+        (
+            "xgb-gpu-ender60-standard.yaml",
+            ("target_ender_60",),
+            "standard",
+            20_000,
+        ),
+        (
+            "xgb-gpu-60d-ensemble-standard.yaml",
+            (
+                "target_ender_60",
+                "target_cyrusd_60",
+                "target_sam_60",
+                "target_teager2b_60",
+            ),
+            "standard",
+            5_000,
+        ),
+    ],
+)
+def test_gpu_xgboost_campaign_configs_are_gate_aligned(
+    filename: str,
+    expected_targets: tuple[str, ...],
+    expected_preset: str,
+    expected_estimators: int,
+) -> None:
+    cfg = load_config(REPO_ROOT / "configs" / filename)
+
+    assert cfg.data.feature_set == "small"
+    assert cfg.data.feature_set != "all"
+    assert cfg.data.targets == expected_targets
+    assert cfg.data.horizon == "60D"
+    assert cfg.split.purge_eras == 16
+    assert cfg.split.n_folds in (2, 4)
+    assert cfg.model.backend == "xgboost"
+    assert cfg.model.device == "gpu"
+    assert cfg.model.preset == expected_preset
+    assert cfg.model.params["n_estimators"] == expected_estimators
+    assert cfg.model.params["colsample_bytree"] == 0.25
+    assert cfg.model.params["subsample"] == 0.8
+    assert cfg.evaluation.main_target == "target_ender_60"
+    assert cfg.evaluation.validation_scorecard is True
+    assert cfg.evaluation.payout_policy == "classic_atomic_ender60_r1343_v1"

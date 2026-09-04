@@ -22,7 +22,7 @@
     return row;
   });
   var state = {
-    metric: (payload.meta || {}).default_rank_metric || "cagr_1y",
+    metric: (payload.meta || {}).default_rank_metric || "mean_payout",
     cohort: "all",
     search: "",
     shortcut: null,
@@ -103,6 +103,11 @@
     var text = degraded ? "DEGRADED" : String(stage).toUpperCase();
     if (row.stale) text += " · STALE";
     return "<span class=\"" + cls + "\">" + esc(text) + "</span>";
+  }
+
+  function newBadge(row) {
+    if (!row.is_new) return "";
+    return "<span class=\"new-badge\" title=\"Latest trained model\">NEW</span>";
   }
 
   function chartContainer(element) {
@@ -298,15 +303,21 @@
     return "<span class=\"sort-ind\">" + (state.sort.dir === "asc" ? "&#9650;" : "&#9660;") + "</span>";
   }
 
+  function columnTooltip(field) {
+    return (payload.column_tooltips || {})[field] || "";
+  }
+
   function headerCell(field, label, extraClass) {
     var active = state.sort && state.sort.field === field;
     var cls = "sortable" + (extraClass ? " " + extraClass : "") + (active ? " sorted" : "");
     var aria = active ? " aria-sort=\"" + (state.sort.dir === "asc" ? "ascending" : "descending") + "\"" : "";
-    return "<th data-sort=\"" + esc(field) + "\" class=\"" + cls + "\" role=\"columnheader\" tabindex=\"0\"" + aria + ">" + label + sortArrow(field) + "</th>";
+    var tooltip = columnTooltip(field);
+    var info = tooltip ? "<button type=\"button\" class=\"metric-info\" aria-expanded=\"false\" aria-label=\"Explain " + esc(field.replace(/_/g, " ")) + "\"><span aria-hidden=\"true\">i</span><span class=\"metric-tooltip\" role=\"tooltip\">" + esc(tooltip) + "</span></button>" : "";
+    return "<th data-sort=\"" + esc(field) + "\" class=\"" + cls + " metric-header\" role=\"columnheader\" tabindex=\"0\"" + aria + "><span class=\"header-label\">" + label + sortArrow(field) + "</span>" + info + "</th>";
   }
 
   function valueText(row, metric) {
-    return fmt(metricValue(row, metric), metric === "cagr_1y" || metric === "max_drawdown");
+    return fmt(metricValue(row, metric), metric === "mean_payout" || metric === "max_drawdown");
   }
 
   // Olympic rank coloring: #1 gold, #2 silver, #3 bronze, #4+ muted slate.
@@ -314,12 +325,12 @@
     return rank === 1 ? "rank-1" : rank === 2 ? "rank-2" : rank === 3 ? "rank-3" : "rank-default";
   }
 
-  // Tier-4 benchmark CAGR = the apex return the heat scale is anchored to.
+  // Tier-4 benchmark payout proxy = the apex payout used for display heat.
   function tier4MaxReturn() {
     var max = null;
     rows.forEach(function (row) {
       if (row.tier_label === "Tier 4") {
-        var v = metricValue(row, "cagr_1y");
+        var v = metricValue(row, "mean_payout");
         if (finite(v) && (max === null || v > max)) max = v;
       }
     });
@@ -337,11 +348,13 @@
   }
 
   function returnValueText(row) {
-    var value = metricValue(row, "cagr_1y");
-    if (!finite(value)) return valueText(row, "cagr_1y");
+    var value = metricValue(row, "mean_payout");
+    if (!finite(value)) {
+      return "<span class=\"metric-unavailable\" title=\"Policy payout per evaluation era unavailable\">&#8212;</span>";
+    }
     var cls = returnClass(value, tier4MaxReturn());
     var sign = value > 0 ? "+" : "";
-    return "<span class=\"metric-return " + cls + "\">" + sign + fmt(value, true) + "</span>";
+    return "<span class=\"metric-return " + cls + "\" title=\"Policy-clipped mean payout per scored era; not annual return\">" + sign + fmt(value, true) + "</span>";
   }
 
   function rankCell(row) {
@@ -382,6 +395,47 @@
     return row.display_name || row.run_name || row.model_id;
   }
 
+  function policyContext(row) {
+    var policy = String(row.payout_policy_id || "");
+    if (!policy) return "";
+    var kind = policy.indexOf("atomic") !== -1 ? "ATOMIC" : policy.indexOf("legacy") !== -1 ? "LEGACY" : "POLICY";
+    var horizon = row.scoring_horizon ? " / " + String(row.scoring_horizon) : "";
+    var identity = [policy, row.scoring_target, row.scoring_horizon].filter(function (value) { return value; }).join(" / ");
+    return "<small class=\"policy-context\" title=\"Payout policy: " + esc(identity) + "\">" + esc(kind + horizon) + "</small>";
+  }
+
+  function closeMetricTooltips(except) {
+    document.querySelectorAll(".metric-info.is-open").forEach(function (button) {
+      if (button !== except) {
+        button.classList.remove("is-open");
+        button.setAttribute("aria-expanded", "false");
+      }
+    });
+  }
+
+  function bindMetricInfoButtons(scope) {
+    (scope || document).querySelectorAll(".metric-info").forEach(function (button) {
+      if (button.getAttribute("data-tooltip-bound")) return;
+      button.setAttribute("data-tooltip-bound", "true");
+      button.addEventListener("click", function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+        var open = !button.classList.contains("is-open");
+        closeMetricTooltips(button);
+        button.classList.toggle("is-open", open);
+        button.setAttribute("aria-expanded", String(open));
+      });
+      button.addEventListener("keydown", function (event) {
+        if (event.key === "Enter" || event.key === " ") event.stopPropagation();
+        if (event.key === "Escape") {
+          event.stopPropagation();
+          closeMetricTooltips(null);
+          button.blur();
+        }
+      });
+    });
+  }
+
   function renderMasterLeaderboard() {
     var host = byId("leaderboard-table"), empty = byId("leaderboard-empty"), count = byId("row-count");
     if (!host || !empty) return;
@@ -389,17 +443,17 @@
     if (count) count.textContent = visible.length + " of " + rows.length + " rows";
     empty.hidden = visible.length !== 0;
     if (!visible.length) { host.innerHTML = ""; return; }
-    var spec = specFor(state.metric), showRankedMetric = ["cagr_1y", "mmc", "corr", "corr_sharpe_ac", "max_drawdown"].indexOf(state.metric) === -1;
-    var rankedLabel = state.metric === "cagr_1y" ? "RANKED: CAGR 1Y" : (state.metric === "mmc" ? "RANKED: MMC (CORE)" : "RANKED: " + spec.label);
+    var spec = specFor(state.metric), showRankedMetric = ["mean_payout", "mmc", "corr", "corr_sharpe_ac", "max_drawdown"].indexOf(state.metric) === -1;
+    var rankedLabel = state.metric === "mean_payout" ? "RANKED: PAYOUT / ERA" : (state.metric === "mmc" ? "RANKED: MMC (CORE)" : "RANKED: " + spec.label);
     var html = "<table class=\"tournament-table\"><thead><tr>" +
       headerCell("rank", "Rank") +
       headerCell("model", "Model") +
       headerCell("type", "Type") +
-      headerCell("cagr_1y", state.metric === "cagr_1y" ? esc(rankedLabel) : "CAGR 1Y", state.metric === "cagr_1y" ? "selected-head" : "") +
+      headerCell("mean_payout", state.metric === "mean_payout" ? esc(rankedLabel) : "PAYOUT / ERA (PROXY)", state.metric === "mean_payout" ? "selected-head" : "") +
       headerCell("mmc", state.metric === "mmc" ? esc(rankedLabel) : "MMC (CORE)", state.metric === "mmc" ? "selected-head" : "") +
       headerCell("corr", state.metric === "corr" ? esc(rankedLabel) : "CORR", state.metric === "corr" ? "selected-head" : "") +
       headerCell("corr_sharpe_ac", state.metric === "corr_sharpe_ac" ? esc(rankedLabel) : "CORR Sharpe + CI", state.metric === "corr_sharpe_ac" ? "selected-head" : "") +
-      headerCell("max_drawdown", state.metric === "max_drawdown" ? esc(rankedLabel) : "Max DD", state.metric === "max_drawdown" ? "selected-head" : "") +
+      headerCell("max_drawdown", state.metric === "max_drawdown" ? esc(rankedLabel) : "Max DD (proxy)", state.metric === "max_drawdown" ? "selected-head" : "") +
       (showRankedMetric ? headerCell(state.metric, esc(rankedLabel), "selected-head") : "") +
       headerCell("gain_to_pain_ratio", "G:P") +
       headerCell("eras", "Eras") +
@@ -414,10 +468,10 @@
       else if (rowRank === 2) rowClass += " row-rank-2";
       else if (rowRank === 3) rowClass += " row-rank-3";
       html += "<tr class=\"model-row" + rowClass + "\" data-model-id=\"" + esc(row.model_id) + "\" tabindex=\"0\">";
-      html += "<td class=\"rank-cell mono\">" + rankCell(row) + "</td><td class=\"model-cell\"><strong>" + tierBadge(row) + esc(row.display_name || row.run_name || row.model_id) + "</strong>";
+      html += "<td class=\"rank-cell mono\">" + rankCell(row) + "</td><td class=\"model-cell\"><strong>" + tierBadge(row) + esc(row.display_name || row.run_name || row.model_id) + newBadge(row) + "</strong>";
       html += row.champion ? " <span class=\"champion-mark\">CHAMPION</span>" : "";
       html += lifecycleBadge(row);
-      html += "<small>" + esc(row.model_id) + "</small></td><td class=\"type-cell\"><span class=\"type-stack\">" + typeBadge(row) + "</span></td>";
+      html += "<small>" + esc(row.model_id) + "</small>" + policyContext(row) + "</td><td class=\"type-cell\"><span class=\"type-stack\">" + typeBadge(row) + "</span></td>";
       html += "<td class=\"num\">" + returnValueText(row) + "</td><td class=\"num\">" + valueText(row, "mmc") + "</td>";
       html += "<td class=\"num\">" + valueText(row, "corr") + "</td><td class=\"num\">" + ciText(row) + "</td>";
       html += "<td class=\"num\">" + valueText(row, "max_drawdown") + "</td>";
@@ -433,6 +487,7 @@
       node.addEventListener("click", function () { cycleColumnSort(node.getAttribute("data-sort")); });
       node.addEventListener("keydown", function (event) { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); cycleColumnSort(node.getAttribute("data-sort")); } });
     });
+    bindMetricInfoButtons(host);
   }
 
   function edgeText(trained, baseline, metric) {
@@ -520,9 +575,9 @@
       var value = Number(metricValue(row, spec.name)), y = top + index * rowHeight, width = Math.abs(value) / max * barWidth, x = value >= 0 ? zero : zero - width;
       var bar = document.createElementNS("http://www.w3.org/2000/svg", "rect"); bar.setAttribute("x", x); bar.setAttribute("y", y); bar.setAttribute("width", width); bar.setAttribute("height", 13); bar.setAttribute("class", value >= 0 ? "profile-bar positive" : "profile-bar negative"); svg.appendChild(bar);
       bindPointerTooltip(bar, profileTip, function () {
-        return tooltipLine(value >= 0 ? "var(--gold)" : "var(--coral)", spec.label, "Value " + fmt(value, spec.name === "cagr_1y" || spec.name === "max_drawdown")) + "<br>" + (spec.higher_is_better ? "Higher is better" : "Lower is better");
+        return tooltipLine(value >= 0 ? "var(--gold)" : "var(--coral)", spec.label, "Value " + fmt(value, spec.name === "mean_payout" || spec.name === "max_drawdown")) + "<br>" + (spec.higher_is_better ? "Higher is better" : "Lower is better");
       });
-      var name = textNode(svg, spec.label, 198, y + 11); name.setAttribute("text-anchor", "end"); svg.appendChild(name); var valueTextNode = textNode(svg, fmt(value, spec.name === "cagr_1y" || spec.name === "max_drawdown"), Math.min(720, zero + width + 8), y + 11); valueTextNode.setAttribute("class", "profile-value"); svg.appendChild(valueTextNode);
+      var name = textNode(svg, spec.label, 198, y + 11); name.setAttribute("text-anchor", "end"); svg.appendChild(name); var valueTextNode = textNode(svg, fmt(value, spec.name === "mean_payout" || spec.name === "max_drawdown"), Math.min(720, zero + width + 8), y + 11); valueTextNode.setAttribute("class", "profile-value"); svg.appendChild(valueTextNode);
     });
     var baseline = document.createElementNS("http://www.w3.org/2000/svg", "line"); baseline.setAttribute("x1", zero); baseline.setAttribute("x2", zero); baseline.setAttribute("y1", 12); baseline.setAttribute("y2", top + available.length * rowHeight); baseline.setAttribute("class", "profile-baseline"); svg.appendChild(baseline);
   }
@@ -582,6 +637,7 @@
     document.querySelectorAll(".cohort-button").forEach(function (button) { button.addEventListener("click", function () { state.cohort = button.getAttribute("data-cohort"); state.shortcut = null; document.querySelectorAll(".cohort-button").forEach(function (item) { var active = item === button; item.classList.toggle("active", active); item.setAttribute("aria-pressed", String(active)); }); document.querySelectorAll(".shortcut-button").forEach(function (item) { item.classList.remove("active"); item.setAttribute("aria-pressed", "false"); }); renderAll(); }); });
     document.querySelectorAll(".shortcut-button:not([disabled])").forEach(function (button) { button.addEventListener("click", function () { var value = button.getAttribute("data-shortcut"); state.shortcut = state.shortcut === value ? null : value; document.querySelectorAll(".shortcut-button").forEach(function (item) { var active = item === button && state.shortcut !== null; item.classList.toggle("active", active); item.setAttribute("aria-pressed", String(active)); }); renderAll(); }); });
     document.querySelectorAll("[data-drawer-close]").forEach(function (button) { button.addEventListener("click", closeDossier); }); document.addEventListener("keydown", function (event) { if (event.key === "Escape") closeDossier(); trapDrawerFocus(event); });
+    document.addEventListener("click", function (event) { if (!event.target.closest(".metric-info")) closeMetricTooltips(null); });
   }
 
   function renderAll() {
@@ -717,5 +773,6 @@
 
   populateToolbar();
   renderAll();
+  bindMetricInfoButtons(document);
   attachTimeseriesTooltip();
 })();

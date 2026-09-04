@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 from nmr import paths
 from nmr.config import REPO_ROOT
 from nmr.dashboard import (
+    DEFAULT_RANK_METRIC,
     _run_preds_path,
     load_benchmark_frame,
     load_unified_leaderboard,
@@ -92,7 +93,9 @@ class LeaderboardRowModel(BaseModel):
     # HTML/Streamlit hosts render the same badge/stale/degraded facts as the
     # engine.
     display_name: str | None = None
-    lifecycle_stage: str | None = None  # uninitialized|research|partial|degraded|full|staked
+    lifecycle_stage: str | None = (
+        None  # uninitialized|research|partial|degraded|full|staked
+    )
     current_full_status: str | None = None  # full|degraded|none
     stale: bool | None = None
     run_name: str
@@ -105,6 +108,9 @@ class LeaderboardRowModel(BaseModel):
     targets: str | None = None
     neutralization_proportion: float | None = None
     oof_device: str | None = None
+    payout_policy_id: str | None = None
+    scoring_target: str | None = None
+    scoring_horizon: str | None = None
 
     # Core metrics
     corr: float | None = None
@@ -113,6 +119,11 @@ class LeaderboardRowModel(BaseModel):
     corr_sharpe_ac: float | None = None
     corr_sharpe_ac_ci_low: float | None = None
     corr_sharpe_ac_ci_high: float | None = None
+    mean_payout: float | None = None
+    mean_payout_ci_low: float | None = None
+    mean_payout_ci_high: float | None = None
+    mean_payout_n_eras: int | None = None
+    cagr_1y: float | None = None
     max_drawdown: float | None = None
     std_corr: float | None = None
     deflated_sharpe: float | None = None
@@ -175,13 +186,16 @@ class LeaderboardFrame(BaseModel):
         )
 
     def sort_by_metric(
-        self, metric: str = "corr_sharpe_ac", descending: bool = True
+        self, metric: str = DEFAULT_RANK_METRIC, descending: bool = True
     ) -> LeaderboardFrame:
         """Sort rows by metric."""
         sorted_rows = sorted(
             self.rows,
-            key=lambda r: getattr(r, metric)
-            or (float("-inf") if descending else float("inf")),
+            key=lambda r: (
+                getattr(r, metric)
+                if getattr(r, metric) is not None
+                else (float("-inf") if descending else float("inf"))
+            ),
             reverse=descending,
         )
         return LeaderboardFrame(
@@ -202,6 +216,7 @@ class KPISnapshot(BaseModel):
     top_contender_sharpe: float | None = None
     hurdle_sharpe: float
     gap: float | None = None
+    fleet_best_payout: float | None = None
     fleet_best_cagr: float | None = None
     worst_drawdown: float | None = None
     capital_ready_count: int
@@ -214,9 +229,10 @@ class TopPerformerRowModel(BaseModel):
     """A single ranked model in the top-performers view.
 
     Carries the metrics a capital allocator needs to manually decide how much
-    to invest in each model: risk-adjusted return (Sharpe), raw CORR with CI,
-    deflated Sharpe (probability of genuine edge), era-to-era stability,
-    maximum drawdown, and robustness flags.
+    to invest in each model: payout per era (the primary sort metric),
+    risk-adjusted return (Sharpe), raw CORR with CI, deflated Sharpe
+    (probability of genuine edge), era-stability (std_corr), max drawdown, and
+    robustness flags.
     """
 
     rank: int
@@ -226,6 +242,7 @@ class TopPerformerRowModel(BaseModel):
     backend: str | None = None
     preset: str | None = None
     feature_set: str | None = None
+    mean_payout: float | None = None
     corr: float | None = None
     corr_ci_low: float | None = None
     corr_ci_high: float | None = None
@@ -462,12 +479,12 @@ class DashboardDataService:
             # (never evaluable) but must NOT be silently dropped from the list
             # (final review I5).
             registry_frame = load_unified_leaderboard(
-                self.registry_dir, benchmark_path=False, models_dir=None
+                self.registry_dir,
+                benchmark_path=False,
+                models_dir=self.registry_dir,
             )
             registry_frame = registry_frame.filter(
-                pl.col("source").is_in(
-                    ["trained", "trained_legacy", "full", "partial"]
-                )
+                pl.col("source").is_in(["trained", "trained_legacy", "full", "partial"])
             )
 
             # Load benchmarks if available
@@ -577,7 +594,15 @@ class DashboardDataService:
             List of run manifests (passed to nmr.meta.fleet_summary).
         """
         entries = []
-        for run_file in sorted(self.registry_dir.glob("*/run.json")):
+        seen_run_ids: set[str] = set()
+        run_files = sorted(
+            {
+                run_file
+                for pattern in ("*/run.json", "*/runs/*/run.json")
+                for run_file in self.registry_dir.glob(pattern)
+            }
+        )
+        for run_file in run_files:
             try:
                 payload = json.loads(run_file.read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError) as e:
@@ -585,7 +610,10 @@ class DashboardDataService:
                 continue
 
             if isinstance(payload, dict) and payload.get("run_id"):
-                entries.append(payload)
+                run_id = str(payload["run_id"])
+                if run_id not in seen_run_ids:
+                    entries.append(payload)
+                    seen_run_ids.add(run_id)
 
         return entries
 
@@ -640,7 +668,7 @@ class DashboardDataService:
 
     def prepare_leaderboard_for_display(
         self,
-        metric: str = "corr_sharpe_ac",
+        metric: str = DEFAULT_RANK_METRIC,
         sort_desc: bool = True,
         champion_id: str | None = None,
     ) -> list[dict]:
@@ -666,8 +694,11 @@ class DashboardDataService:
         # Sort
         sorted_rows = sorted(
             evaluable_rows,
-            key=lambda r: getattr(r, metric)
-            or (float("-inf") if sort_desc else float("inf")),
+            key=lambda r: (
+                getattr(r, metric)
+                if getattr(r, metric) is not None
+                else (float("-inf") if sort_desc else float("inf"))
+            ),
             reverse=sort_desc,
         )
 
@@ -707,7 +738,7 @@ class DashboardDataService:
 
     def compute_top_performers(
         self,
-        sort_metric: str = "corr_sharpe_ac",
+        sort_metric: str = DEFAULT_RANK_METRIC,
         top_n: int = 10,
         min_sharpe: float | None = None,
         sources: list[str] | None = None,
@@ -720,7 +751,7 @@ class DashboardDataService:
         max drawdown, and a robustness score (count of available checks).
 
         Args:
-            sort_metric: Metric to rank by (default corr_sharpe_ac).
+            sort_metric: Metric to rank by (default mean_payout).
             top_n: How many top models to return.
             min_sharpe: Optional floor on corr_sharpe_ac to exclude weak models.
             sources: Optional source allowlist (default trained/trained_legacy).
@@ -743,8 +774,11 @@ class DashboardDataService:
         # Sort by chosen metric (None sorts last)
         ranked = sorted(
             evaluable,
-            key=lambda r: getattr(r, sort_metric)
-            or (float("-inf") if sort_metric else float("inf")),
+            key=lambda r: (
+                getattr(r, sort_metric)
+                if getattr(r, sort_metric) is not None
+                else float("-inf")
+            ),
             reverse=True,
         )[:top_n]
 
@@ -766,6 +800,7 @@ class DashboardDataService:
                     backend=row.backend,
                     preset=row.preset,
                     feature_set=row.feature_set,
+                    mean_payout=row.mean_payout,
                     corr=row.corr,
                     corr_ci_low=row.corr_ci_low,
                     corr_ci_high=row.corr_ci_high,

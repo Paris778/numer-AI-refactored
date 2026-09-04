@@ -22,8 +22,10 @@ from dashboard_ui import charts
 from nmr.benchmark import load_benchmark_file
 from nmr.config import REPO_ROOT
 from nmr.dashboard import (
+    _DASHBOARD_COLUMN_TOOLTIPS,
     DEFAULT_DATA_DIR,
     DEFAULT_GATE_PATH,
+    DEFAULT_RANK_METRIC,
     DEFAULT_REGISTRY_DIR,
     EVALUABLE_ROWS,
     build_tournament_payload,
@@ -108,6 +110,19 @@ def _fmt(value, *, pct: bool = False) -> str:
     return f"{number:.4f}"
 
 
+def _table_header(field: str, label: str) -> str:
+    tooltip = _DASHBOARD_COLUMN_TOOLTIPS[field]
+    return (
+        f'<th class="metric-header" data-metric="{html.escape(field)}">'
+        f'<span class="header-label">{html.escape(label)}</span>'
+        f'<button type="button" class="metric-info" aria-expanded="false" '
+        f'aria-label="Explain {html.escape(label)}">'
+        '<span aria-hidden="true">i</span>'
+        f'<span class="metric-tooltip" role="tooltip">{html.escape(tooltip)}</span>'
+        "</button></th>"
+    )
+
+
 def _bar_label(row: dict) -> str:
     model_id = row["model_id"] or "?"
     label = row.get("display_name") or row["run_name"]
@@ -118,7 +133,7 @@ def _bar_label(row: dict) -> str:
 
 def _bar_input(leaderboard: pl.DataFrame, champion: str | None) -> pl.DataFrame:
     evaluable = leaderboard.filter(EVALUABLE_ROWS)
-    top = evaluable.sort("corr_sharpe_ac", descending=True, nulls_last=True).head(10)
+    top = evaluable.sort(DEFAULT_RANK_METRIC, descending=True, nulls_last=True).head(10)
     return pl.DataFrame(
         [
             {
@@ -127,7 +142,7 @@ def _bar_input(leaderboard: pl.DataFrame, champion: str | None) -> pl.DataFrame:
                 "corr_sharpe_ac_ci_low": row["corr_sharpe_ac_ci_low"],
                 "corr_sharpe_ac_ci_high": row["corr_sharpe_ac_ci_high"],
                 "champion": row["model_id"] == champion,
-                "cagr_1y": row.get("cagr_1y"),
+                "mean_payout": row.get("mean_payout"),
                 "max_drawdown": row.get("max_drawdown"),
                 "deflated_sharpe": row.get("deflated_sharpe"),
             }
@@ -140,10 +155,12 @@ def _kpi_cards(
     leaderboard: pl.DataFrame, champion: str | None, hurdle_sharpe: float
 ) -> dict:
     fleet = leaderboard.filter(pl.col("source").is_in(["trained", "trained_legacy"]))
-    top = fleet.sort("corr_sharpe_ac", descending=True, nulls_last=True).head(1)
+    top = fleet.sort(DEFAULT_RANK_METRIC, descending=True, nulls_last=True).head(1)
     top_row = top.row(0, named=True) if top.height else None
-    cagr_values = [
-        row["cagr_1y"] for row in fleet.to_dicts() if row["cagr_1y"] is not None
+    payout_values = [
+        row.get("mean_payout")
+        for row in fleet.to_dicts()
+        if row.get("mean_payout") is not None
     ]
     champion_row = None
     if champion is not None:
@@ -162,6 +179,7 @@ def _kpi_cards(
         ),
         "champion_detail": "(Unallocated)" if champion_row is None else "Active",
         "top_contender_label": _bar_label(top_row) if top_row else "—",
+        "top_contender_payout": top_row["mean_payout"] if top_row else None,
         "top_contender_sharpe": top_row["corr_sharpe_ac"] if top_row else None,
         "hurdle_sharpe": hurdle_sharpe,
         "gap": (
@@ -169,7 +187,7 @@ def _kpi_cards(
             if top_row and top_row["corr_sharpe_ac"] is not None
             else None
         ),
-        "fleet_best_cagr": max(cagr_values) if cagr_values else None,
+        "fleet_best_payout": max(payout_values) if payout_values else None,
         "worst_drawdown": min(
             [
                 row["max_drawdown"]
@@ -215,8 +233,8 @@ def _table_rows(leaderboard: pl.DataFrame, champion: str | None) -> list[dict]:
         ],
         key=lambda r: (
             -(
-                r["corr_sharpe_ac"]
-                if r["corr_sharpe_ac"] is not None
+                r.get("mean_payout")
+                if r.get("mean_payout") is not None
                 else float("-inf")
             ),
             r["model_id"],
@@ -274,6 +292,12 @@ def _lifecycle_badge(row: dict) -> str:
     return f' <span class="badge {cls}">{html.escape(text)}</span>'
 
 
+def _new_badge(row: dict) -> str:
+    if not row.get("is_new"):
+        return ""
+    return '<span class="new-badge" title="Latest trained model">NEW</span>'
+
+
 def _row_html(row: dict) -> str:
     if row.get("_group_header"):
         return (
@@ -289,6 +313,7 @@ def _row_html(row: dict) -> str:
     ):
         ci = f"[{_fmt(row['corr_sharpe_ac_ci_low'])}–{_fmt(row['corr_sharpe_ac_ci_high'])}]"
     model_label = html.escape(_bar_label(row))
+    model_label += _new_badge(row)
     if row.get("has_full_version") and not row.get("lifecycle_stage"):
         model_label += ' <span class="badge full">FULL</span>'
     model_label += _lifecycle_badge(row)
@@ -296,7 +321,7 @@ def _row_html(row: dict) -> str:
         "<tr>"
         f"<td>{status}</td>"
         f"<td>{model_label}</td>"
-        f"{_td_gate(_fmt(row.get('cagr_1y'), pct=True), row.get('gate_cagr_1y'))}"
+        f'<td class="num">{_fmt(row.get("mean_payout"), pct=True)}</td>'
         f"{_td_gate(sharpe, row.get('gate_corr_sharpe_ac'))}"
         f'<td class="num">{ci}</td>'
         f"<td class=\"num\">{_fmt(row.get('max_drawdown'), pct=True)}</td>"
@@ -419,10 +444,11 @@ def _kpi_cards_html(kpis: dict) -> str:
         f'<div>{html.escape(kpis["champion_detail"])}</div></div>'
         '<div class="kpi"><div class="label">Top Research Contender</div>'
         f'<div class="value">{html.escape(kpis["top_contender_label"])}</div>'
-        f'<div>Sharpe {_fmt(kpis["top_contender_sharpe"])} vs hurdle {_fmt(kpis["hurdle_sharpe"])}</div></div>'
-        '<div class="kpi"><div class="label">Fleet Best Return (CAGR)</div>'
-        f'<div class="value">{_fmt(kpis["fleet_best_cagr"], pct=True)}</div></div>'
-        '<div class="kpi"><div class="label">Worst Fleet Drawdown</div>'
+        f'<div>Payout / Era {_fmt(kpis.get("top_contender_payout"), pct=True)} · '
+        f'Sharpe {_fmt(kpis["top_contender_sharpe"])} vs hurdle {_fmt(kpis["hurdle_sharpe"])}</div></div>'
+        '<div class="kpi"><div class="label">Best Payout / Era (proxy)</div>'
+        f'<div class="value">{_fmt(kpis["fleet_best_payout"], pct=True)}</div></div>'
+        '<div class="kpi"><div class="label">Worst Proxy Drawdown</div>'
         f'<div class="value">{_fmt(kpis["worst_drawdown"], pct=True)}</div></div>'
         '<div class="kpi"><div class="label">Capital Readiness</div>'
         f'<div class="value">{kpis["capital_ready_count"]} / {kpis["fleet_count"]}</div></div>'
@@ -431,10 +457,21 @@ def _kpi_cards_html(kpis: dict) -> str:
 
 def _table_html(leaderboard: pl.DataFrame, champion: str | None) -> str:
     rows_html = "".join(_row_html(row) for row in _table_rows(leaderboard, champion))
+    headers = "".join(
+        (
+            _table_header("status", "Status"),
+            _table_header("model", "Model"),
+            _table_header("mean_payout", "Payout / Era (proxy)"),
+            _table_header("corr_sharpe_ac", "Sharpe (AC)"),
+            _table_header("sharpe_ci", "Sharpe CI"),
+            _table_header("max_drawdown", "Max DD (proxy)"),
+            _table_header("gain_to_pain_ratio", "Gain-to-Pain"),
+            _table_header("mmc_down", "Downside"),
+            _table_header("deflated_sharpe", "Confidence (DSR)"),
+        )
+    )
     return (
-        "<table><thead><tr><th>Status</th><th>Model</th><th>Ann. Return</th>"
-        "<th>Sharpe (AC)</th><th>Sharpe CI</th><th>Max DD</th><th>Gain-to-Pain</th>"
-        "<th>Downside</th><th>Confidence (DSR)</th></tr></thead>"
+        f"<table><thead><tr>{headers}</tr></thead>"
         f"<tbody>{rows_html}</tbody></table>"
     )
 
@@ -530,7 +567,11 @@ def build_dashboard_html(
     data_dir = Path(data_dir) if data_dir is not None else DEFAULT_DATA_DIR
     gate_path = Path(gate_path) if gate_path is not None else DEFAULT_GATE_PATH
 
-    leaderboard = load_unified_leaderboard(registry_dir, benchmark_path=benchmark_path)
+    leaderboard = load_unified_leaderboard(
+        registry_dir,
+        benchmark_path=benchmark_path,
+        models_dir=registry_dir,
+    )
     leaderboard = reconcile_capital_metrics(leaderboard, data_dir)
     statuses = evaluate_gate_status(
         leaderboard, gate_path, registry_dir / "champion.json"
@@ -548,7 +589,7 @@ def build_dashboard_html(
     champion = read_champion_pointer(registry_dir / "champion.json")
     fleet = leaderboard.filter(pl.col("source").is_in(["trained", "trained_legacy"]))
     top3_ids = (
-        fleet.sort("corr_sharpe_ac", descending=True, nulls_last=True)
+        fleet.sort(DEFAULT_RANK_METRIC, descending=True, nulls_last=True)
         .head(3)
         .get_column("model_id")
         .to_list()
@@ -561,7 +602,7 @@ def build_dashboard_html(
         tier4_columns=tier4_columns,
     )
     top5_ids = (
-        fleet.sort("corr_sharpe_ac", descending=True, nulls_last=True)
+        fleet.sort(DEFAULT_RANK_METRIC, descending=True, nulls_last=True)
         .head(5)
         .get_column("model_id")
         .to_list()

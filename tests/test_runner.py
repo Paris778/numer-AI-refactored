@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import numpy as np
 import pandas as pd
@@ -283,6 +284,77 @@ def test_validation_stage_produces_scorecard_and_purges_first_eras(tmp_path) -> 
     assert "13" not in scored_eras  # purge_eras=1 -> era 13 dropped
     assert "14" in scored_eras
     assert result.artifact is not None
+
+
+def test_run_manifest_records_training_completion_timestamp(tmp_path) -> None:
+    result = ExperimentRunner(_config(tmp_path)).run(deploy=False)
+
+    trained_at = result.manifest.get("trained_at")
+    assert isinstance(trained_at, str)
+    parsed = datetime.fromisoformat(trained_at)
+    assert parsed.tzinfo is not None
+    assert parsed.astimezone(UTC).tzinfo == UTC
+
+
+def test_run_manifest_preserves_oof_device_after_cpu_validation_fit(
+    tmp_path, monkeypatch
+) -> None:
+    from types import SimpleNamespace
+
+    from nmr.config import RiskConfig
+
+    base = _config(tmp_path)
+    cfg = ExperimentConfig(
+        data=base.data,
+        split=base.split,
+        model=ModelConfig(
+            backend="lightgbm",
+            preset="fast",
+            device="gpu",
+            params={"n_estimators": 1},
+        ),
+        evaluation=EvalConfig(
+            backend="custom",
+            main_target="target",
+            payout_policy="classic_legacy_075_225_clip005_v1",
+            metrics=("corr", "fnc", "sharpe"),
+            validation_scorecard=True,
+        ),
+        risk=RiskConfig(neutralization_proportion=0.0),
+        run=base.run,
+    )
+
+    def fake_oof(
+        self,
+        train_df,
+        *,
+        feature_cols,
+        splitter,
+        model_orchestrator,
+        **kwargs,
+    ):
+        model_orchestrator.resolved_device = "gpu"
+        return (
+            train_df.select(["id", "era", "f1", "f2"])
+            .with_columns((pl.col("f1") + pl.col("f2")).alias("pred_target"))
+            .select(["id", "era", "pred_target"])
+        )
+
+    def fake_deploy_pipeline(*, orchestrator, **kwargs):
+        orchestrator.resolved_device = "cpu"
+        return (lambda _frame: pl.DataFrame(), {})
+
+    def fake_validation(self, **kwargs):
+        return SimpleNamespace(corr_sharpe_ac=SimpleNamespace(value=0.0)), None, None
+
+    monkeypatch.setattr(ExperimentRunner, "_train_multi_target_oof", fake_oof)
+    monkeypatch.setattr("nmr.runner._build_deploy_pipeline", fake_deploy_pipeline)
+    monkeypatch.setattr(ExperimentRunner, "_run_validation_stage", fake_validation)
+
+    result = ExperimentRunner(cfg).run(deploy=False)
+
+    assert result.manifest["pipeline_device"] == "gpu"
+    assert result.manifest["oof_device"] == "gpu"
 
 
 def test_deployed_artifact_matches_validation_stage_predictions(tmp_path) -> None:

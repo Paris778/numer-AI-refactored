@@ -25,10 +25,12 @@ from nmr.payout import (
     load_payout_factors,
     max_burn_streak,
     max_drawdown,
+    simulate_overlapping_portfolio,
+    sortino,
+    time_to_recovery,
 )
 from nmr.payout import payout_report as _payout_report
 from nmr.payout import payout_series as _payout_series
-from nmr.payout import simulate_overlapping_portfolio, sortino, time_to_recovery
 
 
 def payout_series(*args, **kwargs):
@@ -89,6 +91,7 @@ def test_atomic_report_does_not_fabricate_round_level_capital_metrics() -> None:
 
     assert report.policy_id == CLASSIC_ATOMIC_ENDER60_R1343_V1.policy_id
     assert report.overlapping_sim is None
+    assert report.cagr_1y is None
     assert report.capital_metrics_reason == "round_level_returns_unavailable"
 
 

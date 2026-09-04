@@ -46,9 +46,9 @@ def test_real_data_gate_import_surface() -> None:
     assert callable(real_data_gate.main)
 
 
-from dashboard_ui import (  # noqa: E402  (lazy: streamlit is heavy at module load)
+from dashboard_ui import (
     app as dashboard_app,
-)
+)  # noqa: E402  (lazy: streamlit is heavy at module load)
 
 
 def _registry_entry(run_id: str, *, scorecard: bool = True) -> dict:
@@ -164,8 +164,10 @@ def test_leaderboard_bar_labels_unique_on_run_name_collision(tmp_path) -> None:
 def test_benchmarks_and_merge(tmp_path) -> None:
     bench_path = tmp_path / "bench.csv"
     bench_path.write_text(
-        "model_id,corr,corr_sharpe_ac,corr_sharpe_ac_ci_low,corr_sharpe_ac_ci_high,std_corr,max_drawdown,strategy_group,horizon_target_name\n"
-        "bench_a,0.05,0.5,0.4,0.6,0.3,0.2,linear,cyrusd\n",
+        "model_id,corr,corr_sharpe_ac,corr_sharpe_ac_ci_low,corr_sharpe_ac_ci_high,std_corr,max_drawdown,strategy_group,horizon_target_name,"
+        "payout_policy_id,scoring_target,scoring_horizon\n"
+        "bench_a,0.05,0.5,0.4,0.6,0.3,0.2,linear,cyrusd,"
+        "classic_legacy_075_225_clip005_v1,target,20D\n",
         encoding="utf-8",
     )
     benchmarks = dashboard_app.load_benchmarks(bench_path)
@@ -177,8 +179,10 @@ def test_benchmarks_and_merge(tmp_path) -> None:
     # remain the behavior only when the data is genuinely missing).
     bench_no_ci = tmp_path / "benchmark_no_ci.csv"
     bench_no_ci.write_text(
-        "model_id,corr,corr_sharpe_ac,std_corr,max_drawdown,strategy_group,horizon_target_name\n"
-        "bench_b,0.05,0.5,0.3,0.2,linear,cyrusd\n",
+        "model_id,corr,corr_sharpe_ac,std_corr,max_drawdown,strategy_group,horizon_target_name,"
+        "payout_policy_id,scoring_target,scoring_horizon\n"
+        "bench_b,0.05,0.5,0.3,0.2,linear,cyrusd,"
+        "classic_legacy_075_225_clip005_v1,target,20D\n",
         encoding="utf-8",
     )
     no_ci = dashboard_app.load_benchmarks(bench_no_ci).row(0, named=True)
@@ -359,16 +363,21 @@ def test_run_campaign_records_via_experiment_store(tmp_path, monkeypatch) -> Non
     )
     cfg = tmp_path / "a.yaml"
     cfg.write_text("run:\n  name: x\n", encoding="utf-8")
-    rc = run_campaign.main([
-        "--config", str(cfg), "--name", "camp",
-        "--registry", str(paths.EXPERIMENTS_ROOT),
-        "--campaigns-dir", str(tmp_path / "campaigns"),
-    ])
+    rc = run_campaign.main(
+        [
+            "--config",
+            str(cfg),
+            "--name",
+            "camp",
+            "--registry",
+            str(paths.EXPERIMENTS_ROOT),
+            "--campaigns-dir",
+            str(tmp_path / "campaigns"),
+        ]
+    )
     assert rc == 0
     # Recording lands in the experiments layout (not artifacts/registry).
-    assert (
-        paths.EXPERIMENTS_ROOT / "x" / "runs" / ("a" * 64) / "run.json"
-    ).is_file()
+    assert (paths.EXPERIMENTS_ROOT / "x" / "runs" / ("a" * 64) / "run.json").is_file()
 
 
 def test_promote_model_champion_resolves_from_paths_pointer(
@@ -395,9 +404,7 @@ def test_promote_model_missing_champion_fails_loud(tmp_path, monkeypatch) -> Non
         promote_model._resolve_champion_run_id()
 
 
-def test_promote_model_champion_family_mismatch_raises(
-    tmp_path, monkeypatch
-) -> None:
+def test_promote_model_champion_family_mismatch_raises(tmp_path, monkeypatch) -> None:
     """SECONDARY 6: with --champion the pointer's experiment_slug is
     authoritative for promotion — a user-supplied --family that disagrees is
     a clear error, never a silent promotion under another family."""
@@ -413,9 +420,7 @@ def test_promote_model_champion_family_mismatch_raises(
 
     # --champion + a wrong --family raises before any promotion.
     with pytest.raises(ValueError, match="does not match the champion's family"):
-        promote_model.main(
-            ["--champion", "--family", "other-fam", "--override-gate"]
-        )
+        promote_model.main(["--champion", "--family", "other-fam", "--override-gate"])
 
     # --champion + the matching --family resolves the champion run + slug.
     run_id, slug = promote_model._resolve_champion()

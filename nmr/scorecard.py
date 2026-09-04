@@ -103,7 +103,7 @@ class MetricScorecard:
     cwmm_reason: str | None
     book_correlation: object | None
 
-    cagr_1y: float
+    cagr_1y: float | None
     gain_to_pain_ratio: float
     kelly_fraction: float
     mmc_down: float | None

@@ -62,9 +62,15 @@ def _env_path(env_name: str, default: Path) -> Path:
 def load_registry_frame(
     registry_dir: Path, models_dir: Path | None = None
 ) -> pl.DataFrame:
-    """Compatibility projection of registry rows onto the unified schema."""
+    """Compatibility projection of registry rows onto the unified schema.
+
+    An explicit registry root is isolated by default; callers that need a
+    separate experiments root can still provide ``models_dir`` explicitly.
+    """
+    registry_root = Path(registry_dir)
+    models_root = registry_root if models_dir is None else Path(models_dir)
     frame = load_unified_leaderboard(
-        Path(registry_dir), benchmark_path=False, models_dir=models_dir
+        registry_root, benchmark_path=False, models_dir=models_root
     )
     return frame.filter(
         pl.col("source").is_in(["trained", "trained_legacy", "full", "partial"])
@@ -143,7 +149,9 @@ def champion_run_id(registry_dir: Path) -> str | None:
     return read_champion_pointer(Path(registry_dir) / "champion.json")
 
 
-def _bar_label(source: str, run_name: str, model_id: str | None, display_name=None) -> str:
+def _bar_label(
+    source: str, run_name: str, model_id: str | None, display_name=None
+) -> str:
     """Format the former chart label helper for compatibility callers."""
     identifier = model_id or "?"
     label = display_name or run_name

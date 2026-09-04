@@ -294,7 +294,8 @@ def build_dashboard_payload(
     (metric-first); cumulative/drawdown are derived client-side, so only the
     ``standard`` arrays and labels are carried. ``leaderboard_bars`` must be a
     frame with columns ``label, corr_sharpe_ac, corr_sharpe_ac_ci_low,
-    corr_sharpe_ac_ci_high, cagr_1y, max_drawdown, deflated_sharpe, champion``.
+    corr_sharpe_ac_ci_high, mean_payout, max_drawdown,
+    deflated_sharpe, champion``.
     """
     shaped_metrics: dict[str, Any] = {}
     for metric, models in metrics.items():
@@ -311,7 +312,7 @@ def build_dashboard_payload(
             "sharpe": _round6(row["corr_sharpe_ac"]),
             "ci_low": _round6(row["corr_sharpe_ac_ci_low"]),
             "ci_high": _round6(row["corr_sharpe_ac_ci_high"]),
-            "cagr_1y": _round6(row.get("cagr_1y")),
+            "mean_payout": _round6(row.get("mean_payout")),
             "max_drawdown": _round6(row.get("max_drawdown")),
             "deflated_sharpe": _round6(row.get("deflated_sharpe")),
             "champion": row["champion"],

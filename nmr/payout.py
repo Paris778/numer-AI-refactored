@@ -137,7 +137,7 @@ class PayoutResult:
     mmc_sharpe: float
     max_burn_streak: int
     time_to_recovery: int
-    cagr_1y: float
+    cagr_1y: float | None
     gain_to_pain_ratio: float
     kelly_fraction: float
     overlapping_sim: OverlappingSimulationResult | None = None
@@ -295,11 +295,13 @@ def annual_compounded_return(
     *,
     eras_per_year: float = 52.0,
 ) -> float:
-    """Annualized geometric compounded return on stake.
+    """Annualized geometric compounded return on a periodic return series.
 
     Computes (prod(1 + r_t)) ** (eras_per_year / n) - 1 in float64 over the
-    clipped round-return series. Returns -1.0 when the wealth product is
-    <= 0 (total loss) and 0.0 when fewer than 2 observations exist.
+    supplied periodic return series. Callers must not pass weekly-era Atomic
+    score proxies: those are not account-level round returns. Returns -1.0
+    when the wealth product is <= 0 (total loss) and 0.0 when fewer than 2
+    observations exist.
     """
     x = _as_finite_1d(clipped, name="clipped")
     n = int(x.size)
@@ -614,7 +616,11 @@ def payout_report(
         mmc_sharpe=ac_adjusted_sharpe(mmc_aligned, horizon=horizon),
         max_burn_streak=max_burn_streak(clipped),
         time_to_recovery=time_to_recovery(clipped),
-        cagr_1y=annual_compounded_return(clipped),
+        cagr_1y=(
+            annual_compounded_return(clipped)
+            if supports_era_level_capital_sim
+            else None
+        ),
         gain_to_pain_ratio=gain_to_pain_ratio(clipped),
         kelly_fraction=kelly_fraction(series.clipped),
         overlapping_sim=(
