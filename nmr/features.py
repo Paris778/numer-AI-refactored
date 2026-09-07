@@ -328,10 +328,17 @@ def derive_feature_sets(
     if missing_drift:
         raise ValueError(f"drift missing required columns: {sorted(missing_drift)}")
 
-    distinct_targets = screen.get_column("target").unique().to_list()
+    distinct_targets = sorted(
+        str(value) for value in screen.get_column("target").unique().to_list()
+    )
     if not distinct_targets:
         raise ValueError("screen has no target values")
     if primary_target is not None:
+        if primary_target not in distinct_targets:
+            raise ValueError(
+                f"primary_target {primary_target!r} is not in screen targets "
+                f"{distinct_targets}"
+            )
         primary = primary_target
     elif "target" in distinct_targets:
         primary = "target"

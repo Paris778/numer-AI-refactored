@@ -286,6 +286,14 @@ def test_validation_stage_produces_scorecard_and_purges_first_eras(tmp_path) -> 
     assert result.artifact is not None
 
 
+def test_validation_stage_routes_through_prediction_contract() -> None:
+    import inspect
+
+    source = inspect.getsource(ExperimentRunner._run_validation_stage)
+    assert "evaluate_prediction_set" in source
+    assert "CapitalContext" in source
+
+
 def test_run_manifest_records_training_completion_timestamp(tmp_path) -> None:
     result = ExperimentRunner(_config(tmp_path)).run(deploy=False)
 

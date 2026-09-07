@@ -362,3 +362,26 @@ def test_derive_feature_sets_missing_target_column_raises() -> None:
     drift = pl.DataFrame({"feature": ["f1"], "drifted": [False]})
     with pytest.raises(ValueError, match="target"):
         derive_feature_sets(screen, drift)
+
+
+def test_derive_feature_sets_missing_primary_target_raises() -> None:
+    screen = _derive_screen()
+    drift = _derive_drift()
+    with pytest.raises(ValueError, match="primary_target"):
+        derive_feature_sets(screen, drift, primary_target="absent")
+
+
+def test_derive_feature_sets_fallback_target_is_sorted() -> None:
+    screen = pl.DataFrame(
+        {
+            "feature": ["f_z", "f_a"],
+            "target": ["zeta", "alpha"],
+            "stable": [True, True],
+            "nonlinear": [False, False],
+        }
+    )
+    drift = pl.DataFrame({"feature": ["f_z"], "drifted": [False]})
+    first = derive_feature_sets(screen, drift)
+    second = derive_feature_sets(screen.reverse(), drift)
+    assert first == second
+    assert first["screen_stable"] == ["f_a"]

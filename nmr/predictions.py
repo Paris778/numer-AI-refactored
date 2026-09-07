@@ -15,20 +15,24 @@ import numpy as np
 import polars as pl
 
 from nmr._transforms import tie_kept_rank
+from nmr.config import VALID_HORIZONS, VALID_MODEL_DEVICES
 from nmr.ensemble import Ensembler
+from nmr.payout import resolve_payout_policy
 from nmr.risk import NeutralizationEngine
 
 __all__ = [
     "PREDICTION_STAGES",
+    "ERA_PARTITIONS",
+    "FIT_ROLES",
+    "CapitalContext",
     "PredictionProvenance",
     "PredictionSet",
+    "ResearchEvaluation",
     "compose_predictions",
     "evaluate_prediction_set",
     "prediction_set_from_frame",
     "read_prediction_set",
 ]
-
-CAPITAL_STAGES: tuple[str, ...] = ("validation", "submission")
 
 PREDICTION_STAGES: tuple[str, ...] = (
     "raw",
@@ -37,8 +41,12 @@ PREDICTION_STAGES: tuple[str, ...] = (
     "validation",
     "submission",
 )
-
+ERA_PARTITIONS: tuple[str, ...] = ("oof", "validation", "live", "held_out")
+FIT_ROLES: tuple[str, ...] = ("cv_oof", "full_history", "foreign")
+_RESEARCH_PARTITIONS: frozenset[str] = frozenset({"oof", "held_out"})
 _REQUIRED_FRAME_COLS = ("era", "id", "prediction")
+_DEFAULT_MAIN_TARGET = "target"
+_DEFAULT_HORIZON = "20D"
 
 
 @dataclass(frozen=True)
@@ -63,18 +71,100 @@ class PredictionProvenance:
     source_run_id: str | None = None
     selection_bias: bool = False
     split_estimand: bool = False
+    validation_window: tuple[str, ...] | None = None
 
     def __post_init__(self) -> None:
         if self.stage not in PREDICTION_STAGES:
             raise ValueError(
                 f"stage must be one of {PREDICTION_STAGES}, got {self.stage!r}"
             )
+        targets = self.trained_targets
+        if not isinstance(targets, tuple):
+            object.__setattr__(self, "trained_targets", tuple(targets))
+            targets = self.trained_targets
+        if not targets or any(not isinstance(t, str) or not t for t in targets):
+            raise ValueError("trained_targets must be a non-empty tuple of strings")
+        if self.era_partition is not None and self.era_partition not in ERA_PARTITIONS:
+            raise ValueError(
+                f"era_partition must be one of {ERA_PARTITIONS}, "
+                f"got {self.era_partition!r}"
+            )
+        if self.fit_role is not None and self.fit_role not in FIT_ROLES:
+            raise ValueError(
+                f"fit_role must be one of {FIT_ROLES}, got {self.fit_role!r}"
+            )
+        if self.device is not None and self.device not in VALID_MODEL_DEVICES:
+            raise ValueError(
+                f"device must be one of {VALID_MODEL_DEVICES}, got {self.device!r}"
+            )
+        for name, value in (
+            ("training_horizon", self.training_horizon),
+            ("scoring_horizon", self.scoring_horizon),
+        ):
+            if value is not None and value not in VALID_HORIZONS:
+                raise ValueError(
+                    f"{name} must be one of {VALID_HORIZONS}, got {value!r}"
+                )
+        window = self.validation_window
+        if window is not None:
+            if not isinstance(window, tuple):
+                object.__setattr__(self, "validation_window", tuple(window))
+                window = self.validation_window
+            if any(not isinstance(era, str) or not era for era in window):
+                raise ValueError("validation_window must be a tuple of era labels")
 
 
 @dataclass(frozen=True)
 class PredictionSet:
     frame: pl.DataFrame
     provenance: PredictionProvenance
+
+
+@dataclass(frozen=True)
+class ResearchEvaluation:
+    """Scorecard produced from a research-stage frame. Never capital evidence."""
+
+    scorecard: Any
+    is_capital: bool = False
+
+    def __post_init__(self) -> None:
+        if self.is_capital:
+            raise ValueError("ResearchEvaluation cannot be capital evidence")
+
+
+@dataclass(frozen=True)
+class CapitalContext:
+    """Trusted capital identity. Callers cannot self-attest this block.
+
+    The runner or another trusted evaluator supplies the expected validation
+    window, scoring identity, and fingerprints. Provenance must match this
+    context; matching the prediction frame alone is not enough.
+    """
+
+    validation_window: tuple[str, ...]
+    scoring_target: str
+    scoring_horizon: str
+    data_fingerprint: str
+    feature_fingerprint: str
+
+    def __post_init__(self) -> None:
+        window = self.validation_window
+        if not isinstance(window, tuple):
+            object.__setattr__(self, "validation_window", tuple(window))
+            window = self.validation_window
+        if not window or any(not isinstance(era, str) or not era for era in window):
+            raise ValueError("CapitalContext requires a non-empty validation_window")
+        if not self.scoring_target:
+            raise ValueError("CapitalContext requires scoring_target")
+        if self.scoring_horizon not in VALID_HORIZONS:
+            raise ValueError(
+                "scoring_horizon must be one of "
+                f"{VALID_HORIZONS}, got {self.scoring_horizon!r}"
+            )
+        if not self.data_fingerprint:
+            raise ValueError("CapitalContext requires data_fingerprint")
+        if not self.feature_fingerprint:
+            raise ValueError("CapitalContext requires feature_fingerprint")
 
 
 def prediction_set_from_frame(
@@ -114,14 +204,19 @@ def prediction_set_from_frame(
     if normalized.select(["era", "id"]).n_unique() != normalized.height:
         raise ValueError("prediction frame must have unique (era, id) keys")
 
-    pred_values = normalized.get_column("prediction").cast(pl.Float64).to_numpy()
-    if not np.all(np.isfinite(pred_values)):
+    pred_series = normalized.get_column("prediction").cast(pl.Float64, strict=True)
+    pred_values = pred_series.to_numpy()
+    if pred_series.null_count() > 0 or not np.all(np.isfinite(pred_values)):
         raise ValueError("prediction values must be finite")
     if provenance.stage == "submission":
         if not np.all((pred_values > 0.0) & (pred_values < 1.0)):
             raise ValueError("submission predictions must be in (0, 1)")
 
-    ordered = normalized.sort(["era", "id"]).select(list(_REQUIRED_FRAME_COLS))
+    ordered = (
+        normalized.with_columns(pl.Series("prediction", pred_values, dtype=pl.Float64))
+        .sort(["era", "id"])
+        .select(list(_REQUIRED_FRAME_COLS))
+    )
     return PredictionSet(frame=ordered, provenance=provenance)
 
 
@@ -139,6 +234,7 @@ def compose_predictions(
     era_col: str = "era",
     id_col: str = "id",
     feature_cols: Sequence[str] = (),
+    features: pl.DataFrame | None = None,
     neutralization_proportion: float = 0.0,
     neutralization_cache_dir: Path | None = None,
     as_submission: bool = False,
@@ -148,46 +244,84 @@ def compose_predictions(
     Wraps ``Ensembler.blend`` and ``NeutralizationEngine.neutralize``. Does not
     change their math. The returned stage is ``submission`` if
     ``as_submission``, else ``neutralized`` when ``neutralization_proportion > 0``,
-    else ``blended``.
+    else ``blended``. ``as_submission`` is a rank transform, not a capital
+    promotion: OOF / held-out partitions are rejected.
     """
     pred_list = list(pred_cols)
     if not pred_list:
         raise ValueError("pred_cols must contain at least one prediction column")
     if era_col not in frame.columns or id_col not in frame.columns:
         raise ValueError(f"frame must contain {era_col!r} and {id_col!r}")
+    proportion = float(neutralization_proportion)
+    if not np.isfinite(proportion) or not 0.0 <= proportion <= 1.0:
+        raise ValueError("neutralization_proportion must be a finite value in [0, 1]")
+    if as_submission and provenance.era_partition in _RESEARCH_PARTITIONS:
+        raise ValueError(
+            "as_submission cannot relabel a research era_partition "
+            f"({provenance.era_partition!r}) into a submission artifact"
+        )
+
+    work = frame
+    feature_list = list(feature_cols)
+    if proportion > 0.0:
+        if not feature_list:
+            raise ValueError(
+                "feature_cols must contain at least one feature when "
+                "neutralization_proportion > 0"
+            )
+        missing = [col for col in feature_list if col not in work.columns]
+        if missing:
+            if features is None:
+                raise ValueError(
+                    "features frame is required to join missing neutralization "
+                    f"columns {missing}"
+                )
+            required_feat = [era_col, id_col, *feature_list]
+            missing_feat = [c for c in required_feat if c not in features.columns]
+            if missing_feat:
+                raise ValueError(f"features missing required columns: {missing_feat}")
+            feat = features.select(required_feat)
+            if feat.select([era_col, id_col]).n_unique() != feat.height:
+                raise ValueError("features must have unique (era, id) keys")
+            pred_height = work.height
+            pred_keys = work.select([era_col, id_col])
+            if pred_keys.n_unique() != pred_height:
+                raise ValueError("prediction frame must have unique (era, id) keys")
+            work = work.join(feat, on=[era_col, id_col], how="inner")
+            if work.height != pred_height:
+                raise ValueError(
+                    "feature join must preserve prediction keys exactly "
+                    f"(predictions={pred_height}, joined={work.height})"
+                )
 
     blended = Ensembler().blend(
-        frame,
+        work,
         pred_cols=pred_list,
         weights=weights,
         era_col=era_col,
         out_col="prediction",
     )
     stage = "blended"
-    work = blended
-    if neutralization_proportion > 0.0:
-        feature_list = list(feature_cols)
-        if not feature_list:
-            raise ValueError(
-                "feature_cols must contain at least one feature when "
-                "neutralization_proportion > 0"
-            )
-        work = NeutralizationEngine(
+    composed = blended
+    if proportion > 0.0:
+        composed = NeutralizationEngine(
             cache_dir=neutralization_cache_dir,
             max_cache_bytes=0,
         ).neutralize(
-            work,
+            composed,
             pred_col="prediction",
             feature_cols=feature_list,
             era_col=era_col,
-            proportion=neutralization_proportion,
+            proportion=proportion,
         )
         stage = "neutralized"
     if as_submission:
-        work = _per_era_submission_rank(work, era_col=era_col, pred_col="prediction")
+        composed = _per_era_submission_rank(
+            composed, era_col=era_col, pred_col="prediction"
+        )
         stage = "submission"
     return prediction_set_from_frame(
-        work,
+        composed,
         replace(provenance, stage=stage),
         era_col=era_col,
         id_col=id_col,
@@ -206,6 +340,74 @@ def _per_era_submission_rank(
     return pl.concat(parts, how="vertical").sort("__row_idx").drop("__row_idx")
 
 
+def _assert_capital_eligible(
+    prediction_set: PredictionSet,
+    *,
+    context: CapitalContext,
+    main_target: str,
+    horizon: str,
+) -> None:
+    provenance = prediction_set.provenance
+    if provenance.stage != "validation":
+        raise ValueError(
+            "capital evaluation requires stage='validation' "
+            f"(got {provenance.stage!r}); submission is not capital-eligible"
+        )
+    if provenance.era_partition != "validation":
+        raise ValueError(
+            "capital evaluation requires era_partition='validation' "
+            f"(got {provenance.era_partition!r})"
+        )
+    if provenance.selection_bias:
+        raise ValueError("capital evaluation refuses selection_bias=True")
+    if not provenance.scoring_target:
+        raise ValueError("capital evaluation requires scoring_target identity")
+    if not provenance.scoring_horizon:
+        raise ValueError("capital evaluation requires scoring_horizon identity")
+    if not provenance.data_fingerprint:
+        raise ValueError("capital evaluation requires data_fingerprint")
+    if not provenance.feature_fingerprint:
+        raise ValueError("capital evaluation requires feature_fingerprint")
+    window = provenance.validation_window
+    if not window:
+        raise ValueError("capital evaluation requires validation_window identity")
+    frame_eras = tuple(
+        sorted(prediction_set.frame.get_column("era").unique().to_list(), key=str)
+    )
+    locked = tuple(sorted((str(era) for era in window), key=str))
+    expected = tuple(sorted((str(era) for era in context.validation_window), key=str))
+    if frame_eras != locked or locked != expected:
+        raise ValueError("validation_window does not match prediction eras")
+    if provenance.scoring_target != context.scoring_target:
+        raise ValueError(
+            "scoring_target provenance "
+            f"{provenance.scoring_target!r} does not match CapitalContext "
+            f"{context.scoring_target!r}"
+        )
+    if provenance.scoring_horizon != context.scoring_horizon:
+        raise ValueError(
+            "scoring_horizon provenance "
+            f"{provenance.scoring_horizon!r} does not match CapitalContext "
+            f"{context.scoring_horizon!r}"
+        )
+    if provenance.data_fingerprint != context.data_fingerprint:
+        raise ValueError("data_fingerprint does not match CapitalContext")
+    if provenance.feature_fingerprint != context.feature_fingerprint:
+        raise ValueError("feature_fingerprint does not match CapitalContext")
+    if provenance.scoring_target != main_target:
+        raise ValueError(
+            "scoring_target provenance "
+            f"{provenance.scoring_target!r} does not match evaluation "
+            f"main_target={main_target!r}"
+        )
+    if provenance.scoring_horizon != horizon:
+        raise ValueError(
+            "scoring_horizon provenance "
+            f"{provenance.scoring_horizon!r} does not match evaluation "
+            f"horizon={horizon!r}"
+        )
+
+
 def evaluate_prediction_set(
     prediction_set: PredictionSet,
     *,
@@ -214,22 +416,61 @@ def evaluate_prediction_set(
     features: pl.DataFrame,
     targets: pl.DataFrame,
     allow_research_stage: bool = False,
+    capital_context: CapitalContext | None = None,
     **kwargs: Any,
 ):
     """Score a ``PredictionSet`` through ``evaluate_model``.
 
-    Capital stages are ``validation`` and ``submission``. Other stages raise
-    unless ``allow_research_stage=True``. Does not import ``nmr.models``.
+    Capital evaluation requires a trusted :class:`CapitalContext` plus
+    ``stage='validation'``, ``era_partition='validation'``,
+    ``selection_bias=False``, required scoring/fingerprint identity, and a
+    locked ``validation_window`` that matches both the frame and the
+    context. ``submission`` is a rank-domain artifact, not a capital
+    scorecard. Research stages return :class:`ResearchEvaluation` only when
+    ``allow_research_stage=True``. Does not import ``nmr.models``.
     """
     from nmr.scorecard import evaluate_model
 
-    stage = prediction_set.provenance.stage
-    if stage not in CAPITAL_STAGES and not allow_research_stage:
-        raise ValueError(
-            f"evaluate_prediction_set refuses stage={stage!r}; "
-            f"capital stages are {CAPITAL_STAGES} "
-            "(pass allow_research_stage=True for research frames)"
+    payout_policy = kwargs.get("payout_policy")
+    if payout_policy is None:
+        raise ValueError("payout_policy is required")
+    resolved_policy = resolve_payout_policy(payout_policy)
+    main_target = kwargs.get(
+        "main_target", resolved_policy.target or _DEFAULT_MAIN_TARGET
+    )
+    horizon = kwargs.get("horizon", resolved_policy.scoring_horizon or _DEFAULT_HORIZON)
+
+    if allow_research_stage:
+        scorecard = evaluate_model(
+            prediction_set.frame,
+            meta_model=meta_model,
+            benchmarks=benchmarks,
+            features=features,
+            targets=targets,
+            **kwargs,
         )
+        return ResearchEvaluation(scorecard=scorecard, is_capital=False)
+
+    if capital_context is None:
+        raise ValueError("capital evaluation requires CapitalContext")
+    if capital_context.scoring_target != str(main_target):
+        raise ValueError(
+            "CapitalContext scoring_target "
+            f"{capital_context.scoring_target!r} does not match evaluation "
+            f"main_target={main_target!r}"
+        )
+    if capital_context.scoring_horizon != str(horizon):
+        raise ValueError(
+            "CapitalContext scoring_horizon "
+            f"{capital_context.scoring_horizon!r} does not match evaluation "
+            f"horizon={horizon!r}"
+        )
+    _assert_capital_eligible(
+        prediction_set,
+        context=capital_context,
+        main_target=str(main_target),
+        horizon=str(horizon),
+    )
     return evaluate_model(
         prediction_set.frame,
         meta_model=meta_model,

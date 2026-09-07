@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import polars as pl
 import pytest
 
 from nmr.benchmark import (
@@ -79,6 +80,21 @@ def test_tier4_gate_does_not_exceed_official_line() -> None:
     assert gate.corr_sharpe_ac_min <= _ENDER60_ATOMIC_RECEIPT["corr_sharpe_ac"]
     assert gate.fnc_min <= _ENDER60_ATOMIC_RECEIPT["fnc"]
     assert gate.gain_to_pain_min <= _ENDER60_ATOMIC_RECEIPT["gain_to_pain_ratio"]
+
+
+def test_gate_report_artifact_thresholds_match_tier4_yaml() -> None:
+    spec = load_benchmark_suite_config(BENCHMARK_CONFIG_DIR)
+    gate = spec.gate
+    assert gate is not None
+    report = REPO_ROOT / "artifacts" / "reports" / "benchmark_gate_report.csv"
+    rows = {row["field"]: row for row in pl.read_csv(report).to_dicts()}
+    assert rows["corr"]["threshold"] == gate.corr_min
+    assert rows["corr_sharpe_ac"]["threshold"] == gate.corr_sharpe_ac_min
+    assert rows["fnc"]["threshold"] == gate.fnc_min
+    assert rows["gain_to_pain_ratio"]["threshold"] == gate.gain_to_pain_min
+    assert rows["corr_sharpe_ac"]["measured"] == pytest.approx(
+        _ENDER60_ATOMIC_RECEIPT["corr_sharpe_ac"]
+    )
 
 
 def test_unknown_keys_rejected(tmp_path: Path) -> None:

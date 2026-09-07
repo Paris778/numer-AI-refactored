@@ -137,7 +137,7 @@ When modifying or generating code, enforce these seven invariants:
 | neutralization / its cache | `nmr/risk.py` — `NeutralizationEngine` |
 | model backends / presets | `nmr/models.py` — `ModelOrchestrator`, `_CANONICAL_PRESETS` |
 | ensembling / weight learning | `nmr/ensemble.py` — `Ensembler` |
-| prediction artifacts / foreign parquet scoring | `nmr/predictions.py` — `PredictionSet`, `compose_predictions`, `evaluate_prediction_set` (spec: `ARCHITECTURE.md` Prediction artifacts) |
+| prediction artifacts / foreign parquet scoring | `nmr/predictions.py` — `PredictionSet`, `CapitalContext`, `compose_predictions`, `evaluate_prediction_set` (spec: `ARCHITECTURE.md` Prediction artifacts) |
 | End-to-end pipeline | `nmr/runner.py` — `ExperimentRunner.run()` stage order |
 | cross-family comparison / champion pointer | `nmr/registry.py` — `RunRegistry` (iterates `experiments/*/runs/*/run.json`; atomic `champion.json` = `{run_id, experiment_slug, promoted_at}`) |
 | submission build/validation | `nmr/submission.py` |

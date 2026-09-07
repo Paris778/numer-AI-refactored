@@ -49,8 +49,14 @@ from nmr.ensemble import Ensembler
 from nmr.evaluation import EvaluationEngine, MetricSummary
 from nmr.models import ModelOrchestrator
 from nmr.payout import PAYOUT_FACTOR_FILENAME, era_payout_factors, resolve_payout_policy
+from nmr.predictions import (
+    CapitalContext,
+    PredictionProvenance,
+    evaluate_prediction_set,
+    prediction_set_from_frame,
+)
 from nmr.risk import NeutralizationEngine
-from nmr.scorecard import MetricScorecard, evaluate_model
+from nmr.scorecard import MetricScorecard
 from nmr.splitter import PurgedEraSplitter
 
 logger = logging.getLogger("nmr.runner")
@@ -157,8 +163,8 @@ def _predict_validation_era_batches(
     verified/initialized again at the first computed batch — initializing
     requires a known device (a predict never resolves one), so a None device
     there raises loudly; ``run()`` passes the orchestrator's post-fit
-    ``resolved_device``. The final ``evaluate_model`` scorecard call is NOT
-    checkpointed (single call, no clean granularity).
+    ``resolved_device``. The final ``evaluate_prediction_set`` scorecard call
+    is NOT checkpointed (single call, no clean granularity).
     """
     if val_df.is_empty():
         return val_df.select(["era", "id"]).with_columns(
@@ -744,8 +750,39 @@ class ExperimentRunner:
             data_fingerprint=data_fingerprint,
             environment=environment,
         )
-        scorecard = evaluate_model(
+        validation_window = tuple(
+            sorted(
+                {str(era) for era in val_df.get_column("era").unique().to_list()},
+                key=str,
+            )
+        )
+        feature_fp = feature_list_fingerprint(feature_cols)
+        snapshot = data_fingerprint or self._data_fingerprint
+        prediction_set = prediction_set_from_frame(
             preds,
+            PredictionProvenance(
+                stage="validation",
+                trained_targets=tuple(self._config.data.targets),
+                ensemble_target=self._config.evaluation.main_target,
+                scoring_target=scoring_target,
+                training_horizon=self._config.data.horizon,
+                scoring_horizon=scoring_horizon,
+                era_partition="validation",
+                data_fingerprint=snapshot,
+                feature_fingerprint=feature_fp,
+                fit_role="full_history",
+                device=checkpoint_device,
+                source_run_id=self._run_id,
+                selection_bias=False,
+                split_estimand=bool(
+                    scoring_target != self._config.evaluation.main_target
+                    or scoring_horizon != self._config.data.horizon
+                ),
+                validation_window=validation_window,
+            ),
+        )
+        scorecard = evaluate_prediction_set(
+            prediction_set,
             meta_model=meta_model,
             benchmarks=benchmarks,
             features=val_df.select(["era", "id", *feature_cols]),
@@ -772,6 +809,13 @@ class ExperimentRunner:
                 else None
             ),
             model_id=self._run_id,
+            capital_context=CapitalContext(
+                validation_window=validation_window,
+                scoring_target=scoring_target,
+                scoring_horizon=scoring_horizon,
+                data_fingerprint=snapshot,
+                feature_fingerprint=feature_fp,
+            ),
         )
         return scorecard, preds, purge
 

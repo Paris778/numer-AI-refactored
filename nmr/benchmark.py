@@ -1142,6 +1142,7 @@ class BenchmarkHierarchyResult:
     tier4_violations: tuple[str, ...]
     monotone_ok: bool
     monotone_error: str | None
+    gated_reference_id: str | None = None
 
 
 class BenchmarkHierarchy:
@@ -1413,6 +1414,7 @@ class BenchmarkHierarchy:
             tier4_violations=tier4_violations,
             monotone_ok=monotone_ok,
             monotone_error=monotone_error,
+            gated_reference_id=reference_id if self._spec.gate is not None else None,
         )
 
 
@@ -1441,14 +1443,16 @@ def gate_report_frame(result: BenchmarkHierarchyResult) -> pl.DataFrame:
         return pl.DataFrame(
             {"model_id": [], "field": [], "threshold": [], "measured": [], "pass": []}
         )
-    reference_id = "v53_lgbm_ender60"
-    # The gated reference is inserted into `tier_of` before any additional
-    # reference columns (tier-4 scoring order), so the first tier-4 row is
-    # the capital-line reference the gate thresholds are evidence-pinned to.
-    for mid in result.tier_of:
-        if result.tier_of[mid] == 4:
-            reference_id = mid
-            break
+    reference_id = result.gated_reference_id
+    if not reference_id:
+        raise ValueError(
+            "BenchmarkHierarchyResult.gated_reference_id is required to build "
+            "the tier-4 gate report"
+        )
+    if reference_id not in result.scorecards:
+        raise ValueError(
+            f"gated_reference_id {reference_id!r} is missing from hierarchy scorecards"
+        )
     card = result.scorecards[reference_id]
     rows = _tier4_gate_rows(card, gate)
     out_rows = []

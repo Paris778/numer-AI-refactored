@@ -11,6 +11,7 @@ from nmr.ensemble import Ensembler
 from nmr.payout import CLASSIC_LEGACY_V1
 from nmr.predictions import (
     PREDICTION_STAGES,
+    CapitalContext,
     PredictionProvenance,
     PredictionSet,
     compose_predictions,
@@ -51,6 +52,42 @@ def _prov(**overrides) -> PredictionProvenance:
     )
     payload.update(overrides)
     return PredictionProvenance(**payload)
+
+
+def _capital_prov(**overrides) -> PredictionProvenance:
+    eras = tuple(f"{i:04d}" for i in range(1, 21))
+    payload = dict(
+        stage="validation",
+        trained_targets=("target",),
+        ensemble_target="target",
+        scoring_target="target",
+        training_horizon="20D",
+        scoring_horizon="20D",
+        era_partition="validation",
+        data_fingerprint="abc",
+        feature_fingerprint="def",
+        fit_role="foreign",
+        device="cpu",
+        source_run_id=None,
+        selection_bias=False,
+        split_estimand=False,
+        validation_window=eras,
+    )
+    payload.update(overrides)
+    return PredictionProvenance(**payload)
+
+
+def _capital_ctx(**overrides) -> CapitalContext:
+    eras = tuple(f"{i:04d}" for i in range(1, 21))
+    payload = dict(
+        validation_window=eras,
+        scoring_target="target",
+        scoring_horizon="20D",
+        data_fingerprint="abc",
+        feature_fingerprint="def",
+    )
+    payload.update(overrides)
+    return CapitalContext(**payload)
 
 
 def test_prediction_stages_are_closed() -> None:
@@ -149,7 +186,7 @@ def test_compose_as_submission_is_open_unit_interval() -> None:
         frame,
         pred_cols=("pred_t1",),
         as_submission=True,
-        provenance=_prov(stage="raw"),
+        provenance=_prov(stage="raw", era_partition="live"),
     )
     preds = composed.frame.get_column("prediction").to_list()
     assert composed.provenance.stage == "submission"
@@ -243,7 +280,7 @@ def test_evaluate_prediction_set_scores_foreign_parquet(tmp_path: Path) -> None:
     predictions, meta_model, benchmarks, features, targets = _tiny_like_scorecard()
     path = tmp_path / "foreign.parquet"
     predictions.write_parquet(path)
-    ps = read_prediction_set(path, _prov(stage="validation", fit_role="foreign"))
+    ps = read_prediction_set(path, _capital_prov(fit_role="foreign"))
     kwargs = dict(
         meta_model=meta_model,
         benchmarks=benchmarks,
@@ -255,7 +292,7 @@ def test_evaluate_prediction_set_scores_foreign_parquet(tmp_path: Path) -> None:
         n_boot=5,
         min_overlap_eras=20,
     )
-    scored = evaluate_prediction_set(ps, **kwargs)
+    scored = evaluate_prediction_set(ps, capital_context=_capital_ctx(), **kwargs)
     expected = direct_evaluate_model(ps.frame, **kwargs)
     assert scored.corr.value == expected.corr.value
     source = Path("nmr/predictions.py").read_text(encoding="utf-8")
@@ -278,6 +315,7 @@ def test_evaluate_prediction_set_refuses_raw_stage() -> None:
             payout_policy=CLASSIC_LEGACY_V1,
             n_boot=5,
             min_overlap_eras=20,
+            capital_context=_capital_ctx(),
         )
 
 
@@ -297,4 +335,256 @@ def test_evaluate_prediction_set_allows_research_stage_with_flag() -> None:
         min_overlap_eras=20,
         allow_research_stage=True,
     )
-    assert scored.corr.n_eras == 20
+    from nmr.predictions import ResearchEvaluation
+
+    assert isinstance(scored, ResearchEvaluation)
+    assert scored.is_capital is False
+    assert scored.scorecard.corr.n_eras == 20
+
+
+def test_oof_as_submission_cannot_enter_capital_scorecard() -> None:
+    predictions, meta_model, benchmarks, features, targets = _tiny_like_scorecard()
+    ranked = predictions.with_columns(
+        (pl.col("prediction").rank() / (pl.len() + 1)).alias("prediction")
+    )
+    relabelled = prediction_set_from_frame(
+        ranked,
+        _prov(stage="submission", era_partition="oof"),
+    )
+    assert relabelled.provenance.stage == "submission"
+    assert relabelled.provenance.era_partition == "oof"
+    with pytest.raises(ValueError, match="capital"):
+        evaluate_prediction_set(
+            relabelled,
+            meta_model=meta_model,
+            benchmarks=benchmarks,
+            features=features,
+            targets=targets,
+            n_trials=1,
+            seed=11,
+            payout_policy=CLASSIC_LEGACY_V1,
+            n_boot=5,
+            capital_context=_capital_ctx(),
+            min_overlap_eras=20,
+        )
+
+
+def test_as_submission_rejects_oof_partition() -> None:
+    frame = pl.DataFrame({"era": ["1", "1"], "id": ["a", "b"], "pred_t1": [0.1, 0.9]})
+    with pytest.raises(ValueError, match="era_partition"):
+        compose_predictions(
+            frame,
+            pred_cols=("pred_t1",),
+            as_submission=True,
+            provenance=_prov(stage="raw", era_partition="oof"),
+        )
+
+
+def test_submission_stage_is_not_capital_eligible() -> None:
+    predictions, meta_model, benchmarks, features, targets = _tiny_like_scorecard()
+    ps = prediction_set_from_frame(
+        predictions.with_columns(
+            (pl.col("prediction") % 1 * 0.5 + 0.25).alias("prediction")
+        ),
+        _capital_prov(stage="submission"),
+    )
+    with pytest.raises(ValueError, match="capital"):
+        evaluate_prediction_set(
+            ps,
+            meta_model=meta_model,
+            benchmarks=benchmarks,
+            features=features,
+            targets=targets,
+            n_trials=1,
+            seed=11,
+            payout_policy=CLASSIC_LEGACY_V1,
+            n_boot=5,
+            capital_context=_capital_ctx(),
+            min_overlap_eras=20,
+        )
+
+
+def test_capital_eval_rejects_selection_bias() -> None:
+    predictions, meta_model, benchmarks, features, targets = _tiny_like_scorecard()
+    ps = prediction_set_from_frame(predictions, _capital_prov(selection_bias=True))
+    with pytest.raises(ValueError, match="selection_bias"):
+        evaluate_prediction_set(
+            ps,
+            meta_model=meta_model,
+            benchmarks=benchmarks,
+            features=features,
+            targets=targets,
+            n_trials=1,
+            seed=11,
+            payout_policy=CLASSIC_LEGACY_V1,
+            n_boot=5,
+            capital_context=_capital_ctx(),
+            min_overlap_eras=20,
+        )
+
+
+def test_capital_eval_requires_matching_target_horizon() -> None:
+    predictions, meta_model, benchmarks, features, targets = _tiny_like_scorecard()
+    ps = prediction_set_from_frame(
+        predictions,
+        _capital_prov(scoring_target="target_ender_60", scoring_horizon="60D"),
+    )
+    with pytest.raises(ValueError, match="scoring"):
+        evaluate_prediction_set(
+            ps,
+            meta_model=meta_model,
+            benchmarks=benchmarks,
+            features=features,
+            targets=targets,
+            n_trials=1,
+            seed=11,
+            payout_policy=CLASSIC_LEGACY_V1,
+            horizon="20D",
+            main_target="target",
+            capital_context=_capital_ctx(),
+            n_boot=5,
+            min_overlap_eras=20,
+        )
+
+
+def test_unknown_era_partition_raises() -> None:
+    with pytest.raises(ValueError, match="era_partition"):
+        _prov(era_partition="train")
+
+
+def test_unknown_fit_role_raises() -> None:
+    with pytest.raises(ValueError, match="fit_role"):
+        _prov(fit_role="hpo")
+
+
+def test_compose_rejects_nonfinite_and_negative_proportion() -> None:
+    frame = _component_frame()
+    with pytest.raises(ValueError, match="proportion"):
+        compose_predictions(
+            frame,
+            pred_cols=("pred_t1",),
+            neutralization_proportion=-1.0,
+            provenance=_prov(),
+        )
+    with pytest.raises(ValueError, match="proportion"):
+        compose_predictions(
+            frame,
+            pred_cols=("pred_t1",),
+            neutralization_proportion=float("nan"),
+            provenance=_prov(),
+        )
+
+
+def test_compose_joins_features_for_foreign_parquet(tmp_path: Path) -> None:
+    frame = _component_frame()
+    preds = frame.select(["era", "id", "pred_t1", "pred_t2"])
+    feats = frame.select(["era", "id", "f1"])
+    weights = (0.5, 0.5)
+    expected = compose_predictions(
+        frame,
+        pred_cols=("pred_t1", "pred_t2"),
+        weights=weights,
+        feature_cols=("f1",),
+        neutralization_proportion=1.0,
+        neutralization_cache_dir=tmp_path / "n1",
+        provenance=_prov(),
+    )
+    joined = compose_predictions(
+        preds,
+        pred_cols=("pred_t1", "pred_t2"),
+        weights=weights,
+        feature_cols=("f1",),
+        features=feats,
+        neutralization_proportion=1.0,
+        neutralization_cache_dir=tmp_path / "n2",
+        provenance=_prov(),
+    )
+    assert joined.provenance.stage == "neutralized"
+    assert joined.frame.get_column("prediction").to_list() == pytest.approx(
+        expected.frame.get_column("prediction").to_list()
+    )
+
+
+def test_capital_eval_requires_authoritative_context() -> None:
+    predictions, meta_model, benchmarks, features, targets = _tiny_like_scorecard()
+    ps = prediction_set_from_frame(predictions, _capital_prov())
+    with pytest.raises(ValueError, match="CapitalContext"):
+        evaluate_prediction_set(
+            ps,
+            meta_model=meta_model,
+            benchmarks=benchmarks,
+            features=features,
+            targets=targets,
+            n_trials=1,
+            seed=11,
+            payout_policy=CLASSIC_LEGACY_V1,
+            n_boot=5,
+            min_overlap_eras=20,
+        )
+
+
+def test_capital_eval_rejects_missing_scoring_identity() -> None:
+    predictions, meta_model, benchmarks, features, targets = _tiny_like_scorecard()
+    ps = prediction_set_from_frame(
+        predictions,
+        _capital_prov(scoring_target=None, scoring_horizon=None),
+    )
+    with pytest.raises(ValueError, match="scoring"):
+        evaluate_prediction_set(
+            ps,
+            meta_model=meta_model,
+            benchmarks=benchmarks,
+            features=features,
+            targets=targets,
+            n_trials=1,
+            seed=11,
+            payout_policy=CLASSIC_LEGACY_V1,
+            capital_context=_capital_ctx(),
+            n_boot=5,
+            min_overlap_eras=20,
+        )
+
+
+def test_capital_eval_rejects_missing_fingerprints() -> None:
+    predictions, meta_model, benchmarks, features, targets = _tiny_like_scorecard()
+    ps = prediction_set_from_frame(
+        predictions,
+        _capital_prov(data_fingerprint=None, feature_fingerprint=None),
+    )
+    with pytest.raises(ValueError, match="fingerprint"):
+        evaluate_prediction_set(
+            ps,
+            meta_model=meta_model,
+            benchmarks=benchmarks,
+            features=features,
+            targets=targets,
+            n_trials=1,
+            seed=11,
+            capital_context=_capital_ctx(),
+            payout_policy=CLASSIC_LEGACY_V1,
+            n_boot=5,
+            min_overlap_eras=20,
+        )
+
+
+def test_compose_rejects_partial_feature_join(tmp_path: Path) -> None:
+    frame = _component_frame()
+    preds = frame.select(["era", "id", "pred_t1", "pred_t2"])
+    feats = frame.head(1).select(["era", "id", "f1"])
+    with pytest.raises(ValueError, match="join"):
+        compose_predictions(
+            preds,
+            pred_cols=("pred_t1", "pred_t2"),
+            feature_cols=("f1",),
+            features=feats,
+            neutralization_proportion=1.0,
+            neutralization_cache_dir=tmp_path / "n-partial",
+            provenance=_prov(),
+        )
+
+
+def test_prediction_column_is_float64() -> None:
+    raw = pl.DataFrame({"era": ["1"], "id": ["a"], "prediction": ["0.5"]})
+    ps = prediction_set_from_frame(raw, _prov())
+    assert ps.frame.get_column("prediction").dtype == pl.Float64
+    assert ps.frame.get_column("prediction").to_list() == [0.5]

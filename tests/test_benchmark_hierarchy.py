@@ -242,6 +242,7 @@ def test_hierarchy_scores_additional_tier4_reference_columns(tmp_path: Path) -> 
     assert frame.height == 6
     # the gate report stays keyed to the gated capital line
     report = gate_report_frame(result)
+    assert result.gated_reference_id == "v53_lgbm_ender60"
     assert set(report.get_column("model_id").unique().to_list()) == {"v53_lgbm_ender60"}
     # determinism covers the additional reference row
     result_b = BenchmarkHierarchy(
