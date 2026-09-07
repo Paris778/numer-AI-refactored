@@ -58,9 +58,7 @@ _SUBPROCESS_DRAIN_GRACE_SECONDS = 5.0
 # full dense copy — at 3,555 features × 2.1M rows that copy is ~28 GiB (the
 # lgbm_v1 campaign OOM). Float64 columns are left untouched (precision).
 _EXACT_FLOAT32_DTYPES = frozenset(
-    {
-        pl.Int8, pl.Int16, pl.Int32, pl.UInt8, pl.UInt16, pl.UInt32, pl.Float32
-    }
+    {pl.Int8, pl.Int16, pl.Int32, pl.UInt8, pl.UInt16, pl.UInt32, pl.Float32}
 )
 
 
@@ -143,9 +141,8 @@ def _colsample_floor(n_features: int) -> float:
     """
     if n_features < 1:
         raise ValueError("n_features must be >= 1")
-    raw_floor = (
-        min(float(_COLSAMPLE_FLOOR_TARGET_FEATURES), float(n_features))
-        / float(n_features)
+    raw_floor = min(float(_COLSAMPLE_FLOOR_TARGET_FEATURES), float(n_features)) / float(
+        n_features
     )
     return float(min(1.0, max(_COLSAMPLE_FLOOR_MIN, raw_floor + _COLSAMPLE_FLOOR_EPS)))
 
@@ -316,7 +313,8 @@ class ModelOrchestrator:
                 )
             part_path = (
                 checkpoint_dir / target_col / f"fold_{fold.index + 1:02d}.parquet"
-                if checkpoint_dir is not None else None
+                if checkpoint_dir is not None
+                else None
             )
             if part_path is not None and part_path.exists():
                 try:
@@ -328,23 +326,35 @@ class ModelOrchestrator:
                 models.append(None)
                 logger.info(
                     "[train_cross_validation] %s: fold %d/%d loaded from checkpoint %s",
-                    target_col, fold.index + 1, len(folds), part_path,
+                    target_col,
+                    fold.index + 1,
+                    len(folds),
+                    part_path,
                 )
             else:
                 logger.info(
                     "[train_cross_validation] %s: fold %d/%d train_eras=%d val_eras=%d",
-                    target_col, fold.index + 1, len(folds),
-                    len(fold.train_eras), len(fold.val_eras),
+                    target_col,
+                    fold.index + 1,
+                    len(folds),
+                    len(fold.train_eras),
+                    len(fold.val_eras),
                 )
                 t0 = time.time()
                 model, fold_predictions = self._fit_predict_fold(
-                    df, fold=fold, feature_cols=feature_cols,
-                    target_col=target_col, era_col=era_col,
+                    df,
+                    fold=fold,
+                    feature_cols=feature_cols,
+                    target_col=target_col,
+                    era_col=era_col,
                     purge_eras=splitter.purge_eras,
                 )
                 logger.info(
                     "[train_cross_validation] %s: fold %d/%d trained in %.1fs",
-                    target_col, fold.index + 1, len(folds), time.time() - t0,
+                    target_col,
+                    fold.index + 1,
+                    len(folds),
+                    time.time() - t0,
                 )
                 models.append(model)
                 if part_path is not None:
@@ -399,8 +409,12 @@ class ModelOrchestrator:
         era_col: str = "era",
     ) -> CVResult:
         models, oof_parts = self._cv_fold_parts(
-            df, feature_cols=feature_cols, target_col=target_col,
-            splitter=splitter, era_col=era_col, checkpoint_dir=None,
+            df,
+            feature_cols=feature_cols,
+            target_col=target_col,
+            splitter=splitter,
+            era_col=era_col,
+            checkpoint_dir=None,
         )
         if any(m is None for m in models):  # unreachable defensive guard
             raise ValueError("checkpoint-less CV produced a None model entry")
@@ -430,13 +444,20 @@ class ModelOrchestrator:
         in the manifest when provided.
         """
         _, oof_parts = self._cv_fold_parts(
-            df, feature_cols=feature_cols, target_col=target_col,
-            splitter=splitter, era_col=era_col, checkpoint_dir=checkpoint_dir,
-            data_fingerprint=data_fingerprint, environment=environment,
+            df,
+            feature_cols=feature_cols,
+            target_col=target_col,
+            splitter=splitter,
+            era_col=era_col,
+            checkpoint_dir=checkpoint_dir,
+            data_fingerprint=data_fingerprint,
+            environment=environment,
         )
         oof = pl.concat(oof_parts, how="vertical")
         logger.info(
-            "[train_oof_with_checkpoints] %s: OOF complete rows=%d", target_col, oof.height
+            "[train_oof_with_checkpoints] %s: OOF complete rows=%d",
+            target_col,
+            oof.height,
         )
         return oof
 
@@ -450,11 +471,14 @@ class ModelOrchestrator:
         in_process: bool = False,
         data: DataConfig | None = None,
         include_validation: bool = False,
+        fit_device: str = "cpu",
     ) -> object:
-        """Fit a single CPU-only model on every era (deployment/validation artifact).
+        """Fit a single model on every era for validation or deployment.
 
-        CPU-only by design: determinism is per-device and the deployed model must
-        reproduce identically on any hosted runtime (which may lack a GPU).
+        ``fit_device`` is explicit: ``cpu`` is the deployment-safe default and
+        ``gpu`` is available for research-only validation fits. GPU fits are
+        forced and never silently fall back to CPU. Deployment callers must
+        retain the CPU default because hosted runtimes may lack a GPU.
 
         ``include_validation`` (promotion writer only): when the fit spawns a
         subprocess, the child re-reads BOTH ``train.parquet`` and
@@ -477,8 +501,15 @@ class ModelOrchestrator:
         the run's accumulated commit (CV + neutralization) and crosses the
         machine's commit limit — Windows then thrashes (measured: 1.1 iters/s
         vs ~50). The child re-reads the data itself and returns the pickled
-        booster; results are bit-identical (same code path, same seed).
+        booster; results are bit-identical (same code path, same seed and device).
         """
+        if fit_device not in ("cpu", "gpu"):
+            raise ValueError(f"fit_device={fit_device!r} must be 'cpu' or 'gpu'")
+        if fit_device == "gpu" and self._config.backend == "catboost":
+            raise ValueError(
+                "fit_device='gpu' is unsupported for the catboost backend; "
+                "CatBoost is CPU-only in nmr"
+            )
         train_df = df.filter(pl.col(era_col).is_not_null())
         train_df = train_df.filter(
             pl.col(target_col).is_not_null() & pl.col(target_col).is_finite()
@@ -500,17 +531,25 @@ class ModelOrchestrator:
                     "the ModelConfig)"
                 )
             return self._fit_full_history_subprocess(
-                train_df, feature_cols=feature_cols, target_col=target_col,
-                era_col=era_col, data=data,
+                train_df,
+                feature_cols=feature_cols,
+                target_col=target_col,
+                era_col=era_col,
+                data=data,
                 include_validation=include_validation,
+                fit_device=fit_device,
             )
         model = self._fit_model(
             features=self._feature_frame(train_df, feature_cols=feature_cols),
             target=train_df.get_column(target_col).to_numpy(),
-            use_gpu=False,
+            use_gpu=fit_device == "gpu",
+            requested_device=fit_device,
         )
         logger.info(
-            "[train_full_history] %s: fitted on %d rows (all eras)", target_col, train_df.height
+            "[train_full_history] %s: fitted on %d rows (all eras, device=%s)",
+            target_col,
+            train_df.height,
+            fit_device,
         )
         return model
 
@@ -533,14 +572,20 @@ class ModelOrchestrator:
         train_df = train_df.filter(
             pl.col(target_col).is_not_null() & pl.col(target_col).is_finite()
         )
-        dropped = df.filter(pl.col(era_col).is_in(fold.train_eras)).height - train_df.height
+        dropped = (
+            df.filter(pl.col(era_col).is_in(fold.train_eras)).height - train_df.height
+        )
         if dropped:
             logger.warning(
                 "[_fit_predict_fold] %s fold %d: dropped %d rows with null/non-finite targets",
-                target_col, fold.index, dropped,
+                target_col,
+                fold.index,
+                dropped,
             )
         if train_df.is_empty():
-            raise ValueError(f"No usable training rows for fold {fold.index} after null filtering")
+            raise ValueError(
+                f"No usable training rows for fold {fold.index} after null filtering"
+            )
 
         logger.info(
             "[_fit_predict_fold] %s fold %d: fitting model on %d rows",
@@ -614,10 +659,17 @@ class ModelOrchestrator:
         return np.concatenate(parts)
 
     def _fit_model(
-        self, *, features: np.ndarray, target: np.ndarray, use_gpu: bool = True
+        self,
+        *,
+        features: np.ndarray,
+        target: np.ndarray,
+        use_gpu: bool = True,
+        requested_device: str | None = None,
     ) -> object:
         candidate_params = self._device_candidate_params(
-            use_gpu=use_gpu, n_features=int(features.shape[1])
+            use_gpu=use_gpu,
+            n_features=int(features.shape[1]),
+            requested_device=requested_device,
         )
         last_error: Exception | None = None
         if self._config.backend == "lightgbm":
@@ -634,7 +686,9 @@ class ModelOrchestrator:
             except backend_errors as exc:
                 logger.warning(
                     "[fit] %s fit failed (%s: %s); trying next candidate",
-                    self._config.backend, type(exc).__name__, exc,
+                    self._config.backend,
+                    type(exc).__name__,
+                    exc,
                 )
                 last_error = exc
                 continue
@@ -664,6 +718,7 @@ class ModelOrchestrator:
         backend = self._config.backend
         period = _FIT_PROGRESS_PERIOD
         if backend == "lightgbm":
+
             def _lgb_progress(env: Any) -> None:
                 iteration = env.iteration + 1
                 if iteration == 1 or iteration % period == 0:
@@ -682,8 +737,25 @@ class ModelOrchestrator:
             model.fit(features, target, verbose=period)
 
     def _device_candidate_params(
-        self, *, use_gpu: bool, n_features: int
+        self,
+        *,
+        use_gpu: bool,
+        n_features: int,
+        requested_device: str | None = None,
     ) -> list[dict[str, Any]]:
+        if requested_device is not None:
+            if requested_device not in ("cpu", "gpu"):
+                raise ValueError(
+                    f"requested_device={requested_device!r} must be 'cpu' or 'gpu'"
+                )
+            if requested_device == "cpu":
+                return [self._resolved_params(use_gpu=False, n_features=n_features)]
+            if self._config.backend == "catboost":
+                raise ValueError(
+                    "requested_device='gpu' is unsupported for the catboost "
+                    "backend; CatBoost is CPU-only in nmr"
+                )
+            return [self._resolved_params(use_gpu=True, n_features=n_features)]
         if not use_gpu:
             return [self._resolved_params(use_gpu=False, n_features=n_features)]
         if self._config.backend == "catboost":
@@ -700,9 +772,7 @@ class ModelOrchestrator:
             return [cpu_params]
         return [gpu_params, cpu_params]
 
-    def _resolved_params(
-        self, *, use_gpu: bool, n_features: int
-    ) -> dict[str, Any]:
+    def _resolved_params(self, *, use_gpu: bool, n_features: int) -> dict[str, Any]:
         base = resolve_model_params(self._config.preset, self._config.params)
 
         if self._config.backend == "lightgbm":
@@ -793,7 +863,6 @@ class ModelOrchestrator:
                 f"{val_min - train_max} <= purge_eras={purge_eras}"
             )
 
-
     def _should_spawn_full_history(
         self, train_df: pl.DataFrame, feature_cols: Sequence[str]
     ) -> bool:
@@ -820,6 +889,7 @@ class ModelOrchestrator:
         era_col: str,
         data: DataConfig,
         include_validation: bool = False,
+        fit_device: str = "cpu",
     ) -> object:
         """Fit the full-history model in a fresh process (bounded commit).
 
@@ -830,6 +900,13 @@ class ModelOrchestrator:
             raise ValueError(
                 "subprocess full-history fit requires the DataConfig — pass "
                 "data=<ExperimentConfig.data>"
+            )
+        if fit_device not in ("cpu", "gpu"):
+            raise ValueError(f"fit_device={fit_device!r} must be 'cpu' or 'gpu'")
+        if fit_device == "gpu" and self._config.backend == "catboost":
+            raise ValueError(
+                "fit_device='gpu' is unsupported for the catboost backend; "
+                "CatBoost is CPU-only in nmr"
             )
         import multiprocessing as mp
 
@@ -858,11 +935,13 @@ class ModelOrchestrator:
             "params": dict(self._config.params),
             "seed": self._seed,
             "include_validation": include_validation,
+            "fit_device": fit_device,
         }
         logger.info(
             "[train_full_history] spawning fresh-process fit "
             "(%d rows x %d features > %d GiB float32)",
-            train_df.height, len(feature_cols),
+            train_df.height,
+            len(feature_cols),
             _FULL_HISTORY_SUBPROCESS_MIN_BYTES // 2**30,
         )
         proc = ctx.Process(target=_full_history_fit_worker, args=(spec, out_q))
@@ -875,7 +954,7 @@ class ModelOrchestrator:
             raise RuntimeError(
                 f"full-history subprocess fit failed (exit={proc.exitcode}): {payload}"
             )
-        self.resolved_device = "cpu"  # train_full_history is CPU-only by design
+        self.resolved_device = fit_device
         model_bytes, working_set, commit = payload
         self.last_full_history_peak_bytes = working_set
         self.last_full_history_peak_commit_bytes = commit
@@ -1054,7 +1133,10 @@ def _machine_memory_limits() -> tuple[int | None, int | None]:
             try:
                 dll = getattr(ctypes.windll, dll_name)
                 candidate = getattr(dll, fn_name)
-                candidate.argtypes = [ctypes.POINTER(_PerformanceInformation), ctypes.c_ulong]
+                candidate.argtypes = [
+                    ctypes.POINTER(_PerformanceInformation),
+                    ctypes.c_ulong,
+                ]
                 candidate.restype = ctypes.c_int
                 fn = candidate
                 break
@@ -1081,8 +1163,8 @@ def _full_history_fit_worker(spec: dict, out_q) -> None:
     Runs in a fresh address space: re-loads the train split via
     ``IngestionAgent`` (plus the validation split when ``include_validation``
     is set — the promotion writer's full version trains on train+validation),
-    fits the same CPU-only model (identical code path and seed as the
-    in-process variant), and returns the cloudpickled booster plus the
+    fits the same requested-device model (identical code path, seed, and
+    device as the in-process variant), and returns the cloudpickled booster plus the
     measured peak RSS (for the promotion rehearsal's RAM extrapolation).
     """
     try:
@@ -1104,7 +1186,7 @@ def _full_history_fit_worker(spec: dict, out_q) -> None:
                 backend=spec["backend"],
                 preset=spec["preset"],
                 params=spec["params"],
-                device="cpu",
+                device=spec.get("fit_device", "cpu"),
             ),
             seed=spec["seed"],
         )
@@ -1114,10 +1196,9 @@ def _full_history_fit_worker(spec: dict, out_q) -> None:
             target_col=spec["target_col"],
             era_col=spec["era_col"],
             in_process=True,
+            fit_device=spec.get("fit_device", "cpu"),
         )
         working_set, commit = _peak_memory_counters()
         out_q.put(("ok", (cloudpickle.dumps(model), working_set, commit)))
     except Exception as exc:  # surface the child's failure loudly in the parent
         out_q.put(("error", repr(exc)))
-
-

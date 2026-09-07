@@ -155,8 +155,8 @@ def verify_checkpoint_manifest(
     another feature list / fold geometry) refuses resume instead of silently
     reusing the wrong target's folds. Mismatches raise ``ValueError`` with
     delete-to-refit guidance. ``checkpoint_kind`` names the checkpoint stage
-    in the error text (``oof_checkpoints``, ``deploy_checkpoints``,
-    ``validation_checkpoints``).
+    in the error text (``oof_checkpoints``, ``validation_fit_checkpoints``,
+    ``deploy_checkpoints``, ``validation_checkpoints``).
     """
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
     if stored.get("code_sha256") != fitting_code_sha256():
@@ -165,7 +165,10 @@ def verify_checkpoint_manifest(
             f"since the checkpoints were written ({manifest_path}). "
             f"Delete the {checkpoint_kind} directory to force a full refit."
         )
-    if data_fingerprint is not None and stored.get("data_fingerprint") != data_fingerprint:
+    if (
+        data_fingerprint is not None
+        and stored.get("data_fingerprint") != data_fingerprint
+    ):
         raise ValueError(
             f"{checkpoint_kind} data_fingerprint mismatch: the data snapshot "
             f"changed since the checkpoints were written ({manifest_path}). "
@@ -233,9 +236,11 @@ def ensure_no_torn_tree(
     for OOF folds, ``*.pkl`` for deploy models); ``checkpoint_kind`` names the
     checkpoint stage in the error text.
     """
-    existing_parts = any(
-        manifest_path.parent.rglob(part_glob)
-    ) if manifest_path.parent.exists() else False
+    existing_parts = (
+        any(manifest_path.parent.rglob(part_glob))
+        if manifest_path.parent.exists()
+        else False
+    )
     if existing_parts:
         raise ValueError(
             f"{checkpoint_kind} tree has parts but no manifest.json "

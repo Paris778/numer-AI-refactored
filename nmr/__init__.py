@@ -121,6 +121,7 @@ from .dashboard import (
     extract_pairwise_similarity_matrix,
     load_benchmark_frame,
     load_model_detail,
+    load_sklearn_frame,
     load_unified_leaderboard,
     model_description,
     rank_leaderboard,
@@ -206,7 +207,14 @@ from .meta import (
     promotion_verdict,
 )
 from .models import CVResult, ModelOrchestrator, coerce_float32_features
-from .opt import bayesian_sweep
+from .opt import (
+    HGBHPOConfig,
+    HGBHPOResult,
+    VotingHPOConfig,
+    bayesian_hgb_sweep,
+    bayesian_sweep,
+    bayesian_voting_sweep,
+)
 from .payout import (
     CLASSIC_ATOMIC_ENDER60_R1343_V1,
     CLASSIC_LEGACY_V1,
@@ -281,6 +289,14 @@ from .scorecard import (
     evaluate_cross_check,
     evaluate_model,
 )
+from .sklearn_breadth import (
+    BreadthConfig,
+    EraPurgedSplit,
+    EstimatorSpec,
+    build_estimator,
+    discover_regressor_names,
+    run_sweep,
+)
 from .splitter import Fold, PurgedEraSplitter
 from .submission import (
     accept_promoted_artifact,
@@ -347,6 +363,11 @@ __all__ = [
     "assert_tier0_null_floor",
     "assert_tier4_gate",
     "bayesian_sweep",
+    "HGBHPOConfig",
+    "HGBHPOResult",
+    "VotingHPOConfig",
+    "bayesian_hgb_sweep",
+    "bayesian_voting_sweep",
     "canonical_scorecards_bytes",
     "gate_report_frame",
     "generate_canonical_predictions",
@@ -357,6 +378,7 @@ __all__ = [
     "load_benchmark_data",
     "load_benchmark_file",
     "load_benchmark_frame",
+    "load_sklearn_frame",
     "load_benchmark_suite_config",
     "load_model_detail",
     "load_unified_leaderboard",
@@ -399,6 +421,12 @@ __all__ = [
     "load_tier_rungs_from_csv",
     "select_fleet_cells",
     "write_fleet_csv",
+    "BreadthConfig",
+    "EraPurgedSplit",
+    "EstimatorSpec",
+    "build_estimator",
+    "discover_regressor_names",
+    "run_sweep",
     "CampaignConfig",
     "CampaignRun",
     "CampaignLog",

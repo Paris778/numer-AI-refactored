@@ -1,9 +1,10 @@
-# Short forced-CUDA calibration for the v5.3 Ender-60 research path.
-# This is a smoke/capacity run, not a competitive final candidate.
+# Fast GPU screening candidate. This intentionally skips the full-history
+# validation fit; use the matching CPU confirmation config only if promising.
 
 run:
-  name: xgb-gpu-calibration-ender60
-  seed: 20260903
+  name: xgb-gpu-screen-ender60
+  seed: 20260904
+  workflow: gpu_screen
 
 data:
   version: v5.3
@@ -16,7 +17,7 @@ split:
   scheme: walk_forward
   purge_eras: 16
   embargo_eras: 0
-  n_folds: 2
+  n_folds: 4
 
 model:
   backend: xgboost
@@ -25,22 +26,23 @@ model:
   validation_fit_device: gpu
   deploy_fit_device: cpu
   params:
-    n_estimators: 50
+    n_estimators: 2000
     learning_rate: 0.01
-    max_depth: 4
-    max_leaves: 16
+    max_depth: 5
+    num_leaves: 31
     colsample_bytree: 0.25
     subsample: 0.8
+    reg_lambda: 10.0
 
 evaluation:
   backend: custom
   main_target: target_ender_60
   payout_policy: classic_atomic_ender60_r1343_v1
-  metrics: [corr, mmc, fnc, sharpe]
-  validation_scorecard: true
+  metrics: [corr, fnc, sharpe]
+  validation_scorecard: false
 
 ensemble:
   method: ridge
 
 risk:
-  neutralization_proportion: 0.5
+  neutralization_proportion: 1.0

@@ -2,13 +2,21 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import numpy as np
 import optuna
 import polars as pl
 import pytest
 
-from nmr.opt import _parse_space
+from nmr.opt import (
+    HGBHPOConfig,
+    VotingHPOConfig,
+    _atomic_payout_metrics,
+    _hgb_search_space,
+    _parse_space,
+    _voting_search_space,
+)
 from nmr.research import metric_direction
 
 
@@ -45,6 +53,93 @@ def test_parse_space_accepts_all_kinds() -> None:
     assert parsed["n_estimators"].step is None
     assert parsed["num_leaves"].step is None
     assert parsed["boosting"].choices == ["gbdt", "dart"]
+
+
+def test_hgb_hpo_config_and_space_are_explicit() -> None:
+    data_dir = Path("data/v5.3")
+    config = HGBHPOConfig(data_dir=data_dir, output=data_dir / "hgb.csv", n_trials=12)
+
+    assert config.n_trials == 12
+    assert config.n_jobs == 1
+    assert config.target_col == "target"
+    assert {
+        "learning_rate",
+        "max_iter",
+        "max_leaf_nodes",
+        "min_samples_leaf",
+        "l2_regularization",
+        "max_bins",
+        "max_features",
+        "max_depth",
+    } == set(_hgb_search_space())
+
+
+def test_hgb_hpo_rejects_parallel_trials() -> None:
+    with pytest.raises(ValueError, match="n_jobs"):
+        HGBHPOConfig(
+            data_dir=Path("data/v5.3"),
+            output=Path("hgb.csv"),
+            n_jobs=2,
+        )
+
+
+def test_voting_hpo_config_exposes_base_search_and_vote_weight() -> None:
+    data_dir = Path("data/v5.3")
+    config = VotingHPOConfig(
+        data_dir=data_dir,
+        output=data_dir / "voting.csv",
+        n_trials=12,
+    )
+
+    assert config.n_trials == 12
+    assert config.n_jobs == 1
+    assert config.target_col == "target"
+    assert set(_hgb_search_space()).issubset(_voting_search_space())
+    assert "ridge_weight" in _voting_search_space()
+
+
+def test_atomic_payout_metrics_returns_payout_per_era() -> None:
+    prediction_rows = []
+    meta_rows = []
+    target_rows = []
+    feature_rows = []
+    for era in range(1, 21):
+        for index in range(4):
+            key = f"{era}_{index}"
+            target = 0.2 + 0.1 * index + 0.005 * era
+            prediction_rows.append(
+                {
+                    "era": str(era),
+                    "id": key,
+                    "prediction": 0.2 + 0.1 * ((index + era) % 4) + 0.01 * index,
+                }
+            )
+            meta_rows.append(
+                {"era": str(era), "id": key, "numerai_meta_model": 0.2 + 0.03 * index}
+            )
+            target_rows.append({"era": str(era), "id": key, "target_ender_60": target})
+            target_rows[-1]["target_ender_20"] = target * 0.8 + 0.02 * index
+            feature_rows.append({"era": str(era), "id": key, "feature": float(index)})
+
+    result = _atomic_payout_metrics(
+        pl.DataFrame(prediction_rows),
+        meta_model=pl.DataFrame(meta_rows),
+        targets=pl.DataFrame(target_rows),
+        features=pl.DataFrame(feature_rows),
+        benchmarks=None,
+        seed=17,
+        model_id="test::scorecard",
+    )
+
+    assert result["payout_policy_id"] == "classic_atomic_ender60_r1343_v1"
+    assert result["scoring_target"] == "target_ender_60"
+    assert result["scoring_horizon"] == "60D"
+    assert result["mean_payout_n_eras"] == 20
+    assert result["model_id"] == "test::scorecard"
+    assert np.isfinite(result["mmc"])
+    assert np.isfinite(result["corr"])
+    assert np.isfinite(result["mean_payout"])
+    assert result["cagr_1y"] is None
 
 
 def test_parse_space_int_step() -> None:

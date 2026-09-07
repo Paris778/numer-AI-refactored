@@ -33,8 +33,9 @@ from nmr.config import (
 )
 from nmr.data import IngestionAgent
 from nmr.deployment import load_predict
-from nmr.promote import PromotionResult, promote_full_version, rehearse_promotion
+from nmr.promote import PromotionResult
 from nmr.promote import _full_history_frame as _orig_full_history_frame
+from nmr.promote import promote_full_version, rehearse_promotion
 from nmr.runner import ExperimentRunner
 from nmr.scorecard import CROSSCHECK_N_TRIALS
 
@@ -1201,6 +1202,7 @@ def test_train_only_spawn_spec_excludes_validation(
         era_col,
         data,
         include_validation=False,
+        fit_device="cpu",
     ):
         captured["include_validation"] = include_validation
         return original(
@@ -1211,6 +1213,7 @@ def test_train_only_spawn_spec_excludes_validation(
             era_col=era_col,
             data=data,
             include_validation=include_validation,
+            fit_device=fit_device,
         )
 
     monkeypatch.setattr(ModelOrchestrator, "_fit_full_history_subprocess", _spy)

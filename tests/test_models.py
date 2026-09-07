@@ -186,7 +186,9 @@ def test_cross_validation_routes_fold_local_train_and_validation_eras(
     )
     recorded_pairs: list[tuple[set[str], set[str]]] = []
 
-    def fake_fit_predict_fold(frame, *, fold, feature_cols, target_col, era_col, purge_eras):
+    def fake_fit_predict_fold(
+        frame, *, fold, feature_cols, target_col, era_col, purge_eras
+    ):
         del purge_eras
         train_eras = set(
             frame.filter(pl.col(era_col).is_in(fold.train_eras))
@@ -263,7 +265,14 @@ class _FeatureNameModel:
 @pytest.mark.parametrize(
     ("backend", "attribute", "key", "gpu_value", "cpu_value", "backend_error"),
     [
-        ("lightgbm", "LGBMRegressor", "device_type", "gpu", "cpu", lgb.basic.LightGBMError),
+        (
+            "lightgbm",
+            "LGBMRegressor",
+            "device_type",
+            "gpu",
+            "cpu",
+            lgb.basic.LightGBMError,
+        ),
         ("xgboost", "XGBRegressor", "device", "cuda", "cpu", xgb.core.XGBoostError),
     ],
 )
@@ -353,7 +362,10 @@ def test_train_full_history_covers_all_eras_and_is_cpu_only() -> None:
 def test_train_full_history_drops_null_targets() -> None:
     df = _model_frame(n_eras=4)
     df = df.with_columns(
-        pl.when(pl.col("id") == "1_0").then(None).otherwise(pl.col("target")).alias("target")
+        pl.when(pl.col("id") == "1_0")
+        .then(None)
+        .otherwise(pl.col("target"))
+        .alias("target")
     )
     orchestrator = ModelOrchestrator(
         ModelConfig(backend="lightgbm", preset="fast", params=_tiny_model_params()),
@@ -380,12 +392,18 @@ def test_fit_predict_fold_rejects_zero_purge_gap() -> None:
     )
     with pytest.raises(ValueError, match="purge"):
         orchestrator._fit_predict_fold(
-            df, fold=violating, feature_cols=["f1", "f2", "f3"],
-            target_col="target", era_col="era", purge_eras=1,
+            df,
+            fold=violating,
+            feature_cols=["f1", "f2", "f3"],
+            target_col="target",
+            era_col="era",
+            purge_eras=1,
         )
 
 
-def test_fit_predict_fold_drops_null_target_rows(caplog: pytest.LogCaptureFixture) -> None:
+def test_fit_predict_fold_drops_null_target_rows(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     df = _model_frame(n_eras=6).with_columns(
         pl.when(pl.col("id") == "1_0")
         .then(None)
@@ -417,20 +435,25 @@ def test_fit_model_records_resolved_device() -> None:
         seed=3,
     )
     df = _model_frame(n_eras=4)
-    orchestrator.train_full_history(df, feature_cols=["f1", "f2", "f3"], target_col="target")
+    orchestrator.train_full_history(
+        df, feature_cols=["f1", "f2", "f3"], target_col="target"
+    )
     assert orchestrator.resolved_device == "cpu"
 
 
 def test_resolve_model_params_merges_preset_and_overrides():
     resolved = resolve_model_params("fast", {"n_estimators": 2500})
-    assert resolved["n_estimators"] == 2500          # override wins
-    assert resolved["learning_rate"] == 0.01         # preset default present
-    assert resolved["num_leaves"] == (2**5) - 1      # preset default present
+    assert resolved["n_estimators"] == 2500  # override wins
+    assert resolved["learning_rate"] == 0.01  # preset default present
+    assert resolved["num_leaves"] == (2**5) - 1  # preset default present
 
 
 def test_resolve_model_params_matches_orchestrator_resolution():
-    cfg = ModelConfig(backend="lightgbm", preset="fast",
-                      params={"n_estimators": 2500, "colsample_bytree": 0.2})
+    cfg = ModelConfig(
+        backend="lightgbm",
+        preset="fast",
+        params={"n_estimators": 2500, "colsample_bytree": 0.2},
+    )
     orch = ModelOrchestrator(cfg, seed=42)
     # _resolved_params(use_gpu=False, n_features=1000) adds backend boilerplate;
     # the preset+params core must equal resolve_model_params for the same inputs.
@@ -474,8 +497,12 @@ def test_translate_catboost_maps_preset_knobs() -> None:
     from nmr.models import _translate_catboost
 
     resolved = {
-        "n_estimators": 2000, "learning_rate": 0.01, "max_depth": 5,
-        "num_leaves": 31, "colsample_bytree": 0.1, "min_data_in_leaf": 100,
+        "n_estimators": 2000,
+        "learning_rate": 0.01,
+        "max_depth": 5,
+        "num_leaves": 31,
+        "colsample_bytree": 0.1,
+        "min_data_in_leaf": 100,
     }
     params = _translate_catboost(resolved, seed=42, use_gpu=False)
     assert params["iterations"] == 2000
@@ -483,7 +510,7 @@ def test_translate_catboost_maps_preset_knobs() -> None:
     assert params["depth"] == 5
     assert params["rsm"] == 0.1
     assert params["min_data_in_leaf"] == 100
-    assert "num_leaves" not in params          # dropped: symmetric depth-limited trees
+    assert "num_leaves" not in params  # dropped: symmetric depth-limited trees
 
 
 def test_translate_catboost_contract_params_are_fixed_and_win() -> None:
@@ -492,12 +519,12 @@ def test_translate_catboost_contract_params_are_fixed_and_win() -> None:
     resolved = {"random_seed": 1, "thread_count": 8, "n_estimators": 100}
     params = _translate_catboost(resolved, seed=42, use_gpu=False)
     assert params["loss_function"] == "RMSE"
-    assert params["random_seed"] == 42         # contract wins over user params
-    assert params["thread_count"] == 1         # contract wins over user params
+    assert params["random_seed"] == 42  # contract wins over user params
+    assert params["thread_count"] == 1  # contract wins over user params
     assert params["verbose"] is False
     assert params["allow_writing_files"] is False
     assert params["task_type"] == "CPU"
-    assert params["iterations"] == 100         # non-contract keys still map
+    assert params["iterations"] == 100  # non-contract keys still map
 
 
 def test_translate_catboost_gpu_sets_task_type_and_devices() -> None:
@@ -514,12 +541,18 @@ def test_catboost_cv_oof_is_deterministic_under_seed(tmp_path) -> None:
     cfg = ModelConfig(backend="catboost", preset="fast", params={"n_estimators": 10})
     orch = ModelOrchestrator(cfg, seed=17)
     first = orch.train_cross_validation(
-        df, feature_cols=["f1", "f2", "f3"], target_col="target",
-        splitter=splitter, era_col="era",
+        df,
+        feature_cols=["f1", "f2", "f3"],
+        target_col="target",
+        splitter=splitter,
+        era_col="era",
     )
     second = ModelOrchestrator(cfg, seed=17).train_cross_validation(
-        df, feature_cols=["f1", "f2", "f3"], target_col="target",
-        splitter=splitter, era_col="era",
+        df,
+        feature_cols=["f1", "f2", "f3"],
+        target_col="target",
+        splitter=splitter,
+        era_col="era",
     )
     assert first.oof.equals(second.oof)
     assert orch.resolved_device == "cpu"
@@ -540,6 +573,7 @@ def test_catboost_is_cpu_only_by_construction() -> None:
 
 # --- model.device knob (auto|gpu|cpu) -----------------------------------------
 
+
 def test_orchestrator_device_cpu_never_attempts_gpu(monkeypatch) -> None:
     import nmr.models as models_module
 
@@ -551,8 +585,9 @@ def test_orchestrator_device_cpu_never_attempts_gpu(monkeypatch) -> None:
 
     monkeypatch.setattr(models_module.lgb, "LGBMRegressor", factory)
     orchestrator = ModelOrchestrator(
-        ModelConfig(backend="lightgbm", preset="fast", device="cpu",
-                    params=_tiny_model_params()),
+        ModelConfig(
+            backend="lightgbm", preset="fast", device="cpu", params=_tiny_model_params()
+        ),
         seed=29,
     )
     model, prediction = orchestrator.train_anchor_fold(
@@ -566,7 +601,9 @@ def test_orchestrator_device_cpu_never_attempts_gpu(monkeypatch) -> None:
     assert orchestrator.resolved_device == "cpu"
 
 
-def test_orchestrator_device_gpu_forced_raises_without_cpu_fallback(monkeypatch) -> None:
+def test_orchestrator_device_gpu_forced_raises_without_cpu_fallback(
+    monkeypatch,
+) -> None:
     import nmr.models as models_module
 
     def factory(**params):
@@ -574,8 +611,9 @@ def test_orchestrator_device_gpu_forced_raises_without_cpu_fallback(monkeypatch)
 
     monkeypatch.setattr(models_module.lgb, "LGBMRegressor", factory)
     orchestrator = ModelOrchestrator(
-        ModelConfig(backend="lightgbm", preset="fast", device="gpu",
-                    params=_tiny_model_params()),
+        ModelConfig(
+            backend="lightgbm", preset="fast", device="gpu", params=_tiny_model_params()
+        ),
         seed=29,
     )
     with pytest.raises(lgb.basic.LightGBMError):
@@ -598,8 +636,12 @@ def test_orchestrator_device_auto_tries_gpu_then_falls_back(monkeypatch) -> None
 
     monkeypatch.setattr(models_module.lgb, "LGBMRegressor", factory)
     orchestrator = ModelOrchestrator(
-        ModelConfig(backend="lightgbm", preset="fast", device="auto",
-                    params=_tiny_model_params()),
+        ModelConfig(
+            backend="lightgbm",
+            preset="fast",
+            device="auto",
+            params=_tiny_model_params(),
+        ),
         seed=29,
     )
     model, _ = orchestrator.train_anchor_fold(
@@ -614,14 +656,42 @@ def test_orchestrator_device_auto_tries_gpu_then_falls_back(monkeypatch) -> None
 
 def test_train_full_history_stays_cpu_even_with_device_gpu() -> None:
     orchestrator = ModelOrchestrator(
-        ModelConfig(backend="lightgbm", preset="fast", device="gpu",
-                    params=_tiny_model_params()),
+        ModelConfig(
+            backend="lightgbm", preset="fast", device="gpu", params=_tiny_model_params()
+        ),
         seed=5,
     )
     model = orchestrator.train_full_history(
         _model_frame(), feature_cols=["f1", "f2", "f3"], target_col="target"
     )
     assert model.get_params()["device_type"] == "cpu"  # deploy artifact invariant
+
+
+def test_train_full_history_honors_explicit_gpu_fit_device(monkeypatch) -> None:
+    orchestrator = ModelOrchestrator(
+        ModelConfig(backend="xgboost", preset="fast", device="cpu"),
+        seed=5,
+    )
+    seen: list[tuple[bool, str | None]] = []
+
+    def fake_fit_model(*, features, target, use_gpu=True, requested_device=None):
+        del features, target
+        seen.append((use_gpu, requested_device))
+        orchestrator.resolved_device = "gpu" if use_gpu else "cpu"
+        return _FakeModel(params={"device": "cuda" if use_gpu else "cpu"})
+
+    monkeypatch.setattr(orchestrator, "_fit_model", fake_fit_model)
+
+    model = orchestrator.train_full_history(
+        _model_frame(),
+        feature_cols=["f1", "f2", "f3"],
+        target_col="target",
+        in_process=True,
+        fit_device="gpu",
+    )
+
+    assert model.get_params()["device"] == "cuda"
+    assert seen == [(True, "gpu")]
 
 
 def test_coerce_float32_features_exact_and_all_or_nothing() -> None:
@@ -639,7 +709,10 @@ def test_coerce_float32_features_exact_and_all_or_nothing() -> None:
 
     # Float64 stays untouched (precision), all-or-nothing per frame
     float_frame = pl.DataFrame(
-        {"f1": pl.Series([0.1, 0.2], dtype=pl.Float64), "f2": pl.Series([1, 2], dtype=pl.Int8)}
+        {
+            "f1": pl.Series([0.1, 0.2], dtype=pl.Float64),
+            "f2": pl.Series([1, 2], dtype=pl.Int8),
+        }
     )
     out_mixed = coerce_float32_features(float_frame, ["f1", "f2"])
     assert out_mixed.schema == {"f1": pl.Float64, "f2": pl.Int8}
@@ -651,7 +724,9 @@ def test_feature_frame_is_float32_numpy_for_int_features() -> None:
     from nmr.models import ModelOrchestrator, coerce_float32_features
 
     df = _model_frame().with_columns(
-        pl.col("f1").cast(pl.Int8), pl.col("f2").cast(pl.Int8), pl.col("f3").cast(pl.Int8)
+        pl.col("f1").cast(pl.Int8),
+        pl.col("f2").cast(pl.Int8),
+        pl.col("f3").cast(pl.Int8),
     )
     orchestrator = ModelOrchestrator(ModelConfig(backend="lightgbm"), seed=7)
     frame = orchestrator._feature_frame(df, feature_cols=["f1", "f2", "f3"])
@@ -660,7 +735,9 @@ def test_feature_frame_is_float32_numpy_for_int_features() -> None:
     assert frame.shape == (df.height, 3)
     assert np.array_equal(frame, df.select(["f1", "f2", "f3"]).to_numpy())
     assert coerce_float32_features(df, ["f1", "f2", "f3"]).schema == {
-        "f1": pl.Float32, "f2": pl.Float32, "f3": pl.Float32
+        "f1": pl.Float32,
+        "f2": pl.Float32,
+        "f3": pl.Float32,
     }
 
 
@@ -695,7 +772,11 @@ def test_predict_model_chunked_empty_frame() -> None:
 def test_full_history_subprocess_fit_matches_in_process(tmp_path) -> None:
     """The spawned-process fit (bounded commit for full-universe runs) must be
     bit-identical to the in-process fit — same code path, same seed."""
-    from nmr.models import ModelOrchestrator, _full_history_fit_worker, _receive_subprocess_result
+    from nmr.models import (
+        ModelOrchestrator,
+        _full_history_fit_worker,
+        _receive_subprocess_result,
+    )
 
     df = _model_frame(n_eras=10, rows_per_era=6)
     cfg = ModelConfig(backend="lightgbm", preset="fast", params=_tiny_model_params())
@@ -711,12 +792,16 @@ def test_full_history_subprocess_fit_matches_in_process(tmp_path) -> None:
     data_root = tmp_path / "data" / "vtest"
     data_root.mkdir(parents=True)
     (data_root / "features.json").write_text(
-        json.dumps({
-            "feature_sets": {"small": ["f1", "f2", "f3"],
-                             "medium": ["f1", "f2", "f3"],
-                             "all": ["f1", "f2", "f3"]},
-            "targets": ["target"],
-        }),
+        json.dumps(
+            {
+                "feature_sets": {
+                    "small": ["f1", "f2", "f3"],
+                    "medium": ["f1", "f2", "f3"],
+                    "all": ["f1", "f2", "f3"],
+                },
+                "targets": ["target"],
+            }
+        ),
         encoding="utf-8",
     )
     df.write_parquet(data_root / "train.parquet")
@@ -725,8 +810,11 @@ def test_full_history_subprocess_fit_matches_in_process(tmp_path) -> None:
     q = ctx.Queue()
     spec = {
         "data": {
-            "version": "vtest", "feature_set": "small", "feature_subset": None,
-            "targets": ("target",), "data_dir": str(data_root.parent),
+            "version": "vtest",
+            "feature_set": "small",
+            "feature_subset": None,
+            "targets": ("target",),
+            "data_dir": str(data_root.parent),
             "supplemental_feature_sets": None,
         },
         "feature_cols": ["f1", "f2", "f3"],
@@ -788,12 +876,16 @@ def test_full_history_spawn_path_with_data_config(tmp_path) -> None:
     data_root = tmp_path / "data" / "vtest"
     data_root.mkdir(parents=True)
     (data_root / "features.json").write_text(
-        json.dumps({
-            "feature_sets": {"small": ["f1", "f2", "f3"],
-                             "medium": ["f1", "f2", "f3"],
-                             "all": ["f1", "f2", "f3"]},
-            "targets": ["target"],
-        }),
+        json.dumps(
+            {
+                "feature_sets": {
+                    "small": ["f1", "f2", "f3"],
+                    "medium": ["f1", "f2", "f3"],
+                    "all": ["f1", "f2", "f3"],
+                },
+                "targets": ["target"],
+            }
+        ),
         encoding="utf-8",
     )
     df = _model_frame(n_eras=10, rows_per_era=6)
@@ -805,8 +897,11 @@ def test_full_history_spawn_path_with_data_config(tmp_path) -> None:
     )
     data_cfg = DataConfig(version="vtest", data_dir=tmp_path / "data")
     model = orch._fit_full_history_subprocess(
-        df, feature_cols=["f1", "f2", "f3"], target_col="target",
-        era_col="era", data=data_cfg,
+        df,
+        feature_cols=["f1", "f2", "f3"],
+        target_col="target",
+        era_col="era",
+        data=data_cfg,
     )
     feats = orch._feature_frame(df, feature_cols=["f1", "f2", "f3"])
     preds = np.asarray(model.predict(feats), dtype=float)
@@ -822,8 +917,11 @@ def test_full_history_spawn_requires_data_config() -> None:
     )
     with pytest.raises(ValueError, match="DataConfig"):
         orch._fit_full_history_subprocess(
-            _model_frame(), feature_cols=["f1", "f2", "f3"],
-            target_col="target", era_col="era", data=None,  # type: ignore[arg-type]
+            _model_frame(),
+            feature_cols=["f1", "f2", "f3"],
+            target_col="target",
+            era_col="era",
+            data=None,  # type: ignore[arg-type]
         )
 
 
@@ -866,18 +964,14 @@ def test_resolved_params_floor_noop_for_large_sets() -> None:
 
 
 def test_resolved_params_floors_xgboost_and_catboost_rsm() -> None:
-    xgb_orch = ModelOrchestrator(
-        ModelConfig(backend="xgboost", preset="fast"), seed=1
-    )
+    xgb_orch = ModelOrchestrator(ModelConfig(backend="xgboost", preset="fast"), seed=1)
     assert xgb_orch._resolved_params(use_gpu=True, n_features=3)[
         "colsample_bytree"
     ] == pytest.approx(1.0)
-    cb_orch = ModelOrchestrator(
-        ModelConfig(backend="catboost", preset="fast"), seed=1
-    )
-    assert cb_orch._resolved_params(use_gpu=False, n_features=3)["rsm"] == pytest.approx(
-        1.0
-    )
+    cb_orch = ModelOrchestrator(ModelConfig(backend="catboost", preset="fast"), seed=1)
+    assert cb_orch._resolved_params(use_gpu=False, n_features=3)[
+        "rsm"
+    ] == pytest.approx(1.0)
 
 
 def test_resolved_params_floors_user_native_rsm() -> None:
@@ -950,7 +1044,8 @@ def test_construct_tree_model_max_leaves_sets_lossguide() -> None:
     explicit = construct_tree_model(
         "xgboost",
         {"max_depth": 4, "max_leaves": 15, "grow_policy": "depthwise"},
-        seed=42, n_features=780,
+        seed=42,
+        n_features=780,
     )
     assert explicit.get_params()["grow_policy"] == "depthwise"
 
@@ -1060,7 +1155,9 @@ def test_fit_predict_fold_empty_slice_raises() -> None:
         ModelConfig(backend="lightgbm", preset="fast", params=_tiny_model_params()),
         seed=7,
     )
-    fold = Fold(0, ("7",), ("9",))  # leakage-safe (ordered, disjoint) but absent from the frame
+    fold = Fold(
+        0, ("7",), ("9",)
+    )  # leakage-safe (ordered, disjoint) but absent from the frame
     with pytest.raises(ValueError, match="Degenerate training slice"):
         orch._fit_predict_fold(
             _model_frame(n_eras=4, rows_per_era=4),
@@ -1103,7 +1200,10 @@ def test_device_candidate_params_dedupes_identical(
     """gpu_params == cpu_params → a single candidate (models.py:547-548)."""
     orch = ModelOrchestrator(
         ModelConfig(
-            backend="lightgbm", preset="fast", params=_tiny_model_params(), device="auto"
+            backend="lightgbm",
+            preset="fast",
+            params=_tiny_model_params(),
+            device="auto",
         ),
         seed=7,
     )
@@ -1133,9 +1233,7 @@ def test_xgboost_param_translation_branches() -> None:
     assert p["max_leaves"] == 15
 
     orch_md = ModelOrchestrator(
-        ModelConfig(
-            backend="xgboost", preset="fast", params={"min_data_in_leaf": 20}
-        ),
+        ModelConfig(backend="xgboost", preset="fast", params={"min_data_in_leaf": 20}),
         seed=7,
     )
     p = orch_md._resolved_params(use_gpu=False, n_features=10)
@@ -1150,7 +1248,9 @@ def test_assert_fold_is_leakage_safe_raises() -> None:
         seed=7,
     )
     with pytest.raises(ValueError, match="reuses eras"):
-        orch._assert_fold_is_leakage_safe(Fold(0, ("1", "2", "3"), ("3", "4")), purge_eras=1)
+        orch._assert_fold_is_leakage_safe(
+            Fold(0, ("1", "2", "3"), ("3", "4")), purge_eras=1
+        )
     with pytest.raises(ValueError, match="degenerate"):
         orch._assert_fold_is_leakage_safe(Fold(0, (), ("3",)), purge_eras=1)
     with pytest.raises(ValueError, match="strictly time-ordered"):
@@ -1207,9 +1307,9 @@ def test_peak_memory_counters_zero_return(monkeypatch: pytest.MonkeyPatch) -> No
     from nmr.models import _peak_memory_counters
 
     kernel32 = ctypes.windll.kernel32
-    fake = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t)(
-        lambda *args: 0
-    )
+    fake = ctypes.CFUNCTYPE(
+        ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t
+    )(lambda *args: 0)
     monkeypatch.setattr(kernel32, "K32GetProcessMemoryInfo", fake)
     assert _peak_memory_counters() == (None, None)
 
@@ -1227,7 +1327,9 @@ def test_full_history_fit_worker_in_process_ok_and_error(tmp_path) -> None:
     data_root = tmp_path / "data" / "vtest"
     data_root.mkdir(parents=True)
     (data_root / "features.json").write_text(
-        json.dumps({"feature_sets": {"small": ["f1", "f2", "f3"]}, "targets": ["target"]}),
+        json.dumps(
+            {"feature_sets": {"small": ["f1", "f2", "f3"]}, "targets": ["target"]}
+        ),
         encoding="utf-8",
     )
     df = _model_frame(n_eras=10, rows_per_era=6)
@@ -1259,7 +1361,9 @@ def test_full_history_fit_worker_in_process_ok_and_error(tmp_path) -> None:
     assert working_set is None or working_set > 0
     assert commit is None or commit > 0
     model = cloudpickle.loads(model_bytes)
-    preds = np.asarray(model.predict(df.select(["f1", "f2", "f3"]).to_numpy()), dtype=float)
+    preds = np.asarray(
+        model.predict(df.select(["f1", "f2", "f3"]).to_numpy()), dtype=float
+    )
     assert preds.shape == (df.height,)
     assert np.isfinite(preds).all()
 

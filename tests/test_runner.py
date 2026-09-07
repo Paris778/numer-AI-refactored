@@ -311,6 +311,7 @@ def test_run_manifest_preserves_oof_device_after_cpu_validation_fit(
             backend="lightgbm",
             preset="fast",
             device="gpu",
+            validation_fit_device="gpu",
             params={"n_estimators": 1},
         ),
         evaluation=EvalConfig(
@@ -340,7 +341,11 @@ def test_run_manifest_preserves_oof_device_after_cpu_validation_fit(
             .select(["id", "era", "pred_target"])
         )
 
-    def fake_deploy_pipeline(*, orchestrator, **kwargs):
+    pipeline_calls = []
+
+    def fake_deploy_pipeline(*, orchestrator, fit_device, checkpoint_kind, **kwargs):
+        del kwargs
+        pipeline_calls.append((fit_device, checkpoint_kind))
         orchestrator.resolved_device = "cpu"
         return (lambda _frame: pl.DataFrame(), {})
 
@@ -355,6 +360,87 @@ def test_run_manifest_preserves_oof_device_after_cpu_validation_fit(
 
     assert result.manifest["pipeline_device"] == "gpu"
     assert result.manifest["oof_device"] == "gpu"
+    assert result.manifest["validation_fit_device"] == "gpu"
+    assert result.manifest["deploy_fit_device"] is None
+    assert pipeline_calls == [("gpu", "validation_fit_checkpoints")]
+
+
+def test_gpu_screen_workflow_rejects_deploy(tmp_path) -> None:
+    from dataclasses import replace
+
+    base = _config(tmp_path)
+    screen = ExperimentConfig(
+        data=base.data,
+        split=base.split,
+        model=base.model,
+        evaluation=base.evaluation,
+        risk=base.risk,
+        ensemble=base.ensemble,
+        run=replace(base.run, workflow="gpu_screen"),
+    )
+
+    with pytest.raises(ValueError, match="gpu_screen.*research-only"):
+        ExperimentRunner(screen).run(deploy=True)
+
+
+def test_deploy_run_uses_cpu_full_history_policy(tmp_path, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    base = _config(tmp_path)
+    cfg = ExperimentConfig(
+        data=base.data,
+        split=base.split,
+        model=ModelConfig(
+            backend="lightgbm",
+            preset="fast",
+            device="gpu",
+            validation_fit_device="gpu",
+            deploy_fit_device="cpu",
+            params={"n_estimators": 1},
+        ),
+        evaluation=base.evaluation,
+        risk=base.risk,
+        ensemble=base.ensemble,
+        run=base.run,
+    )
+    pipeline_calls = []
+
+    def fake_oof(
+        self,
+        train_df,
+        *,
+        feature_cols,
+        splitter,
+        model_orchestrator,
+        **kwargs,
+    ):
+        del self, feature_cols, splitter, kwargs
+        model_orchestrator.resolved_device = "gpu"
+        return train_df.select(["id", "era"]).with_columns(
+            pl.lit(0.1).alias("pred_target"),
+            pl.lit(0.2).alias("pred_target_alt"),
+        )
+
+    def fake_deploy_pipeline(*, orchestrator, fit_device, checkpoint_kind, **kwargs):
+        del kwargs
+        pipeline_calls.append((fit_device, checkpoint_kind))
+        orchestrator.resolved_device = "cpu"
+        return (lambda _frame: pl.DataFrame(), {})
+
+    def fake_serialize(*, artifact_path, **kwargs):
+        del kwargs
+        return SimpleNamespace(path=artifact_path, manifest={})
+
+    monkeypatch.setattr(ExperimentRunner, "_train_multi_target_oof", fake_oof)
+    monkeypatch.setattr("nmr.runner._build_deploy_pipeline", fake_deploy_pipeline)
+    monkeypatch.setattr("nmr.runner._serialize_predict_artifact", fake_serialize)
+
+    result = ExperimentRunner(cfg).run(deploy=True)
+
+    assert result.artifact is not None
+    assert result.manifest["deploy_fit_device"] == "cpu"
+    assert result.manifest["validation_fit_device"] is None
+    assert pipeline_calls == [("cpu", "deploy_checkpoints")]
 
 
 def test_deployed_artifact_matches_validation_stage_predictions(tmp_path) -> None:
@@ -1109,7 +1195,7 @@ def test_deploy_checkpoints_written_and_mixed_resume_bit_for_bit(
     actual = load_predict(resumed.artifact.path)(live)
     pd.testing.assert_frame_equal(actual, expected, check_exact=True)
     assert caplog.text.count("train_full_history") == 1  # the refit happened
-    assert caplog.text.count("loaded deploy checkpoint") == 1  # the other loaded
+    assert caplog.text.count("loaded deploy_checkpoints checkpoint") == 1
 
 
 def test_deploy_checkpoint_code_mismatch_raises(tmp_path) -> None:

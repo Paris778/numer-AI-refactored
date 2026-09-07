@@ -192,6 +192,78 @@ def test_load_benchmark_frame_missing_file_returns_empty_schema_frame(
     assert frame.schema == dash.UNIFIED_SCHEMA
 
 
+def test_load_sklearn_frame_projects_hpo_and_breadth_reports(tmp_path: Path) -> None:
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    (reports / "sklearn_hgb_hpo_confirmation.csv").write_text(
+        "status,target_col,full_corr_mean,full_fnc_mean,full_n_eras,"
+        "payout_policy_id,scoring_target,scoring_horizon,mean_payout,"
+        "mean_payout_ci_low,mean_payout_ci_high,mean_payout_n_eras,"
+        "corr,mmc,mmc_sharpe_ac,deflated_sharpe\n"
+        "completed,target,0.011,0.008,86,classic_atomic_ender60_r1343_v1,"
+        "target_ender_60,60D,0.003,0.001,0.005,86,0.011,0.004,0.2,0.3\n",
+        encoding="utf-8",
+    )
+    (reports / "sklearn_breadth_final.csv").write_text(
+        "method,screen_status,screen_corr_mean,screen_corr_sharpe,confirmed_status\n"
+        "Ridge,completed,0.005,0.4,\n",
+        encoding="utf-8",
+    )
+    (reports / "sklearn_breadth_screen.csv").write_text(
+        "method,corr_mean,corr_std,corr_n_eras\n" "Ridge,0.005,0.002,47\n",
+        encoding="utf-8",
+    )
+    frame = dash.load_sklearn_frame(reports_dir=reports)
+
+    assert frame.height == 2
+    assert set(frame.get_column("source").to_list()) == {"sklearn"}
+    assert set(frame.get_column("model_id").to_list()) == {
+        "sklearn::hpo::hgb",
+        "sklearn::breadth::Ridge",
+    }
+    hgb = frame.filter(pl.col("model_id") == "sklearn::hpo::hgb").row(0, named=True)
+    assert hgb["corr"] == pytest.approx(0.011)
+    assert hgb["fnc"] == pytest.approx(0.008)
+    assert hgb["mean_payout"] == pytest.approx(0.003)
+    assert hgb["mean_payout_ci_low"] == pytest.approx(0.001)
+    assert hgb["mean_payout_ci_high"] == pytest.approx(0.005)
+    assert hgb["mean_payout_n_eras"] == 86
+    assert hgb["scoring_target"] == "target_ender_60"
+    assert hgb["scoring_horizon"] == "60D"
+    assert hgb["mmc"] == pytest.approx(0.004)
+    assert hgb["mmc_sharpe_ac"] == pytest.approx(0.2)
+    assert hgb["deflated_sharpe"] == pytest.approx(0.3)
+    assert dash.dashboard_cohort(hgb) == "sklearn"
+    assert "Research-only" in dash.model_description(hgb)
+    ridge = frame.filter(pl.col("model_id") == "sklearn::breadth::Ridge").row(
+        0, named=True
+    )
+    assert ridge["corr"] == pytest.approx(0.005)
+    assert ridge["std_corr"] == pytest.approx(0.002)
+    assert ridge["corr_n_eras"] == 47
+
+
+def test_load_unified_leaderboard_includes_explicit_sklearn_reports(
+    tmp_path: Path,
+) -> None:
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    (reports / "sklearn_hgb_hpo_confirmation.csv").write_text(
+        "status,target_col,full_corr_mean,full_fnc_mean,full_n_eras\n"
+        "completed,target,0.011,0.008,86\n",
+        encoding="utf-8",
+    )
+    frame = dash.load_unified_leaderboard(
+        tmp_path / "registry",
+        benchmark_path=False,
+        reports_dir=reports,
+        models_dir=tmp_path / "models",
+    )
+
+    assert frame.height == 1
+    assert frame.row(0, named=True)["source"] == "sklearn"
+
+
 def _registry_entry(run_id: str, *, scorecard: bool = True) -> dict:
     entry = {
         "run_id": run_id,
@@ -1833,6 +1905,7 @@ def test_dashboard_cohort_uses_source_and_benchmark_tier() -> None:
     assert dash.dashboard_cohort({"source": "trained_legacy"}) == "trained"
     assert dash.dashboard_cohort({"source": "full"}) == "full"
     assert dash.dashboard_cohort({"source": "partial"}) == "partial"
+    assert dash.dashboard_cohort({"source": "sklearn"}) == "sklearn"
     assert (
         dash.dashboard_cohort(
             {"source": "benchmark", "model_id": "null_constant_05", "tier": 0}

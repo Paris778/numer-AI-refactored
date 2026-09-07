@@ -26,11 +26,13 @@ VALID_FEATURE_SETS = ("small", "medium", "all")
 VALID_MODEL_BACKENDS = ("lightgbm", "xgboost", "catboost")
 VALID_MODEL_PRESETS = ("fast", "standard", "deep")
 VALID_MODEL_DEVICES = ("auto", "gpu", "cpu")
+VALID_FULL_HISTORY_DEVICES = ("gpu", "cpu")
 VALID_EVAL_BACKENDS = ("custom", "official")
 VALID_EVAL_METRICS = ("corr", "mmc", "fnc", "sharpe")
 VALID_SPLIT_SCHEMES = ("walk_forward", "anchor")
 VALID_ENSEMBLE_METHODS = ("ridge", "non_negative")
 VALID_HORIZONS = ("20D", "60D")
+VALID_WORKFLOWS = ("standard", "gpu_screen", "cpu_confirm")
 # Leakage law (AGENTS.md §4): 8-era purge for 20D targets, 16 for 60D. These
 # are MINIMUMs — stricter purges are allowed, weaker ones are a correctness
 # bug and rejected at load time.
@@ -202,13 +204,17 @@ class ModelConfig:
     fit raises — no silent fallback), ``cpu`` (never attempt GPU). The
     deployment artifact path (``train_full_history``) is always CPU by
     invariant: determinism is per-device and the hosted runtime may lack a
-    GPU.
+    GPU. ``validation_fit_device`` is an explicit research-only full-history
+    fit choice used to build validation predictions; ``deploy_fit_device`` is
+    intentionally CPU-only.
     """
 
     backend: str = "lightgbm"
     preset: str = "fast"
     params: dict[str, Any] = field(default_factory=dict)
     device: str = "auto"
+    validation_fit_device: str = "cpu"
+    deploy_fit_device: str = "cpu"
 
     def __post_init__(self) -> None:
         if self.backend not in VALID_MODEL_BACKENDS:
@@ -222,6 +228,26 @@ class ModelConfig:
         if self.device not in VALID_MODEL_DEVICES:
             raise ValueError(
                 f"model.device={self.device!r} not in {VALID_MODEL_DEVICES}"
+            )
+        if self.validation_fit_device not in VALID_FULL_HISTORY_DEVICES:
+            raise ValueError(
+                "model.validation_fit_device="
+                f"{self.validation_fit_device!r} not in {VALID_FULL_HISTORY_DEVICES}"
+            )
+        if self.deploy_fit_device not in VALID_FULL_HISTORY_DEVICES:
+            raise ValueError(
+                "model.deploy_fit_device="
+                f"{self.deploy_fit_device!r} not in {VALID_FULL_HISTORY_DEVICES}"
+            )
+        if self.deploy_fit_device != "cpu":
+            raise ValueError(
+                "model.deploy_fit_device must be 'cpu': deployment artifacts "
+                "must remain portable to CPU-only hosted runtimes"
+            )
+        if self.backend == "catboost" and self.validation_fit_device == "gpu":
+            raise ValueError(
+                "model.validation_fit_device='gpu' is unsupported for the "
+                "catboost backend; CatBoost is CPU-only in nmr"
             )
 
 
@@ -285,10 +311,11 @@ class EnsembleConfig:
 
 @dataclass(frozen=True)
 class RunConfig:
-    """Run identity, determinism seed, and shared machine cache root."""
+    """Run identity, workflow phase, determinism seed, and cache root."""
 
     name: str = "default"
     seed: int = 42
+    workflow: str = "standard"
     # Shared machine cache root (cache/reports/campaigns); run/export outputs
     # derive from EXPERIMENTS_ROOT, never from this directory.
     artifacts_dir: Path = REPO_ROOT / "artifacts"
@@ -297,6 +324,8 @@ class RunConfig:
         object.__setattr__(self, "artifacts_dir", _resolve_path(self.artifacts_dir))
         if not self.name:
             raise ValueError("run.name must be a non-empty string")
+        if self.workflow not in VALID_WORKFLOWS:
+            raise ValueError(f"run.workflow={self.workflow!r} not in {VALID_WORKFLOWS}")
 
 
 @dataclass(frozen=True)
@@ -356,12 +385,47 @@ def config_from_dict(raw: dict[str, Any]) -> ExperimentConfig:
         }
     )
     _validate_purge_vs_horizon(config)
+    _validate_workflow(config)
     if config.evaluation.main_target not in config.data.targets:
         raise ValueError(
             f"evaluation.main_target={config.evaluation.main_target!r} must be "
             "present in data.targets because it is the ensemble weight-learning target"
         )
     return config
+
+
+def _validate_workflow(config: ExperimentConfig) -> None:
+    """Enforce the fast-screen then CPU-confirm research protocol."""
+    workflow = config.run.workflow
+    if workflow == "gpu_screen":
+        if config.evaluation.validation_scorecard:
+            raise ValueError(
+                "run.workflow='gpu_screen' requires "
+                "evaluation.validation_scorecard=false"
+            )
+        if config.model.device != "gpu":
+            raise ValueError("run.workflow='gpu_screen' requires model.device='gpu'")
+        if config.model.validation_fit_device != "gpu":
+            raise ValueError(
+                "run.workflow='gpu_screen' requires "
+                "model.validation_fit_device='gpu'"
+            )
+        if "mmc" in config.evaluation.metrics:
+            raise ValueError(
+                "run.workflow='gpu_screen' cannot request mmc without "
+                "the validation scorecard"
+            )
+    elif workflow == "cpu_confirm":
+        if not config.evaluation.validation_scorecard:
+            raise ValueError(
+                "run.workflow='cpu_confirm' requires "
+                "evaluation.validation_scorecard=true"
+            )
+        if config.model.validation_fit_device != "cpu":
+            raise ValueError(
+                "run.workflow='cpu_confirm' requires "
+                "model.validation_fit_device='cpu'"
+            )
 
 
 def load_config(path: str | Path) -> ExperimentConfig:

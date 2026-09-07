@@ -1,36 +1,42 @@
-# Short forced-CUDA calibration for the v5.3 Ender-60 research path.
-# This is a smoke/capacity run, not a competitive final candidate.
+# CPU confirmation for xgb-gpu-screen-60d-ensemble.yaml.
+# Keep model/data/split parameters identical to the screen config; only the
+# authoritative full-history validation fit is switched to CPU.
 
 run:
-  name: xgb-gpu-calibration-ender60
-  seed: 20260903
+  name: xgb-cpu-confirm-60d-ensemble
+  seed: 20260904
+  workflow: cpu_confirm
 
 data:
   version: v5.3
   feature_set: small
   targets:
     - target_ender_60
+    - target_cyrusd_60
+    - target_sam_60
+    - target_teager2b_60
   horizon: 60D
 
 split:
   scheme: walk_forward
   purge_eras: 16
   embargo_eras: 0
-  n_folds: 2
+  n_folds: 4
 
 model:
   backend: xgboost
   preset: fast
   device: gpu
-  validation_fit_device: gpu
+  validation_fit_device: cpu
   deploy_fit_device: cpu
   params:
-    n_estimators: 50
+    n_estimators: 2000
     learning_rate: 0.01
-    max_depth: 4
-    max_leaves: 16
+    max_depth: 5
+    num_leaves: 31
     colsample_bytree: 0.25
     subsample: 0.8
+    reg_lambda: 10.0
 
 evaluation:
   backend: custom

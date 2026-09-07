@@ -784,6 +784,7 @@ def promote_full_version(
             proportion=proportion,
             data=config.data,
             include_validation=(scope == "full"),
+            fit_device=config.model.deploy_fit_device,
         )
         del frame
         artifact_path = staging / "predict.pkl"

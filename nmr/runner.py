@@ -56,6 +56,8 @@ from nmr.splitter import PurgedEraSplitter
 logger = logging.getLogger("nmr.runner")
 
 _VAL_PREDICT_ERA_BATCH = 40  # eras per validation predict chunk (bounds peak RAM)
+_DEPLOY_CHECKPOINT_KIND = "deploy_checkpoints"
+_VALIDATION_FIT_CHECKPOINT_KIND = "validation_fit_checkpoints"
 
 
 def _era_batch_frames(val_df: pl.DataFrame, batch_eras: int) -> list[pl.DataFrame]:
@@ -288,6 +290,11 @@ class ExperimentRunner:
         )
 
     def run(self, *, deploy: bool = False) -> RunResult:
+        if deploy and self._config.run.workflow == "gpu_screen":
+            raise ValueError(
+                "run.workflow='gpu_screen' is research-only; choose the matching "
+                "cpu_confirm config before requesting deploy=True"
+            )
         requested_metrics = set(self._config.evaluation.metrics)
         if (
             "mmc" in requested_metrics
@@ -447,7 +454,9 @@ class ExperimentRunner:
         oof = neutralized.select(["id", "era", "prediction"]).sort(["era", "id"])
 
         pipeline = None
-        if deploy or self._config.evaluation.validation_scorecard:
+        full_history_fit_device: str | None = None
+        if deploy:
+            full_history_fit_device = self._config.model.deploy_fit_device
             pipeline = _build_deploy_pipeline(
                 orchestrator=model_orchestrator,
                 train_df=train_df,
@@ -457,6 +466,24 @@ class ExperimentRunner:
                 proportion=neutralization_proportion,
                 data=self._config.data,
                 deploy_checkpoint_dir=(run_dir / "deploy_checkpoints"),
+                checkpoint_kind=_DEPLOY_CHECKPOINT_KIND,
+                fit_device=full_history_fit_device,
+                data_fingerprint=self._data_fingerprint,
+                environment=self._environment,
+            )
+        elif self._config.evaluation.validation_scorecard:
+            full_history_fit_device = self._config.model.validation_fit_device
+            pipeline = _build_deploy_pipeline(
+                orchestrator=model_orchestrator,
+                train_df=train_df,
+                feature_cols=feature_cols,
+                target_cols=target_cols,
+                weights=weights,
+                proportion=neutralization_proportion,
+                data=self._config.data,
+                deploy_checkpoint_dir=(run_dir / "validation_fit_checkpoints"),
+                checkpoint_kind=_VALIDATION_FIT_CHECKPOINT_KIND,
+                fit_device=full_history_fit_device,
                 data_fingerprint=self._data_fingerprint,
                 environment=self._environment,
             )
@@ -470,11 +497,7 @@ class ExperimentRunner:
                     predict_fn=pipeline[0],
                     feature_cols=feature_cols,
                     validation_checkpoint_dir=(run_dir / "validation_checkpoints"),
-                    checkpoint_device=(
-                        str(model_orchestrator.resolved_device)
-                        if model_orchestrator.resolved_device is not None
-                        else None
-                    ),
+                    checkpoint_device=full_history_fit_device,
                     data_fingerprint=self._data_fingerprint,
                     environment=self._environment,
                 )
@@ -499,6 +522,7 @@ class ExperimentRunner:
             "run_id": self._run_id,
             "config": _to_jsonable(dataclasses.asdict(self._config)),
             "data_version": self._config.data.version,
+            "workflow": self._config.run.workflow,
             "seed": self._config.run.seed,
             "feature_cols": list(feature_cols),
             "pred_cols": pred_cols,
@@ -509,14 +533,20 @@ class ExperimentRunner:
             # Rebuild identity (spec §3.1): data_fingerprint is the SAME value
             # hashed into the run_id (computed once in __init__); code
             # fingerprint/environment are the portable helpers (no paths);
-            # pipeline_device is the config knob, oof_device the actual fit
-            # device (post-fit resolved_device, config fallback).
+            # pipeline_device is the CV config knob, oof_device the actual CV
+            # fit device, and the full-history roles are recorded separately.
             "data_fingerprint": self._data_fingerprint,
             "promotion_data_fingerprint": self._promotion_data_fingerprint,
             "code_fingerprint": _compute_code_fingerprint(),
             "environment": self._environment,
             "pipeline_device": str(self._config.model.device),
             "oof_device": oof_device,
+            "validation_fit_device": (
+                full_history_fit_device
+                if self._config.evaluation.validation_scorecard
+                else None
+            ),
+            "deploy_fit_device": full_history_fit_device if deploy else None,
             "trained_at": datetime.now(UTC).isoformat(),
             # Present for every run whose validation/deploy closure ends with
             # the per-era (0,1) tie_kept_rank step. Absent in pre-fix legacy
@@ -843,8 +873,10 @@ def _build_deploy_pipeline(
     include_validation: bool = False,
     data_fingerprint: str | None = None,
     environment: str | None = None,
+    checkpoint_kind: str = _DEPLOY_CHECKPOINT_KIND,
+    fit_device: str = "cpu",
 ) -> tuple[Callable[[pd.DataFrame], pd.DataFrame], dict[str, object]]:
-    """Train per-target full-history models ONCE and return (predict, model_meta).
+    """Train per-target full-history models once and return (predict, model_meta).
 
     Module-level so the promotion writer (nmr/promote.py) shares the exact
     closure construction with the runner — no second copy of the riskiest
@@ -858,6 +890,11 @@ def _build_deploy_pipeline(
     when ``"train_only"`` (fit-phase isolation). The runner passes the
     default False — its deploy artifact trains on the train frame it passes.
 
+    ``fit_device`` is explicit. ``cpu`` is the deployment-safe default;
+    ``gpu`` is for research-only validation fits. ``deploy_checkpoint_dir``
+    uses the CPU-only ``deploy_checkpoints`` contract, while validation-only
+    callers use ``validation_fit_checkpoints``.
+
     With ``deploy_checkpoint_dir`` set (runner only; the promotion writer
     passes None), each fitted model is persisted with cloudpickle to
     ``<deploy_checkpoint_dir>/<target>.pkl`` (atomic write) and replayed on
@@ -869,11 +906,25 @@ def _build_deploy_pipeline(
     terms (``target_col`` + the canonical feature-list fingerprint) — a
     pickled model copied from another target (or fitted on another feature
     list) refuses resume instead of being silently reused. The recorded device
-    is the orchestrator's post-fit ``resolved_device`` at the FIRST fitted
-    target (deploy fits are CPU-only).
+    is the requested full-history fit device after exact
+    checkpoint verification.
     """
-    logger.info("[build_deploy_pipeline] training full-history models (CPU-only)")
+    if fit_device not in ("cpu", "gpu"):
+        raise ValueError(f"fit_device={fit_device!r} must be 'cpu' or 'gpu'")
+    if checkpoint_kind == _DEPLOY_CHECKPOINT_KIND and fit_device != "cpu":
+        raise ValueError(
+            "deploy_checkpoints require fit_device='cpu'; use "
+            "validation_fit_checkpoints for research GPU fits"
+        )
+    logger.info(
+        "[build_deploy_pipeline] training full-history models (device=%s)",
+        fit_device,
+    )
     trained: dict[str, object] = {}
+    orchestrator.resolved_device = fit_device
+    checkpoint_label = (
+        "deploy" if checkpoint_kind == _DEPLOY_CHECKPOINT_KIND else "validation fit"
+    )
     deploy_root = (
         Path(deploy_checkpoint_dir) if deploy_checkpoint_dir is not None else None
     )
@@ -886,9 +937,9 @@ def _build_deploy_pipeline(
             for pkl in sorted(deploy_root.glob("*.pkl")):
                 if not (deploy_root / f"{pkl.stem}.manifest.json").is_file():
                     raise ValueError(
-                        f"deploy_checkpoints tree has {pkl.name} but no "
+                        f"{checkpoint_kind} tree has {pkl.name} but no "
                         f"manifest.json ({deploy_root / (pkl.stem + '.manifest.json')}) "
-                        f"— inconsistent state. Delete the deploy_checkpoints "
+                        f"— inconsistent state. Delete the {checkpoint_kind} "
                         f"directory to force a full refit."
                     )
     for target in target_cols:
@@ -899,19 +950,16 @@ def _build_deploy_pipeline(
         if pkl_path is not None and pkl_path.exists():
             if per_target_manifest is None or not per_target_manifest.is_file():
                 raise ValueError(
-                    f"deploy checkpoint {pkl_path} has no manifest.json "
+                    f"{checkpoint_kind} checkpoint {pkl_path} has no manifest.json "
                     f"(identity binding) — refusing to load it. Delete the "
-                    f"deploy_checkpoints directory to force a full refit."
+                    f"{checkpoint_kind} directory to force a full refit."
                 )
-            # current_device=None: the orchestrator's resolved_device at this
-            # point belongs to the CV stage — a different identity. The deploy
-            # manifest records the deploy fit's device (CPU-only), which is
-            # exact-checked post-fit at the first fitted target below; the
-            # schema check here still rejects unknown stored devices.
+            # The full-history device is a separate identity from the CV
+            # device, so verify it explicitly when loading a checkpoint.
             verify_checkpoint_manifest(
                 per_target_manifest,
-                None,
-                checkpoint_kind="deploy_checkpoints",
+                fit_device,
+                checkpoint_kind=checkpoint_kind,
                 data_fingerprint=data_fingerprint,
                 environment=environment,
                 target_col=target,
@@ -921,11 +969,12 @@ def _build_deploy_pipeline(
                 trained[target] = cloudpickle.loads(pkl_path.read_bytes())
             except Exception as exc:
                 raise ValueError(
-                    f"corrupt deploy checkpoint {pkl_path}: {exc}"
+                    f"corrupt {checkpoint_label} checkpoint {pkl_path}: {exc}"
                 ) from exc
             logger.info(
-                "[build_deploy_pipeline] %s: loaded deploy checkpoint %s",
+                "[build_deploy_pipeline] %s: loaded %s checkpoint %s",
                 target,
+                checkpoint_kind,
                 pkl_path,
             )
             continue
@@ -936,6 +985,7 @@ def _build_deploy_pipeline(
             era_col="era",
             data=data,
             include_validation=include_validation,
+            fit_device=fit_device,
         )
         if pkl_path is not None:
             # PINNED DECISION (mirrors the OOF path): the authoritative exact
@@ -944,11 +994,16 @@ def _build_deploy_pipeline(
             # (e.g. a crash between the two writes below, or an edited device)
             # is verified before the new manifest/pkl are written.
             resolved_device = str(orchestrator.resolved_device)
+            if resolved_device != fit_device:
+                raise RuntimeError(
+                    f"full-history fit resolved to {resolved_device!r}, "
+                    f"requested {fit_device!r}"
+                )
             if per_target_manifest is not None and per_target_manifest.exists():
                 verify_checkpoint_manifest(
                     per_target_manifest,
                     resolved_device,
-                    checkpoint_kind="deploy_checkpoints",
+                    checkpoint_kind=checkpoint_kind,
                     data_fingerprint=data_fingerprint,
                     environment=environment,
                     target_col=target,

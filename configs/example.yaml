@@ -8,6 +8,7 @@ run:
   seed: 42
   artifacts_dir: artifacts     # shared machine cache root (cache/reports/campaigns);
                                # run/export outputs derive from EXPERIMENTS_ROOT
+  workflow: standard      # standard | gpu_screen | cpu_confirm
 
 data:
   version: v5.3
@@ -27,6 +28,8 @@ model:
   backend: lightgbm         # lightgbm | xgboost | catboost
   preset: fast              # fast | standard | deep
   device: auto              # auto (GPU-first, CPU fallback) | gpu (forced; failures raise) | cpu (never GPU)
+  validation_fit_device: cpu # full-history validation fit: cpu | gpu (research only)
+  deploy_fit_device: cpu     # deployment full-history fit: cpu only
   params: {}                # explicit overrides on top of the preset
 
 evaluation:

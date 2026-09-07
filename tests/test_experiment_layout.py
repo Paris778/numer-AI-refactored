@@ -138,8 +138,8 @@ def test_runner_outputs_under_experiment(tmp_path, monkeypatch) -> None:
     # manifest sits next to its folds, the deploy manifests next to their pkls,
     # the validation manifest stays at the root.
     assert (run_dir / "oof_checkpoints" / "target" / "manifest.json").is_file()
-    assert (run_dir / "deploy_checkpoints" / "target.manifest.json").is_file()
     assert (run_dir / "validation_checkpoints" / "manifest.json").is_file()
+    assert (run_dir / "deploy_checkpoints" / "target.manifest.json").is_file()
     assert (run_dir / "predict.pkl").is_file()
     assert (run_dir / "predict.pkl.manifest.json").is_file()
     # Mid-plan compat: the runner records no run.json — the scripts do (Task 11).
@@ -154,6 +154,8 @@ def test_run_manifest_persists_rebuild_identity(tmp_path, monkeypatch) -> None:
     cfg = _config(tmp_path)
     result = ExperimentRunner(cfg).run(deploy=False)
     manifest = result.manifest
+    run_dir = paths.run_dir(cfg.run.name, result.run_id)
+    assert (run_dir / "validation_fit_checkpoints" / "target.manifest.json").is_file()
 
     for field in (
         "data_fingerprint",
@@ -172,9 +174,12 @@ def test_run_manifest_persists_rebuild_identity(tmp_path, monkeypatch) -> None:
     # code_fingerprint is the portable full-package hash (matches run-id term).
     assert manifest["code_fingerprint"] == _compute_code_fingerprint()
     assert len(manifest["code_fingerprint"]) == 64
-    # pipeline_device is the config knob; oof_device the actual fit device.
+    # pipeline_device is the config knob; oof_device is the actual CV fit
+    # device, which may be GPU when auto resolution finds CUDA.
     assert manifest["pipeline_device"] == str(cfg.model.device)
-    assert manifest["oof_device"] == "cpu"
+    assert manifest["oof_device"] in {"cpu", "gpu"}
+    assert manifest["validation_fit_device"] == cfg.model.validation_fit_device
+    assert manifest["deploy_fit_device"] is None
     # environment is a normalized name==version list — no paths.
     assert "numpy==" in manifest["environment"]
     assert "cloudpickle==" in manifest["environment"]

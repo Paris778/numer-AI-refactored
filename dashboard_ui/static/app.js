@@ -369,7 +369,7 @@
     return valueText(row, "corr_sharpe_ac") + " [" + fmt(low, false) + "&#8211;" + fmt(high, false) + "]";
   }
 
-  var typeLabels = {null: "Null", ridge: "Ridge", benchmark: "Bench", heuristic: "Heuristic", ensemble: "Ensemble", lgbm: "LGBM", xgb: "XGB", catboost: "CatBoost", trained: "Trained", full: "Full", partial: "Partial"};
+  var typeLabels = {null: "Null", ridge: "Ridge", benchmark: "Bench", heuristic: "Heuristic", sklearn: "sklearn", ensemble: "Ensemble", lgbm: "LGBM", xgb: "XGB", catboost: "CatBoost", trained: "Trained", full: "Full", partial: "Partial"};
 
   function typeLabel(type) {
     return typeLabels[type] || "Trained";

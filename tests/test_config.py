@@ -158,6 +158,52 @@ def test_model_config_device_validation() -> None:
     assert ModelConfig().device == "auto"
 
 
+def test_full_history_fit_device_policy() -> None:
+    assert ModelConfig().validation_fit_device == "cpu"
+    assert ModelConfig().deploy_fit_device == "cpu"
+    assert ModelConfig(validation_fit_device="gpu").validation_fit_device == "gpu"
+    with pytest.raises(ValueError, match="validation_fit_device"):
+        ModelConfig(validation_fit_device="auto")
+    with pytest.raises(ValueError, match="deploy_fit_device"):
+        ModelConfig(deploy_fit_device="gpu")
+    with pytest.raises(ValueError, match="CatBoost is CPU-only"):
+        ModelConfig(backend="catboost", validation_fit_device="gpu")
+
+
+def test_workflow_phase_contracts() -> None:
+    from nmr.config import config_from_dict
+
+    base = _cfg_dict(
+        data={"horizon": "60D", "targets": ["target_ender_60"]},
+        split={"purge_eras": 16},
+    )
+    base["model"] = {
+        "backend": "xgboost",
+        "device": "gpu",
+        "validation_fit_device": "gpu",
+    }
+    base["evaluation"] = {
+        "main_target": "target_ender_60",
+        "validation_scorecard": False,
+        "metrics": ["corr", "fnc", "sharpe"],
+    }
+    base["run"] = {"workflow": "gpu_screen"}
+    screen = config_from_dict(base)
+    assert screen.run.workflow == "gpu_screen"
+
+    base["run"] = {"workflow": "cpu_confirm"}
+    base["model"]["validation_fit_device"] = "cpu"
+    base["evaluation"]["validation_scorecard"] = True
+    base["evaluation"]["metrics"] = ["corr", "mmc", "fnc", "sharpe"]
+    confirm = config_from_dict(base)
+    assert confirm.run.workflow == "cpu_confirm"
+
+    base["evaluation"]["validation_scorecard"] = True
+    with pytest.raises(ValueError, match="gpu_screen"):
+        base["run"] = {"workflow": "gpu_screen"}
+        config_from_dict(base)
+
+
 def test_eval_metrics_rejects_unknown_names() -> None:
     with pytest.raises(ValueError, match="metrics"):
         EvalConfig(
@@ -333,6 +379,8 @@ def test_gpu_xgboost_campaign_configs_are_gate_aligned(
     assert cfg.split.n_folds in (2, 4)
     assert cfg.model.backend == "xgboost"
     assert cfg.model.device == "gpu"
+    assert cfg.model.validation_fit_device == "gpu"
+    assert cfg.model.deploy_fit_device == "cpu"
     assert cfg.model.preset == expected_preset
     assert cfg.model.params["n_estimators"] == expected_estimators
     assert cfg.model.params["colsample_bytree"] == 0.25
@@ -340,3 +388,42 @@ def test_gpu_xgboost_campaign_configs_are_gate_aligned(
     assert cfg.evaluation.main_target == "target_ender_60"
     assert cfg.evaluation.validation_scorecard is True
     assert cfg.evaluation.payout_policy == "classic_atomic_ender60_r1343_v1"
+
+
+@pytest.mark.parametrize(
+    ("screen_name", "confirm_name"),
+    [
+        (
+            "xgb-gpu-screen-ender60.yaml",
+            "xgb-cpu-confirm-ender60.yaml",
+        ),
+        (
+            "xgb-gpu-screen-60d-ensemble.yaml",
+            "xgb-cpu-confirm-60d-ensemble.yaml",
+        ),
+    ],
+)
+def test_gpu_screen_and_cpu_confirmation_configs_form_pairs(
+    screen_name: str, confirm_name: str
+) -> None:
+    screen = load_config(REPO_ROOT / "configs" / screen_name)
+    confirm = load_config(REPO_ROOT / "configs" / confirm_name)
+
+    assert screen.data == confirm.data
+    assert screen.split == confirm.split
+    assert screen.model.backend == confirm.model.backend
+    assert screen.model.preset == confirm.model.preset
+    assert screen.model.params == confirm.model.params
+    assert screen.evaluation.backend == confirm.evaluation.backend
+    assert screen.evaluation.main_target == confirm.evaluation.main_target
+    assert screen.evaluation.payout_policy == confirm.evaluation.payout_policy
+    assert screen.ensemble == confirm.ensemble
+    assert screen.risk == confirm.risk
+    assert screen.run.workflow == "gpu_screen"
+    assert confirm.run.workflow == "cpu_confirm"
+    assert screen.model.device == confirm.model.device == "gpu"
+    assert screen.evaluation.validation_scorecard is False
+    assert confirm.evaluation.validation_scorecard is True
+    assert screen.model.validation_fit_device == "gpu"
+    assert confirm.model.validation_fit_device == "cpu"
+    assert screen.model.deploy_fit_device == confirm.model.deploy_fit_device == "cpu"

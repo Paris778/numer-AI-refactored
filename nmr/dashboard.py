@@ -49,6 +49,7 @@ __all__ = [
     "extract_multimetric_timeseries",
     "extract_pairwise_similarity_matrix",
     "load_benchmark_frame",
+    "load_sklearn_frame",
     "load_unified_leaderboard",
     "load_model_detail",
     "model_description",
@@ -264,6 +265,8 @@ def dashboard_cohort(row: Mapping[str, Any]) -> str:
         return "full"
     if source == "partial":
         return "partial"
+    if source == "sklearn":
+        return "sklearn"
     if source == "benchmark":
         if str(row.get("model_id") or "") in _HEURISTIC_BENCHMARK_IDS:
             return "heuristic"
@@ -325,6 +328,8 @@ def row_type_labels(row: Mapping[str, Any]) -> list[str]:
         return ["full"]
     if source == "partial":
         return ["partial"]
+    if source == "sklearn":
+        return ["sklearn"]
     if source == "benchmark":
         cohort = dashboard_cohort(row)  # "benchmark" (tiers 3-4) | "heuristic"
         kinds = _BENCHMARK_KINDS_BY_ID.get(str(row.get("model_id") or ""))
@@ -466,6 +471,8 @@ def model_description(row: Mapping[str, Any]) -> str | None:
         return curated if curated else _generic_benchmark_description(row)
     if source in ("trained", "trained_legacy"):
         return _trained_description(row)
+    if source == "sklearn":
+        return "Research-only sklearn."
     if source == "full":
         return (
             "Full-lineage (in-sample) export of the trained model — diagnostic "
@@ -843,6 +850,8 @@ _DETAIL_PROVENANCE_FIELDS = (
     "seed",
     "pipeline_device",
     "oof_device",
+    "validation_fit_device",
+    "deploy_fit_device",
     "timestamp",
 )
 _ROW_FIELDS = (
@@ -926,6 +935,8 @@ def _detail_provenance(manifest: Mapping[str, Any]) -> dict[str, Any]:
         "seed": run.get("seed"),
         "pipeline_device": manifest.get("pipeline_device"),
         "oof_device": manifest.get("oof_device"),
+        "validation_fit_device": manifest.get("validation_fit_device"),
+        "deploy_fit_device": manifest.get("deploy_fit_device"),
         "timestamp": next(
             (
                 manifest.get(key)
@@ -1019,6 +1030,8 @@ def load_model_detail(row: Mapping[str, Any]) -> dict[str, Any]:
         )
         if source == "benchmark":
             detail["reason"] = "benchmark_csv_projection"
+        elif source == "sklearn":
+            detail["reason"] = "sklearn_report_projection"
         elif source != "full":
             detail["reason"] = "source_metadata_unavailable"
     if manifest is not None:
@@ -1092,9 +1105,51 @@ def build_tournament_payload(
                 "has_regime": row.get("has_regime"),
             },
         }
+        if row.get("source") == "sklearn":
+            for field in (
+                "description",
+                "family",
+                "feature_set",
+                "targets",
+                "preset",
+                "backend",
+                "cvar5",
+                "max_drawdown",
+                "burn_rate",
+                "mmc_sharpe_ac",
+                "gain_to_pain_ratio",
+                "cagr_1y",
+                "capital_metrics_reason",
+            ):
+                item[field] = None
         item = _compact_json_value(item)
         rows.append(item)
         model_ids.append(model_id)
+        if row.get("source") == "sklearn":
+            details.append([[], [], None, None])
+            rank_values.append(
+                [
+                    rank_map.get(model_id, {}).get(spec.name)
+                    for spec in DASHBOARD_METRICS
+                ]
+            )
+            corr = _finite_metric_value(row, "corr")
+            mmc = _finite_metric_value(row, "mmc")
+            if (
+                corr is not None
+                and mmc is not None
+                and cohort not in ("full", "partial")
+            ):
+                landscape.append(
+                    {
+                        "model_id": model_id,
+                        "cohort": cohort,
+                        "corr": corr,
+                        "mmc": mmc,
+                        "champion": champion,
+                    }
+                )
+            continue
         detail = load_model_detail(row)
         details.append(
             [
@@ -1163,7 +1218,7 @@ def build_tournament_payload(
             }
             for spec in DASHBOARD_METRICS
         ],
-        "cohorts": ["all", "trained", "heuristic", "benchmark"],
+        "cohorts": ["all", "trained", "sklearn", "heuristic", "benchmark"],
         "model_ids": model_ids,
         "row_fields": list(_ROW_FIELDS),
         "rows": [[row.get(field) for field in _ROW_FIELDS] for row in rows],
@@ -1383,6 +1438,281 @@ def load_benchmark_frame(benchmark_path: Path) -> pl.DataFrame:
                 "run_dir": str(path),
             }
         )
+    return pl.DataFrame(rows, schema=UNIFIED_SCHEMA, strict=False)
+
+
+_SKLEARN_REPORT_NAMES = (
+    "sklearn_breadth_final.csv",
+    "sklearn_hgb_hpo_confirmation.csv",
+    "sklearn_voting_hpo_confirmation.csv",
+)
+
+
+def resolve_sklearn_paths(
+    sklearn_reports: Path | None | bool = None,
+    reports_dir: Path | None = None,
+) -> tuple[Path, ...]:
+    """Resolve sklearn research reports without mixing them into benchmarks."""
+    if sklearn_reports is False:
+        return ()
+    root_or_file = Path(sklearn_reports) if sklearn_reports is not None else None
+    if root_or_file is not None and root_or_file.is_file():
+        return (root_or_file,)
+    root = root_or_file or (
+        Path(reports_dir) if reports_dir is not None else REPORTS_DIR
+    )
+    return tuple(
+        candidate
+        for candidate in (root / name for name in _SKLEARN_REPORT_NAMES)
+        if candidate.is_file()
+    )
+
+
+def _csv_float(row: Mapping[str, Any], key: str) -> float | None:
+    value = row.get(key)
+    if value is None or value == "":
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if np.isfinite(result) else None
+
+
+def _csv_int(row: Mapping[str, Any], key: str) -> int | None:
+    value = _csv_float(row, key)
+    return None if value is None else int(value)
+
+
+def _sklearn_row(
+    *,
+    model_id: str,
+    run_name: str,
+    display_name: str,
+    backend: str,
+    preset: str,
+    source_path: Path,
+    corr: float | None,
+    corr_std: float | None,
+    fnc: float | None,
+    n_eras: int | None,
+    target: str,
+    payout_metrics: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    payout = payout_metrics or {}
+    row = dict.fromkeys(UNIFIED_SCHEMA.names())
+    row.update(
+        {
+            "model_id": model_id,
+            "source": "sklearn",
+            "run_name": run_name,
+            "family": "sklearn",
+            "display_name": display_name,
+            "training_scope": "research",
+            "has_full_version": False,
+            "backend": backend,
+            "preset": preset,
+            "feature_set": "medium",
+            "feature_subset": None,
+            "n_targets": 1,
+            "targets": target,
+            "payout_policy_id": payout.get("payout_policy_id"),
+            "scoring_target": payout.get("scoring_target") or target,
+            "scoring_horizon": payout.get("scoring_horizon"),
+            "corr": corr,
+            "corr_n_eras": n_eras,
+            "std_corr": corr_std,
+            "fnc": fnc,
+            "n_eras": n_eras,
+            "mean_payout": payout.get("mean_payout"),
+            "mean_payout_ci_low": payout.get("mean_payout_ci_low"),
+            "mean_payout_ci_high": payout.get("mean_payout_ci_high"),
+            "mean_payout_n_eras": payout.get("mean_payout_n_eras"),
+            "cvar5": payout.get("cvar5"),
+            "max_drawdown": payout.get("max_drawdown"),
+            "burn_rate": payout.get("burn_rate"),
+            "mmc_sharpe_ac": payout.get("mmc_sharpe_ac"),
+            "gain_to_pain_ratio": payout.get("gain_to_pain_ratio"),
+            "cagr_1y": payout.get("cagr_1y"),
+            "capital_metrics_reason": payout.get("capital_metrics_reason"),
+            "max_feature_exposure_reason": "research_report_unavailable",
+            "has_bmc": False,
+            "has_horizon": False,
+            "has_perturb": False,
+            "has_regime": False,
+            "run_dir": str(source_path),
+        }
+    )
+    identity_fields = {
+        "model_id",
+        "source",
+        "run_name",
+        "family",
+        "display_name",
+        "backend",
+        "preset",
+        "feature_set",
+        "feature_subset",
+        "targets",
+    }
+    for field, value in payout.items():
+        if (
+            field in UNIFIED_SCHEMA
+            and field not in identity_fields
+            and value is not None
+        ):
+            row[field] = value
+    if payout.get("max_feature_exposure") is not None:
+        row["max_feature_exposure_reason"] = "scorecard_evaluation"
+    if payout.get("bmc") is not None:
+        row["has_bmc"] = True
+    if any(
+        payout.get(field) is not None
+        for field in ("horizon_n_eras", "horizon_model_sharpe_20")
+    ):
+        row["has_horizon"] = True
+    return row
+
+
+def load_sklearn_frame(
+    sklearn_reports: Path | None | bool = None,
+    *,
+    reports_dir: Path | None = None,
+    include_breadth: bool = True,
+) -> pl.DataFrame:
+    """Project breadth/HPO sklearn reports into a research-only dashboard cohort.
+
+    HPO confirmation rows carry canonical Atomic payout-per-era fields when the
+    confirmation report includes them. Breadth rows remain CORR/FNC-only. All
+    rows stay research-only and never participate in capital gates.
+    """
+    paths_by_name = {
+        path.name: path for path in resolve_sklearn_paths(sklearn_reports, reports_dir)
+    }
+    rows: list[dict[str, Any]] = []
+
+    for filename, backend, label in (
+        (
+            "sklearn_hgb_hpo_confirmation.csv",
+            "sklearn_hgb",
+            "Tuned HGB · Bayesian",
+        ),
+        (
+            "sklearn_voting_hpo_confirmation.csv",
+            "sklearn_voting",
+            "Tuned Ridge + HGB · Bayesian",
+        ),
+    ):
+        path = paths_by_name.get(filename)
+        if path is None:
+            continue
+        for raw in pl.read_csv(path).to_dicts():
+            if str(raw.get("status") or "") != "completed":
+                continue
+            payout_metrics: dict[str, Any] = {}
+            for field, dtype in UNIFIED_SCHEMA.items():
+                if field not in raw:
+                    continue
+                if dtype == pl.String:
+                    payout_metrics[field] = raw.get(field) or None
+                elif dtype == pl.Boolean:
+                    value = raw.get(field)
+                    payout_metrics[field] = (
+                        None
+                        if value in (None, "")
+                        else str(value).strip().lower() == "true"
+                    )
+                elif dtype == pl.Int64:
+                    payout_metrics[field] = _csv_int(raw, field)
+                else:
+                    payout_metrics[field] = _csv_float(raw, field)
+            scorecard_corr = payout_metrics.get("corr")
+            scorecard_fnc = payout_metrics.get("fnc")
+            scorecard_n_eras = payout_metrics.get("n_eras")
+            rows.append(
+                _sklearn_row(
+                    model_id=f"sklearn::hpo::{filename.split('_hpo_')[0].replace('sklearn_', '')}",
+                    run_name=label,
+                    display_name=label,
+                    backend=backend,
+                    preset="HPO",
+                    source_path=path,
+                    corr=(
+                        scorecard_corr
+                        if scorecard_corr is not None
+                        else _csv_float(raw, "full_corr_mean")
+                    ),
+                    corr_std=payout_metrics.get("std_corr"),
+                    fnc=(
+                        scorecard_fnc
+                        if scorecard_fnc is not None
+                        else _csv_float(raw, "full_fnc_mean")
+                    ),
+                    n_eras=(
+                        scorecard_n_eras
+                        if scorecard_n_eras is not None
+                        else _csv_int(raw, "full_n_eras")
+                    ),
+                    target=str(raw.get("target_col") or "target"),
+                    payout_metrics=payout_metrics,
+                )
+            )
+
+    breadth_path = paths_by_name.get("sklearn_breadth_final.csv")
+    if include_breadth and breadth_path is not None:
+        breadth = pl.read_csv(breadth_path).to_dicts()
+        screen_path = breadth_path.with_name("sklearn_breadth_screen.csv")
+        screen_by_method = (
+            {str(raw.get("method")): raw for raw in pl.read_csv(screen_path).to_dicts()}
+            if screen_path.is_file()
+            else {}
+        )
+        full_path = Path(breadth_path).with_name("sklearn_breadth_full_confirm.csv")
+        full_by_method = (
+            {str(raw.get("method")): raw for raw in pl.read_csv(full_path).to_dicts()}
+            if full_path.is_file()
+            else {}
+        )
+        for raw in breadth:
+            method = str(raw.get("method") or "unknown")
+            confirmed = full_by_method.get(method, {})
+            is_confirmed = str(confirmed.get("status") or "") == "completed"
+            screen = screen_by_method.get(method, {})
+            corr = _csv_float(
+                confirmed if is_confirmed else raw,
+                "corr_mean" if is_confirmed else "screen_corr_mean",
+            )
+            corr_std = _csv_float(
+                confirmed if is_confirmed else screen,
+                "corr_std",
+            )
+            fnc = _csv_float(confirmed, "fnc_mean") if is_confirmed else None
+            n_eras = _csv_int(
+                confirmed if is_confirmed else screen,
+                "corr_n_eras",
+            )
+            status = str(
+                confirmed.get("status") or raw.get("screen_status") or "unknown"
+            )
+            suffix = " · full confirmation" if is_confirmed else f" · {status}"
+            rows.append(
+                _sklearn_row(
+                    model_id=f"sklearn::breadth::{method}",
+                    run_name=f"Breadth · {method}",
+                    display_name=f"sklearn · {method}{suffix}",
+                    backend=f"sklearn_{method}",
+                    preset="full_confirmation" if is_confirmed else "breadth_screen",
+                    source_path=breadth_path,
+                    corr=corr,
+                    corr_std=corr_std,
+                    fnc=fnc,
+                    n_eras=n_eras,
+                    target="target",
+                )
+            )
+
+    if not rows:
+        return pl.DataFrame(schema=UNIFIED_SCHEMA)
     return pl.DataFrame(rows, schema=UNIFIED_SCHEMA, strict=False)
 
 
@@ -1667,6 +1997,8 @@ def load_unified_leaderboard(
     benchmark_path: Path | None | bool = None,
     reports_dir: Path | None = None,
     models_dir: Path | None = None,
+    sklearn_reports: Path | None | bool = None,
+    include_sklearn_breadth: bool = False,
 ) -> pl.DataFrame:
     """Load run records and (optionally) benchmark rows into one frame.
 
@@ -1742,6 +2074,23 @@ def load_unified_leaderboard(
     resolved = resolve_benchmark_path(benchmark_path, reports_dir=reports_dir)
     if resolved is not None:
         rows.extend(load_benchmark_frame(resolved).to_dicts())
+
+    # Keep custom/test registry roots isolated from the repository's generated
+    # research reports. The production dashboard uses the default experiments
+    # root, or callers can opt in explicitly with reports_dir/sklearn_reports.
+    should_load_sklearn = sklearn_reports is not False and (
+        sklearn_reports is not None
+        or reports_dir is not None
+        or experiments_root == paths.EXPERIMENTS_ROOT
+    )
+    if should_load_sklearn:
+        rows.extend(
+            load_sklearn_frame(
+                sklearn_reports,
+                reports_dir=reports_dir,
+                include_breadth=include_sklearn_breadth,
+            ).to_dicts()
+        )
 
     if not rows:
         return pl.DataFrame(schema=UNIFIED_SCHEMA)

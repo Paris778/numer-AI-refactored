@@ -26,6 +26,8 @@ model:
   backend: xgboost
   preset: standard
   device: gpu
+  validation_fit_device: gpu
+  deploy_fit_device: cpu
   params:
     n_estimators: 5000
     learning_rate: 0.004
