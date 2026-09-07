@@ -21,6 +21,7 @@ __all__ = [
     "resolve_small_feature_set",
     "feature_stability_screen",
     "select_stable_features",
+    "derive_feature_sets",
 ]
 
 
@@ -295,6 +296,63 @@ def select_stable_features(
         & (pl.col("n_eras") >= 2)
     )
     return sorted(kept.get_column("feature").to_list())
+
+
+DERIVED_FEATURE_SET_KEYS: tuple[str, ...] = (
+    "screen_stable",
+    "screen_nonlinear",
+    "screen_linear_or_nonlinear",
+    "screen_drift_filtered",
+)
+
+
+def derive_feature_sets(
+    screen: pl.DataFrame,
+    drift: pl.DataFrame,
+    *,
+    primary_target: str | None = None,
+) -> dict[str, list[str]]:
+    """Build the four screen-derived feature sets from train-only dumps.
+
+    Pure function of the screen and drift frames. Empty sets are valid.
+    Features without a drift row are kept (no evidence of drift).
+    """
+    if "target" not in screen.columns:
+        raise ValueError("screen missing required column: 'target'")
+    required_screen = {"feature", "stable", "nonlinear"}
+    missing_screen = required_screen - set(screen.columns)
+    if missing_screen:
+        raise ValueError(f"screen missing required columns: {sorted(missing_screen)}")
+    required_drift = {"feature", "drifted"}
+    missing_drift = required_drift - set(drift.columns)
+    if missing_drift:
+        raise ValueError(f"drift missing required columns: {sorted(missing_drift)}")
+
+    distinct_targets = screen.get_column("target").unique().to_list()
+    if not distinct_targets:
+        raise ValueError("screen has no target values")
+    if primary_target is not None:
+        primary = primary_target
+    elif "target" in distinct_targets:
+        primary = "target"
+    else:
+        primary = distinct_targets[0]
+    rows = screen.filter(pl.col("target") == primary)
+    stable = sorted(rows.filter(pl.col("stable")).get_column("feature").to_list())
+    nonlinear = sorted(
+        rows.filter((~pl.col("stable")) & pl.col("nonlinear"))
+        .get_column("feature")
+        .to_list()
+    )
+    lin_or_non = sorted(set(stable) | set(nonlinear))
+    drifted = set(drift.filter(pl.col("drifted")).get_column("feature").to_list())
+    derived = {
+        "screen_stable": stable,
+        "screen_nonlinear": nonlinear,
+        "screen_linear_or_nonlinear": lin_or_non,
+        "screen_drift_filtered": [f for f in lin_or_non if f not in drifted],
+    }
+    return {key: derived[key] for key in DERIVED_FEATURE_SET_KEYS}
 
 
 def _feature_target_pearson(features: np.ndarray, target: np.ndarray) -> np.ndarray:

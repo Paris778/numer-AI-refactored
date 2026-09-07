@@ -525,6 +525,11 @@ def bayesian_sweep(
         trials=trial_df,
         best_params=best.params if best is not None else {},
         best_value=float(best.value) if best is not None else float("nan"),
+        is_capital=False,
+        proxy_metric=metric,
+        proxy_split="held_out_80_20",
+        proxy_target=base_config.evaluation.main_target,
+        selection_bias=False,
     )
 
 

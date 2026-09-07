@@ -1051,6 +1051,28 @@ def test_validation_stage_uses_atomic_target_horizon_and_overlap(tmp_path) -> No
     assert result.scorecard.scoring_target == "target_ender_60"
     assert result.scorecard.scoring_horizon == "60D"
     assert result.manifest["validation_purge_dropped_first_eras"] == 16
+    provenance = result.manifest["estimand"]
+    assert provenance["trained_targets"] == ["target", "target_alt"]
+    assert provenance["ensemble_target"] == "target"
+    assert provenance["oof_metric_target"] == "target"
+    assert provenance["oof_horizon"] == "20D"
+    assert provenance["scoring_target"] == "target_ender_60"
+    assert provenance["scoring_horizon"] == "60D"
+    assert provenance["payout_policy_id"] == "classic_atomic_ender60_r1343_v1"
+    assert provenance["split_estimand"] is True
+
+
+def test_oof_only_run_records_estimand_without_payout_scoring(tmp_path) -> None:
+    result = ExperimentRunner(_config(tmp_path)).run(deploy=False)
+    provenance = result.manifest["estimand"]
+    assert provenance["trained_targets"] == ["target", "target_alt"]
+    assert provenance["ensemble_target"] == "target"
+    assert provenance["oof_metric_target"] == "target"
+    assert provenance["oof_horizon"] == "20D"
+    assert provenance["scoring_target"] is None
+    assert provenance["scoring_horizon"] is None
+    assert provenance["payout_policy_id"] == "classic_atomic_ender60_r1343_v1"
+    assert provenance["split_estimand"] is True
 
 
 def test_run_id_changes_when_data_changes(tmp_path) -> None:

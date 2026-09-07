@@ -2,6 +2,13 @@
 # reference_column = the gated capital line (thresholds are evidence-pinned
 # to its measured v5.3 values); reference_columns = additional official
 # Numerai benchmark columns scored as informational tier-4 rows (no gate).
+#
+# 2026-09-03 Atomic Ender-60 receipt (`artifacts/reports/benchmark_gate_report.csv`):
+#   corr=0.02927014311764319, corr_sharpe_ac=0.5358798441316628,
+#   fnc=0.02727794845999274, gain_to_pain_ratio=47.76278056274705
+# corr_min is a small haircut under measured CORR (same as the original pin).
+# corr_sharpe_ac_min is truncated measured AC-Sharpe. The 0.86 hurdle (2026-09-01)
+# sat *above* the official line and made the capital gate unsatisfiable.
 tier: 4
 reference_column: v53_lgbm_ender60
 reference_columns: [v53_lgbm_ender20]
@@ -10,6 +17,6 @@ gate:
   scoring_target: target_ender_60
   scoring_horizon: 60D
   corr_min: 0.0286
-  corr_sharpe_ac_min: 0.86
+  corr_sharpe_ac_min: 0.5358
   fnc_min: 0.020
   gain_to_pain_min: 1.50

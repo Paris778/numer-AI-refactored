@@ -89,9 +89,7 @@ def test_per_era_bmc_oracle_parity_on_real_v52() -> None:
             on=["era", "id"],
             how="inner",
         )
-        .filter(
-            pl.col("v53_lgbm_ender20").cast(pl.Float64, strict=False).is_not_null()
-        )
+        .filter(pl.col("v53_lgbm_ender20").cast(pl.Float64, strict=False).is_not_null())
     )
 
     eras = (
@@ -356,6 +354,14 @@ def test_public_api_includes_harness_symbols() -> None:
         "resolve_feature_sets",
         "feature_stability_screen",
         "select_stable_features",
+        "derive_feature_sets",
+        "PREDICTION_STAGES",
+        "PredictionProvenance",
+        "PredictionSet",
+        "prediction_set_from_frame",
+        "read_prediction_set",
+        "compose_predictions",
+        "evaluate_prediction_set",
         "PairedResult",
         "paired_era_comparison",
         "promotion_verdict",

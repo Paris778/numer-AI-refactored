@@ -55,9 +55,30 @@ def test_tier4_gate_thresholds() -> None:
     gate = spec.gate
     assert gate is not None
     assert gate.corr_min == 0.0286
-    assert gate.corr_sharpe_ac_min == 0.86
+    assert gate.corr_sharpe_ac_min == 0.5358
     assert gate.fnc_min == 0.020
     assert gate.gain_to_pain_min == 1.50
+
+
+# 2026-09-03 receipt for v53_lgbm_ender60 under classic_atomic_ender60_r1343_v1
+# (artifacts/reports/benchmark_gate_report.csv). The capital gate is unsatisfiable
+# if any hard threshold sits strictly above the official line it claims to pin to.
+_ENDER60_ATOMIC_RECEIPT = {
+    "corr": 0.02927014311764319,
+    "corr_sharpe_ac": 0.5358798441316628,
+    "fnc": 0.02727794845999274,
+    "gain_to_pain_ratio": 47.76278056274705,
+}
+
+
+def test_tier4_gate_does_not_exceed_official_line() -> None:
+    spec = load_benchmark_suite_config(BENCHMARK_CONFIG_DIR)
+    gate = spec.gate
+    assert gate is not None
+    assert gate.corr_min <= _ENDER60_ATOMIC_RECEIPT["corr"]
+    assert gate.corr_sharpe_ac_min <= _ENDER60_ATOMIC_RECEIPT["corr_sharpe_ac"]
+    assert gate.fnc_min <= _ENDER60_ATOMIC_RECEIPT["fnc"]
+    assert gate.gain_to_pain_min <= _ENDER60_ATOMIC_RECEIPT["gain_to_pain_ratio"]
 
 
 def test_unknown_keys_rejected(tmp_path: Path) -> None:

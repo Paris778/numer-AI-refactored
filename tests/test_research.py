@@ -104,6 +104,11 @@ def test_sweep_is_deterministic_and_held_out(tmp_path) -> None:
     assert first.trials.equals(second.trials)
     assert first.best_params == second.best_params
     assert first.best_value == second.best_value
+    assert first.is_capital is False
+    assert first.proxy_split == "held_out_80_20"
+    assert first.proxy_metric == "sharpe"
+    assert first.proxy_target == "target"
+    assert first.selection_bias is False
 
 
 def test_held_out_partition_enforces_purge_gap(tmp_path) -> None:
@@ -221,9 +226,9 @@ def test_held_out_metric_supports_corr_sharpe_ac(tmp_path, monkeypatch) -> None:
     value = _held_out_metric(cfg, metric_name="corr_sharpe_ac")
     series = np.asarray(list(captured["per_era"].values()), dtype=float)
     assert np.isfinite(value)
-    assert value != 0.0            # real AC path ran, not the std==0 short-circuit
-    assert series.size >= 5        # 20D bandwidth floor: >= 5 held-out eras
-    assert np.std(series) > 0.0    # per-era corr genuinely varies
+    assert value != 0.0  # real AC path ran, not the std==0 short-circuit
+    assert series.size >= 5  # 20D bandwidth floor: >= 5 held-out eras
+    assert np.std(series) > 0.0  # per-era corr genuinely varies
 
 
 def test_held_out_metric_still_rejects_unknown_metric(tmp_path) -> None:

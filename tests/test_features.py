@@ -11,6 +11,7 @@ from nmr.data import IngestionAgent
 from nmr.features import (
     DEFAULT_MAX_ABS_DECAY,
     DEFAULT_MIN_MEAN_CORR,
+    derive_feature_sets,
     feature_stability_screen,
     resolve_feature_sets,
     resolve_small_feature_set,
@@ -289,3 +290,75 @@ def test_resolve_small_feature_set_raises_on_empty_intersection(tmp_path) -> Non
     _write_features(tmp_path, sets={"small": ["feature_a"]})
     with pytest.raises(ValueError, match="no overlap"):
         resolve_small_feature_set(tmp_path / "features.json", ["feature_zzz"])
+
+
+def _derive_screen() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "feature": ["z_stable", "a_nonlin", "m_both", "noise"],
+            "target": ["target", "target", "target", "target"],
+            "stable": [True, False, True, False],
+            "nonlinear": [False, True, True, False],
+        }
+    )
+
+
+def _derive_drift() -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "feature": ["m_both", "unrelated"],
+            "drifted": [True, True],
+        }
+    )
+
+
+def test_derive_feature_sets_four_keys_sorted() -> None:
+    sets = derive_feature_sets(_derive_screen(), _derive_drift())
+    assert set(sets) == {
+        "screen_stable",
+        "screen_nonlinear",
+        "screen_linear_or_nonlinear",
+        "screen_drift_filtered",
+    }
+    assert sets["screen_stable"] == ["m_both", "z_stable"]
+    assert sets["screen_nonlinear"] == ["a_nonlin"]
+    assert sets["screen_linear_or_nonlinear"] == ["a_nonlin", "m_both", "z_stable"]
+    # m_both drifted out; features without a drift row are kept
+    assert sets["screen_drift_filtered"] == ["a_nonlin", "z_stable"]
+
+
+def test_derive_feature_sets_empty_stable_is_valid() -> None:
+    screen = pl.DataFrame(
+        {
+            "feature": ["only_nonlin"],
+            "target": ["target"],
+            "stable": [False],
+            "nonlinear": [True],
+        }
+    )
+    drift = pl.DataFrame({"feature": ["x"], "drifted": [False]})
+    sets = derive_feature_sets(screen, drift)
+    assert sets["screen_stable"] == []
+    assert sets["screen_nonlinear"] == ["only_nonlin"]
+
+
+def test_derive_feature_sets_primary_fallback() -> None:
+    screen = pl.DataFrame(
+        {
+            "feature": ["f1", "f2"],
+            "target": ["other", "other"],
+            "stable": [True, False],
+            "nonlinear": [False, True],
+        }
+    )
+    drift = pl.DataFrame({"feature": ["f1"], "drifted": [False]})
+    sets = derive_feature_sets(screen, drift)
+    assert sets["screen_stable"] == ["f1"]
+    assert sets["screen_nonlinear"] == ["f2"]
+
+
+def test_derive_feature_sets_missing_target_column_raises() -> None:
+    screen = pl.DataFrame({"feature": ["f1"], "stable": [True], "nonlinear": [False]})
+    drift = pl.DataFrame({"feature": ["f1"], "drifted": [False]})
+    with pytest.raises(ValueError, match="target"):
+        derive_feature_sets(screen, drift)

@@ -131,12 +131,13 @@ When modifying or generating code, enforce these seven invariants:
 | lifecycle stages / export validity | `nmr/lifecycle.py` — `derive_stage` (total), `valid_export`/`scan_valid_exports`, `current_full_status`, `sort_exports`, `StakedRecord` (spec: `ARCHITECTURE.md` §Y) |
 | run persistence / atomic export publication | `nmr/experiment_store.py` — `record_run_result`/`record_run`/`read_run`, `stage_export`/`publish_staged_export` (spec: `ARCHITECTURE.md` §Z) |
 | data loading / feature sets | `nmr/data.py` — `IngestionAgent` (lazy Polars, `features.json`) |
-| feature-set resolution / stability screening | `nmr/features.py` — `resolve_feature_sets`, `feature_stability_screen`, `select_stable_features` (spec: `ARCHITECTURE.md` §P) |
+| feature-set resolution / stability screening | `nmr/features.py` — `resolve_feature_sets`, `feature_stability_screen`, `select_stable_features`, `derive_feature_sets` (spec: `ARCHITECTURE.md` §P) |
 | fold construction / purge math | `nmr/splitter.py` — `PurgedEraSplitter` |
 | Metric formula | `nmr/evaluation.py` + `nmr/_transforms.py`; update parity test in `tests/test_parity.py` |
 | neutralization / its cache | `nmr/risk.py` — `NeutralizationEngine` |
 | model backends / presets | `nmr/models.py` — `ModelOrchestrator`, `_CANONICAL_PRESETS` |
 | ensembling / weight learning | `nmr/ensemble.py` — `Ensembler` |
+| prediction artifacts / foreign parquet scoring | `nmr/predictions.py` — `PredictionSet`, `compose_predictions`, `evaluate_prediction_set` (spec: `ARCHITECTURE.md` Prediction artifacts) |
 | End-to-end pipeline | `nmr/runner.py` — `ExperimentRunner.run()` stage order |
 | cross-family comparison / champion pointer | `nmr/registry.py` — `RunRegistry` (iterates `experiments/*/runs/*/run.json`; atomic `champion.json` = `{run_id, experiment_slug, promoted_at}`) |
 | submission build/validation | `nmr/submission.py` |
@@ -152,7 +153,7 @@ When modifying or generating code, enforce these seven invariants:
 | Benchmark hierarchy (cells, gates, thresholds) | `nmr/benchmark.py` + `configs/benchmarks/` + `benchmark_runner.py` |
 | Untiered benchmark fleet (configs, generators, runner) | `nmr/benchmark_fleet.py` + `configs/benchmarks/fleet/` (spec: `docs/superpowers/specs/2026-08-19-benchmark-fleet-design.md`) |
 | sklearn breadth | `nmr/sklearn_breadth.py` + `sklearn_breadth_runner.py` |
-| Model Tournament dashboard engine + shared renderer | `nmr/dashboard.py` + `dashboard_ui/`; `generate_dashboard.py`/`dashboard_app.py` are thin hosts. Runs read from `experiments/`; exports via `nmr.lifecycle` — one `family::<scope>::<run_id>` row per VALID slot (carries `display_name`/`lifecycle_stage`/`current_full_status`/`stale`); full+partial rows are diagnostic-only (`EVALUABLE_ROWS` = trained + benchmark; partials carry cross-check cells). Payload rows carry `type_labels` (stacked cohort-tag + kind badges, `type_label` = primary) + `tier_label` badges + curated display names + a human `description` (spec: `ARCHITECTURE.md` §W). Ranking/cohorts/ML Advantage/detail payloads are deterministic and read-only; static report + Streamlit host share one vanilla renderer. |
+| Model Tournament dashboard engine + shared renderer | `nmr/dashboard.py` + `dashboard_ui/`; `generate_dashboard.py`/`dashboard_app.py` are thin hosts. Ranking/cohorts/ML Advantage/detail payloads are deterministic and read-only; static report + Streamlit host share one vanilla renderer (spec: `ARCHITECTURE.md` §W). |
 | model-family / full-version discovery | `nmr/families.py` — compat wrapper over `nmr/lifecycle` (spec: `ARCHITECTURE.md` Model Families section) |
 | Promote a run to a full/partial export (`train_only` → partial + cross-check `scorecard.json`; Model Uploads `predict.pkl`) | `nmr/promote.py` (`promote_full_version`, `rehearse_promotion`) + `promote_model.py` / `rehearse_promotion.py` CLIs; acceptance gate `nmr/submission.py::accept_promoted_artifact` |
 | campaign orchestration | `nmr/campaign.py` + `run_campaign.py` (spec: `ARCHITECTURE.md` §R) |

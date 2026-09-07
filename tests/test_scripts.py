@@ -10,6 +10,7 @@ import pytest
 import benchmark_runner
 import generate_dashboard
 import train_first_model  # noqa: F401  (import-time smoke)
+from dashboard_ui import app as dashboard_app
 from nmr import paths
 
 
@@ -44,11 +45,6 @@ def test_real_data_gate_import_surface() -> None:
     import scripts.real_data_gate as real_data_gate  # noqa: F401
 
     assert callable(real_data_gate.main)
-
-
-from dashboard_ui import (
-    app as dashboard_app,
-)  # noqa: E402  (lazy: streamlit is heavy at module load)
 
 
 def _registry_entry(run_id: str, *, scorecard: bool = True) -> dict:
@@ -454,3 +450,9 @@ def test_train_catboost_quick_import_surface() -> None:
     import train_catboost_quick  # noqa: F401  (import-time smoke)
 
     assert callable(train_catboost_quick.main)
+
+
+def test_train_catboost_ender60_import_surface() -> None:
+    import train_catboost_ender60  # noqa: F401  (import-time smoke)
+
+    assert callable(train_catboost_ender60.main)

@@ -57,6 +57,11 @@ class SweepResult:
     trials: pl.DataFrame
     best_params: dict[str, Any]
     best_value: float
+    is_capital: bool = False
+    proxy_metric: str | None = None
+    proxy_split: str = "held_out_80_20"
+    proxy_target: str | None = None
+    selection_bias: bool = False
 
 
 @dataclass(frozen=True)
@@ -120,7 +125,14 @@ class HyperparameterSweep:
         best_params = json.loads(best_row["params_json"])
         best_value = float(best_row["metric_value"])
         return SweepResult(
-            trials=trial_df, best_params=best_params, best_value=best_value
+            trials=trial_df,
+            best_params=best_params,
+            best_value=best_value,
+            is_capital=False,
+            proxy_metric=self._metric,
+            proxy_split="held_out_80_20",
+            proxy_target=self._base_config.evaluation.main_target,
+            selection_bias=False,
         )
 
 

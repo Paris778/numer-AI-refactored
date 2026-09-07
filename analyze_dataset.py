@@ -183,9 +183,7 @@ def _era_chunks(
     """
     frames = [agent.scan(split, columns=columns).collect() for split in splits]
     if max_eras is not None:
-        frames = [
-            f.filter(pl.col("era").cast(pl.Int64) <= max_eras) for f in frames
-        ]
+        frames = [f.filter(pl.col("era").cast(pl.Int64) <= max_eras) for f in frames]
     if not frames:
         raise ValueError("no split frames to analyze")
     combined = pl.concat(frames)
@@ -209,7 +207,9 @@ def _iter_era_chunks(
     """
     era_sets: list[set[str]] = []
     for split in splits:
-        labels = agent.scan(split, columns=["era"]).collect().get_column("era").to_list()
+        labels = (
+            agent.scan(split, columns=["era"]).collect().get_column("era").to_list()
+        )
         era_sets.append(set(labels))
     all_eras = sorted(set().union(*era_sets), key=int)
     if max_eras is not None:
@@ -335,9 +335,7 @@ def _stage_screens(ctx: _Ctx) -> None:
         )
         for t in ctx.target_columns
     ]
-    _atomic_write_parquet(
-        pl.concat(screens), ctx.out / "feature_ic_screen.parquet"
-    )
+    _atomic_write_parquet(pl.concat(screens), ctx.out / "feature_ic_screen.parquet")
 
 
 def _stage_screens_train(ctx: _Ctx) -> None:
@@ -373,7 +371,11 @@ def _stage_summary(ctx: _Ctx) -> None:
     _atomic_write_parquet(
         analysis.feature_summary(
             _iter_era_chunks(
-                ctx.agent, ctx.splits, feature_columns, ctx.args.max_eras, label="summary"
+                ctx.agent,
+                ctx.splits,
+                feature_columns,
+                ctx.args.max_eras,
+                label="summary",
             ),
             ctx.feature_cols,
         ),
@@ -385,11 +387,17 @@ def _stage_psi(ctx: _Ctx) -> None:
     _atomic_write_parquet(
         analysis.feature_drift_psi(
             _iter_era_chunks(
-                ctx.agent, ["train"], ["era", *ctx.medium_cols], ctx.args.max_eras,
+                ctx.agent,
+                ["train"],
+                ["era", *ctx.medium_cols],
+                ctx.args.max_eras,
                 label="psi:train",
             ),
             _iter_era_chunks(
-                ctx.agent, ["validation"], ["era", *ctx.medium_cols], ctx.args.max_eras,
+                ctx.agent,
+                ["validation"],
+                ["era", *ctx.medium_cols],
+                ctx.args.max_eras,
                 label="psi:val",
             ),
             ctx.medium_cols,
@@ -403,11 +411,17 @@ def _stage_drift(ctx: _Ctx) -> None:
     _atomic_write_parquet(
         analysis.feature_drift_profile(
             _iter_era_chunks(
-                ctx.agent, ["train"], ["era", *ctx.medium_cols], ctx.args.max_eras,
+                ctx.agent,
+                ["train"],
+                ["era", *ctx.medium_cols],
+                ctx.args.max_eras,
                 label="drift:train",
             ),
             _iter_era_chunks(
-                ctx.agent, ["validation"], ["era", *ctx.medium_cols], ctx.args.max_eras,
+                ctx.agent,
+                ["validation"],
+                ["era", *ctx.medium_cols],
+                ctx.args.max_eras,
                 label="drift:val",
             ),
             ctx.medium_cols,
@@ -448,34 +462,12 @@ def _stage_derived_sets(ctx: _Ctx) -> None:
             f"{drift_path} not found — run the 'drift' stage first "
             "(e.g. --only screens_train,drift,derived_sets)"
         )
+    from nmr.features import derive_feature_sets
+
     screen = pl.read_parquet(screen_path)
-    if "target" not in screen.columns:
-        raise RuntimeError(f"{screen_path}: missing 'target' column")
-    distinct_targets = screen["target"].unique().to_list()
-    primary = "target" if "target" in distinct_targets else distinct_targets[0]
-    rows = screen.filter(pl.col("target") == primary)
-    stable = sorted(rows.filter(pl.col("stable")).get_column("feature").to_list())
-    nonlinear = sorted(
-        rows.filter((~pl.col("stable")) & pl.col("nonlinear"))
-        .get_column("feature")
-        .to_list()
-    )
-    lin_or_non = sorted(set(stable) | set(nonlinear))
-    drifted = set(
-        pl.read_parquet(drift_path)
-        .filter(pl.col("drifted"))
-        .get_column("feature")
-        .to_list()
-    )
+    drift = pl.read_parquet(drift_path)
     _atomic_write_json(
-        {
-            "feature_sets": {
-                "screen_stable": stable,
-                "screen_nonlinear": nonlinear,
-                "screen_linear_or_nonlinear": lin_or_non,
-                "screen_drift_filtered": [f for f in lin_or_non if f not in drifted],
-            }
-        },
+        {"feature_sets": derive_feature_sets(screen, drift)},
         ctx.out / "derived_feature_sets.json",
     )
 
@@ -483,12 +475,17 @@ def _stage_derived_sets(ctx: _Ctx) -> None:
 def _stage_corr_medium(ctx: _Ctx) -> None:
     medium_result = analysis.feature_correlation_structure(
         _iter_era_chunks(
-            ctx.agent, ctx.splits, ["era", *ctx.medium_cols], ctx.args.max_eras,
+            ctx.agent,
+            ctx.splits,
+            ["era", *ctx.medium_cols],
+            ctx.args.max_eras,
             label="corr_medium",
         ),
         ctx.medium_cols,
     )
-    _atomic_write_parquet(medium_result.top_pairs, ctx.out / "feature_corr_medium.parquet")
+    _atomic_write_parquet(
+        medium_result.top_pairs, ctx.out / "feature_corr_medium.parquet"
+    )
     # full medium matrix (780 x 780 float32, ~2.4 MB) for downstream
     # covariance work; top-100 pairs stay in feature_corr_medium.parquet
     _atomic_write_parquet(
@@ -578,9 +575,8 @@ def _stage_benchmarks(ctx: _Ctx) -> None:
         target_side = ctx.agent.scan(
             "validation", columns=["era", "id", *ctx.target_columns]
         ).collect()
-        bench_frame = (
-            pl.concat([s.collect() for s in sources], how="align")
-            .join(target_side, on=["era", "id"], how="inner")
+        bench_frame = pl.concat([s.collect() for s in sources], how="align").join(
+            target_side, on=["era", "id"], how="inner"
         )
         excluded = {"era", "id", "data_type", *ctx.target_columns}
         bench_cols = [c for c in bench_frame.columns if c not in excluded]
@@ -592,9 +588,7 @@ def _stage_benchmarks(ctx: _Ctx) -> None:
             # each benchmark signal against the medium universe per era.
             bench_era_labels = list(bench_frame["era"].unique())
             bench_feats = bench_frame.join(
-                ctx.agent.scan(
-                    "validation", columns=["era", "id", *ctx.medium_cols]
-                )
+                ctx.agent.scan("validation", columns=["era", "id", *ctx.medium_cols])
                 .filter(pl.col("era").is_in(bench_era_labels))
                 .collect(),
                 on=["era", "id"],
@@ -630,9 +624,7 @@ def _stage_meta_ortho(ctx: _Ctx) -> None:
             joined = meta_frame.join(target_side, on=["era", "id"], how="inner")
             meta_eras = list(joined["era"].unique())
             feats = (
-                ctx.agent.scan(
-                    "validation", columns=["era", "id", *ctx.medium_cols]
-                )
+                ctx.agent.scan("validation", columns=["era", "id", *ctx.medium_cols])
                 .filter(pl.col("era").is_in(meta_eras))
                 .collect()
             )
@@ -710,7 +702,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     version_dir = args.data_dir / args.version
     features_path = version_dir / "features.json"
     if not features_path.exists():
-        print(f"ERROR: {features_path} missing — run refresh_data.py first", file=sys.stderr)
+        print(
+            f"ERROR: {features_path} missing — run refresh_data.py first",
+            file=sys.stderr,
+        )
         return 1
 
     feature_sets = resolve_feature_sets(features_path)
@@ -721,7 +716,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     out = args.output_dir
     out.mkdir(parents=True, exist_ok=True)
 
-    config = DataConfig(version=args.version, feature_set=args.features, data_dir=args.data_dir)
+    config = DataConfig(
+        version=args.version, feature_set=args.features, data_dir=args.data_dir
+    )
     agent = IngestionAgent(config)
     splits = ("train", "validation")
     target_columns = [c for c in targets if c in agent.schema("train").names()]

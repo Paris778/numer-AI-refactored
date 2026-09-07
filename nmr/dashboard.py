@@ -853,6 +853,14 @@ _DETAIL_PROVENANCE_FIELDS = (
     "validation_fit_device",
     "deploy_fit_device",
     "timestamp",
+    "trained_targets",
+    "ensemble_target",
+    "oof_metric_target",
+    "oof_horizon",
+    "scoring_target",
+    "scoring_horizon",
+    "payout_policy_id",
+    "split_estimand",
 )
 _ROW_FIELDS = (
     "model_id",
@@ -925,6 +933,7 @@ def _detail_provenance(manifest: Mapping[str, Any]) -> dict[str, Any]:
     model = config.get("model") or {}
     risk = config.get("risk") or {}
     run = config.get("run") or {}
+    estimand = manifest.get("estimand") or {}
     return {
         "backend": model.get("backend"),
         "preset": model.get("preset"),
@@ -951,6 +960,14 @@ def _detail_provenance(manifest: Mapping[str, Any]) -> dict[str, Any]:
             ),
             None,
         ),
+        "trained_targets": estimand.get("trained_targets") or data.get("targets"),
+        "ensemble_target": estimand.get("ensemble_target"),
+        "oof_metric_target": estimand.get("oof_metric_target"),
+        "oof_horizon": estimand.get("oof_horizon"),
+        "scoring_target": estimand.get("scoring_target"),
+        "scoring_horizon": estimand.get("scoring_horizon"),
+        "payout_policy_id": estimand.get("payout_policy_id"),
+        "split_estimand": estimand.get("split_estimand"),
     }
 
 

@@ -166,6 +166,7 @@ from .families import (
     validate_family_name,
 )
 from .features import (
+    derive_feature_sets,
     feature_stability_screen,
     resolve_feature_sets,
     resolve_small_feature_set,
@@ -240,6 +241,15 @@ from .payout import (
     simulate_overlapping_portfolio,
     sortino,
     time_to_recovery,
+)
+from .predictions import (
+    PREDICTION_STAGES,
+    PredictionProvenance,
+    PredictionSet,
+    compose_predictions,
+    evaluate_prediction_set,
+    prediction_set_from_frame,
+    read_prediction_set,
 )
 from .promote import (
     PromotionResult,
@@ -463,6 +473,7 @@ __all__ = [
     "load_full_version",
     "scan_full_versions",
     "validate_family_name",
+    "derive_feature_sets",
     "feature_stability_screen",
     "resolve_feature_sets",
     "resolve_small_feature_set",
@@ -513,6 +524,13 @@ __all__ = [
     "read_champion_pointer",
     "reconcile_capital_metrics",
     "PAYOUT_FACTOR_FILENAME",
+    "PREDICTION_STAGES",
+    "PredictionProvenance",
+    "PredictionSet",
+    "compose_predictions",
+    "evaluate_prediction_set",
+    "prediction_set_from_frame",
+    "read_prediction_set",
     "PayoutPolicy",
     "CLASSIC_ATOMIC_ENDER60_R1343_V1",
     "CLASSIC_LEGACY_V1",

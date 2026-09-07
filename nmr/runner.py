@@ -261,6 +261,48 @@ def _predict_validation_era_batches(
 __all__ = ["RunResult", "ExperimentRunner"]
 
 
+def _scoring_identity(config: ExperimentConfig) -> tuple[str, str, str]:
+    """Payout-policy identity used by the validation scorecard.
+
+    Train/ensemble target and payout target are allowed to differ; callers
+    must persist both. ``policy.target`` / ``policy.scoring_horizon`` win when
+    the named policy binds them (Atomic Ender-60); otherwise the evaluation
+    main target and ``data.horizon`` are used.
+    """
+    policy = resolve_payout_policy(config.evaluation.payout_policy)
+    scoring_target = policy.target or config.evaluation.main_target
+    scoring_horizon = policy.scoring_horizon or config.data.horizon
+    return policy.policy_id, scoring_target, scoring_horizon
+
+
+def _estimand_block(
+    config: ExperimentConfig, *, validation_scorecard: bool
+) -> dict[str, Any]:
+    """First-class train vs payout identity for a run record.
+
+    Evaluation still consumes prediction frames only. This block lives on the
+    runner manifest so a later reader cannot confuse OOF CORR (ensemble
+    target / training horizon) with the capital scorecard (payout target /
+    scoring horizon).
+    """
+    policy_id, scoring_target, scoring_horizon = _scoring_identity(config)
+    ensemble_target = config.evaluation.main_target
+    trained_targets = list(dict.fromkeys([*config.data.targets, ensemble_target]))
+    split_estimand = bool(
+        scoring_target != ensemble_target or scoring_horizon != config.data.horizon
+    )
+    return {
+        "trained_targets": trained_targets,
+        "ensemble_target": ensemble_target,
+        "oof_metric_target": ensemble_target,
+        "oof_horizon": config.data.horizon,
+        "scoring_target": scoring_target if validation_scorecard else None,
+        "scoring_horizon": scoring_horizon if validation_scorecard else None,
+        "payout_policy_id": policy_id,
+        "split_estimand": split_estimand,
+    }
+
+
 @dataclass(frozen=True)
 class RunResult:
     run_id: str
@@ -556,6 +598,10 @@ class ExperimentRunner:
             "scorecard_prediction_scale": "percentile_rank",
             "metrics": dataclasses.asdict(metrics),
             "validation_purge_dropped_first_eras": validation_purge,
+            "estimand": _estimand_block(
+                self._config,
+                validation_scorecard=self._config.evaluation.validation_scorecard,
+            ),
         }
 
         return RunResult(
@@ -624,8 +670,7 @@ class ExperimentRunner:
     ) -> tuple[MetricScorecard, pl.DataFrame, int]:
         data = self._config.data
         payout_policy = resolve_payout_policy(self._config.evaluation.payout_policy)
-        scoring_target = payout_policy.target or self._config.evaluation.main_target
-        scoring_horizon = payout_policy.scoring_horizon or data.horizon
+        _, scoring_target, scoring_horizon = _scoring_identity(self._config)
         agent = IngestionAgent(data)
         # Config targets + main target + every horizon target column present in
         # the validation schema (benchmark_runner convention). Horizon stability
