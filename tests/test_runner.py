@@ -294,6 +294,35 @@ def test_validation_stage_routes_through_prediction_contract() -> None:
     assert "CapitalContext" in source
 
 
+def test_validation_stage_persists_capital_evidence(tmp_path) -> None:
+    from nmr._oof import feature_list_fingerprint
+    from nmr.predictions import CAPITAL_EVIDENCE_VERSION, validation_key_fingerprint
+    from nmr.scorecard import scorecard_block_digest
+
+    cfg = _validation_config(tmp_path)
+    result = ExperimentRunner(cfg).run(deploy=True)
+    evidence = result.manifest.get("capital_evidence")
+    assert evidence is not None
+    assert evidence["version"] == CAPITAL_EVIDENCE_VERSION
+    preds = result.validation_predictions
+    scored_eras = sorted(
+        {str(era) for era in preds.get_column("era").unique().to_list()}, key=str
+    )
+    assert tuple(evidence["validation_window"]) == tuple(scored_eras)
+    assert evidence["validation_row_count"] == preds.height
+    assert evidence["validation_key_fingerprint"] == validation_key_fingerprint(preds)
+    assert evidence["payout_policy_id"] == "classic_legacy_075_225_clip005_v1"
+    assert evidence["scoring_target"] == "target"
+    assert evidence["scoring_horizon"] == "20D"
+    assert evidence["data_fingerprint"] == result.manifest["data_fingerprint"]
+    assert evidence["feature_fingerprint"] == feature_list_fingerprint(
+        result.manifest["feature_cols"]
+    )
+    assert evidence["scorecard_sha256"] == scorecard_block_digest(
+        result.scorecard.to_frame().to_dicts()[0]
+    )
+
+
 def test_run_manifest_records_training_completion_timestamp(tmp_path) -> None:
     result = ExperimentRunner(_config(tmp_path)).run(deploy=False)
 

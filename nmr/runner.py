@@ -50,14 +50,16 @@ from nmr.evaluation import EvaluationEngine, MetricSummary
 from nmr.models import ModelOrchestrator
 from nmr.payout import PAYOUT_FACTOR_FILENAME, era_payout_factors, resolve_payout_policy
 from nmr.predictions import (
+    CAPITAL_EVIDENCE_VERSION,
     CapitalContext,
     PredictionProvenance,
     evaluate_prediction_set,
     prediction_set_from_frame,
+    validation_key_fingerprint,
 )
 from nmr.risk import NeutralizationEngine
-from nmr.scorecard import MetricScorecard
-from nmr.splitter import PurgedEraSplitter
+from nmr.scorecard import MetricScorecard, scorecard_block_digest
+from nmr.splitter import PurgedEraSplitter, scoring_purge_eras
 
 logger = logging.getLogger("nmr.runner")
 
@@ -323,6 +325,10 @@ class RunResult:
 class ExperimentRunner:
     def __init__(self, config: ExperimentConfig):
         self._config = config
+        # Persisted capital evidence (nmr.predictions.CAPITAL_EVIDENCE_VERSION):
+        # set by the validation stage when it scores through
+        # evaluate_prediction_set; promotion requires this block to exist.
+        self._capital_evidence: dict[str, Any] | None = None
         # Rebuild identity (spec §3.1): persist the EXACT data fingerprint that
         # enters the run_id hash. Computed once here so the manifest field can
         # never drift from the run-id data term (a re-computation at run() time
@@ -604,6 +610,11 @@ class ExperimentRunner:
             "scorecard_prediction_scale": "percentile_rank",
             "metrics": dataclasses.asdict(metrics),
             "validation_purge_dropped_first_eras": validation_purge,
+            # Capital evidence (predictions.CAPITAL_EVIDENCE_VERSION): the
+            # scorecard-authorizing block produced by the validation stage.
+            # Promotion refuses runs without it; None here marks a run whose
+            # validation scorecard never ran (or was stubbed in a test).
+            "capital_evidence": self._capital_evidence,
             "estimand": _estimand_block(
                 self._config,
                 validation_scorecard=self._config.evaluation.validation_scorecard,
@@ -676,7 +687,7 @@ class ExperimentRunner:
     ) -> tuple[MetricScorecard, pl.DataFrame, int]:
         data = self._config.data
         payout_policy = resolve_payout_policy(self._config.evaluation.payout_policy)
-        _, scoring_target, scoring_horizon = _scoring_identity(self._config)
+        policy_id, scoring_target, scoring_horizon = _scoring_identity(self._config)
         agent = IngestionAgent(data)
         # Config targets + main target + every horizon target column present in
         # the validation schema (benchmark_runner convention). Horizon stability
@@ -719,12 +730,12 @@ class ExperimentRunner:
                 "[validation] benchmark models missing; BMC/horizon disabled"
             )
 
-        policy_overlap = (
-            16
-            if payout_policy.scoring_horizon == "60D"
-            else 8 if payout_policy.scoring_horizon == "20D" else 0
+        # Purge = max(config purge, scoring-overlap purge) via the shared
+        # splitter helper (single source with promotion's cross-check). The
+        # RAW policy horizon drives overlap: legacy policies bind none.
+        purge = scoring_purge_eras(
+            self._config.split.purge_eras, payout_policy.scoring_horizon
         )
-        purge = max(self._config.split.purge_eras, policy_overlap)
         all_eras = sorted({int(e) for e in val_df.get_column("era").unique().to_list()})
         if purge > 0:
             # Compare on the NUMERIC era index: the era column is zero-padded
@@ -739,6 +750,10 @@ class ExperimentRunner:
             scoring_horizon,
             val_df.select(pl.col("era").n_unique()).item(),
         )
+        validation_keys = val_df.select(["era", "id"])
+        meta_model = meta_model.join(validation_keys, on=["era", "id"], how="semi")
+        if benchmarks is not None:
+            benchmarks = benchmarks.join(validation_keys, on=["era", "id"], how="semi")
 
         preds = _predict_validation_era_batches(
             val_df,
@@ -753,20 +768,28 @@ class ExperimentRunner:
         validation_window = tuple(
             sorted(
                 {str(era) for era in val_df.get_column("era").unique().to_list()},
-                key=str,
+                key=int,
             )
         )
         feature_fp = feature_list_fingerprint(feature_cols)
         snapshot = data_fingerprint or self._data_fingerprint
+        trained_targets = tuple(self._config.data.targets)
+        ensemble_target = self._config.evaluation.main_target
+        training_horizon = self._config.data.horizon
+        split_estimand = bool(
+            scoring_target != ensemble_target or scoring_horizon != training_horizon
+        )
+        key_fingerprint = validation_key_fingerprint(val_df)
         prediction_set = prediction_set_from_frame(
             preds,
             PredictionProvenance(
                 stage="validation",
-                trained_targets=tuple(self._config.data.targets),
-                ensemble_target=self._config.evaluation.main_target,
+                trained_targets=trained_targets,
+                ensemble_target=ensemble_target,
                 scoring_target=scoring_target,
-                training_horizon=self._config.data.horizon,
+                training_horizon=training_horizon,
                 scoring_horizon=scoring_horizon,
+                payout_policy_id=policy_id,
                 era_partition="validation",
                 data_fingerprint=snapshot,
                 feature_fingerprint=feature_fp,
@@ -774,12 +797,23 @@ class ExperimentRunner:
                 device=checkpoint_device,
                 source_run_id=self._run_id,
                 selection_bias=False,
-                split_estimand=bool(
-                    scoring_target != self._config.evaluation.main_target
-                    or scoring_horizon != self._config.data.horizon
-                ),
+                split_estimand=split_estimand,
                 validation_window=validation_window,
             ),
+        )
+        capital_context = CapitalContext(
+            validation_window=validation_window,
+            scoring_target=scoring_target,
+            scoring_horizon=scoring_horizon,
+            payout_policy_id=policy_id,
+            data_fingerprint=snapshot,
+            feature_fingerprint=feature_fp,
+            validation_key_fingerprint=key_fingerprint,
+            validation_row_count=val_df.height,
+            trained_targets=trained_targets,
+            ensemble_target=ensemble_target,
+            training_horizon=training_horizon,
+            split_estimand=split_estimand,
         )
         scorecard = evaluate_prediction_set(
             prediction_set,
@@ -809,14 +843,29 @@ class ExperimentRunner:
                 else None
             ),
             model_id=self._run_id,
-            capital_context=CapitalContext(
-                validation_window=validation_window,
-                scoring_target=scoring_target,
-                scoring_horizon=scoring_horizon,
-                data_fingerprint=snapshot,
-                feature_fingerprint=feature_fp,
-            ),
+            capital_context=capital_context,
         )
+        # Persisted capital evidence: promotion verifies this block against the
+        # stored scorecard and recomputes the key universe from the data files.
+        # No wall-clock or paths — deterministic across processes.
+        self._capital_evidence = {
+            "version": CAPITAL_EVIDENCE_VERSION,
+            "validation_window": list(validation_window),
+            "validation_key_fingerprint": key_fingerprint,
+            "validation_row_count": int(val_df.height),
+            "payout_policy_id": policy_id,
+            "scoring_target": scoring_target,
+            "scoring_horizon": scoring_horizon,
+            "data_fingerprint": snapshot,
+            "feature_fingerprint": feature_fp,
+            "trained_targets": list(trained_targets),
+            "ensemble_target": ensemble_target,
+            "training_horizon": training_horizon,
+            "split_estimand": bool(split_estimand),
+            "scorecard_sha256": scorecard_block_digest(
+                scorecard.to_frame().to_dicts()[0]
+            ),
+        }
         return scorecard, preds, purge
 
     @staticmethod

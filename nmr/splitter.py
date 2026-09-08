@@ -21,9 +21,32 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from nmr.config import SplitConfig
+from nmr.config import VALID_HORIZONS, SplitConfig
 
-__all__ = ["Fold", "PurgedEraSplitter"]
+__all__ = ["Fold", "PurgedEraSplitter", "scoring_purge_eras"]
+
+
+def scoring_purge_eras(purge_eras: int, scoring_horizon: str | None) -> int:
+    """The active validation-window purge: max(config purge, policy overlap).
+
+    Single source for the purge rule shared by the runner's validation stage
+    and promotion's cross-check: 8 eras of scoring overlap for 20D targets,
+    16 for 60D (AGENTS.md leakage law), never below the configured purge.
+    ``scoring_horizon`` is the RAW policy horizon: ``None`` (legacy policies
+    that bind no horizon) contributes no overlap — the resolved fallback
+    horizon does not grant a target-overlap purge the policy never declared.
+    """
+    if scoring_horizon is not None and scoring_horizon not in VALID_HORIZONS:
+        raise ValueError(
+            f"scoring_horizon must be one of {VALID_HORIZONS}, got {scoring_horizon!r}"
+        )
+    if scoring_horizon == "60D":
+        policy_overlap = 16
+    elif scoring_horizon == "20D":
+        policy_overlap = 8
+    else:
+        policy_overlap = 0
+    return max(int(purge_eras), policy_overlap)
 
 
 @dataclass(frozen=True)
@@ -79,10 +102,7 @@ class PurgedEraSplitter:
                 raise ValueError(
                     f"Non-numeric era label {era!r}; splitter requires numeric chronology"
                 ) from exc
-            if (
-                era_num in numeric_to_label
-                and numeric_to_label[era_num] != era
-            ):
+            if era_num in numeric_to_label and numeric_to_label[era_num] != era:
                 raise ValueError(
                     "Inconsistent zero-padding detected in era splitter for index "
                     f"{era_num}: {numeric_to_label[era_num]!r} vs {era!r}"

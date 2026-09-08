@@ -6,6 +6,7 @@ single structured scorecard. It does not define new statistical metrics.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -54,7 +55,38 @@ __all__ = [
     "CrossCheckResult",
     "evaluate_model",
     "evaluate_cross_check",
+    "canonical_digest",
+    "scorecard_block_digest",
 ]
+
+
+def canonical_digest(value: object) -> str:
+    """Deterministic SHA-256 over a JSON-able value (sorted keys, no NaN)."""
+    return hashlib.sha256(
+        json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def scorecard_block_digest(scorecard: Mapping[str, Any]) -> str:
+    """Digest of a persisted scorecard block with instrumentation stripped.
+
+    Timing/instrumentation columns (``timing_*``, ``quality_metric_*``) are
+    wall-clock artifacts excluded from canonical serialization (AGENTS.md
+    timing hazard) — the runner computes this over its ``MetricScorecard``
+    row and promotion recomputes it over the stored ``run.json`` block, so
+    the two digests bind the persisted scorecard to the capital evidence.
+    """
+    canonical = {
+        key: value
+        for key, value in scorecard.items()
+        if not key.startswith(("timing_", "quality_metric"))
+    }
+    return canonical_digest(canonical)
 
 
 @dataclass(frozen=True)
@@ -556,6 +588,9 @@ def evaluate_model(
     meta_col: str = "numerai_meta_model",
     trials_sr_var: float | None = None,
     sr0_benchmark: float = 0.0,
+    _expected_key_fingerprint: str | None = None,
+    _expected_row_count: int | None = None,
+    _expected_era_window: Sequence[str] | None = None,
 ) -> MetricScorecard:
     resolved_policy = resolve_payout_policy(payout_policy)
     if resolved_policy.target is not None and main_target != resolved_policy.target:
@@ -589,6 +624,35 @@ def evaluate_model(
         meta_col=meta_col,
         main_target=main_target,
     )
+    if _expected_row_count is not None and base.height != _expected_row_count:
+        raise ValueError(
+            "capital evaluation joined base row count does not match the "
+            f"authoritative validation universe ({base.height} != "
+            f"{_expected_row_count})"
+        )
+    if _expected_key_fingerprint is not None:
+        from nmr.predictions import validation_key_fingerprint
+
+        if validation_key_fingerprint(base) != _expected_key_fingerprint:
+            raise ValueError(
+                "capital evaluation joined base keys do not match the "
+                "authoritative validation key universe"
+            )
+    if _expected_era_window is not None:
+        actual_window = tuple(
+            sorted(
+                (str(era) for era in base.get_column(era_col).unique().to_list()),
+                key=int,
+            )
+        )
+        expected_window = tuple(
+            sorted((str(era) for era in _expected_era_window), key=int)
+        )
+        if actual_window != expected_window:
+            raise ValueError(
+                "capital evaluation joined base eras do not match the "
+                "authoritative validation window"
+            )
     _mark("join_base", t0)
 
     bench_col = benchmark_col
@@ -610,6 +674,20 @@ def evaluate_model(
                     how="left",
                 )
                 _mark("join_benchmark", t0)
+    if _expected_row_count is not None and base.height != _expected_row_count:
+        raise ValueError(
+            "capital evaluation final base key row count does not match the "
+            f"authoritative validation universe ({base.height} != "
+            f"{_expected_row_count})"
+        )
+    if _expected_key_fingerprint is not None:
+        from nmr.predictions import validation_key_fingerprint
+
+        if validation_key_fingerprint(base) != _expected_key_fingerprint:
+            raise ValueError(
+                "capital evaluation final base keys do not match the "
+                "authoritative validation key universe"
+            )
 
     evaluator = EvaluationEngine(backend)
     corr_by_era, mmc_by_era, fnc_by_era = _compute_era_series(

@@ -243,6 +243,7 @@ from .payout import (
     time_to_recovery,
 )
 from .predictions import (
+    CAPITAL_EVIDENCE_VERSION,
     ERA_PARTITIONS,
     FIT_ROLES,
     PREDICTION_STAGES,
@@ -254,6 +255,7 @@ from .predictions import (
     evaluate_prediction_set,
     prediction_set_from_frame,
     read_prediction_set,
+    validation_key_fingerprint,
 )
 from .promote import (
     PromotionResult,
@@ -300,8 +302,10 @@ from .scorecard import (
     CrossCheckResult,
     MetricCell,
     MetricScorecard,
+    canonical_digest,
     evaluate_cross_check,
     evaluate_model,
+    scorecard_block_digest,
 )
 from .sklearn_breadth import (
     BreadthConfig,
@@ -311,7 +315,7 @@ from .sklearn_breadth import (
     discover_regressor_names,
     run_sweep,
 )
-from .splitter import Fold, PurgedEraSplitter
+from .splitter import Fold, PurgedEraSplitter, scoring_purge_eras
 from .submission import (
     accept_promoted_artifact,
     build_submission,
@@ -531,6 +535,7 @@ __all__ = [
     "ERA_PARTITIONS",
     "FIT_ROLES",
     "PREDICTION_STAGES",
+    "CAPITAL_EVIDENCE_VERSION",
     "CapitalContext",
     "PredictionProvenance",
     "PredictionSet",
@@ -539,6 +544,7 @@ __all__ = [
     "evaluate_prediction_set",
     "prediction_set_from_frame",
     "read_prediction_set",
+    "validation_key_fingerprint",
     "PayoutPolicy",
     "CLASSIC_ATOMIC_ENDER60_R1343_V1",
     "CLASSIC_LEGACY_V1",
@@ -574,6 +580,8 @@ __all__ = [
     "MetricScorecard",
     "evaluate_cross_check",
     "evaluate_model",
+    "canonical_digest",
+    "scorecard_block_digest",
     "RunResult",
     "ExperimentRunner",
     "RunRegistry",
@@ -585,6 +593,7 @@ __all__ = [
     "metric_direction",
     "Fold",
     "PurgedEraSplitter",
+    "scoring_purge_eras",
     "build_submission",
     "validate_submission",
     "write_submission",

@@ -359,6 +359,8 @@ def test_public_api_includes_harness_symbols() -> None:
         "ERA_PARTITIONS",
         "FIT_ROLES",
         "CapitalContext",
+        "CAPITAL_EVIDENCE_VERSION",
+        "validation_key_fingerprint",
         "PredictionProvenance",
         "PredictionSet",
         "ResearchEvaluation",

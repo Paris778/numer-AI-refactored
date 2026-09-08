@@ -18,6 +18,7 @@ from nmr.predictions import (
     evaluate_prediction_set,
     prediction_set_from_frame,
     read_prediction_set,
+    validation_key_fingerprint,
 )
 from nmr.risk import NeutralizationEngine
 from nmr.scorecard import evaluate_model as direct_evaluate_model
@@ -63,6 +64,7 @@ def _capital_prov(**overrides) -> PredictionProvenance:
         scoring_target="target",
         training_horizon="20D",
         scoring_horizon="20D",
+        payout_policy_id="classic_legacy_075_225_clip005_v1",
         era_partition="validation",
         data_fingerprint="abc",
         feature_fingerprint="def",
@@ -79,12 +81,21 @@ def _capital_prov(**overrides) -> PredictionProvenance:
 
 def _capital_ctx(**overrides) -> CapitalContext:
     eras = tuple(f"{i:04d}" for i in range(1, 21))
+    keys = [(f"{i:04d}", f"{i:04d}_{j:03d}") for i in range(1, 21) for j in range(3)]
+    key_frame = pl.DataFrame({"era": [k[0] for k in keys], "id": [k[1] for k in keys]})
     payload = dict(
         validation_window=eras,
         scoring_target="target",
         scoring_horizon="20D",
+        payout_policy_id="classic_legacy_075_225_clip005_v1",
         data_fingerprint="abc",
         feature_fingerprint="def",
+        validation_key_fingerprint=validation_key_fingerprint(key_frame),
+        validation_row_count=len(keys),
+        trained_targets=("target",),
+        ensemble_target="target",
+        training_horizon="20D",
+        split_estimand=False,
     )
     payload.update(overrides)
     return CapitalContext(**payload)
@@ -565,6 +576,178 @@ def test_capital_eval_rejects_missing_fingerprints() -> None:
             n_boot=5,
             min_overlap_eras=20,
         )
+
+
+@pytest.mark.parametrize(
+    "frame_name", ["meta_model", "features", "targets", "benchmarks"]
+)
+@pytest.mark.parametrize("mutation", ["missing", "extra"])
+def test_capital_eval_rejects_incomplete_auxiliary_key_universe(
+    frame_name: str, mutation: str
+) -> None:
+    predictions, meta_model, benchmarks, features, targets = _tiny_like_scorecard()
+    frames = {
+        "meta_model": meta_model,
+        "features": features,
+        "targets": targets,
+        "benchmarks": benchmarks,
+    }
+    source = frames[frame_name]
+    if mutation == "missing":
+        frames[frame_name] = source.slice(0, source.height - 1)
+    else:
+        frames[frame_name] = pl.concat([source, source.head(1)])
+    ps = prediction_set_from_frame(predictions, _capital_prov())
+    with pytest.raises(ValueError, match="key"):
+        evaluate_prediction_set(
+            ps,
+            meta_model=frames["meta_model"],
+            benchmarks=frames["benchmarks"],
+            features=frames["features"],
+            targets=frames["targets"],
+            n_trials=1,
+            seed=11,
+            capital_context=_capital_ctx(),
+            payout_policy=CLASSIC_LEGACY_V1,
+            n_boot=5,
+            min_overlap_eras=20,
+        )
+
+
+def test_capital_eval_rejects_duplicate_benchmark_key() -> None:
+    predictions, meta_model, benchmarks, features, targets = _tiny_like_scorecard()
+    duplicate_benchmarks = pl.concat([benchmarks, benchmarks.head(1)])
+    ps = prediction_set_from_frame(predictions, _capital_prov())
+    with pytest.raises(ValueError, match="key"):
+        evaluate_prediction_set(
+            ps,
+            meta_model=meta_model,
+            benchmarks=duplicate_benchmarks,
+            features=features,
+            targets=targets,
+            n_trials=1,
+            seed=11,
+            capital_context=_capital_ctx(),
+            payout_policy=CLASSIC_LEGACY_V1,
+            n_boot=5,
+            min_overlap_eras=20,
+        )
+
+
+def _capital_kwargs(meta_model, benchmarks, features, targets) -> dict:
+    return dict(
+        meta_model=meta_model,
+        benchmarks=benchmarks,
+        features=features,
+        targets=targets,
+        n_trials=1,
+        seed=11,
+        payout_policy=CLASSIC_LEGACY_V1,
+        n_boot=5,
+        min_overlap_eras=20,
+    )
+
+
+def test_capital_eval_rejects_sparse_prediction_keys() -> None:
+    """One id per era against a 3-id universe: exact key coverage refuses."""
+    predictions, meta_model, benchmarks, features, targets = _tiny_like_scorecard()
+    sparse = predictions.group_by("era").head(1)
+    ps = prediction_set_from_frame(sparse, _capital_prov())
+    with pytest.raises(ValueError, match="key"):
+        evaluate_prediction_set(
+            ps,
+            **_capital_kwargs(meta_model, benchmarks, features, targets),
+            capital_context=_capital_ctx(),
+        )
+
+
+def test_capital_eval_rejects_extra_prediction_keys() -> None:
+    """One extra (era, id) row refuses, even with the full window present."""
+    predictions, meta_model, benchmarks, features, targets = _tiny_like_scorecard()
+    extra = pl.DataFrame({"era": ["0001"], "id": ["0001_zzz"], "prediction": [0.1]})
+    ps = prediction_set_from_frame(pl.concat([predictions, extra]), _capital_prov())
+    with pytest.raises(ValueError, match="key"):
+        evaluate_prediction_set(
+            ps,
+            **_capital_kwargs(meta_model, benchmarks, features, targets),
+            capital_context=_capital_ctx(),
+        )
+
+
+def test_capital_eval_rejects_forged_context_keys() -> None:
+    """A context whose key universe does not describe the frame is refused."""
+    predictions, meta_model, benchmarks, features, targets = _tiny_like_scorecard()
+    ps = prediction_set_from_frame(predictions, _capital_prov())
+    with pytest.raises(ValueError, match="key"):
+        evaluate_prediction_set(
+            ps,
+            **_capital_kwargs(meta_model, benchmarks, features, targets),
+            capital_context=_capital_ctx(
+                validation_key_fingerprint="0" * 64, validation_row_count=1
+            ),
+        )
+
+
+def test_capital_eval_requires_payout_policy_match() -> None:
+    """The evaluation's payout policy must equal the context's policy id."""
+    predictions, meta_model, benchmarks, features, targets = _tiny_like_scorecard()
+    ps = prediction_set_from_frame(predictions, _capital_prov())
+    with pytest.raises(ValueError, match="payout"):
+        evaluate_prediction_set(
+            ps,
+            **_capital_kwargs(meta_model, benchmarks, features, targets),
+            capital_context=_capital_ctx(
+                payout_policy_id="classic_atomic_ender60_r1343_v1"
+            ),
+        )
+
+
+def test_capital_eval_rejects_provenance_policy_mismatch() -> None:
+    predictions, meta_model, benchmarks, features, targets = _tiny_like_scorecard()
+    ps = prediction_set_from_frame(
+        predictions,
+        _capital_prov(payout_policy_id="classic_atomic_ender60_r1343_v1"),
+    )
+    with pytest.raises(ValueError, match="payout"):
+        evaluate_prediction_set(
+            ps,
+            **_capital_kwargs(meta_model, benchmarks, features, targets),
+            capital_context=_capital_ctx(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("override", "expected"),
+    [
+        ({"trained_targets": ("other",)}, "trained_targets"),
+        ({"ensemble_target": "other"}, "ensemble_target"),
+        ({"training_horizon": "60D"}, "training_horizon"),
+        ({"split_estimand": True}, "split_estimand"),
+    ],
+)
+def test_capital_eval_rejects_contradictory_training_estimand(
+    override: dict, expected: str
+) -> None:
+    predictions, meta_model, benchmarks, features, targets = _tiny_like_scorecard()
+    ps = prediction_set_from_frame(predictions, _capital_prov(**override))
+    with pytest.raises(ValueError, match=expected):
+        evaluate_prediction_set(
+            ps,
+            **_capital_kwargs(meta_model, benchmarks, features, targets),
+            capital_context=_capital_ctx(),
+        )
+
+
+def test_validation_key_fingerprint_is_canonical() -> None:
+    a = pl.DataFrame(
+        {"era": ["1", "2", "1"], "id": ["a", "b", "c"], "prediction": [0.1, 0.2, 0.3]}
+    )
+    reordered = a.sort("id")
+    extra_cols = a.with_columns(pl.lit(1).alias("x"))
+    assert validation_key_fingerprint(a) == validation_key_fingerprint(reordered)
+    assert validation_key_fingerprint(a) == validation_key_fingerprint(extra_cols)
+    subset = pl.DataFrame({"era": ["1", "2"], "id": ["a", "b"]})
+    assert validation_key_fingerprint(a) != validation_key_fingerprint(subset)
 
 
 def test_compose_rejects_partial_feature_join(tmp_path: Path) -> None:

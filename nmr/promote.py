@@ -46,6 +46,7 @@ import polars as pl
 from nmr import experiment_store, lifecycle, paths
 from nmr._atomicio import atomic_write_text
 from nmr._filelock import file_lock
+from nmr._oof import feature_list_fingerprint
 from nmr.benchmark import Tier4GateConfig, load_benchmark_file
 from nmr.config import ExperimentConfig, config_from_dict
 from nmr.data import IngestionAgent
@@ -53,6 +54,7 @@ from nmr.deployment import load_predict
 from nmr.families import DEFAULT_MODELS_DIR, validate_family_name
 from nmr.models import ModelOrchestrator
 from nmr.payout import PAYOUT_FACTOR_FILENAME, era_payout_factors, resolve_payout_policy
+from nmr.predictions import CAPITAL_EVIDENCE_VERSION, validation_key_fingerprint
 from nmr.runner import (
     ExperimentRunner,
     _build_deploy_pipeline,
@@ -68,8 +70,11 @@ from nmr.scorecard import (
     CROSSCHECK_SR0_BENCHMARK,
     CrossCheckResult,
     MetricCell,
+    canonical_digest,
     evaluate_cross_check,
+    scorecard_block_digest,
 )
+from nmr.splitter import scoring_purge_eras
 
 logger = logging.getLogger("nmr.promote")
 
@@ -83,6 +88,7 @@ __all__ = [
 _RID_RE = re.compile(r"^[0-9a-f]{64}$")
 RAM_ESTIMATE_FILENAME = "full_version_ram_estimate.json"
 _VALID_SCOPES = ("train_only", "full")
+_PROMOTION_AUTHORIZATION_VERSION = 1
 # Eras per validation predict chunk for the partial cross-check (bounds peak
 # RAM; mirrors the runner's _VAL_PREDICT_ERA_BATCH).
 _CROSSCHECK_PREDICT_ERA_BATCH = 40
@@ -219,26 +225,6 @@ def _evaluate_gate(
     return not violations, receipts
 
 
-def _canonical_digest(value: object) -> str:
-    return hashlib.sha256(
-        json.dumps(
-            value,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-    ).hexdigest()
-
-
-def _scorecard_digest(scorecard: dict[str, Any]) -> str:
-    canonical = {
-        key: value
-        for key, value in scorecard.items()
-        if not key.startswith(("timing_", "quality_metric"))
-    }
-    return _canonical_digest(canonical)
-
-
 def _component_identity(
     target_cols: Sequence[str], pred_cols: Sequence[str], weights: Sequence[float]
 ) -> tuple[list[dict[str, Any]], str]:
@@ -260,7 +246,7 @@ def _component_identity(
         {"target": target, "prediction_col": pred, "weight": weight}
         for target, pred, weight in zip(target_cols, pred_cols, numeric_weights)
     ]
-    return components, _canonical_digest(components)
+    return components, canonical_digest(components)
 
 
 def _load_run_record(family: str, run_id: str) -> dict[str, Any]:
@@ -318,6 +304,311 @@ def _supplemental_identity_check(
         raise ValueError(
             "supplemental feature-set identity mismatch: resolved "
             f"{supp} sha256={actual[:12]}... != stored {stored_sha[:12]}..."
+        )
+
+
+def _capital_evidence_check(
+    manifest: dict[str, Any],
+    scorecard: dict[str, Any],
+    *,
+    config: ExperimentConfig,
+    payout_policy: Any,
+) -> dict[str, Any]:
+    """Promotion requires the persisted capital evidence block (design option 3).
+
+    The stored scorecard must be digest-bound to a runner-produced evidence
+    block, and the block must match the promotion config's scoring identity,
+    data snapshot, feature schema, and training estimand. A run record
+    without this block was not scored through ``evaluate_prediction_set`` on
+    the authoritative validation window and is not promotion-eligible.
+    """
+    evidence = manifest.get("capital_evidence")
+    if not isinstance(evidence, dict):
+        raise ValueError(
+            "promotion requires manifest capital_evidence: the run's validation "
+            "scorecard was not produced through evaluate_prediction_set and "
+            "cannot authorize a promotion"
+        )
+    if evidence.get("version") != CAPITAL_EVIDENCE_VERSION:
+        raise ValueError(
+            f"promotion requires capital evidence version "
+            f"{CAPITAL_EVIDENCE_VERSION}, got {evidence.get('version')!r}"
+        )
+    if evidence.get("scorecard_sha256") != scorecard_block_digest(scorecard):
+        raise ValueError(
+            "capital evidence scorecard_sha256 does not match the stored "
+            "scorecard; the scorecard is not bound to the evidence block"
+        )
+    expected_target = payout_policy.target or config.evaluation.main_target
+    expected_horizon = payout_policy.scoring_horizon or config.data.horizon
+    for field, expected in (
+        ("payout_policy_id", payout_policy.policy_id),
+        ("scoring_target", expected_target),
+        ("scoring_horizon", expected_horizon),
+    ):
+        if evidence.get(field) != expected:
+            raise ValueError(
+                f"capital evidence {field}={evidence.get(field)!r} does not match "
+                f"the promotion config {expected!r}"
+            )
+    if evidence.get("data_fingerprint") != manifest.get("data_fingerprint"):
+        raise ValueError(
+            "capital evidence data_fingerprint does not match the run manifest"
+        )
+    feature_fp = feature_list_fingerprint(list(manifest.get("feature_cols") or []))
+    if evidence.get("feature_fingerprint") != feature_fp:
+        raise ValueError(
+            "capital evidence feature_fingerprint does not match the run "
+            "manifest feature_cols"
+        )
+    if evidence.get("trained_targets") != list(config.data.targets):
+        raise ValueError(
+            "capital evidence trained_targets do not match the promotion config"
+        )
+    if evidence.get("ensemble_target") != config.evaluation.main_target:
+        raise ValueError(
+            "capital evidence ensemble_target does not match the promotion config"
+        )
+    if evidence.get("training_horizon") != config.data.horizon:
+        raise ValueError(
+            "capital evidence training_horizon does not match the promotion config"
+        )
+    expected_split_estimand = bool(
+        expected_target != config.evaluation.main_target
+        or expected_horizon != config.data.horizon
+    )
+    if evidence.get("split_estimand") != expected_split_estimand:
+        raise ValueError(
+            "capital evidence split_estimand contradicts the promotion config "
+            f"(expected {expected_split_estimand}, got {evidence.get('split_estimand')!r})"
+        )
+    window = evidence.get("validation_window")
+    if not isinstance(window, list) or not window:
+        raise ValueError("capital evidence validation_window must be non-empty")
+    if (
+        not isinstance(evidence.get("validation_row_count"), int)
+        or evidence["validation_row_count"] < 1
+    ):
+        raise ValueError("capital evidence validation_row_count must be >= 1")
+    return evidence
+
+
+def _verify_capital_evidence_against_data(
+    config: ExperimentConfig,
+    evidence: dict[str, Any],
+    *,
+    payout_policy: Any,
+    scorecard: dict[str, Any],
+) -> None:
+    """Independently recompute the authoritative prediction universe from disk.
+
+    Derives the expected purged validation window independently from the
+    current data and policy, then compares the evidence window, scorecard era
+    count, exact ``(era, id)`` key fingerprint, and row count. The evidence
+    window is never treated as the authority for selecting rows.
+    """
+    val_path = config.data.path("validation.parquet")
+    if not val_path.is_file():
+        raise ValueError("promotion capital verification requires validation.parquet")
+    keys = (
+        pl.scan_parquet(val_path)
+        .select(["era", "id"])
+        .with_columns(pl.col("era").cast(pl.String))
+        .collect()
+    )
+    labels_by_number: dict[int, str] = {}
+    for raw_era in keys.get_column("era").to_list():
+        label = str(raw_era)
+        try:
+            number = int(label)
+        except ValueError as exc:
+            raise ValueError(
+                "promotion capital verification requires numeric validation eras"
+            ) from exc
+        previous = labels_by_number.setdefault(number, label)
+        if previous != label:
+            raise ValueError(
+                "promotion capital verification found multiple labels for one "
+                f"numeric validation era {number}"
+            )
+    ordered_labels = [labels_by_number[number] for number in sorted(labels_by_number)]
+    purge = scoring_purge_eras(config.split.purge_eras, payout_policy.scoring_horizon)
+    expected_window = tuple(ordered_labels[purge:])
+    if not expected_window:
+        raise ValueError(
+            "promotion capital verification leaves no validation eras after "
+            f"purge_eras={purge}"
+        )
+    supplied_window = tuple(str(era) for era in evidence["validation_window"])
+    if supplied_window != expected_window:
+        raise ValueError(
+            "capital evidence validation_window does not match the independently "
+            f"derived purged validation window (expected {list(expected_window)}, "
+            f"got {list(supplied_window)})"
+        )
+    observed_n_eras = scorecard.get("n_eras")
+    if observed_n_eras != len(expected_window):
+        raise ValueError(
+            "capital evidence scorecard n_eras does not match the independently "
+            f"derived validation window ({observed_n_eras!r} != "
+            f"{len(expected_window)})"
+        )
+    in_window = keys.filter(pl.col("era").is_in(set(expected_window)))
+    if in_window.height != evidence["validation_row_count"]:
+        raise ValueError(
+            "capital evidence key recomputation mismatch: validation data has "
+            f"{in_window.height} rows in the evidence window, evidence records "
+            f"{evidence['validation_row_count']}"
+        )
+    if validation_key_fingerprint(in_window) != evidence["validation_key_fingerprint"]:
+        raise ValueError(
+            "capital evidence key recomputation mismatch: the (era, id) keys "
+            "on disk do not match the evidence block"
+        )
+
+
+def _authorize_capital_evidence(
+    manifest: dict[str, Any],
+    scorecard: dict[str, Any],
+    *,
+    data_dir: Path | None,
+    rehearsal: bool,
+) -> tuple[ExperimentConfig, Any, dict[str, Any], list[str], list[dict[str, Any]]]:
+    """Run the complete capital-evidence authorization contract.
+
+    This helper is deliberately shared by fresh publication and pointer
+    repair. Recovery is not allowed to use a weaker identity check than the
+    original publication path.
+    """
+    stored_config = manifest.get("config")
+    if not isinstance(stored_config, dict):
+        raise ValueError("run manifest has no config dict")
+    normalized, normalizations = _normalize_stored_config(stored_config)
+    if data_dir is not None:
+        original_data_dir = normalized.get("data", {}).get("data_dir")
+        normalized["data"]["data_dir"] = str(Path(data_dir))
+        normalizations.append(
+            {
+                "field": "data.data_dir",
+                "from": original_data_dir,
+                "to": str(Path(data_dir)),
+            }
+        )
+    config = config_from_dict(normalized)
+    payout_policy = resolve_payout_policy(config.evaluation.payout_policy)
+    expected_scoring_target = payout_policy.target or config.evaluation.main_target
+    expected_scoring_horizon = payout_policy.scoring_horizon or config.data.horizon
+    expected_identity = {
+        "payout_policy_id": payout_policy.policy_id,
+        "scoring_target": expected_scoring_target,
+        "scoring_horizon": expected_scoring_horizon,
+    }
+    observed_identity = {field: scorecard.get(field) for field in expected_identity}
+    if observed_identity != expected_identity:
+        raise ValueError(
+            "promotion scorecard identity mismatch: "
+            f"expected {expected_identity}, got {observed_identity}"
+        )
+    feature_cols = list(manifest.get("feature_cols") or [])
+    if not feature_cols:
+        raise ValueError("run manifest has no feature_cols")
+    evidence = _capital_evidence_check(
+        manifest, scorecard, config=config, payout_policy=payout_policy
+    )
+    if not rehearsal:
+        recorded_data_fingerprint = manifest.get("data_fingerprint")
+        if not isinstance(recorded_data_fingerprint, str):
+            raise ValueError(
+                "promotion requires the run manifest data_fingerprint; legacy "
+                "runs without snapshot identity are not activation-eligible"
+            )
+        if _data_fingerprint(config) != recorded_data_fingerprint:
+            raise ValueError(
+                "promotion data fingerprint mismatch: the configured data "
+                "snapshot changed after the research run"
+            )
+        recorded_promotion_fingerprint = manifest.get("promotion_data_fingerprint")
+        if not isinstance(recorded_promotion_fingerprint, str):
+            raise ValueError(
+                "promotion requires the run manifest promotion_data_fingerprint; "
+                "legacy runs without content identity are not activation-eligible"
+            )
+        if _promotion_data_fingerprint(config) != recorded_promotion_fingerprint:
+            raise ValueError(
+                "promotion data content fingerprint mismatch: train, validation, "
+                "or features content changed after the research run"
+            )
+        _verify_capital_evidence_against_data(
+            config,
+            evidence,
+            payout_policy=payout_policy,
+            scorecard=scorecard,
+        )
+    return config, payout_policy, evidence, feature_cols, normalizations
+
+
+def _promotion_authorization_payload(export_payload: dict[str, Any]) -> dict[str, Any]:
+    """Return the immutable, non-timing authorization fields for an export."""
+    return {
+        "version": _PROMOTION_AUTHORIZATION_VERSION,
+        "family": export_payload["family"],
+        "training_scope": export_payload["training_scope"],
+        "promoted_from_run_id": export_payload["promoted_from_run_id"],
+        "scorecard_sha256": export_payload["scorecard_sha256"],
+        "capital_evidence_sha256": export_payload["capital_evidence_sha256"],
+        "tier4_gate_passed": bool(export_payload["tier4_gate_passed"]),
+        "override_used": bool(export_payload["override_used"]),
+        "rehearsal": bool(export_payload["rehearsal"]),
+        "acceptance": export_payload["acceptance"],
+        "activation_eligible": bool(export_payload["activation_eligible"]),
+    }
+
+
+def _promotion_authorization_path(family: str, run_id: str) -> Path:
+    return paths.run_dir(family, run_id) / "promotion_authorization.json"
+
+
+def _write_promotion_authorization(
+    family: str, run_id: str, export_payload: dict[str, Any]
+) -> None:
+    """Write the slot authorization once; a changed receipt refuses recovery."""
+    path = _promotion_authorization_path(family, run_id)
+    expected = _promotion_authorization_payload(export_payload)
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError) as exc:
+            raise ValueError(
+                f"promotion authorization receipt {path} is unreadable"
+            ) from exc
+        if existing != expected:
+            raise ValueError(
+                f"promotion authorization receipt {path} is immutable and differs"
+            )
+        return
+    atomic_write_text(path, json.dumps(expected, sort_keys=True, indent=2))
+
+
+def _verify_promotion_authorization(
+    family: str, run_id: str, export_payload: dict[str, Any]
+) -> None:
+    path = _promotion_authorization_path(family, run_id)
+    if not path.is_file():
+        raise ValueError(
+            "existing slot has no immutable promotion authorization receipt; "
+            "refusing pointer repair"
+        )
+    try:
+        recorded = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        raise ValueError(
+            "existing slot promotion authorization receipt is unreadable; "
+            "refusing pointer repair"
+        ) from exc
+    if recorded != _promotion_authorization_payload(export_payload):
+        raise ValueError(
+            "existing slot promotion authorization does not match export.json; "
+            "refusing pointer repair"
         )
 
 
@@ -608,6 +899,39 @@ def promote_full_version(
                 "force=True only repoints current.json at an existing VALID "
                 "full slot, never overwrites a slot (prefer a new run)"
             )
+        # The recovery path never refits, so the capital-evidence chain is
+        # verified with the exact same authorization routine as publication:
+        # a slot whose run or export evidence is stale is not repointable.
+        run_payload = _load_run_record(family, run_id)
+        run_manifest = run_payload.get("manifest") or {}
+        run_scorecard = run_payload.get("scorecard") or {}
+        if not run_scorecard:
+            raise ValueError(
+                "existing slot cannot be repointed: the run has no scorecard"
+            )
+        repair_config, _repair_policy, repair_evidence, _repair_features, _ = (
+            _authorize_capital_evidence(
+                run_manifest,
+                run_scorecard,
+                data_dir=data_dir,
+                rehearsal=False,
+            )
+        )
+        _supplemental_identity_check(repair_config, run_manifest)
+        slot_record = json.loads((slot / "export.json").read_text(encoding="utf-8"))
+        if slot_record.get("capital_evidence_sha256") != canonical_digest(
+            repair_evidence
+        ):
+            raise ValueError(
+                "existing slot capital evidence digest does not match the run "
+                "record; refusing pointer repair"
+            )
+        if slot_record.get("scorecard_sha256") != scorecard_block_digest(run_scorecard):
+            raise ValueError(
+                "existing slot scorecard digest does not match the run record; "
+                "refusing pointer repair"
+            )
+        _verify_promotion_authorization(family, run_id, slot_record)
         with file_lock(promotion_lock):
             version = lifecycle.valid_export(family, "full", run_id)
             if version is None:
@@ -635,7 +959,6 @@ def promote_full_version(
             "(no refit; slot untouched)",
             slot,
         )
-        slot_record = json.loads((slot / "export.json").read_text(encoding="utf-8"))
         return PromotionResult(
             artifact_path=slot / "predict.pkl",
             manifest_path=slot / "export.json",
@@ -678,56 +1001,16 @@ def promote_full_version(
             "(recorded as tier4_gate_passed: false in the record)"
         )
 
-    normalized, normalizations = _normalize_stored_config(stored_config)
-    if data_dir is not None:
-        original_data_dir = normalized.get("data", {}).get("data_dir")
-        normalized["data"]["data_dir"] = str(Path(data_dir))
-        normalizations.append(
-            {
-                "field": "data.data_dir",
-                "from": original_data_dir,
-                "to": str(Path(data_dir)),
-            }
+    config, payout_policy, evidence, feature_cols, normalizations = (
+        _authorize_capital_evidence(
+            manifest,
+            scorecard,
+            data_dir=data_dir,
+            rehearsal=rehearsal,
         )
-    config = config_from_dict(normalized)
-    payout_policy = resolve_payout_policy(config.evaluation.payout_policy)
+    )
     expected_scoring_target = payout_policy.target or config.evaluation.main_target
     expected_scoring_horizon = payout_policy.scoring_horizon or config.data.horizon
-    expected_identity = {
-        "payout_policy_id": payout_policy.policy_id,
-        "scoring_target": expected_scoring_target,
-        "scoring_horizon": expected_scoring_horizon,
-    }
-    observed_identity = {field: scorecard.get(field) for field in expected_identity}
-    if observed_identity != expected_identity:
-        raise ValueError(
-            "promotion scorecard identity mismatch: "
-            f"expected {expected_identity}, got {observed_identity}"
-        )
-    if not rehearsal:
-        recorded_data_fingerprint = manifest.get("data_fingerprint")
-        if not isinstance(recorded_data_fingerprint, str):
-            raise ValueError(
-                "promotion requires the run manifest data_fingerprint; legacy "
-                "runs without snapshot identity are not activation-eligible"
-            )
-        current_data_fingerprint = _data_fingerprint(config)
-        if current_data_fingerprint != recorded_data_fingerprint:
-            raise ValueError(
-                "promotion data fingerprint mismatch: the configured data "
-                "snapshot changed after the research run"
-            )
-        recorded_promotion_fingerprint = manifest.get("promotion_data_fingerprint")
-        if not isinstance(recorded_promotion_fingerprint, str):
-            raise ValueError(
-                "promotion requires the run manifest promotion_data_fingerprint; "
-                "legacy runs without content identity are not activation-eligible"
-            )
-        if _promotion_data_fingerprint(config) != recorded_promotion_fingerprint:
-            raise ValueError(
-                "promotion data content fingerprint mismatch: train, validation, "
-                "or features content changed after the research run"
-            )
     _supplemental_identity_check(config, manifest)
     _ram_guard(config, scope=scope)
 
@@ -761,7 +1044,7 @@ def promote_full_version(
         components, components_sha256 = _component_identity(
             target_cols, pred_cols, weights
         )
-        scorecard_sha256 = _scorecard_digest(scorecard)
+        scorecard_sha256 = scorecard_block_digest(scorecard)
         proportion = float(config.risk.neutralization_proportion)
 
         orchestrator = ModelOrchestrator(config.model, seed=config.run.seed)
@@ -815,6 +1098,9 @@ def promote_full_version(
             "components": components,
             "components_sha256": components_sha256,
             "scorecard_sha256": scorecard_sha256,
+            # The evidence block that authorized this promotion (digested into
+            # the export record so the authorization is auditable per slot).
+            "capital_evidence_sha256": canonical_digest(evidence),
             "data_fingerprint": manifest.get("data_fingerprint"),
             "promotion_data_fingerprint": manifest.get("promotion_data_fingerprint"),
             "payout_policy_id": payout_policy.policy_id,
@@ -895,6 +1181,7 @@ def promote_full_version(
             slot = experiment_store.publish_staged_export(
                 family, persisted_scope, run_id, staging=staging
             )
+            _write_promotion_authorization(family, run_id, export_payload)
             if scope == "full" and activation_eligible:
                 atomic_write_text(
                     pointer,
@@ -1047,12 +1334,10 @@ def _run_cross_check(
     val_df = agent.load(
         "validation", columns=["era", "id", *feature_cols, *target_cols]
     )
-    policy_overlap = (
-        16
-        if payout_policy.scoring_horizon == "60D"
-        else 8 if payout_policy.scoring_horizon == "20D" else 0
-    )
-    purge = max(config.split.purge_eras, policy_overlap)
+    # Purge = max(config purge, scoring-overlap purge) via the shared splitter
+    # helper (single source with the runner's validation stage). The RAW
+    # policy horizon drives overlap: legacy policies bind none.
+    purge = scoring_purge_eras(config.split.purge_eras, payout_policy.scoring_horizon)
     if purge > 0:
         # Same window rule as the runner's validation stage: the first
         # purge_eras validation eras overlap the last train eras' targets.

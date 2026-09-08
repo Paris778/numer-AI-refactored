@@ -6,6 +6,9 @@ evaluation consume it. This module does not import ``nmr.models``.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -24,6 +27,7 @@ __all__ = [
     "PREDICTION_STAGES",
     "ERA_PARTITIONS",
     "FIT_ROLES",
+    "CAPITAL_EVIDENCE_VERSION",
     "CapitalContext",
     "PredictionProvenance",
     "PredictionSet",
@@ -32,6 +36,7 @@ __all__ = [
     "evaluate_prediction_set",
     "prediction_set_from_frame",
     "read_prediction_set",
+    "validation_key_fingerprint",
 ]
 
 PREDICTION_STAGES: tuple[str, ...] = (
@@ -47,6 +52,52 @@ _RESEARCH_PARTITIONS: frozenset[str] = frozenset({"oof", "held_out"})
 _REQUIRED_FRAME_COLS = ("era", "id", "prediction")
 _DEFAULT_MAIN_TARGET = "target"
 _DEFAULT_HORIZON = "20D"
+# Schema version of the persisted capital-evidence block (run.json manifest).
+# Promotion refuses any other version — bump deliberately, never silently.
+CAPITAL_EVIDENCE_VERSION = 1
+_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def validation_key_fingerprint(
+    frame: pl.DataFrame, *, era_col: str = "era", id_col: str = "id"
+) -> str:
+    """SHA-256 over the canonical ``(era, id)`` key universe of a frame.
+
+    Order-independent and extra-column-independent: two frames carry the same
+    fingerprint iff they cover exactly the same keys. This is the identity
+    term that lets capital evaluation refuse sparse or extra prediction rows.
+    """
+    if era_col not in frame.columns or id_col not in frame.columns:
+        raise ValueError(
+            f"frame must contain {era_col!r} and {id_col!r} for key fingerprinting"
+        )
+    keys = sorted(
+        (str(era), str(key_id))
+        for era, key_id in frame.select([era_col, id_col]).iter_rows()
+    )
+    return hashlib.sha256(
+        json.dumps(keys, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    ).hexdigest()
+
+
+def _assert_capital_frame_key_universe(
+    name: str, frame: pl.DataFrame, context: CapitalContext
+) -> None:
+    """Require one auxiliary evaluation frame to equal the trusted universe."""
+    if not isinstance(frame, pl.DataFrame):
+        raise ValueError(f"capital evaluation {name} must be a polars DataFrame")
+    if "era" not in frame.columns or "id" not in frame.columns:
+        raise ValueError(f"capital evaluation {name} must contain exact (era, id) keys")
+    if frame.select(["era", "id"]).n_unique() != frame.height:
+        raise ValueError(f"capital evaluation {name} contains duplicate (era, id) keys")
+    if (
+        frame.height != context.validation_row_count
+        or validation_key_fingerprint(frame) != context.validation_key_fingerprint
+    ):
+        raise ValueError(
+            f"capital evaluation {name} keys do not match the authoritative "
+            "validation key universe"
+        )
 
 
 @dataclass(frozen=True)
@@ -72,6 +123,7 @@ class PredictionProvenance:
     selection_bias: bool = False
     split_estimand: bool = False
     validation_window: tuple[str, ...] | None = None
+    payout_policy_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.stage not in PREDICTION_STAGES:
@@ -112,6 +164,8 @@ class PredictionProvenance:
                 window = self.validation_window
             if any(not isinstance(era, str) or not era for era in window):
                 raise ValueError("validation_window must be a tuple of era labels")
+        if self.payout_policy_id is not None and not self.payout_policy_id:
+            raise ValueError("payout_policy_id must be a non-empty string or None")
 
 
 @dataclass(frozen=True)
@@ -134,18 +188,39 @@ class ResearchEvaluation:
 
 @dataclass(frozen=True)
 class CapitalContext:
-    """Trusted capital identity. Callers cannot self-attest this block.
+    """Authoritative capital identity for one validation evaluation.
 
-    The runner or another trusted evaluator supplies the expected validation
-    window, scoring identity, and fingerprints. Provenance must match this
-    context; matching the prediction frame alone is not enough.
+    Produced by a trusted validation loader (the runner derives every field
+    from the loaded, purged ``validation.parquet`` and the run config — never
+    from the prediction artifact). A caller can still construct the dataclass,
+    but the predicate verifies it against BOTH the prediction frame and the
+    persisted evidence chain; promotion additionally re-verifies the key
+    universe against the data on disk. Self-consistency with a prediction
+    frame is necessary but never sufficient: the context is bound to the data
+    snapshot (``data_fingerprint``) and the feature schema
+    (``feature_fingerprint``), which promotion re-checks against the current
+    data files.
+
+    Threat-model boundary: this binding is anti-DRIFT, not anti-forgery. An
+    operator with filesystem write access to ``experiments/`` and read access
+    to the data can compute every fingerprint and fabricate a consistent
+    evidence chain; nothing in this module can detect that. The chain detects
+    stale, partial, or mislabeled evidence and hand-edited inconsistencies —
+    it does not authenticate the producer.
     """
 
     validation_window: tuple[str, ...]
     scoring_target: str
     scoring_horizon: str
+    payout_policy_id: str
     data_fingerprint: str
     feature_fingerprint: str
+    validation_key_fingerprint: str
+    validation_row_count: int
+    trained_targets: tuple[str, ...]
+    ensemble_target: str
+    training_horizon: str
+    split_estimand: bool
 
     def __post_init__(self) -> None:
         window = self.validation_window
@@ -161,10 +236,35 @@ class CapitalContext:
                 "scoring_horizon must be one of "
                 f"{VALID_HORIZONS}, got {self.scoring_horizon!r}"
             )
+        if not self.payout_policy_id:
+            raise ValueError("CapitalContext requires payout_policy_id")
         if not self.data_fingerprint:
             raise ValueError("CapitalContext requires data_fingerprint")
         if not self.feature_fingerprint:
             raise ValueError("CapitalContext requires feature_fingerprint")
+        if not _HEX64_RE.fullmatch(self.validation_key_fingerprint):
+            raise ValueError(
+                "CapitalContext validation_key_fingerprint must be a 64-char "
+                "lowercase hex digest"
+            )
+        if (
+            not isinstance(self.validation_row_count, int)
+            or self.validation_row_count < 1
+        ):
+            raise ValueError("CapitalContext requires validation_row_count >= 1")
+        targets = self.trained_targets
+        if not isinstance(targets, tuple):
+            object.__setattr__(self, "trained_targets", tuple(targets))
+            targets = self.trained_targets
+        if not targets or any(not isinstance(t, str) or not t for t in targets):
+            raise ValueError("CapitalContext requires a non-empty trained_targets")
+        if not self.ensemble_target:
+            raise ValueError("CapitalContext requires ensemble_target")
+        if self.training_horizon not in VALID_HORIZONS:
+            raise ValueError(
+                "training_horizon must be one of "
+                f"{VALID_HORIZONS}, got {self.training_horizon!r}"
+            )
 
 
 def prediction_set_from_frame(
@@ -368,6 +468,12 @@ def _assert_capital_eligible(
         raise ValueError("capital evaluation requires data_fingerprint")
     if not provenance.feature_fingerprint:
         raise ValueError("capital evaluation requires feature_fingerprint")
+    if not provenance.payout_policy_id:
+        raise ValueError("capital evaluation requires payout_policy_id identity")
+    if not provenance.ensemble_target:
+        raise ValueError("capital evaluation requires ensemble_target identity")
+    if not provenance.training_horizon:
+        raise ValueError("capital evaluation requires training_horizon identity")
     window = provenance.validation_window
     if not window:
         raise ValueError("capital evaluation requires validation_window identity")
@@ -378,6 +484,22 @@ def _assert_capital_eligible(
     expected = tuple(sorted((str(era) for era in context.validation_window), key=str))
     if frame_eras != locked or locked != expected:
         raise ValueError("validation_window does not match prediction eras")
+    frame_key_fp = validation_key_fingerprint(prediction_set.frame)
+    if (
+        frame_key_fp != context.validation_key_fingerprint
+        or prediction_set.frame.height != context.validation_row_count
+    ):
+        raise ValueError(
+            "prediction keys do not match the authoritative validation key "
+            f"universe (expected {context.validation_row_count} rows, "
+            f"got {prediction_set.frame.height})"
+        )
+    if provenance.payout_policy_id != context.payout_policy_id:
+        raise ValueError(
+            "payout_policy_id provenance "
+            f"{provenance.payout_policy_id!r} does not match CapitalContext "
+            f"{context.payout_policy_id!r}"
+        )
     if provenance.scoring_target != context.scoring_target:
         raise ValueError(
             "scoring_target provenance "
@@ -389,6 +511,30 @@ def _assert_capital_eligible(
             "scoring_horizon provenance "
             f"{provenance.scoring_horizon!r} does not match CapitalContext "
             f"{context.scoring_horizon!r}"
+        )
+    if provenance.trained_targets != context.trained_targets:
+        raise ValueError(
+            "trained_targets provenance "
+            f"{provenance.trained_targets!r} does not match CapitalContext "
+            f"{context.trained_targets!r}"
+        )
+    if provenance.ensemble_target != context.ensemble_target:
+        raise ValueError(
+            "ensemble_target provenance "
+            f"{provenance.ensemble_target!r} does not match CapitalContext "
+            f"{context.ensemble_target!r}"
+        )
+    if provenance.training_horizon != context.training_horizon:
+        raise ValueError(
+            "training_horizon provenance "
+            f"{provenance.training_horizon!r} does not match CapitalContext "
+            f"{context.training_horizon!r}"
+        )
+    if provenance.split_estimand != context.split_estimand:
+        raise ValueError(
+            "split_estimand provenance "
+            f"{provenance.split_estimand!r} does not match CapitalContext "
+            f"{context.split_estimand!r}"
         )
     if provenance.data_fingerprint != context.data_fingerprint:
         raise ValueError("data_fingerprint does not match CapitalContext")
@@ -421,11 +567,13 @@ def evaluate_prediction_set(
 ):
     """Score a ``PredictionSet`` through ``evaluate_model``.
 
-    Capital evaluation requires a trusted :class:`CapitalContext` plus
-    ``stage='validation'``, ``era_partition='validation'``,
-    ``selection_bias=False``, required scoring/fingerprint identity, and a
-    locked ``validation_window`` that matches both the frame and the
-    context. ``submission`` is a rank-domain artifact, not a capital
+    Capital evaluation requires a :class:`CapitalContext` produced by a
+    trusted validation loader (the runner derives it from the loaded, purged
+    validation data) plus ``stage='validation'``,
+    ``era_partition='validation'``, ``selection_bias=False``, required
+    scoring/payout/fingerprint identity, training-estimand identity, and
+    exact ``(era, id)`` key coverage — sparse or extra prediction rows are
+    rejected. ``submission`` is a rank-domain artifact, not a capital
     scorecard. Research stages return :class:`ResearchEvaluation` only when
     ``allow_research_stage=True``. Does not import ``nmr.models``.
     """
@@ -465,6 +613,22 @@ def evaluate_prediction_set(
             f"{capital_context.scoring_horizon!r} does not match evaluation "
             f"horizon={horizon!r}"
         )
+    if capital_context.payout_policy_id != resolved_policy.policy_id:
+        raise ValueError(
+            "CapitalContext payout_policy_id "
+            f"{capital_context.payout_policy_id!r} does not match evaluation "
+            f"payout_policy={resolved_policy.policy_id!r}"
+        )
+    capital_frames = [
+        ("predictions", prediction_set.frame),
+        ("meta_model", meta_model),
+        ("features", features),
+        ("targets", targets),
+    ]
+    if benchmarks is not None:
+        capital_frames.append(("benchmarks", benchmarks))
+    for name, frame in capital_frames:
+        _assert_capital_frame_key_universe(name, frame, capital_context)
     _assert_capital_eligible(
         prediction_set,
         context=capital_context,
@@ -478,4 +642,7 @@ def evaluate_prediction_set(
         features=features,
         targets=targets,
         **kwargs,
+        _expected_key_fingerprint=capital_context.validation_key_fingerprint,
+        _expected_row_count=capital_context.validation_row_count,
+        _expected_era_window=capital_context.validation_window,
     )

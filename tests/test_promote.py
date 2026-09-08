@@ -19,6 +19,7 @@ import polars as pl
 import pytest
 
 from nmr import experiment_store, lifecycle, paths
+from nmr._oof import feature_list_fingerprint
 from nmr.benchmark import Tier4GateConfig
 from nmr.config import (
     DataConfig,
@@ -33,11 +34,13 @@ from nmr.config import (
 )
 from nmr.data import IngestionAgent
 from nmr.deployment import load_predict
+from nmr.payout import resolve_payout_policy
+from nmr.predictions import CAPITAL_EVIDENCE_VERSION, validation_key_fingerprint
 from nmr.promote import PromotionResult
 from nmr.promote import _full_history_frame as _orig_full_history_frame
 from nmr.promote import promote_full_version, rehearse_promotion
 from nmr.runner import ExperimentRunner
-from nmr.scorecard import CROSSCHECK_N_TRIALS
+from nmr.scorecard import CROSSCHECK_N_TRIALS, scorecard_block_digest
 
 _RID = "a" * 64
 
@@ -48,7 +51,7 @@ def _isolated_experiments_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(paths, "EXPERIMENTS_ROOT", tmp_path / "experiments")
 
 
-def _make_data(root: Path, *, validation_eras: int = 8) -> Path:
+def _make_data(root: Path, *, validation_eras: int = 24) -> Path:
     version_dir = root / "vtest"
     version_dir.mkdir(parents=True, exist_ok=True)
     train_eras = 8
@@ -140,6 +143,7 @@ def _passing_scorecard() -> dict:
         "payout_policy_id": "classic_atomic_ender60_r1343_v1",
         "scoring_target": "target_ender_60",
         "scoring_horizon": "60D",
+        "n_eras": 8,
         "corr": 0.05,
         "corr_sharpe_ac": 1.0,
         "fnc": 0.03,
@@ -147,6 +151,77 @@ def _passing_scorecard() -> dict:
         "cagr_1y": 0.1,
         "deflated_sharpe": 0.9,
         "turnover_mean": None,
+    }
+
+
+def _default_capital_evidence(
+    stored_config: dict, manifest: dict, scorecard: dict
+) -> dict:
+    """Build a run-consistent capital evidence block from the fixture data."""
+    data_dir = Path(stored_config["data"]["data_dir"])
+    version = stored_config["data"].get("version", "vtest")
+    val = pl.read_parquet(data_dir / version / "validation.parquet")
+    normalized = json.loads(json.dumps(stored_config))
+    normalized.setdefault("data", {}).setdefault("horizon", "20D")
+    normalized.setdefault("split", {})["embargo_eras"] = 0
+    cfg = config_from_dict(normalized)
+    policy = resolve_payout_policy(cfg.evaluation.payout_policy)
+    scoring_target = policy.target or cfg.evaluation.main_target
+    scoring_horizon = policy.scoring_horizon or cfg.data.horizon
+    ensemble_target = cfg.evaluation.main_target
+    training_horizon = cfg.data.horizon
+    feature_cols = list(manifest.get("feature_cols") or ["f1", "f2"])
+    purge = max(
+        cfg.split.purge_eras,
+        16 if policy.scoring_horizon == "60D" else 8,
+    )
+    all_eras = sorted({int(era) for era in val.get_column("era").unique().to_list()})
+    window_eras = [f"{era:04d}" for era in all_eras[purge:]]
+    val = val.filter(pl.col("era").is_in(window_eras))
+    return {
+        "version": CAPITAL_EVIDENCE_VERSION,
+        "validation_window": sorted(
+            {str(era) for era in val.get_column("era").unique().to_list()}, key=int
+        ),
+        "validation_key_fingerprint": validation_key_fingerprint(val),
+        "validation_row_count": int(val.height),
+        "payout_policy_id": policy.policy_id,
+        "scoring_target": scoring_target,
+        "scoring_horizon": scoring_horizon,
+        "data_fingerprint": manifest["data_fingerprint"],
+        "feature_fingerprint": feature_list_fingerprint(feature_cols),
+        "trained_targets": list(cfg.data.targets),
+        "ensemble_target": ensemble_target,
+        "training_horizon": training_horizon,
+        "split_estimand": bool(
+            scoring_target != ensemble_target or scoring_horizon != training_horizon
+        ),
+        "scorecard_sha256": scorecard_block_digest(scorecard),
+    }
+
+
+def _fixture_manifest(
+    stored_config: dict,
+    *,
+    feature_cols: list[str] | None = None,
+    weights: list[float] | None = None,
+) -> dict:
+    """The manifest fields ``_write_registry`` persists — shared so evidence
+    tampering tests mutate exactly one field against a consistent baseline."""
+    normalized = json.loads(json.dumps(stored_config))
+    normalized.setdefault("data", {}).setdefault("horizon", "20D")
+    normalized.setdefault("split", {})["embargo_eras"] = 0
+    fingerprint_config = config_from_dict(normalized)
+    target_names = list(stored_config.get("data", {}).get("targets") or ["target"])
+    return {
+        "config": stored_config,
+        "feature_cols": feature_cols if feature_cols is not None else ["f1", "f2"],
+        "pred_cols": [f"pred_{target}" for target in target_names],
+        "weights": weights if weights is not None else [1.0],
+        "data_fingerprint": ExperimentRunner(fingerprint_config)._data_fingerprint,
+        "promotion_data_fingerprint": ExperimentRunner(
+            fingerprint_config
+        )._promotion_data_fingerprint,
     }
 
 
@@ -158,30 +233,27 @@ def _write_registry(
     feature_cols: list[str] | None = None,
     weights: list[float] | None = None,
     supplemental_sha: str | None = None,
+    capital_evidence: dict | None = None,
+    omit_capital_evidence: bool = False,
 ) -> Path:
     """Write the run record through experiment_store (experiments layout)."""
-    normalized = json.loads(json.dumps(stored_config))
-    normalized.setdefault("data", {}).setdefault("horizon", "20D")
-    normalized.setdefault("split", {})["embargo_eras"] = 0
-    fingerprint_config = config_from_dict(normalized)
-    target_names = list(stored_config.get("data", {}).get("targets") or ["target"])
-    manifest = {
-        "config": stored_config,
-        "feature_cols": feature_cols if feature_cols is not None else ["f1", "f2"],
-        "pred_cols": [f"pred_{target}" for target in target_names],
-        "weights": weights if weights is not None else [1.0],
-        "data_fingerprint": ExperimentRunner(fingerprint_config)._data_fingerprint,
-        "promotion_data_fingerprint": ExperimentRunner(
-            fingerprint_config
-        )._promotion_data_fingerprint,
-    }
+    scorecard_block = scorecard if scorecard is not None else _passing_scorecard()
+    manifest = _fixture_manifest(
+        stored_config, feature_cols=feature_cols, weights=weights
+    )
     if supplemental_sha is not None:
         manifest["supplemental_feature_sets_sha256"] = supplemental_sha
+    if not omit_capital_evidence:
+        manifest["capital_evidence"] = (
+            _default_capital_evidence(stored_config, manifest, scorecard_block)
+            if capital_evidence is None
+            else capital_evidence
+        )
     payload = {
         "run_id": run_id,
         "metrics": {"mean": 0.1, "sharpe": 0.5},
         "manifest": manifest,
-        "scorecard": scorecard if scorecard is not None else _passing_scorecard(),
+        "scorecard": scorecard_block,
     }
     return experiment_store.record_run("brb1-lgbm-v6", run_id, payload)
 
@@ -342,6 +414,94 @@ def test_promote_gate_refusal_and_override(tmp_path: Path) -> None:
         )
 
 
+def test_promote_requires_capital_evidence(tmp_path: Path) -> None:
+    """A run whose scorecard is not bound to runner-produced capital evidence
+    cannot be promoted — direct/foreign scorecards are not promotion inputs."""
+    data = _make_data(tmp_path / "data")
+    _write_registry(stored_config=_stored_config_dict(data), omit_capital_evidence=True)
+    with pytest.raises(ValueError, match="capital_evidence"):
+        promote_full_version(_RID, "brb1-lgbm-v6")
+
+
+def test_promote_refuses_scorecard_not_bound_to_evidence(
+    tmp_path: Path,
+) -> None:
+    """The stored scorecard must be digest-bound to the persisted evidence.
+
+    The record carries a tampered scorecard while the evidence block still
+    digests the original — the mismatch refuses the promotion (runs are
+    immutable, so the tampered record is written once and only once).
+    """
+    data = _make_data(tmp_path / "data")
+    stored = _stored_config_dict(data)
+    good = _passing_scorecard()
+    tampered = dict(good)
+    tampered["corr"] = 0.09
+    _write_registry(
+        stored_config=stored,
+        scorecard=tampered,
+        capital_evidence=_default_capital_evidence(
+            stored, _fixture_manifest(stored), good
+        ),
+    )
+    with pytest.raises(ValueError, match="scorecard"):
+        promote_full_version(_RID, "brb1-lgbm-v6")
+
+
+def test_promote_refuses_evidence_payout_policy_mismatch(
+    tmp_path: Path,
+) -> None:
+    data = _make_data(tmp_path / "data")
+    stored = _stored_config_dict(data)
+    evidence = _default_capital_evidence(
+        stored, _fixture_manifest(stored), _passing_scorecard()
+    )
+    evidence["payout_policy_id"] = "classic_legacy_075_225_clip005_v1"
+    _write_registry(stored_config=stored, capital_evidence=evidence)
+    with pytest.raises(ValueError, match="payout_policy_id"):
+        promote_full_version(_RID, "brb1-lgbm-v6")
+
+
+def test_promote_refuses_evidence_feature_fingerprint_mismatch(
+    tmp_path: Path,
+) -> None:
+    data = _make_data(tmp_path / "data")
+    stored = _stored_config_dict(data)
+    evidence = _default_capital_evidence(
+        stored, _fixture_manifest(stored), _passing_scorecard()
+    )
+    evidence["feature_fingerprint"] = "0" * 64
+    _write_registry(stored_config=stored, capital_evidence=evidence)
+    with pytest.raises(ValueError, match="feature_fingerprint"):
+        promote_full_version(_RID, "brb1-lgbm-v6")
+
+
+def test_promote_refuses_evidence_data_fingerprint_mismatch(tmp_path: Path) -> None:
+    data = _make_data(tmp_path / "data")
+    stored = _stored_config_dict(data)
+    evidence = _default_capital_evidence(
+        stored, _fixture_manifest(stored), _passing_scorecard()
+    )
+    evidence["data_fingerprint"] = "0" * 64
+    _write_registry(stored_config=stored, capital_evidence=evidence)
+    with pytest.raises(ValueError, match="data_fingerprint"):
+        promote_full_version(_RID, "brb1-lgbm-v6")
+
+
+def test_promote_recomputes_validation_keys_from_data(tmp_path: Path) -> None:
+    """Promotion independently recomputes the purged validation key universe
+    and refuses an evidence block whose keys do not match the data."""
+    data = _make_data(tmp_path / "data")
+    stored = _stored_config_dict(data)
+    evidence = _default_capital_evidence(
+        stored, _fixture_manifest(stored), _passing_scorecard()
+    )
+    evidence["validation_key_fingerprint"] = "0" * 64
+    _write_registry(stored_config=stored, capital_evidence=evidence)
+    with pytest.raises(ValueError, match="key"):
+        promote_full_version(_RID, "brb1-lgbm-v6")
+
+
 def test_promote_missing_scorecard_refused(tmp_path: Path) -> None:
     data = _make_data(tmp_path / "data")
     _write_registry(stored_config=_stored_config_dict(data), scorecard={})
@@ -394,6 +554,7 @@ def test_promote_refuses_same_shape_training_value_change_before_fit(
         ("components_sha256", "0" * 64),
         ("data_fingerprint", "0" * 64),
         ("payout_policy_id", "unrelated_policy"),
+        ("capital_evidence_sha256", "0" * 64),
     ],
 )
 def test_export_identity_tampering_revokes_activation_and_force_recovery(
@@ -413,9 +574,16 @@ def test_export_identity_tampering_revokes_activation_and_force_recovery(
 
     version = lifecycle.valid_export("brb1-lgbm-v6", "full", _RID)
     assert version is not None
-    assert lifecycle.activation_eligible(version) is False
-    assert lifecycle.current_full_status("brb1-lgbm-v6") == "none"
-    with pytest.raises(ValueError, match="activation-eligible"):
+    if field == "capital_evidence_sha256":
+        # lifecycle is the artifact read-side; the promotion writer owns the
+        # run.json/evidence binding and must reject this at pointer repair.
+        assert lifecycle.activation_eligible(version) is True
+        expected_error = "capital evidence digest"
+    else:
+        assert lifecycle.activation_eligible(version) is False
+        assert lifecycle.current_full_status("brb1-lgbm-v6") == "none"
+        expected_error = "activation-eligible|scorecard digest"
+    with pytest.raises(ValueError, match=expected_error):
         promote_full_version(_RID, "brb1-lgbm-v6", force=True)
 
 
@@ -560,6 +728,95 @@ def test_promote_force_recovery_refuses_invalid_slot(tmp_path: Path) -> None:
     slot = paths.export_dir("brb1-lgbm-v6", "full", _RID)
     (slot / "predict.pkl").unlink()  # hollow the slot -> invalid
     with pytest.raises(ValueError, match="not a VALID full export"):
+        promote_full_version(_RID, "brb1-lgbm-v6", force=True)
+
+
+def test_promote_refuses_arbitrary_evidence_window(tmp_path: Path) -> None:
+    data = _make_data(tmp_path / "data")
+    stored = _stored_config_dict(data)
+    manifest = _fixture_manifest(stored)
+    scorecard = _passing_scorecard()
+    evidence = _default_capital_evidence(stored, manifest, scorecard)
+    evidence["validation_window"] = evidence["validation_window"][1:]
+    evidence["validation_row_count"] -= 8
+    val = pl.read_parquet(data / "vtest" / "validation.parquet").filter(
+        pl.col("era").is_in(evidence["validation_window"])
+    )
+    evidence["validation_key_fingerprint"] = validation_key_fingerprint(val)
+    _write_registry(stored_config=stored, capital_evidence=evidence)
+    with pytest.raises(ValueError, match="validation_window"):
+        promote_full_version(_RID, "brb1-lgbm-v6")
+
+
+def test_promote_binds_scorecard_era_count_to_expected_window(tmp_path: Path) -> None:
+    data = _make_data(tmp_path / "data")
+    stored = _stored_config_dict(data)
+    manifest = _fixture_manifest(stored)
+    scorecard = _passing_scorecard()
+    scorecard["n_eras"] = 7
+    evidence = _default_capital_evidence(stored, manifest, scorecard)
+    _write_registry(
+        stored_config=stored, scorecard=scorecard, capital_evidence=evidence
+    )
+    with pytest.raises(ValueError, match="n_eras"):
+        promote_full_version(_RID, "brb1-lgbm-v6")
+
+
+def test_pointer_repair_rechecks_capital_evidence(tmp_path: Path) -> None:
+    data = _make_data(tmp_path / "data")
+    _write_registry(stored_config=_stored_config_dict(data))
+    promote_full_version(_RID, "brb1-lgbm-v6")
+    paths.current_pointer_path("brb1-lgbm-v6").unlink()
+    run_path = paths.run_json_path("brb1-lgbm-v6", _RID)
+    run_payload = json.loads(run_path.read_text(encoding="utf-8"))
+    run_payload["manifest"]["capital_evidence"]["validation_window"] = run_payload[
+        "manifest"
+    ]["capital_evidence"]["validation_window"][1:]
+    run_path.write_text(json.dumps(run_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="validation_window"):
+        promote_full_version(_RID, "brb1-lgbm-v6", force=True)
+
+
+def test_pointer_repair_refuses_tampered_activation_flags(tmp_path: Path) -> None:
+    data = _make_data(tmp_path / "data")
+    _write_registry(stored_config=_stored_config_dict(data))
+    promote_full_version(_RID, "brb1-lgbm-v6", override_gate=True)
+    export_path = paths.export_dir("brb1-lgbm-v6", "full", _RID) / "export.json"
+    export = json.loads(export_path.read_text(encoding="utf-8"))
+    export.update(
+        {
+            "tier4_gate_passed": True,
+            "override_used": False,
+            "rehearsal": False,
+            "activation_eligible": True,
+        }
+    )
+    export_path.write_text(json.dumps(export), encoding="utf-8")
+    with pytest.raises(ValueError, match="authorization"):
+        promote_full_version(_RID, "brb1-lgbm-v6", force=True)
+
+
+def test_pointer_repair_refuses_missing_authorization_receipt(tmp_path: Path) -> None:
+    data = _make_data(tmp_path / "data")
+    _write_registry(stored_config=_stored_config_dict(data))
+    promote_full_version(_RID, "brb1-lgbm-v6")
+    receipt = paths.run_dir("brb1-lgbm-v6", _RID) / "promotion_authorization.json"
+    receipt.unlink()
+    with pytest.raises(ValueError, match="no immutable promotion authorization"):
+        promote_full_version(_RID, "brb1-lgbm-v6", force=True)
+
+
+def test_pointer_repair_refuses_mismatched_authorization_receipt(
+    tmp_path: Path,
+) -> None:
+    data = _make_data(tmp_path / "data")
+    _write_registry(stored_config=_stored_config_dict(data))
+    promote_full_version(_RID, "brb1-lgbm-v6")
+    receipt = paths.run_dir("brb1-lgbm-v6", _RID) / "promotion_authorization.json"
+    payload = json.loads(receipt.read_text(encoding="utf-8"))
+    payload["activation_eligible"] = False
+    receipt.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="authorization"):
         promote_full_version(_RID, "brb1-lgbm-v6", force=True)
 
 
@@ -1133,7 +1390,10 @@ def test_train_only_scope_fits_train_only(
     fit-phase spy records IngestionAgent.load calls only for the duration of
     the fit — the post-fit cross-check legitimately opens validation later."""
     data = _make_data(tmp_path / "data", validation_eras=32)
-    _write_registry(stored_config=_stored_config_dict(data))
+    _write_registry(
+        stored_config=_stored_config_dict(data),
+        scorecard={**_passing_scorecard(), "n_eras": 16},
+    )
     opened: list[str] = []
     original_load = IngestionAgent.load
 
@@ -1219,7 +1479,10 @@ def test_train_only_spawn_spec_excludes_validation(
     monkeypatch.setattr(ModelOrchestrator, "_fit_full_history_subprocess", _spy)
     monkeypatch.setenv("NMR_FULL_HISTORY_SPAWN_MIN_BYTES", "1")
     data = _make_data(tmp_path / "data", validation_eras=32)
-    _write_registry(stored_config=_stored_config_dict(data))
+    _write_registry(
+        stored_config=_stored_config_dict(data),
+        scorecard={**_passing_scorecard(), "n_eras": 16},
+    )
     promote_full_version(
         _RID,
         "brb1-lgbm-v6",
@@ -1233,7 +1496,10 @@ def test_train_only_writes_cross_check_scorecard(tmp_path: Path) -> None:
     """The partial export ships a versioned scorecard.json (official backend,
     fixed replay constants, window eras + per-era series + raw Sharpe)."""
     data = _make_data(tmp_path / "data", validation_eras=32)
-    _write_registry(stored_config=_stored_config_dict(data))
+    _write_registry(
+        stored_config=_stored_config_dict(data),
+        scorecard={**_passing_scorecard(), "n_eras": 16},
+    )
     result = promote_full_version(
         _RID,
         "brb1-lgbm-v6",
@@ -1318,7 +1584,10 @@ def test_partial_scoring_failure_discards_staging(
     """A cross-check failure discards the staging dir — no half-written slot
     and no .tmp- residue (publication atomicity)."""
     data = _make_data(tmp_path / "data", validation_eras=32)
-    _write_registry(stored_config=_stored_config_dict(data))
+    _write_registry(
+        stored_config=_stored_config_dict(data),
+        scorecard={**_passing_scorecard(), "n_eras": 16},
+    )
 
     def _boom(*args, **kwargs):
         raise RuntimeError("scoring exploded")
