@@ -33,6 +33,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -52,6 +53,7 @@ from nmr.config import ExperimentConfig, config_from_dict
 from nmr.data import IngestionAgent
 from nmr.deployment import load_predict
 from nmr.families import DEFAULT_MODELS_DIR, validate_family_name
+from nmr.model_backend_registry import BackendRegistry
 from nmr.models import ModelOrchestrator
 from nmr.payout import PAYOUT_FACTOR_FILENAME, era_payout_factors, resolve_payout_policy
 from nmr.predictions import CAPITAL_EVIDENCE_VERSION, validation_key_fingerprint
@@ -61,6 +63,8 @@ from nmr.runner import (
     _data_fingerprint,
     _predict_in_era_batches,
     _promotion_data_fingerprint,
+    _require_full_history_backend_capabilities,
+    _run_backend_identity_layers,
     _serialize_predict_artifact,
 )
 from nmr.scorecard import (
@@ -256,8 +260,7 @@ def _load_run_record(family: str, run_id: str) -> dict[str, Any]:
     record lives at ``experiments/<family>/runs/<run_id>/run.json``, written
     by ``experiment_store.record_run_result`` at record time.
     """
-    if not _RID_RE.fullmatch(run_id):
-        raise ValueError(f"run_id={run_id!r} is not a 64-char lowercase hex string")
+    paths.validate_run_id(run_id)
     try:
         payload = experiment_store.read_run(family, run_id)
     except FileNotFoundError as exc:
@@ -305,6 +308,84 @@ def _supplemental_identity_check(
             "supplemental feature-set identity mismatch: resolved "
             f"{supp} sha256={actual[:12]}... != stored {stored_sha[:12]}..."
         )
+
+
+def _selected_backend_identity_check(
+    manifest: dict[str, Any],
+    *,
+    config: ExperimentConfig,
+    feature_cols: Sequence[str],
+    backend_registry: BackendRegistry | None = None,
+) -> None:
+    stored_selected = manifest.get("selected_backend_identity")
+    if not isinstance(stored_selected, dict):
+        raise ValueError(
+            "promotion requires the run manifest selected_backend_identity; "
+            "legacy runs without backend identity are not activation-eligible"
+        )
+    stored_audit = manifest.get("backend_registry_audit_identity")
+    if not isinstance(stored_audit, dict):
+        raise ValueError(
+            "promotion requires the run manifest backend_registry_audit_identity; "
+            "legacy runs without backend audit identity are not activation-eligible"
+        )
+    backend_name = stored_selected.get("backend_name")
+    if not isinstance(backend_name, str) or not backend_name:
+        raise ValueError(
+            "promotion selected_backend_identity must record a backend_name"
+        )
+
+    def _selected_registry_entry(
+        audit_identity: dict[str, Any], *, label: str
+    ) -> dict[str, Any]:
+        adapters = audit_identity.get("adapters_by_name")
+        if not isinstance(adapters, dict):
+            raise ValueError(
+                f"promotion requires {label} backend_registry_audit_identity "
+                "adapters_by_name"
+            )
+        entry = adapters.get(backend_name)
+        if not isinstance(entry, dict):
+            raise ValueError(
+                f"promotion requires {label} backend_registry_audit_identity "
+                f"selected registry entry for backend {backend_name!r}"
+            )
+        return entry
+
+    stored_selected_entry = _selected_registry_entry(stored_audit, label="stored")
+    if backend_registry is None:
+        builtins_audit = dict(BackendRegistry.with_builtins().identity())
+        builtin_entry = (builtins_audit.get("adapters_by_name") or {}).get(backend_name)
+        if stored_selected_entry != builtin_entry:
+            raise ValueError(
+                "promotion for a custom backend run requires an explicit "
+                "backend_registry matching the persisted selected registry entry"
+            )
+    current_selected, _ = _run_backend_identity_layers(
+        config,
+        n_features=len(feature_cols),
+        backend_registry=backend_registry,
+    )
+    if current_selected != stored_selected:
+        raise ValueError(
+            "promotion selected_backend_identity mismatch: the selected backend "
+            "identity changed after the research run"
+        )
+    _, current_audit = _run_backend_identity_layers(
+        config,
+        n_features=len(feature_cols),
+        backend_registry=backend_registry,
+    )
+    current_selected_entry = _selected_registry_entry(current_audit, label="current")
+    if current_selected_entry != stored_selected_entry:
+        raise ValueError(
+            "promotion selected registry entry mismatch: the explicit "
+            "backend_registry entry changed after the research run"
+        )
+    _require_full_history_backend_capabilities(
+        current_selected,
+        require_deployment=True,
+    )
 
 
 def _capital_evidence_check(
@@ -473,6 +554,7 @@ def _authorize_capital_evidence(
     *,
     data_dir: Path | None,
     rehearsal: bool,
+    backend_registry: BackendRegistry | None = None,
 ) -> tuple[ExperimentConfig, Any, dict[str, Any], list[str], list[dict[str, Any]]]:
     """Run the complete capital-evidence authorization contract.
 
@@ -512,6 +594,12 @@ def _authorize_capital_evidence(
     feature_cols = list(manifest.get("feature_cols") or [])
     if not feature_cols:
         raise ValueError("run manifest has no feature_cols")
+    _selected_backend_identity_check(
+        manifest,
+        config=config,
+        feature_cols=feature_cols,
+        backend_registry=backend_registry,
+    )
     evidence = _capital_evidence_check(
         manifest, scorecard, config=config, payout_policy=payout_policy
     )
@@ -838,6 +926,7 @@ def promote_full_version(
     override_gate: bool = False,
     force: bool = False,
     data_dir: Path | None = None,
+    backend_registry: BackendRegistry | None = None,
     rehearsal: bool = False,
     scope: Literal["train_only", "full"] = "full",
     _acceptance_data_dir: Path | None = None,
@@ -915,6 +1004,7 @@ def promote_full_version(
                 run_scorecard,
                 data_dir=data_dir,
                 rehearsal=False,
+                backend_registry=backend_registry,
             )
         )
         _supplemental_identity_check(repair_config, run_manifest)
@@ -1007,6 +1097,7 @@ def promote_full_version(
             scorecard,
             data_dir=data_dir,
             rehearsal=rehearsal,
+            backend_registry=backend_registry,
         )
     )
     expected_scoring_target = payout_policy.target or config.evaluation.main_target
@@ -1033,7 +1124,8 @@ def promote_full_version(
                     "repointing requires force=True"
                 )
 
-    staging = experiment_store.stage_export(family, persisted_scope, run_id)
+    staging: Path | None = None
+    build_dir = Path(tempfile.mkdtemp(prefix=f"nmr-promote-{run_id[:12]}-"))
     try:
         feature_cols = list(manifest.get("feature_cols") or [])
         if not feature_cols:
@@ -1047,7 +1139,11 @@ def promote_full_version(
         scorecard_sha256 = scorecard_block_digest(scorecard)
         proportion = float(config.risk.neutralization_proportion)
 
-        orchestrator = ModelOrchestrator(config.model, seed=config.run.seed)
+        orchestrator = ModelOrchestrator(
+            config.model,
+            seed=config.run.seed,
+            backend_registry=backend_registry,
+        )
         frame = _full_history_frame(
             config, feature_cols, target_cols, orchestrator, scope=scope
         )
@@ -1070,7 +1166,7 @@ def promote_full_version(
             fit_device=config.model.deploy_fit_device,
         )
         del frame
-        artifact_path = staging / "predict.pkl"
+        artifact_path = build_dir / "predict.pkl"
         _serialize_predict_artifact(
             predict_fn=predict_fn,
             model_meta=model_meta,
@@ -1120,17 +1216,13 @@ def promote_full_version(
             "training_rows": training_rows,
             "training_era_range": training_era_range,
         }
-        atomic_write_text(
-            staging / "export.json",
-            json.dumps(export_payload, sort_keys=True, indent=2),
-        )
 
         cross_check_path: Path | None = None
+        cross_check_payload: dict[str, Any] | None = None
         if scope == "train_only":
-            # Post-fit cross-check on the STAGED artifact (hash-verified
-            # load_predict): the exact predict.pkl that will be published.
-            # This phase legitimately opens validation.parquet — fit-phase
-            # isolation applies to the fit only.
+            # Post-fit cross-check on the preflight artifact (hash-verified
+            # load_predict). This phase legitimately opens validation.parquet —
+            # fit-phase isolation applies to the fit only.
             cross_check, window_eras = _run_cross_check(
                 load_predict(artifact_path),
                 config=config,
@@ -1145,19 +1237,28 @@ def promote_full_version(
                     )
                 ),
             )
+            cross_check_payload = _cross_check_payload(
+                cross_check,
+                run_id=run_id,
+                family=family,
+                scored_eras=window_eras,
+            )
+
+        staging = experiment_store.stage_export(family, persisted_scope, run_id)
+        shutil.copy2(artifact_path, staging / "predict.pkl")
+        shutil.copy2(
+            artifact_path.with_name(f"{artifact_path.name}.manifest.json"),
+            staging / "predict.pkl.manifest.json",
+        )
+        atomic_write_text(
+            staging / "export.json",
+            json.dumps(export_payload, sort_keys=True, indent=2),
+        )
+        if cross_check_payload is not None:
             cross_check_path = staging / "scorecard.json"
             atomic_write_text(
                 cross_check_path,
-                json.dumps(
-                    _cross_check_payload(
-                        cross_check,
-                        run_id=run_id,
-                        family=family,
-                        scored_eras=window_eras,
-                    ),
-                    sort_keys=True,
-                    indent=2,
-                ),
+                json.dumps(cross_check_payload, sort_keys=True, indent=2),
             )
 
         with file_lock(promotion_lock):
@@ -1195,15 +1296,18 @@ def promote_full_version(
             # published scorecard path (the staging path no longer exists).
             cross_check_path = slot / "scorecard.json"
     except Exception:
-        experiment_store.discard_staged_export(
-            family, persisted_scope, run_id, staging=staging
-        )
+        if staging is not None:
+            experiment_store.discard_staged_export(
+                family, persisted_scope, run_id, staging=staging
+            )
         logger.error(
             "[promote] promotion for %s (%s scope) FAILED; staged export discarded",
             run_id,
             persisted_scope,
         )
         raise
+    finally:
+        shutil.rmtree(build_dir, ignore_errors=True)
 
     logger.info(
         "[promote] %s published: %s (scope=%s, gate_passed=%s, override=%s, rows=%d)",
@@ -1594,6 +1698,7 @@ def rehearse_promotion(
     validation_eras: int = 6,
     live_features_path: Path | None = None,
     live_benchmark_path: Path | None = None,
+    backend_registry: BackendRegistry | None = None,
 ) -> RehearsalResult:
     """D7 Stage-1 rehearsal: prove the promotion writer end-to-end in minutes.
 
@@ -1639,6 +1744,7 @@ def rehearse_promotion(
             family,
             override_gate=True,
             data_dir=rehearsal_root,
+            backend_registry=backend_registry,
             force=True,  # repoints/repairs current.json; a rehearsal slot is
             # immutable like any export (re-rehearsing the same run_id raises)
             rehearsal=True,

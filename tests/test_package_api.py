@@ -26,3 +26,21 @@ def test_nmr_package_reexports_all_module_public_symbols() -> None:
         "nmr/__init__.py is missing re-exports for public module symbols; "
         f"add them (imports AND __all__): {missing}"
     )
+
+
+def test_nmr_package_exports_model_backend_protocol_types_only() -> None:
+    import nmr
+
+    for name in ("BackendAdapter", "BackendCapabilities", "BackendIdentity"):
+        assert name in nmr.__all__
+        assert getattr(nmr, name) is not None
+
+    assert "canonical_json_bytes" not in nmr.__all__
+    assert "normalize_identity_value" not in nmr.__all__
+
+
+def test_nmr_package_exports_backend_registry() -> None:
+    import nmr
+
+    assert "BackendRegistry" in nmr.__all__
+    assert getattr(nmr, "BackendRegistry") is not None

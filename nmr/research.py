@@ -7,7 +7,7 @@ import dataclasses
 import itertools
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +21,8 @@ from nmr.data import IngestionAgent
 from nmr.ensemble import Ensembler
 from nmr.evaluation import EvaluationEngine, MetricSummary
 from nmr.inference import ac_adjusted_sharpe, era_series_stats
+from nmr.model_backend_protocol import BackendIdentity, canonical_json_bytes
+from nmr.model_backend_registry import BackendRegistry
 from nmr.models import ModelOrchestrator, coerce_float32_features
 from nmr.risk import NeutralizationEngine
 from nmr.splitter import PurgedEraSplitter
@@ -57,6 +59,11 @@ class SweepResult:
     trials: pl.DataFrame
     best_params: dict[str, Any]
     best_value: float
+    backend: str = ""
+    adapter_version: str = ""
+    backend_identity: dict[str, Any] = field(default_factory=dict)
+    resolved_params_identity: dict[str, Any] = field(default_factory=dict)
+    training_geometry: dict[str, Any] = field(default_factory=dict)
     is_capital: bool = False
     proxy_metric: str | None = None
     proxy_split: str = "held_out_80_20"
@@ -71,16 +78,25 @@ class NeutralizationFrontier:
 
 
 class HyperparameterSweep:
-    def __init__(self, base_config: ExperimentConfig, *, metric: str = "sharpe"):
+    def __init__(
+        self,
+        base_config: ExperimentConfig,
+        *,
+        metric: str = "sharpe",
+        backend_registry: BackendRegistry | None = None,
+    ):
         self._base_config = base_config
         self._metric = metric
         self._direction = metric_direction(metric)
+        self._backend_registry = backend_registry
 
     def run(self, space: dict, *, n_trials: int, seed: int) -> SweepResult:
         if n_trials < 1:
             raise ValueError("n_trials must be >= 1")
         if not space:
             raise ValueError("space must contain at least one parameter")
+
+        registry = _hpo_backend_registry(self._base_config, self._backend_registry)
 
         set_global_seeds(seed)
         rng = np.random.default_rng(seed)
@@ -102,7 +118,11 @@ class HyperparameterSweep:
         trials: list[dict[str, Any]] = []
         for trial_idx, params in enumerate(chosen):
             cfg = _override_config(self._base_config, params)
-            metric_value, moments = _held_out_metric_full(cfg, metric_name=self._metric)
+            metric_value, moments = _held_out_metric_full(
+                cfg,
+                metric_name=self._metric,
+                backend_registry=registry,
+            )
             trials.append(
                 {
                     "trial_id": trial_idx,
@@ -124,10 +144,19 @@ class HyperparameterSweep:
         best_row = trial_df.row(0, named=True)
         best_params = json.loads(best_row["params_json"])
         best_value = float(best_row["metric_value"])
+        provenance = _sweep_result_provenance(
+            _override_config(self._base_config, best_params),
+            backend_registry=registry,
+        )
         return SweepResult(
             trials=trial_df,
             best_params=best_params,
             best_value=best_value,
+            backend=provenance["backend"],
+            adapter_version=provenance["adapter_version"],
+            backend_identity=provenance["backend_identity"],
+            resolved_params_identity=provenance["resolved_params_identity"],
+            training_geometry=provenance["training_geometry"],
             is_capital=False,
             proxy_metric=self._metric,
             proxy_split="held_out_80_20",
@@ -255,13 +284,97 @@ def _per_era_ac_sharpe(per_era: dict[str, float], *, horizon: str = "20D") -> fl
     return ac_adjusted_sharpe(series, horizon=horizon)
 
 
-def _held_out_metric(config: ExperimentConfig, *, metric_name: str) -> float:
+def _canonical_mapping(value: object) -> dict[str, Any]:
+    return json.loads(canonical_json_bytes(value).decode("utf-8"))
+
+
+def _hpo_backend_registry(
+    config: ExperimentConfig,
+    backend_registry: BackendRegistry | None,
+) -> BackendRegistry:
+    if backend_registry is not None:
+        return backend_registry
+    registry = BackendRegistry.with_builtins()
+    try:
+        registry.resolve(config.model.backend)
+    except KeyError as exc:
+        raise ValueError(
+            f"backend={config.model.backend!r} requires explicit backend_registry for HPO"
+        ) from exc
+    return registry
+
+
+def _planned_backend_candidate(
+    config: ExperimentConfig,
+    *,
+    backend_registry: BackendRegistry | None = None,
+) -> tuple[dict[str, Any], BackendIdentity]:
+    registry = _hpo_backend_registry(config, backend_registry)
+    feature_cols = IngestionAgent(config.data).features(
+        config.data.resolved_feature_set
+    )
+    modeler = ModelOrchestrator(
+        config.model,
+        seed=config.run.seed,
+        backend_registry=registry,
+    )
+    device_role = config.model.device
+    requested_device = None if device_role == "auto" else device_role
+    selected_device, selected_params = modeler._device_candidate_specs(
+        use_gpu=device_role != "cpu",
+        n_features=len(feature_cols),
+        requested_device=requested_device,
+    )[0]
+    return dict(selected_params), modeler._backend_adapter.identity(
+        resolved_params=selected_params,
+        device=selected_device,
+    )
+
+
+def _sweep_result_provenance(
+    config: ExperimentConfig,
+    *,
+    backend_registry: BackendRegistry | None = None,
+) -> dict[str, Any]:
+    _, identity = _planned_backend_candidate(
+        config,
+        backend_registry=backend_registry,
+    )
+    backend_identity = _canonical_mapping(dataclasses.asdict(identity))
+    return {
+        "backend": identity.name,
+        "adapter_version": identity.adapter_version,
+        "backend_identity": backend_identity,
+        "resolved_params_identity": dict(backend_identity["resolved_params"]),
+        "training_geometry": _canonical_mapping(
+            {
+                "split_scheme": config.split.scheme,
+                "fold_count": config.split.n_folds,
+                "purge_eras": config.split.purge_eras,
+                "feature_set": config.data.resolved_feature_set,
+                "target": config.evaluation.main_target,
+                "horizon": config.data.horizon,
+            }
+        ),
+    }
+
+
+def _held_out_metric(
+    config: ExperimentConfig,
+    *,
+    metric_name: str,
+    backend_registry: BackendRegistry | None = None,
+) -> float:
     """Held-out metric scalar (the public contract used by sweeps).
 
     Delegates to :func:`_held_out_metric_full`; the per-era series moments are
     computed in the same training pass and discarded here.
     """
-    return _held_out_metric_full(config, metric_name=metric_name)[0]
+    return _held_out_metric_full(
+        config,
+        metric_name=metric_name,
+        backend_registry=backend_registry,
+    )[0]
 
 
 @dataclass(frozen=True)
@@ -277,7 +390,10 @@ class _HeldOutMoments:
 
 
 def _held_out_metric_full(
-    config: ExperimentConfig, *, metric_name: str
+    config: ExperimentConfig,
+    *,
+    metric_name: str,
+    backend_registry: BackendRegistry | None = None,
 ) -> tuple[float, _HeldOutMoments]:
     set_global_seeds(config.run.seed)
     agent = IngestionAgent(config.data)
@@ -301,7 +417,11 @@ def _held_out_metric_full(
         raise ValueError("Held-out split is empty; increase era history")
 
     splitter = PurgedEraSplitter(config.split)
-    modeler = ModelOrchestrator(config.model, seed=config.run.seed)
+    modeler = ModelOrchestrator(
+        config.model,
+        seed=config.run.seed,
+        backend_registry=_hpo_backend_registry(config, backend_registry),
+    )
     cv_oof = _train_multi_target_oof(
         modeler,
         train_df,
@@ -339,7 +459,10 @@ def _held_out_metric_full(
         # numpy feature matrix (zero-copy float32) — the pandas path goes
         # through pyarrow and doubles memory (OOM at 3,555 features)
         feature_frame = coerce_float32_features(held_out_df, feature_cols).to_numpy()
-        raw_pred = np.asarray(model.predict(feature_frame), dtype=float)
+        raw_pred = np.asarray(
+            modeler._predict_model(model, features=feature_frame),
+            dtype=float,
+        )
         anchor_predictions.append(
             held_out_df.select(["id", "era"]).with_columns(
                 pl.Series(f"pred_{target}", raw_pred)

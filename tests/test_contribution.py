@@ -351,6 +351,9 @@ def test_public_api_includes_harness_symbols() -> None:
     import nmr
 
     for name in (
+        "BackendAdapter",
+        "BackendCapabilities",
+        "BackendIdentity",
         "resolve_feature_sets",
         "feature_stability_screen",
         "select_stable_features",

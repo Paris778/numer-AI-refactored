@@ -14,7 +14,8 @@ Choose the shortest path that matches the work:
 | Change Python behavior | [`AGENTS.md`](AGENTS.md) | [`ARCHITECTURE.md`](ARCHITECTURE.md), owning module, nearest tests |
 | Understand Numerai rules | [Canon index](docs/01-canon/NUMERAI-CANON-DOCS-README.md) | The specific canon page linked from its domain map |
 | Change evaluation or a metric | [Evaluation bible](docs/06-evaluation/evaluation-suite-bible.md) | Canon [scoring reference](docs/01-canon/10-scoring-reference.md), `nmr/evaluation.py`, parity tests |
-| Score a foreign prediction parquet | [`nmr/predictions.py`](nmr/predictions.py) | `tests/test_predictions.py`; OS spec [`2026-09-07-model-os-design.md`](docs/superpowers/specs/2026-09-07-model-os-design.md) |
+| Score a foreign prediction parquet (Level 1) | [`nmr/predictions.py`](nmr/predictions.py) | `tests/test_predictions.py`; OS spec [`2026-09-07-model-os-design.md`](docs/superpowers/specs/2026-09-07-model-os-design.md) |
+| Add a first-class backend or custom adapter (Level 2/3) | [`ARCHITECTURE.md`](ARCHITECTURE.md) backend-modeling sections | [`nmr/model_backend_protocol.py`](nmr/model_backend_protocol.py), [`nmr/model_backend_registry.py`](nmr/model_backend_registry.py), [`nmr/models.py`](nmr/models.py), `tests/test_model_backend_*.py`, `tests/test_checkpointing.py`, `tests/test_opt.py`, `tests/test_promote.py` |
 | Run or assess a model experiment | [`docs/02-strategy/model-lifecycle.md`](docs/02-strategy/model-lifecycle.md) | `nmr/runner.py`, `nmr/models.py`, `nmr/scorecard.py`, runner tests |
 | Change deployment or promotion | Canon [Model Uploads](docs/01-canon/05-model-uploads.md) | Canon [Submissions](docs/01-canon/04-submissions.md), `nmr/deployment.py`, `nmr/submission.py`, `nmr/promote.py` |
 | Change docs or navigation | [`AGENTS.md`](AGENTS.md) documentation rules | [`docs/DOCS_README.md`](docs/DOCS_README.md), relevant owner document, docs-hygiene tests |
@@ -89,6 +90,7 @@ The matrix names the narrowest controlling surface. Read the listed test before 
 | Fold construction or leakage | [`nmr/splitter.py`](nmr/splitter.py) | `tests/test_splitter.py`, `tests/test_benchmark_purge.py` | Canon [Models](docs/01-canon/03-models.md), [`AGENTS.md`](AGENTS.md#4-leakage-is-a-correctness-bug) |
 | Transforms, scoring, or neutralization | [`nmr/_transforms.py`](nmr/_transforms.py), [`nmr/evaluation.py`](nmr/evaluation.py), [`nmr/risk.py`](nmr/risk.py) | [`tests/test_parity.py`](tests/test_parity.py), [`tests/test_risk_parity.py`](tests/test_risk_parity.py) | Canon [Scoring reference](docs/01-canon/10-scoring-reference.md), evaluation bible |
 | Model fitting or OOF | [`nmr/models.py`](nmr/models.py), [`nmr/_oof.py`](nmr/_oof.py) | `tests/test_models.py`, `tests/test_runner.py`, `tests/test_checkpointing.py` | [`ARCHITECTURE.md`](ARCHITECTURE.md) |
+| Backend protocol, registry, or adapter extension | [`nmr/model_backend_protocol.py`](nmr/model_backend_protocol.py), [`nmr/model_backend_registry.py`](nmr/model_backend_registry.py), [`nmr/models.py`](nmr/models.py), [`nmr/_oof.py`](nmr/_oof.py) | `tests/test_model_backend_protocol.py`, `tests/test_model_backend_registry.py`, `tests/test_model_backend_parity.py`, `tests/test_model_backend_ridge.py`, `tests/test_checkpointing.py` | [`ARCHITECTURE.md`](ARCHITECTURE.md) |
 | Ensembling or weight learning | [`nmr/ensemble.py`](nmr/ensemble.py) | `tests/test_ensemble.py` | Canon [Models](docs/01-canon/03-models.md), evaluation bible |
 | Foreign prediction parquet or composition contract | [`nmr/predictions.py`](nmr/predictions.py) | [`tests/test_predictions.py`](tests/test_predictions.py) | [OS spec](docs/superpowers/specs/2026-09-07-model-os-design.md) |
 | Scorecards, robustness, or payout | [`nmr/scorecard.py`](nmr/scorecard.py), [`nmr/robustness.py`](nmr/robustness.py), [`nmr/payout.py`](nmr/payout.py) | `tests/test_scorecard.py`, `tests/test_robustness.py`, `tests/test_payout.py` | Evaluation bible; canon [Scoring live](docs/01-canon/09-scoring-live.md) |
@@ -121,6 +123,12 @@ Use the exact filename search when a test name in this table is absent in a chec
 ### Research-to-deployment change
 
 [Canon data](docs/01-canon/02-data.md) -> [Canon models](docs/01-canon/03-models.md) -> [`docs/02-strategy/model-lifecycle.md`](docs/02-strategy/model-lifecycle.md) -> [`nmr/runner.py`](nmr/runner.py) -> [`nmr/registry.py`](nmr/registry.py) -> [`nmr/promote.py`](nmr/promote.py) -> [Canon Model Uploads](docs/01-canon/05-model-uploads.md) -> deployment and submission tests.
+
+### Foreign-model vs backend-extension change
+
+Level 1 research scoring: [`nmr/predictions.py`](nmr/predictions.py) -> [`tests/test_predictions.py`](tests/test_predictions.py) -> model-OS design.
+
+Level 2/3 backend extension: [`ARCHITECTURE.md`](ARCHITECTURE.md) backend-modeling sections -> [`nmr/model_backend_protocol.py`](nmr/model_backend_protocol.py) -> [`nmr/model_backend_registry.py`](nmr/model_backend_registry.py) -> [`nmr/models.py`](nmr/models.py) / [`nmr/_oof.py`](nmr/_oof.py) -> `tests/test_model_backend_*.py` -> `tests/test_checkpointing.py` -> `tests/test_opt.py` / `tests/test_promote.py` when HPO or promotion is involved.
 
 ### Documentation change
 

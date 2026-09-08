@@ -1,6 +1,8 @@
 # tests/test_opt.py
 from __future__ import annotations
 
+import dataclasses
+import importlib
 import json
 from pathlib import Path
 
@@ -18,6 +20,70 @@ from nmr.opt import (
     _voting_search_space,
 )
 from nmr.research import metric_direction
+
+
+def _registry_module():
+    return importlib.import_module("nmr.model_backend_registry")
+
+
+def _protocol_module():
+    return importlib.import_module("nmr.model_backend_protocol")
+
+
+class ConstantAdapter:
+    def __init__(self, proto, *, name: str = "constant_model") -> None:
+        self.name = name
+        self.adapter_version = "1"
+        self.capabilities = proto.BackendCapabilities(
+            supports_gpu=False,
+            supports_full_history=True,
+            supports_deployment=True,
+            deployment_device="cpu",
+        )
+        self.fit_error_types = (ValueError, TypeError)
+        self._proto = proto
+
+    def resolve_params(self, *, preset, params, n_features):
+        del preset, n_features
+        return {"alpha": float(params.get("alpha", 0.25))}
+
+    def build_model(self, *, resolved_params, seed, device):
+        return {
+            "alpha": float(resolved_params["alpha"]),
+            "seed": seed,
+            "device": device,
+        }
+
+    def fit(self, model, features, target, *, progress=None):
+        del target
+        if progress is not None:
+            progress("fit")
+        model["rows"] = int(len(features))
+        return model
+
+    def predict(self, model, features):
+        base = np.asarray(features[:, 0], dtype=float).reshape(-1)
+        return base * float(model["alpha"])
+
+    def identity(self, *, resolved_params, device):
+        return self._proto.BackendIdentity(
+            schema_version=1,
+            name=self.name,
+            adapter_version=self.adapter_version,
+            implementation_fingerprint="a" * 64,
+            resolved_params=dict(resolved_params),
+            device=device,
+            capabilities=self.capabilities,
+            dependency_identity={"custom-backend": "1.0"},
+        )
+
+
+def _custom_registry():
+    proto = _protocol_module()
+    registry_module = _registry_module()
+    return registry_module.BackendRegistry(
+        adapters={"constant_model": ConstantAdapter(proto)}
+    )
 
 
 @pytest.mark.parametrize(
@@ -293,6 +359,19 @@ def _sweep_config(tmp_path, *, n_train_eras: int = 12):
     )
 
 
+def _custom_sweep_config(tmp_path, *, n_train_eras: int = 12):
+    cfg = _sweep_config(tmp_path, n_train_eras=n_train_eras)
+    return dataclasses.replace(
+        cfg,
+        model=dataclasses.replace(
+            cfg.model,
+            backend="constant_model",
+            device="cpu",
+            params={"alpha": 0.25},
+        ),
+    )
+
+
 def test_bayesian_sweep_is_deterministic_under_seed(tmp_path) -> None:
     from nmr.opt import bayesian_sweep
 
@@ -306,6 +385,35 @@ def test_bayesian_sweep_is_deterministic_under_seed(tmp_path) -> None:
     assert first.trials.equals(second.trials)
     assert first.best_params == second.best_params
     assert first.best_value == second.best_value
+
+
+def test_bayesian_sweep_carries_backend_provenance_and_geometry(tmp_path) -> None:
+    from nmr.opt import bayesian_sweep
+
+    cfg = _sweep_config(tmp_path)
+    result = bayesian_sweep(
+        cfg,
+        {"learning_rate": {"kind": "float", "low": 0.01, "high": 0.1, "log": True}},
+        n_trials=2,
+        seed=7,
+        n_startup_trials=1,
+    )
+
+    assert result.is_capital is False
+    assert result.backend == cfg.model.backend
+    assert result.adapter_version == result.backend_identity["adapter_version"]
+    assert result.backend_identity["name"] == cfg.model.backend
+    assert result.resolved_params_identity == result.backend_identity["resolved_params"]
+    assert result.training_geometry == {
+        "split_scheme": cfg.split.scheme,
+        "fold_count": cfg.split.n_folds,
+        "purge_eras": cfg.split.purge_eras,
+        "feature_set": cfg.data.resolved_feature_set,
+        "target": cfg.evaluation.main_target,
+        "horizon": cfg.data.horizon,
+    }
+    assert not hasattr(result, "capital_context")
+    assert not hasattr(result, "capital_evidence")
 
 
 def test_bayesian_sweep_anchors_baseline_as_trial_zero(tmp_path) -> None:
@@ -342,6 +450,42 @@ def test_bayesian_sweep_rejects_parallel_trials(tmp_path) -> None:
             seed=7,
             n_jobs=2,
         )
+
+
+def test_bayesian_sweep_custom_backend_requires_explicit_backend_registry(
+    tmp_path,
+) -> None:
+    from nmr.opt import bayesian_sweep
+
+    cfg = _custom_sweep_config(tmp_path)
+    with pytest.raises(ValueError, match="backend_registry"):
+        bayesian_sweep(
+            cfg,
+            {"alpha": {"kind": "float", "low": 0.1, "high": 0.4}},
+            n_trials=1,
+            seed=7,
+            n_startup_trials=1,
+        )
+
+
+def test_bayesian_sweep_custom_backend_accepts_explicit_backend_registry(
+    tmp_path,
+) -> None:
+    from nmr.opt import bayesian_sweep
+
+    cfg = _custom_sweep_config(tmp_path)
+    result = bayesian_sweep(
+        cfg,
+        {"alpha": {"kind": "float", "low": 0.1, "high": 0.4}},
+        n_trials=1,
+        seed=7,
+        n_startup_trials=1,
+        backend_registry=_custom_registry(),
+    )
+
+    assert result.backend == "constant_model"
+    assert result.backend_identity["name"] == "constant_model"
+    assert result.resolved_params_identity["alpha"] == pytest.approx(0.25)
 
 
 def test_bayesian_sweep_supports_corr_sharpe_ac_metric(tmp_path, monkeypatch) -> None:

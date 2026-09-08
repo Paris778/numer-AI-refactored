@@ -9,6 +9,7 @@ import pytest
 
 from nmr.config import (
     REPO_ROOT,
+    VALID_MODEL_BACKENDS,
     DataConfig,
     EvalConfig,
     ExperimentConfig,
@@ -51,9 +52,17 @@ def test_invalid_feature_set_raises():
         DataConfig(feature_set="huge")
 
 
-def test_invalid_model_backend_raises():
-    with pytest.raises(ValueError):
-        ModelConfig(backend="bogus")
+def test_syntactically_valid_custom_backend_is_accepted_at_config_stage() -> None:
+    assert ModelConfig(backend="custom_model").backend == "custom_model"
+
+
+def test_invalid_model_backend_identifier_still_raises() -> None:
+    with pytest.raises(ValueError, match="identifier"):
+        ModelConfig(backend="bad-name")
+
+
+def test_builtin_backend_help_tuple_includes_ridge() -> None:
+    assert VALID_MODEL_BACKENDS == ("lightgbm", "xgboost", "catboost", "ridge")
 
 
 def test_invalid_split_scheme_raises():
@@ -138,15 +147,6 @@ def test_catboost_backend_is_valid():
     from nmr.config import ModelConfig
 
     assert ModelConfig(backend="catboost").backend == "catboost"
-
-
-def test_invalid_backend_still_raises():
-    import pytest as _pytest
-
-    from nmr.config import ModelConfig
-
-    with _pytest.raises(ValueError, match="backend"):
-        ModelConfig(backend="bogus")
 
 
 def test_model_config_device_validation() -> None:

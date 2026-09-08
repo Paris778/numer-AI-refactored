@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from typing import Any
@@ -12,7 +13,10 @@ import polars as pl
 import pytest
 import xgboost as xgb
 
+from nmr import BackendRegistry
+from nmr._oof import fitting_code_sha256
 from nmr.config import ModelConfig, SplitConfig
+from nmr.model_backend_protocol import BackendCapabilities, BackendIdentity
 from nmr.models import CVResult, ModelOrchestrator, resolve_model_params
 from nmr.splitter import PurgedEraSplitter
 
@@ -56,6 +60,108 @@ def _tiny_model_params(**extra: Any) -> dict[str, Any]:
     }
     params.update(extra)
     return params
+
+
+class _CustomBackendAdapter:
+    name = "custom_model"
+    adapter_version = "1"
+    capabilities = BackendCapabilities(
+        supports_gpu=False,
+        supports_full_history=True,
+        supports_deployment=True,
+        deployment_device="cpu",
+    )
+    fit_error_types = (ValueError, TypeError)
+
+    def resolve_params(self, *, preset, params, n_features):
+        del preset, n_features
+        return dict(params)
+
+    def resolve_device_params(self, *, preset, params, n_features, seed, device):
+        del preset, n_features
+        return {**params, "seed": seed, "device": device}
+
+    def build_model(self, *, resolved_params, seed, device):
+        del seed
+        return {"resolved_params": dict(resolved_params), "device": device}
+
+    def fit(self, model, features, target, *, progress=None):
+        del target
+        if progress is not None:
+            progress("custom")
+        model["fit_rows"] = int(len(features))
+        return model
+
+    def predict(self, model, features):
+        del model
+        return np.full(len(features), 0.125, dtype=float)
+
+    def identity(self, *, resolved_params, device):
+        return BackendIdentity(
+            schema_version=1,
+            name=self.name,
+            adapter_version=self.adapter_version,
+            implementation_fingerprint="c" * 64,
+            resolved_params=dict(resolved_params),
+            device=device,
+            capabilities=self.capabilities,
+            dependency_identity={"custom-backend": "1.0"},
+        )
+
+
+def test_orchestrator_rejects_unknown_backend_name_at_construction() -> None:
+    with pytest.raises(KeyError, match="unknown backend adapter"):
+        ModelOrchestrator(ModelConfig(backend="custom_model", preset="fast"), seed=7)
+
+
+def test_orchestrator_uses_supplied_backend_registry_for_custom_backend() -> None:
+    registry = BackendRegistry()
+    registry.register(_CustomBackendAdapter())
+    orchestrator = ModelOrchestrator(
+        ModelConfig(backend="custom_model", preset="fast", params={"alpha": 1}),
+        seed=7,
+        backend_registry=registry,
+    )
+
+    model, prediction = orchestrator.train_anchor_fold(
+        _model_frame(),
+        feature_cols=["f1", "f2", "f3"],
+        target_col="target",
+        splitter=_anchor_splitter(),
+    )
+
+    assert model["device"] == "cpu"
+    assert prediction.columns == ["id", "era", "prediction"]
+    assert prediction.get_column("prediction").to_list() == [0.125] * prediction.height
+    assert orchestrator.resolved_device == "cpu"
+    assert len(orchestrator.backend_source_files) == 1
+
+
+def test_oof_checkpoint_manifest_uses_selected_backend_sources(tmp_path) -> None:
+    df = _model_frame()
+    splitter = _walk_forward_splitter()
+    orchestrator = ModelOrchestrator(
+        ModelConfig(backend="lightgbm", preset="fast", params=_tiny_model_params()),
+        seed=7,
+    )
+
+    orchestrator.train_oof_with_checkpoints(
+        df,
+        feature_cols=["f1", "f2", "f3"],
+        target_col="target",
+        splitter=splitter,
+        checkpoint_dir=tmp_path / "oof_checkpoints",
+    )
+
+    manifest = json.loads(
+        (tmp_path / "oof_checkpoints" / "target" / "manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert manifest["code_sha256"] == fitting_code_sha256(
+        backend_name=orchestrator.backend_name,
+        backend_source_files=orchestrator.backend_source_files,
+    )
 
 
 @pytest.mark.parametrize("backend", ["lightgbm", "xgboost"])
@@ -285,14 +391,17 @@ def test_gpu_absent_falls_back_to_cpu_without_raising(
     cpu_value: str,
     backend_error: type[Exception],
 ) -> None:
-    import nmr.models as models_module
+    if backend == "lightgbm":
+        import nmr.model_backend_lightgbm as backend_module
+    else:
+        import nmr.model_backend_xgboost as backend_module
 
     df = _model_frame()
 
     def factory(**params):
         return _FakeModel(params=params, backend_error=backend_error)
 
-    module = models_module.lgb if backend == "lightgbm" else models_module.xgb
+    module = backend_module.lgb if backend == "lightgbm" else backend_module.xgb
     monkeypatch.setattr(module, attribute, factory)
 
     orchestrator = ModelOrchestrator(
@@ -575,7 +684,7 @@ def test_catboost_is_cpu_only_by_construction() -> None:
 
 
 def test_orchestrator_device_cpu_never_attempts_gpu(monkeypatch) -> None:
-    import nmr.models as models_module
+    import nmr.model_backend_lightgbm as backend_module
 
     seen: list[str] = []
 
@@ -583,7 +692,7 @@ def test_orchestrator_device_cpu_never_attempts_gpu(monkeypatch) -> None:
         seen.append(params.get("device_type", "?"))
         return _FakeModel(params=params, backend_error=RuntimeError)
 
-    monkeypatch.setattr(models_module.lgb, "LGBMRegressor", factory)
+    monkeypatch.setattr(backend_module.lgb, "LGBMRegressor", factory)
     orchestrator = ModelOrchestrator(
         ModelConfig(
             backend="lightgbm", preset="fast", device="cpu", params=_tiny_model_params()
@@ -604,12 +713,12 @@ def test_orchestrator_device_cpu_never_attempts_gpu(monkeypatch) -> None:
 def test_orchestrator_device_gpu_forced_raises_without_cpu_fallback(
     monkeypatch,
 ) -> None:
-    import nmr.models as models_module
+    import nmr.model_backend_lightgbm as backend_module
 
     def factory(**params):
         return _FakeModel(params=params, backend_error=lgb.basic.LightGBMError)
 
-    monkeypatch.setattr(models_module.lgb, "LGBMRegressor", factory)
+    monkeypatch.setattr(backend_module.lgb, "LGBMRegressor", factory)
     orchestrator = ModelOrchestrator(
         ModelConfig(
             backend="lightgbm", preset="fast", device="gpu", params=_tiny_model_params()
@@ -626,7 +735,7 @@ def test_orchestrator_device_gpu_forced_raises_without_cpu_fallback(
 
 
 def test_orchestrator_device_auto_tries_gpu_then_falls_back(monkeypatch) -> None:
-    import nmr.models as models_module
+    import nmr.model_backend_lightgbm as backend_module
 
     seen: list[str] = []
 
@@ -634,7 +743,7 @@ def test_orchestrator_device_auto_tries_gpu_then_falls_back(monkeypatch) -> None
         seen.append(params.get("device_type"))
         return _FakeModel(params=params, backend_error=lgb.basic.LightGBMError)
 
-    monkeypatch.setattr(models_module.lgb, "LGBMRegressor", factory)
+    monkeypatch.setattr(backend_module.lgb, "LGBMRegressor", factory)
     orchestrator = ModelOrchestrator(
         ModelConfig(
             backend="lightgbm",
@@ -756,6 +865,30 @@ def test_fold_predict_chunked_matches_full_predict(backend: str) -> None:
         model, features=orchestrator._feature_frame(df, feature_cols=["f1", "f2", "f3"])
     )
     chunked = orchestrator._predict_model_chunked(model, df, ["f1", "f2", "f3"])
+    assert np.array_equal(full, chunked)
+
+
+def test_ridge_backend_trains_anchor_and_chunked_predicts_finite() -> None:
+    df = _model_frame(n_eras=12, rows_per_era=6)
+    orchestrator = ModelOrchestrator(
+        ModelConfig(backend="ridge", preset="fast", params={"alpha": 0.5}),
+        seed=7,
+    )
+
+    model, prediction = orchestrator.train_anchor_fold(
+        df,
+        feature_cols=["f1", "f2", "f3"],
+        target_col="target",
+        splitter=_anchor_splitter(),
+    )
+    full = orchestrator._predict_model(
+        model, features=orchestrator._feature_frame(df, feature_cols=["f1", "f2", "f3"])
+    )
+    chunked = orchestrator._predict_model_chunked(model, df, ["f1", "f2", "f3"])
+
+    assert prediction.columns == ["id", "era", "prediction"]
+    assert np.isfinite(prediction.get_column("prediction").to_numpy()).all()
+    assert np.isfinite(full).all()
     assert np.array_equal(full, chunked)
 
 

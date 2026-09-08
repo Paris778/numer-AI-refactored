@@ -81,6 +81,101 @@ def _run(ckpt: Path | None, train: pl.DataFrame) -> pl.DataFrame:
     )
 
 
+def _backend_identity_kwargs() -> dict[str, object]:
+    orchestrator = _modeler()
+    return {
+        "backend_name": orchestrator.backend_name,
+        "backend_source_files": orchestrator.backend_source_files,
+    }
+
+
+def _selected_backend_identity(
+    *,
+    backend_name: str = "lightgbm",
+    adapter_version: str = "1",
+    source_fingerprint: str = "a" * 64,
+    resolved_params_identity: dict[str, object] | None = None,
+    device_role: str = "cpu",
+    dependency_identity: dict[str, str] | None = None,
+) -> dict[str, object]:
+    return {
+        "registry_schema_version": 1,
+        "backend_name": backend_name,
+        "adapter_version": adapter_version,
+        "source_fingerprint": source_fingerprint,
+        "resolved_params_identity": (
+            {"learning_rate": 0.01, "n_estimators": 1}
+            if resolved_params_identity is None
+            else resolved_params_identity
+        ),
+        "device_role": device_role,
+        "capabilities": {
+            "deployment_device": "cpu",
+            "supports_deployment": True,
+            "supports_full_history": True,
+            "supports_gpu": True,
+        },
+        "dependency_identity": (
+            {"lightgbm": "1.0"} if dependency_identity is None else dependency_identity
+        ),
+    }
+
+
+def _backend_registry_audit_identity() -> dict[str, object]:
+    selected = _selected_backend_identity()
+    return {
+        "schema_version": 1,
+        "adapter_names": ["lightgbm", "xgboost"],
+        "adapters_by_name": {
+            "lightgbm": {
+                "schema_version": 1,
+                "name": "lightgbm",
+                "adapter_version": selected["adapter_version"],
+                "implementation_fingerprint": selected["source_fingerprint"],
+                "resolved_params": {},
+                "device": "cpu",
+                "capabilities": selected["capabilities"],
+                "dependency_identity": selected["dependency_identity"],
+            },
+            "xgboost": {
+                "schema_version": 1,
+                "name": "xgboost",
+                "adapter_version": "1",
+                "implementation_fingerprint": "b" * 64,
+                "resolved_params": {},
+                "device": "cpu",
+                "capabilities": selected["capabilities"],
+                "dependency_identity": {"xgboost": "1.0"},
+            },
+        },
+    }
+
+
+def _patch_code_identity_tree(monkeypatch, root: Path) -> tuple[Path, Path]:
+    import nmr._oof as oof
+
+    shared = {
+        "nmr/models.py": "models = 1\r\n",
+        "nmr/splitter.py": "splitter = 1\r\n",
+        "nmr/runner.py": "runner = 1\r\n",
+    }
+    for relative, content in shared.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    selected = root / "nmr" / "model_backend_lightgbm.py"
+    selected.write_text("backend = 'lightgbm'\r\n", encoding="utf-8")
+    unrelated = root / "nmr" / "model_backend_xgboost.py"
+    unrelated.write_text("backend = 'xgboost'\r\n", encoding="utf-8")
+    monkeypatch.setattr(oof, "_CODE_IDENTITY_ROOT", root)
+    monkeypatch.setattr(
+        oof,
+        "_SHARED_CODE_IDENTITY_FILES",
+        ("nmr/models.py", "nmr/runner.py", "nmr/splitter.py"),
+    )
+    return selected, unrelated
+
+
 def test_all_loaded_resume_equals_fresh_and_fits_nothing(tmp_path, caplog):
     train = _synthetic_train()
     ckpt = tmp_path / "ckpt"
@@ -116,6 +211,44 @@ def test_partial_target_resume_refits_only_missing_target(tmp_path):
     shutil.rmtree(ckpt / "target_ender_20")  # rmtree, NOT unlink (directory)
     resumed = _run(ckpt, train)
     assert fresh.equals(resumed)
+
+
+def test_ridge_oof_resume_is_bit_for_bit_and_records_selected_backend(tmp_path, caplog):
+    train = _synthetic_train()
+    ckpt = tmp_path / "ridge_ckpt"
+    orchestrator = ModelOrchestrator(
+        ModelConfig(backend="ridge", preset="fast", params={"alpha": 0.5}),
+        seed=7,
+    )
+    fresh = train_multi_target_oof(
+        orchestrator,
+        train,
+        feature_cols=["f1", "f2"],
+        splitter=_splitter(),
+        targets=["target"],
+        checkpoint_dir=ckpt,
+    )
+
+    caplog.clear()
+    with caplog.at_level("INFO", logger="nmr.models"):
+        resumed = train_multi_target_oof(
+            ModelOrchestrator(
+                ModelConfig(backend="ridge", preset="fast", params={"alpha": 0.5}),
+                seed=7,
+            ),
+            train,
+            feature_cols=["f1", "f2"],
+            splitter=_splitter(),
+            targets=["target"],
+            checkpoint_dir=ckpt,
+        )
+
+    manifest = json.loads(
+        (ckpt / "target" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert fresh.equals(resumed)
+    assert manifest["selected_backend_identity"]["backend_name"] == "ridge"
+    assert "loaded from checkpoint" in caplog.text
 
 
 def test_code_mismatch_raises(tmp_path):
@@ -179,16 +312,51 @@ def test_checkpoint_tree_contains_no_temp_files(tmp_path):
 
 
 def test_fitting_code_sha256_is_stable_and_feeds_manifest():
-    digest = fitting_code_sha256()
+    digest = fitting_code_sha256(**_backend_identity_kwargs())
     assert isinstance(digest, str)
     assert len(digest) == 64
-    assert digest == fitting_code_sha256()  # deterministic across calls
-    assert digest == checkpoint_manifest("cpu")["code_sha256"]
+    assert digest == fitting_code_sha256(**_backend_identity_kwargs())
+    assert (
+        digest
+        == checkpoint_manifest("cpu", **_backend_identity_kwargs())["code_sha256"]
+    )
+
+
+def test_fitting_code_sha256_changes_when_selected_backend_source_changes(
+    monkeypatch, tmp_path
+):
+    selected, _ = _patch_code_identity_tree(monkeypatch, tmp_path)
+    digest = fitting_code_sha256(
+        backend_name="lightgbm",
+        backend_source_files=(selected,),
+    )
+
+    selected.write_text("backend = 'lightgbm-v2'\r\n", encoding="utf-8")
+
+    assert digest != fitting_code_sha256(
+        backend_name="lightgbm",
+        backend_source_files=(selected,),
+    )
+
+
+def test_fitting_code_sha256_excludes_unselected_backend_sources(monkeypatch, tmp_path):
+    selected, unrelated = _patch_code_identity_tree(monkeypatch, tmp_path)
+    digest = fitting_code_sha256(
+        backend_name="lightgbm",
+        backend_source_files=(selected,),
+    )
+
+    unrelated.write_text("backend = 'xgboost-v2'\r\n", encoding="utf-8")
+
+    assert digest == fitting_code_sha256(
+        backend_name="lightgbm",
+        backend_source_files=(selected,),
+    )
 
 
 def test_checkpoint_manifest_roundtrip():
-    assert checkpoint_manifest("cpu") == {
-        "code_sha256": fitting_code_sha256(),
+    assert checkpoint_manifest("cpu", **_backend_identity_kwargs()) == {
+        "code_sha256": fitting_code_sha256(**_backend_identity_kwargs()),
         "device": "cpu",
     }
 
@@ -198,10 +366,13 @@ def test_checkpoint_manifest_carries_rebuild_identity_fields():
     when the caller (the runner) provides them — the same values run.json
     persists, so resume refuses on data-snapshot or environment drift."""
     manifest = checkpoint_manifest(
-        "cpu", data_fingerprint="d" * 64, environment="numpy==1.0"
+        "cpu",
+        data_fingerprint="d" * 64,
+        environment="numpy==1.0",
+        **_backend_identity_kwargs(),
     )
     assert manifest == {
-        "code_sha256": fitting_code_sha256(),
+        "code_sha256": fitting_code_sha256(**_backend_identity_kwargs()),
         "device": "cpu",
         "data_fingerprint": "d" * 64,
         "environment": "numpy==1.0",
@@ -222,6 +393,7 @@ def test_checkpoint_manifest_carries_fit_identity_fields():
         target_col="target",
         feature_fingerprint=feature_fp,
         splitter_fingerprint=splitter_fp,
+        **_backend_identity_kwargs(),
     )
     assert manifest["target_col"] == "target"
     assert manifest["feature_fingerprint"] == feature_fp
@@ -233,12 +405,29 @@ def test_checkpoint_manifest_carries_fit_identity_fields():
     assert feature_list_fingerprint(["f1", "f2"]) == feature_fp
 
 
+def test_checkpoint_manifest_carries_backend_identity_layers():
+    selected = _selected_backend_identity(device_role="auto")
+    audit = _backend_registry_audit_identity()
+    manifest = checkpoint_manifest(
+        "cpu",
+        selected_backend_identity=selected,
+        backend_registry_audit_identity=audit,
+        **_backend_identity_kwargs(),
+    )
+
+    assert manifest["selected_backend_identity"] == selected
+    assert manifest["backend_registry_audit_identity"] == audit
+
+
 def test_verify_checkpoint_manifest_data_fingerprint_mismatch_raises(tmp_path):
     """Spec §3.1 rebuild-refusal: a checkpoint manifest recording a different
     data snapshot must refuse resume with delete-to-refit guidance."""
     manifest_path = tmp_path / "manifest.json"
     manifest = checkpoint_manifest(
-        "cpu", data_fingerprint="d" * 64, environment="numpy==1.0"
+        "cpu",
+        data_fingerprint="d" * 64,
+        environment="numpy==1.0",
+        **_backend_identity_kwargs(),
     )
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ValueError, match="data_fingerprint"):
@@ -247,6 +436,7 @@ def test_verify_checkpoint_manifest_data_fingerprint_mismatch_raises(tmp_path):
             "cpu",
             data_fingerprint="e" * 64,
             environment="numpy==1.0",
+            **_backend_identity_kwargs(),
         )
 
 
@@ -255,7 +445,10 @@ def test_verify_checkpoint_manifest_environment_mismatch_raises(tmp_path):
     dependency environment must refuse resume."""
     manifest_path = tmp_path / "manifest.json"
     manifest = checkpoint_manifest(
-        "cpu", data_fingerprint="d" * 64, environment="numpy==1.0"
+        "cpu",
+        data_fingerprint="d" * 64,
+        environment="numpy==1.0",
+        **_backend_identity_kwargs(),
     )
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ValueError, match="environment"):
@@ -264,6 +457,7 @@ def test_verify_checkpoint_manifest_environment_mismatch_raises(tmp_path):
             "cpu",
             data_fingerprint="d" * 64,
             environment="numpy==2.0",
+            **_backend_identity_kwargs(),
         )
 
 
@@ -271,44 +465,177 @@ def test_verify_checkpoint_manifest_missing_identity_fields_refuses(tmp_path):
     """A legacy code+device-only manifest (no data_fingerprint/environment)
     must refuse when the caller guards those terms — never resume vacuously."""
     manifest_path = tmp_path / "manifest.json"
-    manifest_path.write_text(json.dumps(checkpoint_manifest("cpu")), encoding="utf-8")
+    manifest_path.write_text(
+        json.dumps(checkpoint_manifest("cpu", **_backend_identity_kwargs())),
+        encoding="utf-8",
+    )
     with pytest.raises(ValueError, match="data_fingerprint"):
         verify_checkpoint_manifest(
-            manifest_path, "cpu", data_fingerprint="d" * 64, environment="env"
+            manifest_path,
+            "cpu",
+            data_fingerprint="d" * 64,
+            environment="env",
+            **_backend_identity_kwargs(),
         )
+
+
+def test_verify_checkpoint_manifest_missing_selected_backend_identity_refuses(tmp_path):
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(checkpoint_manifest("cpu", **_backend_identity_kwargs())),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="selected_backend_identity"):
+        verify_checkpoint_manifest(
+            manifest_path,
+            "cpu",
+            selected_backend_identity=_selected_backend_identity(),
+            **_backend_identity_kwargs(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("registry_schema_version", 2),
+        ("backend_name", "catboost"),
+        ("adapter_version", "2"),
+        ("source_fingerprint", "c" * 64),
+        ("resolved_params_identity", {"learning_rate": 0.02, "n_estimators": 1}),
+        ("device_role", "gpu"),
+        (
+            "capabilities",
+            {
+                "deployment_device": "cpu",
+                "supports_deployment": True,
+                "supports_full_history": True,
+                "supports_gpu": False,
+            },
+        ),
+        ("dependency_identity", {"lightgbm": "2.0"}),
+    ],
+)
+def test_verify_checkpoint_manifest_selected_backend_identity_mismatch_raises(
+    tmp_path, field, value
+):
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            checkpoint_manifest(
+                "cpu",
+                selected_backend_identity=_selected_backend_identity(),
+                backend_registry_audit_identity=_backend_registry_audit_identity(),
+                **_backend_identity_kwargs(),
+            )
+        ),
+        encoding="utf-8",
+    )
+    selected = _selected_backend_identity()
+    selected[field] = value
+    with pytest.raises(ValueError, match="selected_backend_identity"):
+        verify_checkpoint_manifest(
+            manifest_path,
+            "cpu",
+            selected_backend_identity=selected,
+            **_backend_identity_kwargs(),
+        )
+
+
+def test_verify_checkpoint_manifest_ignores_registry_audit_identity_drift(tmp_path):
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            checkpoint_manifest(
+                "cpu",
+                selected_backend_identity=_selected_backend_identity(),
+                backend_registry_audit_identity=_backend_registry_audit_identity(),
+                **_backend_identity_kwargs(),
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    verify_checkpoint_manifest(
+        manifest_path,
+        "cpu",
+        selected_backend_identity=_selected_backend_identity(),
+        backend_registry_audit_identity={
+            "schema_version": 1,
+            "adapter_names": ["catboost", "lightgbm", "ridge", "xgboost"],
+        },
+        **_backend_identity_kwargs(),
+    )
 
 
 def test_verify_checkpoint_manifest_accepts_matching_manifest(tmp_path):
     manifest_path = tmp_path / "manifest.json"
-    manifest_path.write_text(json.dumps(checkpoint_manifest("cpu")), encoding="utf-8")
-    verify_checkpoint_manifest(manifest_path, "cpu")  # known device, exact match
-    verify_checkpoint_manifest(manifest_path, None)  # unresolved device, valid schema
+    manifest_path.write_text(
+        json.dumps(checkpoint_manifest("cpu", **_backend_identity_kwargs())),
+        encoding="utf-8",
+    )
+    verify_checkpoint_manifest(
+        manifest_path,
+        "cpu",
+        **_backend_identity_kwargs(),
+    )
+    verify_checkpoint_manifest(
+        manifest_path,
+        None,
+        **_backend_identity_kwargs(),
+    )
 
 
 def test_verify_checkpoint_manifest_code_mismatch_raises(tmp_path):
     manifest_path = tmp_path / "manifest.json"
-    manifest = checkpoint_manifest("cpu")
+    manifest = checkpoint_manifest("cpu", **_backend_identity_kwargs())
     manifest["code_sha256"] = "0" * 64
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ValueError, match="code_sha256"):
-        verify_checkpoint_manifest(manifest_path, "cpu")
+        verify_checkpoint_manifest(manifest_path, "cpu", **_backend_identity_kwargs())
+
+
+def test_verify_checkpoint_manifest_selected_backend_source_mismatch_raises(
+    monkeypatch, tmp_path
+):
+    selected, _ = _patch_code_identity_tree(monkeypatch, tmp_path)
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            checkpoint_manifest(
+                "cpu",
+                backend_name="lightgbm",
+                backend_source_files=(selected,),
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    selected.write_text("backend = 'lightgbm-v2'\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="code_sha256"):
+        verify_checkpoint_manifest(
+            manifest_path,
+            "cpu",
+            backend_name="lightgbm",
+            backend_source_files=(selected,),
+        )
 
 
 def test_verify_checkpoint_manifest_device_mismatch_raises(tmp_path):
     manifest_path = tmp_path / "manifest.json"
-    manifest = checkpoint_manifest("cpu")
+    manifest = checkpoint_manifest("cpu", **_backend_identity_kwargs())
     manifest["device"] = "gpu"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ValueError, match="device"):
-        verify_checkpoint_manifest(manifest_path, "cpu")
+        verify_checkpoint_manifest(manifest_path, "cpu", **_backend_identity_kwargs())
 
 
 def test_verify_checkpoint_manifest_rejects_unknown_device_when_unresolved(tmp_path):
     manifest_path = tmp_path / "manifest.json"
-    manifest = checkpoint_manifest("not_a_real_device")
+    manifest = checkpoint_manifest("not_a_real_device", **_backend_identity_kwargs())
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ValueError, match="device"):
-        verify_checkpoint_manifest(manifest_path, None)
+        verify_checkpoint_manifest(manifest_path, None, **_backend_identity_kwargs())
 
 
 def test_ensure_no_torn_tree_raises_with_parts(tmp_path):
@@ -356,6 +683,7 @@ def _write_fit_identity_manifest(tmp_path: Path) -> Path:
                 splitter_fingerprint=splitter_geometry_fingerprint(
                     _splitter(), train["era"].to_list()
                 ),
+                **_backend_identity_kwargs(),
             )
         ),
         encoding="utf-8",
@@ -366,8 +694,18 @@ def _write_fit_identity_manifest(tmp_path: Path) -> Path:
 def test_verify_checkpoint_manifest_target_mismatch_raises(tmp_path):
     manifest_path = _write_fit_identity_manifest(tmp_path)
     with pytest.raises(ValueError, match="target mismatch"):
-        verify_checkpoint_manifest(manifest_path, "cpu", target_col="target_ender_20")
-    verify_checkpoint_manifest(manifest_path, "cpu", target_col="target")  # agrees
+        verify_checkpoint_manifest(
+            manifest_path,
+            "cpu",
+            target_col="target_ender_20",
+            **_backend_identity_kwargs(),
+        )
+    verify_checkpoint_manifest(
+        manifest_path,
+        "cpu",
+        target_col="target",
+        **_backend_identity_kwargs(),
+    )
 
 
 def test_verify_checkpoint_manifest_feature_mismatch_raises(tmp_path):
@@ -376,10 +714,16 @@ def test_verify_checkpoint_manifest_feature_mismatch_raises(tmp_path):
     manifest_path = _write_fit_identity_manifest(tmp_path)
     with pytest.raises(ValueError, match="feature-list mismatch"):
         verify_checkpoint_manifest(
-            manifest_path, "cpu", feature_fingerprint=feature_list_fingerprint(["f1"])
+            manifest_path,
+            "cpu",
+            feature_fingerprint=feature_list_fingerprint(["f1"]),
+            **_backend_identity_kwargs(),
         )
     verify_checkpoint_manifest(
-        manifest_path, "cpu", feature_fingerprint=feature_list_fingerprint(["f1", "f2"])
+        manifest_path,
+        "cpu",
+        feature_fingerprint=feature_list_fingerprint(["f1", "f2"]),
+        **_backend_identity_kwargs(),
     )
 
 
@@ -398,6 +742,7 @@ def test_verify_checkpoint_manifest_splitter_mismatch_raises(tmp_path):
             splitter_fingerprint=splitter_geometry_fingerprint(
                 other_splitter, train["era"].to_list()
             ),
+            **_backend_identity_kwargs(),
         )
     verify_checkpoint_manifest(
         manifest_path,
@@ -405,6 +750,7 @@ def test_verify_checkpoint_manifest_splitter_mismatch_raises(tmp_path):
         splitter_fingerprint=splitter_geometry_fingerprint(
             _splitter(), train["era"].to_list()
         ),
+        **_backend_identity_kwargs(),
     )
 
 
@@ -412,9 +758,17 @@ def test_verify_checkpoint_manifest_missing_fit_identity_fields_refuses(tmp_path
     """A legacy manifest without the fit-identity fields must refuse when the
     caller guards them — never resume vacuously."""
     manifest_path = tmp_path / "manifest.json"
-    manifest_path.write_text(json.dumps(checkpoint_manifest("cpu")), encoding="utf-8")
+    manifest_path.write_text(
+        json.dumps(checkpoint_manifest("cpu", **_backend_identity_kwargs())),
+        encoding="utf-8",
+    )
     with pytest.raises(ValueError, match="target mismatch"):
-        verify_checkpoint_manifest(manifest_path, "cpu", target_col="target")
+        verify_checkpoint_manifest(
+            manifest_path,
+            "cpu",
+            target_col="target",
+            **_backend_identity_kwargs(),
+        )
 
 
 def test_copied_target_dir_refused_for_different_target(tmp_path):

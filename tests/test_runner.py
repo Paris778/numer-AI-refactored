@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from datetime import UTC, datetime
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -11,6 +14,7 @@ import polars as pl
 import pytest
 
 from nmr import paths
+from nmr._oof import fitting_code_sha256
 from nmr.config import (
     DataConfig,
     EvalConfig,
@@ -21,9 +25,16 @@ from nmr.config import (
 )
 from nmr.data import IngestionAgent
 from nmr.deployment import load_predict
+from nmr.model_backend_catboost import CatBoostAdapter
+from nmr.model_backend_lightgbm import LightGBMAdapter
+from nmr.model_backend_protocol import BackendCapabilities, BackendIdentity
+from nmr.model_backend_registry import BackendRegistry
+from nmr.model_backend_xgboost import XGBoostAdapter
 from nmr.models import ModelOrchestrator
 from nmr.runner import ExperimentRunner
 from nmr.splitter import PurgedEraSplitter
+
+_DEFAULT_BUILTIN_BACKENDS = ["catboost", "lightgbm", "ridge", "xgboost"]
 
 
 @pytest.fixture(autouse=True)
@@ -148,6 +159,161 @@ def _config(tmp_path) -> ExperimentConfig:
     )
 
 
+def _expected_checkpoint_code_sha(config: ExperimentConfig) -> str:
+    orchestrator = ModelOrchestrator(config.model, seed=config.run.seed)
+    return fitting_code_sha256(
+        backend_name=orchestrator.backend_name,
+        backend_source_files=orchestrator.backend_source_files,
+    )
+
+
+class _UnrelatedAdapter:
+    name = "unrelated_model"
+    adapter_version = "1"
+    capabilities = BackendCapabilities(
+        supports_gpu=False,
+        supports_full_history=True,
+        supports_deployment=False,
+        deployment_device="none",
+    )
+
+    def resolve_params(self, *, preset, params, n_features):
+        del preset, params, n_features
+        return {"unrelated": True}
+
+    def build_model(self, *, resolved_params, seed, device):
+        return {
+            "resolved_params": dict(resolved_params),
+            "seed": seed,
+            "device": device,
+        }
+
+    def fit(self, model, features, target, *, progress=None):
+        del features, target
+        if progress is not None:
+            progress("fit")
+        return model
+
+    def predict(self, model, features):
+        del model
+        return np.zeros(len(features), dtype=float)
+
+    def identity(self, *, resolved_params, device):
+        return BackendIdentity(
+            schema_version=1,
+            name=self.name,
+            adapter_version=self.adapter_version,
+            implementation_fingerprint="d" * 64,
+            resolved_params=dict(resolved_params),
+            device=device,
+            capabilities=self.capabilities,
+            dependency_identity={"stdlib": "python-3.11"},
+        )
+
+
+class _VersionBumpedLightGBMAdapter(LightGBMAdapter):
+    adapter_version = "2"
+
+
+def _registry_with_builtin_plus(adapter: object | None = None) -> BackendRegistry:
+    registry = BackendRegistry(
+        adapters={
+            "lightgbm": LightGBMAdapter(),
+            "xgboost": XGBoostAdapter(),
+            "catboost": CatBoostAdapter(),
+        }
+    )
+    if adapter is not None:
+        registry.register(adapter)
+    return registry
+
+
+def _registry_with_version_bumped_lightgbm() -> BackendRegistry:
+    return BackendRegistry(
+        adapters={
+            "lightgbm": _VersionBumpedLightGBMAdapter(),
+            "xgboost": XGBoostAdapter(),
+            "catboost": CatBoostAdapter(),
+        }
+    )
+
+
+class _ProtocolDeployAdapter:
+    def __init__(
+        self,
+        *,
+        name: str = "constant_model",
+        adapter_version: str = "1",
+        implementation_fingerprint: str = "e" * 64,
+        dependency_identity: dict[str, str] | None = None,
+        supports_full_history: bool = True,
+        supports_deployment: bool = True,
+    ) -> None:
+        self.name = name
+        self.adapter_version = adapter_version
+        self.capabilities = BackendCapabilities(
+            supports_gpu=False,
+            supports_full_history=supports_full_history,
+            supports_deployment=supports_deployment,
+            deployment_device="cpu" if supports_deployment else "none",
+        )
+        self.fit_error_types = (ValueError, TypeError)
+        self._implementation_fingerprint = implementation_fingerprint
+        self._dependency_identity = dict(
+            {"custom-backend": "1.0"}
+            if dependency_identity is None
+            else dependency_identity
+        )
+        self.fit_calls = 0
+
+    def resolve_params(self, *, preset, params, n_features):
+        return {
+            "preset": preset,
+            "params": dict(params),
+            "n_features": int(n_features),
+        }
+
+    def build_model(self, *, resolved_params, seed, device):
+        return {
+            "resolved_params": dict(resolved_params),
+            "seed": seed,
+            "device": device,
+            "value": 0.125,
+        }
+
+    def fit(self, model, features, target, *, progress=None):
+        del target
+        self.fit_calls += 1
+        if progress is not None:
+            progress("fit")
+        model["rows"] = int(len(features))
+        return model
+
+    def predict(self, model, features):
+        matrix = np.asarray(features, dtype=float)
+        return float(model["value"]) + matrix[:, 0] + 0.5 * matrix[:, 1]
+
+    def identity(self, *, resolved_params, device):
+        return BackendIdentity(
+            schema_version=1,
+            name=self.name,
+            adapter_version=self.adapter_version,
+            implementation_fingerprint=self._implementation_fingerprint,
+            resolved_params=dict(resolved_params),
+            device=device,
+            capabilities=self.capabilities,
+            dependency_identity=dict(self._dependency_identity),
+        )
+
+
+def _registry_with_protocol_deploy_adapter(
+    adapter: _ProtocolDeployAdapter | None = None,
+) -> BackendRegistry:
+    return BackendRegistry(
+        adapters={"constant_model": adapter or _ProtocolDeployAdapter()}
+    )
+
+
 def test_runner_is_deterministic_and_leakage_safe(tmp_path) -> None:
     cfg = _config(tmp_path)
     runner = ExperimentRunner(cfg)
@@ -189,6 +355,191 @@ def test_runner_deploy_serializes_reloadable_predict(tmp_path) -> None:
     # closure's per-era tie_kept_rank step guarantees (0.5/n, (n-0.5)/n).
     pred_values = prediction["prediction"]
     assert ((pred_values > 0) & (pred_values < 1)).all()
+
+
+def test_runner_custom_registry_deploy_uses_adapter_predict_after_reload(
+    tmp_path,
+) -> None:
+    import nmr.runner as runner_module
+
+    base = _config(tmp_path)
+    cfg = ExperimentConfig(
+        data=base.data,
+        split=base.split,
+        model=ModelConfig(backend="constant_model", preset="fast"),
+        evaluation=base.evaluation,
+        run=base.run,
+    )
+    registry = _registry_with_protocol_deploy_adapter()
+    original_serialize = runner_module._serialize_predict_artifact
+    captured_predict_fns: list[object] = []
+
+    def capture_serialize(**kwargs):
+        captured_predict_fns.append(kwargs["predict_fn"])
+        return original_serialize(**kwargs)
+
+    expected_live = pd.DataFrame(
+        {"f1": [0.0, 0.02, 0.04, 0.06], "f2": [0.0, 0.01, 0.0, 0.01]},
+        index=[f"id_{i}" for i in range(4)],
+    )
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(runner_module, "_serialize_predict_artifact", capture_serialize)
+    try:
+        result = ExperimentRunner(cfg, backend_registry=registry).run(deploy=True)
+    finally:
+        monkeypatch.undo()
+
+    assert len(captured_predict_fns) == 1
+    expected = captured_predict_fns[0](expected_live)
+
+    assert result.artifact is not None
+    loaded_predict = load_predict(result.artifact.path)
+    prediction = loaded_predict(expected_live)
+    repeat_prediction = load_predict(result.artifact.path)(expected_live)
+
+    pd.testing.assert_frame_equal(prediction, expected, check_exact=True)
+    pd.testing.assert_frame_equal(repeat_prediction, expected, check_exact=True)
+    assert list(prediction.columns) == ["prediction"]
+    assert prediction.index.tolist() == expected_live.index.tolist()
+    assert prediction["prediction"].notna().all()
+    assert ((prediction["prediction"] > 0) & (prediction["prediction"] < 1)).all()
+
+    payload = {
+        "index": expected_live.index.tolist(),
+        "columns": expected_live.columns.tolist(),
+        "data": expected_live.to_numpy(dtype=float).tolist(),
+        "expected": expected.reset_index().to_dict(orient="list"),
+    }
+    code = """
+import json
+import pandas as pd
+from nmr.deployment import load_predict
+
+artifact_path = __import__('sys').argv[1]
+payload = json.loads(__import__('sys').argv[2])
+features = pd.DataFrame(payload['data'], index=payload['index'], columns=payload['columns'])
+actual = load_predict(artifact_path)(features).reset_index().to_dict(orient='list')
+assert actual == payload['expected']
+print(json.dumps(actual, sort_keys=True))
+"""
+    fresh_process_supported = (
+        subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import importlib, sys; importlib.import_module(sys.argv[1])",
+                _ProtocolDeployAdapter.__module__,
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).returncode
+        == 0
+    )
+    if fresh_process_supported:
+        fresh = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                code,
+                str(result.artifact.path),
+                json.dumps(payload),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        fresh_prediction = pd.DataFrame(json.loads(fresh.stdout)).set_index("index")
+        fresh_prediction.index.name = expected.index.name
+        pd.testing.assert_frame_equal(fresh_prediction, expected, check_exact=True)
+    assert (
+        result.manifest["selected_backend_identity"]["backend_name"] == "constant_model"
+    )
+
+
+def test_runner_deploy_rejects_backend_without_full_history_support_before_fit(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from nmr.config import EnsembleConfig, RiskConfig
+
+    base = _config(tmp_path)
+    adapter = _ProtocolDeployAdapter(supports_full_history=False)
+    cfg = ExperimentConfig(
+        data=base.data,
+        split=base.split,
+        model=ModelConfig(backend="constant_model", preset="fast"),
+        evaluation=base.evaluation,
+        risk=RiskConfig(neutralization_proportion=0.0),
+        ensemble=EnsembleConfig(),
+        run=base.run,
+    )
+
+    def fake_oof(self, train_df, *, model_orchestrator, **kwargs):
+        del self, kwargs
+        model_orchestrator.resolved_device = "cpu"
+        return train_df.select(["id", "era"]).with_columns(
+            pl.lit(0.1).alias("pred_target"),
+            pl.lit(0.2).alias("pred_target_alt"),
+        )
+
+    monkeypatch.setattr(ExperimentRunner, "_train_multi_target_oof", fake_oof)
+
+    with pytest.raises(ValueError, match="supports_full_history=True"):
+        ExperimentRunner(
+            cfg,
+            backend_registry=_registry_with_protocol_deploy_adapter(adapter),
+        ).run(deploy=True)
+
+    assert adapter.fit_calls == 0
+
+
+def test_runner_deploy_rejects_backend_without_deployment_support_before_fit(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from nmr.config import EnsembleConfig, RiskConfig
+
+    base = _config(tmp_path)
+    adapter = _ProtocolDeployAdapter(supports_deployment=False)
+    cfg = ExperimentConfig(
+        data=base.data,
+        split=base.split,
+        model=ModelConfig(backend="constant_model", preset="fast"),
+        evaluation=base.evaluation,
+        risk=RiskConfig(neutralization_proportion=0.0),
+        ensemble=EnsembleConfig(),
+        run=base.run,
+    )
+
+    def fake_oof(self, train_df, *, model_orchestrator, **kwargs):
+        del self, kwargs
+        model_orchestrator.resolved_device = "cpu"
+        return train_df.select(["id", "era"]).with_columns(
+            pl.lit(0.1).alias("pred_target"),
+            pl.lit(0.2).alias("pred_target_alt"),
+        )
+
+    monkeypatch.setattr(ExperimentRunner, "_train_multi_target_oof", fake_oof)
+
+    with pytest.raises(ValueError, match="supports_deployment=True"):
+        ExperimentRunner(
+            cfg,
+            backend_registry=_registry_with_protocol_deploy_adapter(adapter),
+        ).run(deploy=True)
+
+    assert adapter.fit_calls == 0
+
+
+def test_runner_deploy_reload_failure_raises(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def _raise_reload_failure(path: str | Path):
+        raise ValueError(f"artifact reload failed: {path}")
+
+    monkeypatch.setattr("nmr.runner.load_predict", _raise_reload_failure)
+
+    with pytest.raises(ValueError, match="artifact reload failed"):
+        ExperimentRunner(_config(tmp_path)).run(deploy=True)
 
 
 def test_deploy_predict_ranks_per_era_not_whole_frame(tmp_path) -> None:
@@ -252,6 +603,77 @@ def test_run_id_is_path_independent_and_seed_sensitive(tmp_path) -> None:
     )
     runner_seed_flip = ExperimentRunner(cfg_seed_flip)
     assert runner_seed_flip._run_id != runner_a._run_id
+
+
+def test_run_id_ignores_unrelated_backend_registry_entries(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _config(tmp_path)
+    baseline = ExperimentRunner.compute_run_id(cfg)
+
+    monkeypatch.setattr(
+        "nmr.runner._backend_registry_for_identity",
+        lambda: _registry_with_builtin_plus(_UnrelatedAdapter()),
+    )
+
+    assert ExperimentRunner.compute_run_id(cfg) == baseline
+
+
+def test_run_id_changes_when_selected_backend_identity_changes(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = _config(tmp_path)
+    baseline = ExperimentRunner.compute_run_id(cfg)
+
+    monkeypatch.setattr(
+        "nmr.runner._backend_registry_for_identity",
+        _registry_with_version_bumped_lightgbm,
+    )
+
+    assert ExperimentRunner.compute_run_id(cfg) != baseline
+
+
+def test_compute_run_id_honors_explicit_backend_registry(tmp_path) -> None:
+    cfg = _config(tmp_path)
+    baseline = ExperimentRunner.compute_run_id(cfg)
+
+    assert (
+        ExperimentRunner.compute_run_id(
+            cfg,
+            backend_registry=_registry_with_builtin_plus(_UnrelatedAdapter()),
+        )
+        == baseline
+    )
+    assert (
+        ExperimentRunner.compute_run_id(
+            cfg,
+            backend_registry=_registry_with_version_bumped_lightgbm(),
+        )
+        != baseline
+    )
+
+
+def test_runner_uses_supplied_backend_registry_for_runtime_identity(tmp_path) -> None:
+    cfg = _config(tmp_path)
+    registry = _registry_with_version_bumped_lightgbm()
+
+    runner = ExperimentRunner(cfg, backend_registry=registry)
+    result = runner.run(deploy=False)
+
+    assert result.run_id == ExperimentRunner.compute_run_id(
+        cfg,
+        backend_registry=registry,
+    )
+    assert result.manifest["selected_backend_identity"]["adapter_version"] == "2"
+
+    manifest_path = (
+        paths.run_dir(cfg.run.name, result.run_id)
+        / "oof_checkpoints"
+        / "target"
+        / "manifest.json"
+    )
+    checkpoint_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert checkpoint_manifest["selected_backend_identity"]["adapter_version"] == "2"
 
 
 def _validation_config(tmp_path) -> ExperimentConfig:
@@ -331,6 +753,23 @@ def test_run_manifest_records_training_completion_timestamp(tmp_path) -> None:
     parsed = datetime.fromisoformat(trained_at)
     assert parsed.tzinfo is not None
     assert parsed.astimezone(UTC).tzinfo == UTC
+
+
+def test_run_manifest_records_backend_identity_layers(tmp_path) -> None:
+    cfg = _config(tmp_path)
+    result = ExperimentRunner(cfg).run(deploy=False)
+
+    selected = result.manifest.get("selected_backend_identity")
+    assert isinstance(selected, dict)
+    assert selected["backend_name"] == "lightgbm"
+    assert selected["device_role"] == cfg.model.device
+    assert selected["adapter_version"] == "1"
+    assert isinstance(selected["resolved_params_identity"], dict)
+
+    audit = result.manifest.get("backend_registry_audit_identity")
+    assert isinstance(audit, dict)
+    assert audit["schema_version"] == 1
+    assert audit["adapter_names"] == _DEFAULT_BUILTIN_BACKENDS
 
 
 def test_run_manifest_preserves_oof_device_after_cpu_validation_fit(
@@ -1196,6 +1635,16 @@ def test_runner_writes_and_reuses_oof_checkpoints(tmp_path, caplog) -> None:
     # The OOF manifest is PER-TARGET (2026-08-26 review SECONDARY 1): it sits
     # next to its own fold parquets.
     assert (ckpt_root / "target" / "manifest.json").exists()
+    oof_manifest = json.loads(
+        (ckpt_root / "target" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert oof_manifest["code_sha256"] == _expected_checkpoint_code_sha(cfg)
+    assert oof_manifest["selected_backend_identity"]["backend_name"] == "lightgbm"
+    assert oof_manifest["selected_backend_identity"]["device_role"] == cfg.model.device
+    assert (
+        oof_manifest["backend_registry_audit_identity"]["adapter_names"]
+        == _DEFAULT_BUILTIN_BACKENDS
+    )
     assert sorted(p.name for p in (ckpt_root / "target").glob("fold_*.parquet"))
     caplog.clear()
     with caplog.at_level("INFO", logger="nmr.models"):
@@ -1203,6 +1652,25 @@ def test_runner_writes_and_reuses_oof_checkpoints(tmp_path, caplog) -> None:
     assert result2.run_id == result1.run_id
     assert result2.oof.equals(result1.oof)
     assert "loaded from checkpoint" in caplog.text
+
+
+def test_runner_rejects_legacy_oof_manifest_without_selected_backend_identity(
+    tmp_path,
+) -> None:
+    cfg = _config(tmp_path)
+    first = ExperimentRunner(cfg).run(deploy=False)
+    manifest_path = (
+        paths.run_dir(cfg.run.name, first.run_id)
+        / "oof_checkpoints"
+        / "target"
+        / "manifest.json"
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.pop("selected_backend_identity")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="selected_backend_identity"):
+        ExperimentRunner(_config(tmp_path)).run(deploy=False)
 
 
 def test_deploy_checkpoints_written_and_mixed_resume_bit_for_bit(
@@ -1237,7 +1705,13 @@ def test_deploy_checkpoints_written_and_mixed_resume_bit_for_bit(
         (ckpt_root / "target.manifest.json").read_text(encoding="utf-8")
     )
     assert manifest["device"] == "cpu"  # train_full_history is CPU-only by design
-    assert len(manifest["code_sha256"]) == 64
+    assert manifest["code_sha256"] == _expected_checkpoint_code_sha(cfg)
+    assert manifest["selected_backend_identity"]["backend_name"] == "lightgbm"
+    assert manifest["selected_backend_identity"]["device_role"] == "cpu"
+    assert (
+        manifest["backend_registry_audit_identity"]["adapter_names"]
+        == _DEFAULT_BUILTIN_BACKENDS
+    )
     assert manifest["target_col"] == "target"
     assert len(manifest["feature_fingerprint"]) == 64
     # Rebuild-identity terms (spec §3.1) mirror run.json's data_fingerprint
@@ -1455,9 +1929,23 @@ def test_validation_checkpoints_mixed_resume_bit_for_bit(tmp_path, caplog) -> No
     ]
     manifest = json.loads((ckpt_root / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["device"] == "cpu"  # full-history deploy fits are CPU-only
-    assert len(manifest["code_sha256"]) == 64
+    assert manifest["code_sha256"] == _expected_checkpoint_code_sha(cfg)
+    assert manifest["selected_backend_identity"]["backend_name"] == "lightgbm"
+    assert manifest["selected_backend_identity"]["device_role"] == "cpu"
+    assert (
+        manifest["backend_registry_audit_identity"]["adapter_names"]
+        == _DEFAULT_BUILTIN_BACKENDS
+    )
     assert len(manifest["data_fingerprint"]) == 64  # rebuild identity (spec §3.1)
     assert manifest["environment"]
+    validation_fit_manifest = json.loads(
+        (
+            paths.run_dir(cfg.run.name, first.run_id)
+            / "validation_fit_checkpoints"
+            / "target.manifest.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert validation_fit_manifest["code_sha256"] == _expected_checkpoint_code_sha(cfg)
     expected = first.validation_predictions
 
     (ckpt_root / "preds_batch_00.parquet").unlink()  # delete exactly ONE batch

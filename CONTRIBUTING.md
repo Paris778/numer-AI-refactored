@@ -83,6 +83,8 @@ npx --yes clean-css-cli@5.6.3 -O2 dashboard_ui/static/style.css -o dashboard_ui/
 Useful targeted runs while iterating:
 
 ```powershell
+\.venv\Scripts\python -m pytest tests/test_docs_hygiene.py tests/test_package_api.py tests/test_contribution.py -q  # docs + public API contract
+\.venv\Scripts\python -m pytest tests/test_model_backend_protocol.py tests/test_model_backend_registry.py tests/test_model_backend_parity.py tests/test_model_backend_ridge.py tests/test_checkpointing.py tests/test_models.py tests/test_opt.py tests/test_promote.py -q  # backend protocol/registry + checkpoint/HPO/promotion gate
 .\.venv\Scripts\python -m pytest tests/test_parity.py tests/test_risk_parity.py -q   # oracle parity
 .\.venv\Scripts\python -m pytest tests/test_benchmark_hierarchy.py -q              # benchmark determinism hashes
 .\.venv\Scripts\python -m pytest tests/test_runner.py tests/test_registry.py -q       # pipeline + registry

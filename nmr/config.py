@@ -23,7 +23,9 @@ from nmr.payout import PAYOUT_POLICIES
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 VALID_FEATURE_SETS = ("small", "medium", "all")
-VALID_MODEL_BACKENDS = ("lightgbm", "xgboost", "catboost")
+# Built-in help tuple only. The accepted backend identifier universe is wider
+# and is resolved later through BackendRegistry.
+VALID_MODEL_BACKENDS = ("lightgbm", "xgboost", "catboost", "ridge")
 VALID_MODEL_PRESETS = ("fast", "standard", "deep")
 VALID_MODEL_DEVICES = ("auto", "gpu", "cpu")
 VALID_FULL_HISTORY_DEVICES = ("gpu", "cpu")
@@ -42,6 +44,7 @@ PURGE_ERAS_60D = 16
 # with ``20``/``60`` (e.g. ``target_cyrusd_20``, ``ender60``) and must agree
 # with the declared data.horizon.
 _HORIZON_TARGET_RE = re.compile(r"(20|60)$")
+_MODEL_BACKEND_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
 def _validate_purge_vs_horizon(config: ExperimentConfig) -> None:
@@ -217,9 +220,12 @@ class ModelConfig:
     deploy_fit_device: str = "cpu"
 
     def __post_init__(self) -> None:
-        if self.backend not in VALID_MODEL_BACKENDS:
+        if _MODEL_BACKEND_NAME_RE.fullmatch(self.backend) is None:
             raise ValueError(
-                f"model.backend={self.backend!r} not in {VALID_MODEL_BACKENDS}"
+                "model.backend="
+                f"{self.backend!r} must be a lowercase identifier matching "
+                "^[a-z][a-z0-9_]*$; built-in names are listed in "
+                f"VALID_MODEL_BACKENDS={VALID_MODEL_BACKENDS}"
             )
         if self.preset not in VALID_MODEL_PRESETS:
             raise ValueError(

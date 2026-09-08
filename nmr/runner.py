@@ -44,9 +44,10 @@ from nmr.config import (
     set_global_seeds,
 )
 from nmr.data import IngestionAgent
-from nmr.deployment import DeploymentArtifact, serialize_predict
+from nmr.deployment import DeploymentArtifact, load_predict, serialize_predict
 from nmr.ensemble import Ensembler
 from nmr.evaluation import EvaluationEngine, MetricSummary
+from nmr.model_backend_registry import BackendRegistry
 from nmr.models import ModelOrchestrator
 from nmr.payout import PAYOUT_FACTOR_FILENAME, era_payout_factors, resolve_payout_policy
 from nmr.predictions import (
@@ -66,6 +67,65 @@ logger = logging.getLogger("nmr.runner")
 _VAL_PREDICT_ERA_BATCH = 40  # eras per validation predict chunk (bounds peak RAM)
 _DEPLOY_CHECKPOINT_KIND = "deploy_checkpoints"
 _VALIDATION_FIT_CHECKPOINT_KIND = "validation_fit_checkpoints"
+
+
+def _backend_registry_for_identity() -> BackendRegistry:
+    return BackendRegistry.with_builtins()
+
+
+def _resolved_backend_registry(
+    backend_registry: BackendRegistry | None,
+) -> BackendRegistry:
+    return (
+        _backend_registry_for_identity()
+        if backend_registry is None
+        else backend_registry
+    )
+
+
+def _run_backend_identity_layers(
+    config: ExperimentConfig,
+    *,
+    n_features: int | None = None,
+    backend_registry: BackendRegistry | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    feature_count = n_features
+    if feature_count is None:
+        feature_count = len(
+            IngestionAgent(config.data).features(config.data.resolved_feature_set)
+        )
+    orchestrator = ModelOrchestrator(
+        config.model,
+        seed=config.run.seed,
+        backend_registry=_resolved_backend_registry(backend_registry),
+    )
+    return (
+        orchestrator.planned_selected_backend_identity(n_features=feature_count),
+        dict(orchestrator.backend_registry_audit_identity),
+    )
+
+
+def _require_full_history_backend_capabilities(
+    selected_backend_identity: dict[str, Any],
+    *,
+    require_deployment: bool,
+) -> None:
+    capabilities = selected_backend_identity.get("capabilities")
+    if not isinstance(capabilities, dict):
+        raise ValueError(
+            "selected backend identity has no capabilities mapping for "
+            "full-history deployment validation"
+        )
+    if capabilities.get("supports_full_history") is not True:
+        raise ValueError(
+            "full-history deployment requires selected backend capability "
+            "supports_full_history=True"
+        )
+    if require_deployment and capabilities.get("supports_deployment") is not True:
+        raise ValueError(
+            "deployment artifact publication requires selected backend "
+            "capability supports_deployment=True"
+        )
 
 
 def _era_batch_frames(val_df: pl.DataFrame, batch_eras: int) -> list[pl.DataFrame]:
@@ -143,6 +203,10 @@ def _predict_validation_era_batches(
     predict_fn: Callable[[pd.DataFrame], pd.DataFrame],
     batch_eras: int,
     *,
+    backend_name: str,
+    backend_source_files: Sequence[Path],
+    selected_backend_identity: dict[str, Any],
+    backend_registry_audit_identity: dict[str, Any],
     validation_checkpoint_dir: Path | None = None,
     checkpoint_device: str | None = None,
     data_fingerprint: str | None = None,
@@ -183,6 +247,10 @@ def _predict_validation_era_batches(
             verify_checkpoint_manifest(
                 manifest_path,
                 checkpoint_device,
+                backend_name=backend_name,
+                backend_source_files=backend_source_files,
+                selected_backend_identity=selected_backend_identity,
+                backend_registry_audit_identity=backend_registry_audit_identity,
                 checkpoint_kind="validation_checkpoints",
                 data_fingerprint=data_fingerprint,
                 environment=environment,
@@ -226,6 +294,10 @@ def _predict_validation_era_batches(
                 verify_checkpoint_manifest(
                     manifest_path,
                     checkpoint_device,
+                    backend_name=backend_name,
+                    backend_source_files=backend_source_files,
+                    selected_backend_identity=selected_backend_identity,
+                    backend_registry_audit_identity=backend_registry_audit_identity,
                     checkpoint_kind="validation_checkpoints",
                     data_fingerprint=data_fingerprint,
                     environment=environment,
@@ -244,6 +316,12 @@ def _predict_validation_era_batches(
                     json.dumps(
                         checkpoint_manifest(
                             checkpoint_device,
+                            backend_name=backend_name,
+                            backend_source_files=backend_source_files,
+                            selected_backend_identity=selected_backend_identity,
+                            backend_registry_audit_identity=(
+                                backend_registry_audit_identity
+                            ),
                             data_fingerprint=data_fingerprint,
                             environment=environment,
                             feature_fingerprint=feature_fp,
@@ -323,8 +401,14 @@ class RunResult:
 
 
 class ExperimentRunner:
-    def __init__(self, config: ExperimentConfig):
+    def __init__(
+        self,
+        config: ExperimentConfig,
+        *,
+        backend_registry: BackendRegistry | None = None,
+    ):
         self._config = config
+        self._backend_registry = _resolved_backend_registry(backend_registry).snapshot()
         # Persisted capital evidence (nmr.predictions.CAPITAL_EVIDENCE_VERSION):
         # set by the validation stage when it scores through
         # evaluate_prediction_set; promotion requires this block to exist.
@@ -339,8 +423,17 @@ class ExperimentRunner:
         # or timestamps) — computed once so run.json and every checkpoint
         # manifest record the same value (spec §3.1).
         self._environment = _portable_environment()
+        (
+            self._selected_backend_identity,
+            self._backend_registry_audit_identity,
+        ) = _run_backend_identity_layers(
+            config,
+            backend_registry=self._backend_registry,
+        )
         self._run_id = self._compute_run_id(
-            config, data_fingerprint=self._data_fingerprint
+            config,
+            data_fingerprint=self._data_fingerprint,
+            selected_backend_identity=self._selected_backend_identity,
         )
 
     def run(self, *, deploy: bool = False) -> RunResult:
@@ -393,7 +486,9 @@ class ExperimentRunner:
 
         splitter = PurgedEraSplitter(self._config.split)
         model_orchestrator = ModelOrchestrator(
-            self._config.model, seed=self._config.run.seed
+            self._config.model,
+            seed=self._config.run.seed,
+            backend_registry=self._backend_registry,
         )
 
         cv_oof = self._train_multi_target_oof(
@@ -546,10 +641,22 @@ class ExperimentRunner:
         validation_predictions = None
         validation_purge = None
         if self._config.evaluation.validation_scorecard:
+            validation_selected_backend_identity = (
+                model_orchestrator.planned_selected_backend_identity(
+                    n_features=len(feature_cols),
+                    device_role=full_history_fit_device,
+                )
+            )
             scorecard, validation_predictions, validation_purge = (
                 self._run_validation_stage(
                     predict_fn=pipeline[0],
                     feature_cols=feature_cols,
+                    backend_name=model_orchestrator.backend_name,
+                    backend_source_files=model_orchestrator.backend_source_files,
+                    selected_backend_identity=validation_selected_backend_identity,
+                    backend_registry_audit_identity=dict(
+                        model_orchestrator.backend_registry_audit_identity
+                    ),
                     validation_checkpoint_dir=(run_dir / "validation_checkpoints"),
                     checkpoint_device=full_history_fit_device,
                     data_fingerprint=self._data_fingerprint,
@@ -593,6 +700,8 @@ class ExperimentRunner:
             "promotion_data_fingerprint": self._promotion_data_fingerprint,
             "code_fingerprint": _compute_code_fingerprint(),
             "environment": self._environment,
+            "selected_backend_identity": self._selected_backend_identity,
+            "backend_registry_audit_identity": self._backend_registry_audit_identity,
             "pipeline_device": str(self._config.model.device),
             "oof_device": oof_device,
             "validation_fit_device": (
@@ -680,6 +789,10 @@ class ExperimentRunner:
         *,
         predict_fn,
         feature_cols: Sequence[str],
+        backend_name: str,
+        backend_source_files: Sequence[Path],
+        selected_backend_identity: dict[str, Any],
+        backend_registry_audit_identity: dict[str, Any],
         validation_checkpoint_dir: Path | None = None,
         checkpoint_device: str | None = None,
         data_fingerprint: str | None = None,
@@ -760,6 +873,10 @@ class ExperimentRunner:
             feature_cols,
             predict_fn,
             _VAL_PREDICT_ERA_BATCH,
+            backend_name=backend_name,
+            backend_source_files=backend_source_files,
+            selected_backend_identity=selected_backend_identity,
+            backend_registry_audit_identity=backend_registry_audit_identity,
             validation_checkpoint_dir=validation_checkpoint_dir,
             checkpoint_device=checkpoint_device,
             data_fingerprint=data_fingerprint,
@@ -870,7 +987,10 @@ class ExperimentRunner:
 
     @staticmethod
     def _compute_run_id(
-        config: ExperimentConfig, data_fingerprint: str | None = None
+        config: ExperimentConfig,
+        data_fingerprint: str | None = None,
+        selected_backend_identity: dict[str, Any] | None = None,
+        backend_registry: BackendRegistry | None = None,
     ) -> str:
         config_payload = _to_jsonable(dataclasses.asdict(config))
         _strip_path_dependent_fields(config_payload)
@@ -878,6 +998,11 @@ class ExperimentRunner:
         if data_fingerprint is None:
             # Public compute_run_id() path: derive the data snapshot here.
             data_fingerprint = _data_fingerprint(config)
+        if selected_backend_identity is None:
+            selected_backend_identity, _ = _run_backend_identity_layers(
+                config,
+                backend_registry=backend_registry,
+            )
         payload: dict[str, Any] = {
             "config": config_payload,
             "data_version": config.data.version,
@@ -891,6 +1016,7 @@ class ExperimentRunner:
             "environment": ExperimentRunner._environment_fingerprint(
                 config.model.backend
             ),
+            "selected_backend_identity": selected_backend_identity,
         }
         # Content identity for derived feature sets: the absolute path is
         # stripped above (never hashed), while the resolved file's SHA256 is
@@ -917,9 +1043,16 @@ class ExperimentRunner:
         return hashlib.sha256(path.read_bytes().replace(b"\r\n", b"\n")).hexdigest()
 
     @staticmethod
-    def compute_run_id(config: ExperimentConfig) -> str:
+    def compute_run_id(
+        config: ExperimentConfig,
+        *,
+        backend_registry: BackendRegistry | None = None,
+    ) -> str:
         """Public accessor for the canonical run id (used by campaign tooling)."""
-        return ExperimentRunner._compute_run_id(config)
+        return ExperimentRunner._compute_run_id(
+            config,
+            backend_registry=backend_registry,
+        )
 
     @staticmethod
     def _code_fingerprint(package_dir: Path | None = None) -> str:
@@ -1060,6 +1193,16 @@ def _build_deploy_pipeline(
     )
     trained: dict[str, object] = {}
     orchestrator.resolved_device = fit_device
+    selected_backend_identity = orchestrator.planned_selected_backend_identity(
+        n_features=len(feature_cols),
+        device_role=fit_device,
+    )
+    _require_full_history_backend_capabilities(
+        selected_backend_identity,
+        require_deployment=(checkpoint_kind == _DEPLOY_CHECKPOINT_KIND),
+    )
+    backend_registry_audit_identity = dict(orchestrator.backend_registry_audit_identity)
+    adapter_predict = orchestrator._backend_adapter.predict
     checkpoint_label = (
         "deploy" if checkpoint_kind == _DEPLOY_CHECKPOINT_KIND else "validation fit"
     )
@@ -1097,6 +1240,10 @@ def _build_deploy_pipeline(
             verify_checkpoint_manifest(
                 per_target_manifest,
                 fit_device,
+                backend_name=orchestrator.backend_name,
+                backend_source_files=orchestrator.backend_source_files,
+                selected_backend_identity=selected_backend_identity,
+                backend_registry_audit_identity=backend_registry_audit_identity,
                 checkpoint_kind=checkpoint_kind,
                 data_fingerprint=data_fingerprint,
                 environment=environment,
@@ -1141,6 +1288,10 @@ def _build_deploy_pipeline(
                 verify_checkpoint_manifest(
                     per_target_manifest,
                     resolved_device,
+                    backend_name=orchestrator.backend_name,
+                    backend_source_files=orchestrator.backend_source_files,
+                    selected_backend_identity=selected_backend_identity,
+                    backend_registry_audit_identity=backend_registry_audit_identity,
                     checkpoint_kind=checkpoint_kind,
                     data_fingerprint=data_fingerprint,
                     environment=environment,
@@ -1154,6 +1305,12 @@ def _build_deploy_pipeline(
                 json.dumps(
                     checkpoint_manifest(
                         resolved_device,
+                        backend_name=orchestrator.backend_name,
+                        backend_source_files=orchestrator.backend_source_files,
+                        selected_backend_identity=selected_backend_identity,
+                        backend_registry_audit_identity=(
+                            backend_registry_audit_identity
+                        ),
                         data_fingerprint=data_fingerprint,
                         environment=environment,
                         target_col=target,
@@ -1174,15 +1331,16 @@ def _build_deploy_pipeline(
     ) -> pd.DataFrame:
         del live_benchmark_models
         frame = live_features.loc[:, ordered_features]
+        feature_matrix = frame.to_numpy(dtype=float)
         components = [
-            np.asarray(trained[t].predict(frame), dtype=float) for t in target_order
+            np.asarray(adapter_predict(trained[t], feature_matrix), dtype=float)
+            for t in target_order
         ]
         design = np.column_stack(components)
         if "era" in live_features.columns:
             era_values = live_features["era"].astype(str).to_numpy()
         else:
             era_values = np.full(len(live_features), "1")
-        feature_matrix = frame.to_numpy(dtype=float)
         blended = np.empty(len(live_features), dtype=float)
         for era in np.unique(era_values):
             mask = era_values == era
@@ -1224,14 +1382,21 @@ def _serialize_predict_artifact(
     model_meta: dict[str, object],
     artifact_path: Path,
 ) -> DeploymentArtifact:
-    """Serialize the prebuilt pipeline closure. Does NOT retrain models."""
+    """Serialize the prebuilt pipeline closure and verify it reloads."""
     cloudpickle.register_pickle_by_value(_transforms)
-    return serialize_predict(
+    artifact = serialize_predict(
         predict_fn,
         path=artifact_path,
         feature_names=list(model_meta["feature_names"]),
         models=model_meta,
     )
+    try:
+        load_predict(artifact.path)
+    except Exception as exc:
+        raise ValueError(
+            f"serialized deployment artifact failed reload at {artifact.path}: {exc}"
+        ) from exc
+    return artifact
 
 
 def _package_version(name: str) -> str | None:

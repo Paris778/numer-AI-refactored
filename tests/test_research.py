@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import dataclasses
+import importlib
 import json
 
 import numpy as np
@@ -27,6 +29,83 @@ from nmr.research import (
     neutralization_frontier,
 )
 from nmr.risk import NeutralizationEngine
+
+
+def _registry_module():
+    return importlib.import_module("nmr.model_backend_registry")
+
+
+def _protocol_module():
+    return importlib.import_module("nmr.model_backend_protocol")
+
+
+class ConstantAdapter:
+    def __init__(self, proto, *, name: str = "constant_model") -> None:
+        self.name = name
+        self.adapter_version = "1"
+        self.capabilities = proto.BackendCapabilities(
+            supports_gpu=False,
+            supports_full_history=True,
+            supports_deployment=True,
+            deployment_device="cpu",
+        )
+        self.fit_error_types = (ValueError, TypeError)
+        self._proto = proto
+
+    def resolve_params(self, *, preset, params, n_features):
+        del preset, n_features
+        return {"alpha": float(params.get("alpha", 0.25))}
+
+    def build_model(self, *, resolved_params, seed, device):
+        return {
+            "alpha": float(resolved_params["alpha"]),
+            "seed": seed,
+            "device": device,
+        }
+
+    def fit(self, model, features, target, *, progress=None):
+        del target
+        if progress is not None:
+            progress("fit")
+        model["rows"] = int(len(features))
+        return model
+
+    def predict(self, model, features):
+        base = np.asarray(features[:, 0], dtype=float).reshape(-1)
+        return base * float(model["alpha"])
+
+    def identity(self, *, resolved_params, device):
+        return self._proto.BackendIdentity(
+            schema_version=1,
+            name=self.name,
+            adapter_version=self.adapter_version,
+            implementation_fingerprint="a" * 64,
+            resolved_params=dict(resolved_params),
+            device=device,
+            capabilities=self.capabilities,
+            dependency_identity={"custom-backend": "1.0"},
+        )
+
+
+def _custom_registry():
+    proto = _protocol_module()
+    registry_module = _registry_module()
+    return registry_module.BackendRegistry(
+        adapters={"constant_model": ConstantAdapter(proto)}
+    )
+
+
+def _custom_backend_config(tmp_path):
+    cfg = _write_data(tmp_path)
+    return dataclasses.replace(
+        cfg,
+        model=dataclasses.replace(
+            cfg.model,
+            backend="constant_model",
+            device="cpu",
+            params={"alpha": 0.25},
+        ),
+    )
 
 
 def _train_frame() -> pl.DataFrame:
@@ -109,6 +188,55 @@ def test_sweep_is_deterministic_and_held_out(tmp_path) -> None:
     assert first.proxy_metric == "sharpe"
     assert first.proxy_target == "target"
     assert first.selection_bias is False
+
+
+def test_sweep_carries_backend_provenance_and_geometry(tmp_path) -> None:
+    cfg = _write_data(tmp_path)
+    result = HyperparameterSweep(cfg, metric="sharpe").run(
+        {"n_estimators": [6, 8]}, n_trials=2, seed=123
+    )
+
+    assert result.is_capital is False
+    assert result.backend == cfg.model.backend
+    assert result.adapter_version == result.backend_identity["adapter_version"]
+    assert result.backend_identity["name"] == cfg.model.backend
+    assert result.resolved_params_identity == result.backend_identity["resolved_params"]
+    assert result.training_geometry == {
+        "split_scheme": cfg.split.scheme,
+        "fold_count": cfg.split.n_folds,
+        "purge_eras": cfg.split.purge_eras,
+        "feature_set": cfg.data.resolved_feature_set,
+        "target": cfg.evaluation.main_target,
+        "horizon": cfg.data.horizon,
+    }
+    assert not hasattr(result, "capital_context")
+    assert not hasattr(result, "capital_evidence")
+
+
+def test_custom_hyperparameter_sweep_requires_explicit_backend_registry(
+    tmp_path,
+) -> None:
+    cfg = _custom_backend_config(tmp_path)
+
+    with pytest.raises(ValueError, match="backend_registry"):
+        HyperparameterSweep(cfg, metric="sharpe").run(
+            {"alpha": [0.25]}, n_trials=1, seed=7
+        )
+
+
+def test_custom_hyperparameter_sweep_accepts_explicit_backend_registry(
+    tmp_path,
+) -> None:
+    cfg = _custom_backend_config(tmp_path)
+    result = HyperparameterSweep(
+        cfg,
+        metric="sharpe",
+        backend_registry=_custom_registry(),
+    ).run({"alpha": [0.25]}, n_trials=1, seed=7)
+
+    assert result.backend == "constant_model"
+    assert result.backend_identity["name"] == "constant_model"
+    assert result.resolved_params_identity["alpha"] == 0.25
 
 
 def test_held_out_partition_enforces_purge_gap(tmp_path) -> None:

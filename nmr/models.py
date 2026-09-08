@@ -1,7 +1,7 @@
 """Deterministic model orchestration for leakage-safe era validation.
 
-`ModelOrchestrator` is the narrow training boundary for tree models. It only
-does three things:
+`ModelOrchestrator` is the narrow deterministic training boundary for
+registered model backends. It only does three things:
 
 - resolve canonical preset params from `ModelConfig`
 - fit one model per leakage-safe fold from `PurgedEraSplitter`
@@ -16,19 +16,19 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-import catboost
-import lightgbm as lgb
 import numpy as np
 import polars as pl
-import xgboost as xgb
 
 from nmr.config import DataConfig, ModelConfig
+from nmr.model_backend_protocol import BackendIdentity, canonical_json_bytes
+from nmr.model_backend_registry import BackendRegistry
 from nmr.splitter import Fold, PurgedEraSplitter
 
 logger = logging.getLogger("nmr.models")
@@ -60,6 +60,10 @@ _SUBPROCESS_DRAIN_GRACE_SECONDS = 5.0
 _EXACT_FLOAT32_DTYPES = frozenset(
     {pl.Int8, pl.Int16, pl.Int32, pl.UInt8, pl.UInt16, pl.UInt32, pl.Float32}
 )
+
+
+def _canonical_mapping(value: object) -> dict[str, Any]:
+    return json.loads(canonical_json_bytes(value).decode("utf-8"))
 
 
 def coerce_float32_features(
@@ -192,16 +196,109 @@ class CVResult:
 
 
 class ModelOrchestrator:
-    def __init__(self, config: ModelConfig, *, seed: int = 42) -> None:
+    def __init__(
+        self,
+        config: ModelConfig,
+        *,
+        seed: int = 42,
+        backend_registry: BackendRegistry | None = None,
+    ) -> None:
         self._config = config
         self._seed = seed
+        self._backend_registry = (
+            BackendRegistry.with_builtins()
+            if backend_registry is None
+            else backend_registry
+        ).snapshot()
+        self._backend_registry_audit_identity = self._backend_registry.identity()
+        self._backend_adapter = self._backend_registry.resolve(config.backend)
+        self.backend_source_files = self._resolve_backend_source_files(
+            self._backend_adapter
+        )
         self.resolved_device: str | None = None
+        self.selected_backend_identity: BackendIdentity | None = None
         # Measured peak RSS + commit charge of the last spawned full-history
         # fit (bytes), or None when unknown / not spawned. Commit is the
         # quantity that gates the promotion (the full-universe thrash was a
         # commit-limit crossing). Read by the promotion rehearsal.
         self.last_full_history_peak_bytes: int | None = None
         self.last_full_history_peak_commit_bytes: int | None = None
+
+    @property
+    def backend_name(self) -> str:
+        return self._backend_adapter.name
+
+    @property
+    def backend_registry_audit_identity(self) -> Mapping[str, Any]:
+        return self._backend_registry_audit_identity
+
+    def _persisted_selected_backend_identity(
+        self,
+        backend_identity: BackendIdentity,
+        *,
+        device_role: str,
+    ) -> dict[str, Any]:
+        return _canonical_mapping(
+            {
+                "registry_schema_version": int(
+                    self._backend_registry_audit_identity["schema_version"]
+                ),
+                "backend_name": backend_identity.name,
+                "adapter_version": backend_identity.adapter_version,
+                "source_fingerprint": backend_identity.implementation_fingerprint,
+                "resolved_params_identity": dict(backend_identity.resolved_params),
+                "device_role": device_role,
+                "capabilities": asdict(backend_identity.capabilities),
+                "dependency_identity": dict(backend_identity.dependency_identity),
+            }
+        )
+
+    def planned_selected_backend_identity(
+        self,
+        *,
+        n_features: int,
+        device_role: str | None = None,
+    ) -> dict[str, Any]:
+        role = self._config.device if device_role is None else device_role
+        if role not in ("auto", "cpu", "gpu"):
+            raise ValueError(f"device_role={role!r} must be 'auto', 'cpu', or 'gpu'")
+        requested_device = None if role == "auto" else role
+        selected_device, selected_params = self._device_candidate_specs(
+            use_gpu=role != "cpu",
+            n_features=n_features,
+            requested_device=requested_device,
+        )[0]
+        backend_identity = self._backend_adapter.identity(
+            resolved_params=selected_params,
+            device=selected_device,
+        )
+        return self._persisted_selected_backend_identity(
+            backend_identity,
+            device_role=role,
+        )
+
+    @staticmethod
+    def _resolve_backend_source_files(adapter: object) -> tuple[Path, ...]:
+        explicit = getattr(adapter, "source_files", None)
+        if explicit is not None:
+            source_files = tuple(Path(path).resolve() for path in explicit)
+        else:
+            module = sys.modules.get(adapter.__class__.__module__)
+            module_file = getattr(module, "__file__", None)
+            if not isinstance(module_file, str) or not module_file:
+                raise ValueError(
+                    "backend adapter source file could not be resolved from its module"
+                )
+            source_files = (Path(module_file).resolve(),)
+        normalized = tuple(
+            sorted(
+                {path.resolve() for path in source_files},
+                key=lambda path: path.as_posix(),
+            )
+        )
+        if not normalized:
+            raise ValueError("backend adapter source file tuple must be non-empty")
+        return normalized
 
     def train_anchor_fold(
         self,
@@ -286,12 +383,20 @@ class ModelOrchestrator:
         splitter_fp = splitter_geometry_fingerprint(
             splitter, df.get_column(era_col).to_list()
         )
+        selected_backend_identity = self.planned_selected_backend_identity(
+            n_features=len(feature_cols)
+        )
+        backend_registry_audit_identity = self.backend_registry_audit_identity
         manifest_written = False
         if manifest_path is not None:
             if manifest_path.exists():
                 verify_checkpoint_manifest(
                     manifest_path,
                     self.resolved_device,
+                    backend_name=self.backend_name,
+                    backend_source_files=self.backend_source_files,
+                    selected_backend_identity=selected_backend_identity,
+                    backend_registry_audit_identity=backend_registry_audit_identity,
                     data_fingerprint=data_fingerprint,
                     environment=environment,
                     target_col=target_col,
@@ -369,6 +474,12 @@ class ModelOrchestrator:
                             verify_checkpoint_manifest(
                                 manifest_path,
                                 resolved_device,
+                                backend_name=self.backend_name,
+                                backend_source_files=self.backend_source_files,
+                                selected_backend_identity=selected_backend_identity,
+                                backend_registry_audit_identity=(
+                                    backend_registry_audit_identity
+                                ),
                                 data_fingerprint=data_fingerprint,
                                 environment=environment,
                                 target_col=target_col,
@@ -380,6 +491,14 @@ class ModelOrchestrator:
                                 json.dumps(
                                     checkpoint_manifest(
                                         resolved_device,
+                                        backend_name=self.backend_name,
+                                        backend_source_files=self.backend_source_files,
+                                        selected_backend_identity=(
+                                            selected_backend_identity
+                                        ),
+                                        backend_registry_audit_identity=(
+                                            backend_registry_audit_identity
+                                        ),
                                         data_fingerprint=data_fingerprint,
                                         environment=environment,
                                         target_col=target_col,
@@ -505,11 +624,8 @@ class ModelOrchestrator:
         """
         if fit_device not in ("cpu", "gpu"):
             raise ValueError(f"fit_device={fit_device!r} must be 'cpu' or 'gpu'")
-        if fit_device == "gpu" and self._config.backend == "catboost":
-            raise ValueError(
-                "fit_device='gpu' is unsupported for the catboost backend; "
-                "CatBoost is CPU-only in nmr"
-            )
+        if fit_device == "gpu" and not self._backend_adapter.capabilities.supports_gpu:
+            raise ValueError(self._gpu_unsupported_message(argument_name="fit_device"))
         train_df = df.filter(pl.col(era_col).is_not_null())
         train_df = train_df.filter(
             pl.col(target_col).is_not_null() & pl.col(target_col).is_finite()
@@ -627,8 +743,7 @@ class ModelOrchestrator:
         return coerce_float32_features(df, feature_cols).to_numpy()
 
     def _predict_model(self, model: object, *, features: np.ndarray) -> np.ndarray:
-        prediction = model.predict(features)
-        return np.asarray(prediction, dtype=float).reshape(-1)
+        return self._backend_adapter.predict(model, features)
 
     def _predict_model_chunked(
         self, model: object, val_df: pl.DataFrame, feature_cols: Sequence[str]
@@ -658,6 +773,26 @@ class ModelOrchestrator:
             return np.zeros(0, dtype=float)
         return np.concatenate(parts)
 
+    def _resolved_device_hint(self, params: Mapping[str, Any]) -> str:
+        if params.get("device_type") == "gpu":
+            return "gpu"
+        if params.get("device") == "cuda":
+            return "gpu"
+        if params.get("task_type") == "GPU":
+            return "gpu"
+        return "cpu"
+
+    def _gpu_unsupported_message(self, *, argument_name: str) -> str:
+        if self._backend_adapter.name == "catboost":
+            return (
+                f"{argument_name}='gpu' is unsupported for the catboost backend; "
+                "CatBoost is CPU-only in nmr"
+            )
+        return (
+            f"{argument_name}='gpu' is unsupported for the "
+            f"{self._backend_adapter.name} backend"
+        )
+
     def _fit_model(
         self,
         *,
@@ -666,38 +801,35 @@ class ModelOrchestrator:
         use_gpu: bool = True,
         requested_device: str | None = None,
     ) -> object:
-        candidate_params = self._device_candidate_params(
+        candidate_specs = self._device_candidate_specs(
             use_gpu=use_gpu,
             n_features=int(features.shape[1]),
             requested_device=requested_device,
         )
         last_error: Exception | None = None
-        if self._config.backend == "lightgbm":
-            backend_errors = (ValueError, TypeError, lgb.basic.LightGBMError)
-        elif self._config.backend == "catboost":
-            backend_errors = (ValueError, TypeError, catboost.CatBoostError)
-        else:
-            backend_errors = (ValueError, TypeError, xgb.core.XGBoostError)
+        backend_errors = getattr(
+            self._backend_adapter,
+            "fit_error_types",
+            (ValueError, TypeError),
+        )
 
-        for params in candidate_params:
+        for candidate_device, params in candidate_specs:
             model = self._build_model(params)
             try:
-                self._fit_with_progress(model, features, target)
+                model = self._fit_with_progress(model, features, target)
             except backend_errors as exc:
                 logger.warning(
                     "[fit] %s fit failed (%s: %s); trying next candidate",
-                    self._config.backend,
+                    self._backend_adapter.name,
                     type(exc).__name__,
                     exc,
                 )
                 last_error = exc
                 continue
-            self.resolved_device = (
-                "gpu"
-                if params.get("device_type") == "gpu"
-                or params.get("device") == "cuda"
-                or params.get("task_type") == "GPU"
-                else "cpu"
+            self.resolved_device = candidate_device
+            self.selected_backend_identity = self._backend_adapter.identity(
+                resolved_params=params,
+                device=candidate_device,
             )
             return model
 
@@ -706,7 +838,7 @@ class ModelOrchestrator:
 
     def _fit_with_progress(
         self, model: object, features: np.ndarray, target: np.ndarray
-    ) -> None:
+    ) -> object:
         """Fit with progress markers on stdout.
 
         LightGBM and CatBoost expose per-iteration hooks; the installed
@@ -715,26 +847,58 @@ class ModelOrchestrator:
         output-only: they never touch the model's numeric results or the
         params dict, so determinism guarantees are unchanged.
         """
-        backend = self._config.backend
-        period = _FIT_PROGRESS_PERIOD
-        if backend == "lightgbm":
+        return self._backend_adapter.fit(
+            model,
+            features,
+            target,
+            progress=lambda message: print(message, flush=True),
+        )
 
-            def _lgb_progress(env: Any) -> None:
-                iteration = env.iteration + 1
-                if iteration == 1 or iteration % period == 0:
-                    print(f"[fit] lightgbm iteration {iteration}", flush=True)
-
-            model.fit(features, target, callbacks=[_lgb_progress])
-        elif backend == "xgboost":
-            started = time.monotonic()
-            print("[fit] xgboost training started", flush=True)
-            model.fit(features, target)
-            print(
-                f"[fit] xgboost training done ({time.monotonic() - started:.1f}s)",
-                flush=True,
-            )
-        else:  # catboost: period-based verbose logging at fit time
-            model.fit(features, target, verbose=period)
+    def _device_candidate_specs(
+        self,
+        *,
+        use_gpu: bool,
+        n_features: int,
+        requested_device: str | None = None,
+    ) -> list[tuple[str, dict[str, Any]]]:
+        if (
+            requested_device is None
+            and self._config.device == "gpu"
+            and not self._backend_adapter.capabilities.supports_gpu
+        ):
+            raise ValueError(self._gpu_unsupported_message(argument_name="device"))
+        if requested_device is not None:
+            if requested_device not in ("cpu", "gpu"):
+                raise ValueError(
+                    f"requested_device={requested_device!r} must be 'cpu' or 'gpu'"
+                )
+            if (
+                requested_device == "gpu"
+                and not self._backend_adapter.capabilities.supports_gpu
+            ):
+                raise ValueError(
+                    self._gpu_unsupported_message(argument_name="requested_device")
+                )
+            return [
+                (
+                    requested_device,
+                    self._resolved_params(
+                        use_gpu=requested_device == "gpu",
+                        n_features=n_features,
+                    ),
+                )
+            ]
+        if not use_gpu or not self._backend_adapter.capabilities.supports_gpu:
+            return [
+                ("cpu", self._resolved_params(use_gpu=False, n_features=n_features))
+            ]
+        gpu_params = self._resolved_params(use_gpu=True, n_features=n_features)
+        if self._config.device == "gpu":
+            return [("gpu", gpu_params)]
+        cpu_params = self._resolved_params(use_gpu=False, n_features=n_features)
+        if gpu_params == cpu_params:
+            return [("cpu", cpu_params)]
+        return [("gpu", gpu_params), ("cpu", cpu_params)]
 
     def _device_candidate_params(
         self,
@@ -743,107 +907,43 @@ class ModelOrchestrator:
         n_features: int,
         requested_device: str | None = None,
     ) -> list[dict[str, Any]]:
-        if requested_device is not None:
-            if requested_device not in ("cpu", "gpu"):
-                raise ValueError(
-                    f"requested_device={requested_device!r} must be 'cpu' or 'gpu'"
-                )
-            if requested_device == "cpu":
-                return [self._resolved_params(use_gpu=False, n_features=n_features)]
-            if self._config.backend == "catboost":
-                raise ValueError(
-                    "requested_device='gpu' is unsupported for the catboost "
-                    "backend; CatBoost is CPU-only in nmr"
-                )
-            return [self._resolved_params(use_gpu=True, n_features=n_features)]
-        if not use_gpu:
-            return [self._resolved_params(use_gpu=False, n_features=n_features)]
-        if self._config.backend == "catboost":
-            # CPU-only by design: catboost rejects `rsm` on GPU (non-pairwise
-            # modes) and every canonical preset ships colsample_bytree -> rsm,
-            # so a GPU candidate can never fit. Never attempt one.
-            return [self._resolved_params(use_gpu=False, n_features=n_features)]
-        gpu_params = self._resolved_params(use_gpu=True, n_features=n_features)
-        if self._config.device == "gpu":
-            # Forced GPU: a failing GPU fit raises — no silent CPU fallback.
-            return [gpu_params]
-        cpu_params = self._resolved_params(use_gpu=False, n_features=n_features)
-        if gpu_params == cpu_params:
-            return [cpu_params]
-        return [gpu_params, cpu_params]
+        return [
+            params
+            for _, params in self._device_candidate_specs(
+                use_gpu=use_gpu,
+                n_features=n_features,
+                requested_device=requested_device,
+            )
+        ]
 
     def _resolved_params(self, *, use_gpu: bool, n_features: int) -> dict[str, Any]:
-        base = resolve_model_params(self._config.preset, self._config.params)
-
-        if self._config.backend == "lightgbm":
-            params = {
-                "objective": "regression",
-                "random_state": self._seed,
-                "n_jobs": 1,
-                "deterministic": True,
-                "force_col_wise": True,
-                "verbosity": -1,
-                **base,
-            }
-            params["device_type"] = "gpu" if use_gpu else "cpu"
-            # Floor every present member of the LightGBM sampling-alias group
-            # ({colsample_bytree, feature_fraction, sub_feature} — one
-            # _ConfigAliases group in the installed wrapper, and unknown
-            # kwargs flow through **kwargs into the native engine). Flooring
-            # all present members is precedence-proof.
-            for alias in _LGBM_COLSAMPLE_ALIASES:
-                if alias in params:
-                    params[alias] = _raise_to_colsample_floor(
-                        float(params[alias]), n_features
-                    )
-            return params
-
-        if self._config.backend == "catboost":
-            base = resolve_model_params(self._config.preset, self._config.params)
-            translated = _translate_catboost(base, seed=self._seed, use_gpu=use_gpu)
-            translated["rsm"] = _raise_to_colsample_floor(
-                float(translated["rsm"]), n_features
-            )
-            return translated
-
-        params = {
-            "objective": "reg:squarederror",
-            "random_state": self._seed,
-            "seed": self._seed,
-            "n_jobs": 1,
-            "verbosity": 0,
-            "subsample": 1.0,
-            "colsample_bylevel": 1.0,
-            **base,
-        }
-        num_leaves = params.pop("num_leaves", None)
-        min_data_in_leaf = params.pop("min_data_in_leaf", None)
-        if num_leaves is not None:
-            params.setdefault("grow_policy", "lossguide")
-            params.setdefault("max_leaves", num_leaves)
-        elif "max_leaves" in params:
-            # A config specifying max_leaves directly (without num_leaves) means
-            # leaf-wise growth: under XGBoost's default depthwise policy
-            # max_leaves is silently inert (audit SEV-3: the tier-2 XGB cell's
-            # max_leaves: 15 was a no-op). An explicit grow_policy wins.
-            params.setdefault("grow_policy", "lossguide")
-        if min_data_in_leaf is not None:
-            params.setdefault("min_child_weight", float(min_data_in_leaf))
-        params["colsample_bytree"] = _raise_to_colsample_floor(
-            float(params["colsample_bytree"]), n_features
+        resolve_device_params = getattr(
+            self._backend_adapter, "resolve_device_params", None
         )
-        # xgboost >= 3.0 unified GPU acceleration under device='cuda';
-        # tree_method='gpu_hist' was removed and raises Invalid Input.
-        params["tree_method"] = "hist"
-        params["device"] = "cuda" if use_gpu else "cpu"
-        return params
+        if callable(resolve_device_params):
+            return dict(
+                resolve_device_params(
+                    preset=self._config.preset,
+                    params=self._config.params,
+                    n_features=n_features,
+                    seed=self._seed,
+                    device="gpu" if use_gpu else "cpu",
+                )
+            )
+        return dict(
+            self._backend_adapter.resolve_params(
+                preset=self._config.preset,
+                params=self._config.params,
+                n_features=n_features,
+            )
+        )
 
     def _build_model(self, params: dict[str, Any]) -> object:
-        if self._config.backend == "lightgbm":
-            return lgb.LGBMRegressor(**params)
-        if self._config.backend == "catboost":
-            return catboost.CatBoostRegressor(**params)
-        return xgb.XGBRegressor(**params)
+        return self._backend_adapter.build_model(
+            resolved_params=params,
+            seed=self._seed,
+            device=self._resolved_device_hint(params),
+        )
 
     def _assert_fold_is_leakage_safe(self, fold: Fold, *, purge_eras: int) -> None:
         train_eras = {int(era) for era in fold.train_eras}

@@ -14,6 +14,7 @@ import logging
 import os
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import polars as pl
 import pytest
@@ -34,15 +35,96 @@ from nmr.config import (
 )
 from nmr.data import IngestionAgent
 from nmr.deployment import load_predict
+from nmr.model_backend_protocol import BackendCapabilities, BackendIdentity
+from nmr.model_backend_registry import BackendRegistry
 from nmr.payout import resolve_payout_policy
 from nmr.predictions import CAPITAL_EVIDENCE_VERSION, validation_key_fingerprint
-from nmr.promote import PromotionResult
+from nmr.promote import PromotionResult, promote_full_version, rehearse_promotion
 from nmr.promote import _full_history_frame as _orig_full_history_frame
-from nmr.promote import promote_full_version, rehearse_promotion
-from nmr.runner import ExperimentRunner
+from nmr.research import SweepResult
+from nmr.runner import (
+    ExperimentRunner,
+    _data_fingerprint,
+    _promotion_data_fingerprint,
+    _run_backend_identity_layers,
+)
 from nmr.scorecard import CROSSCHECK_N_TRIALS, scorecard_block_digest
 
 _RID = "a" * 64
+
+
+class _ConstantPromotionAdapter:
+    def __init__(
+        self,
+        *,
+        adapter_version: str = "1",
+        implementation_fingerprint: str = "c" * 64,
+        dependency_identity: dict[str, str] | None = None,
+        supports_full_history: bool = True,
+        supports_deployment: bool = True,
+    ) -> None:
+        self.name = "constant_model"
+        self.adapter_version = adapter_version
+        self.capabilities = BackendCapabilities(
+            supports_gpu=False,
+            supports_full_history=supports_full_history,
+            supports_deployment=supports_deployment,
+            deployment_device="cpu" if supports_deployment else "none",
+        )
+        self.fit_error_types = (ValueError, TypeError)
+        self._implementation_fingerprint = implementation_fingerprint
+        self._dependency_identity = dict(
+            {"custom-backend": "1.0"}
+            if dependency_identity is None
+            else dependency_identity
+        )
+
+    def resolve_params(self, *, preset, params, n_features):
+        return {
+            "preset": preset,
+            "params": dict(params),
+            "n_features": int(n_features),
+        }
+
+    def build_model(self, *, resolved_params, seed, device):
+        return {
+            "constant": 0.25,
+            "resolved_params": dict(resolved_params),
+            "seed": seed,
+            "device": device,
+        }
+
+    def fit(self, model, features, target, *, progress=None):
+        del target
+        if progress is not None:
+            progress("fit")
+        model["rows"] = int(len(features))
+        return model
+
+    def predict(self, model, features):
+        del model
+        matrix = np.asarray(features, dtype=float)
+        return 0.25 + matrix[:, 0] + 0.5 * matrix[:, 1]
+
+    def identity(self, *, resolved_params, device):
+        return BackendIdentity(
+            schema_version=1,
+            name=self.name,
+            adapter_version=self.adapter_version,
+            implementation_fingerprint=self._implementation_fingerprint,
+            resolved_params=dict(resolved_params),
+            device=device,
+            capabilities=self.capabilities,
+            dependency_identity=dict(self._dependency_identity),
+        )
+
+
+def _custom_backend_registry(
+    adapter: _ConstantPromotionAdapter | None = None,
+) -> BackendRegistry:
+    return BackendRegistry(
+        adapters={"constant_model": adapter or _ConstantPromotionAdapter()}
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -91,7 +173,13 @@ def _make_data(root: Path, *, validation_eras: int = 24) -> Path:
     ).write_parquet(version_dir / "validation_benchmark_models.parquet")
     # Rehearsal needs features.json + live files in the same layout as v5.3.
     version_dir.joinpath("features.json").write_text(
-        json.dumps({"feature_sets": {"small": ["f1", "f2"]}}), encoding="utf-8"
+        json.dumps(
+            {
+                "feature_sets": {"small": ["f1", "f2"]},
+                "targets": ["target", "target_ender_60"],
+            }
+        ),
+        encoding="utf-8",
     )
     pl.DataFrame(
         {
@@ -113,7 +201,7 @@ def _make_data(root: Path, *, validation_eras: int = 24) -> Path:
     return root
 
 
-def _config(tmp_data: Path) -> ExperimentConfig:
+def _config(tmp_data: Path, *, backend: str = "lightgbm") -> ExperimentConfig:
     return ExperimentConfig(
         data=DataConfig(
             version="vtest",
@@ -122,7 +210,7 @@ def _config(tmp_data: Path) -> ExperimentConfig:
             data_dir=tmp_data,
         ),
         split=SplitConfig(purge_eras=8),
-        model=ModelConfig(backend="lightgbm", preset="fast"),
+        model=ModelConfig(backend=backend, preset="fast"),
         evaluation=EvalConfig(payout_policy="classic_atomic_ender60_r1343_v1"),
         risk=RiskConfig(neutralization_proportion=0.0),
         ensemble=EnsembleConfig(),
@@ -132,8 +220,10 @@ def _config(tmp_data: Path) -> ExperimentConfig:
     )
 
 
-def _stored_config_dict(tmp_data: Path) -> dict:
-    stored = json.loads(json.dumps(dataclasses.asdict(_config(tmp_data)), default=str))
+def _stored_config_dict(tmp_data: Path, *, backend: str = "lightgbm") -> dict:
+    stored = json.loads(
+        json.dumps(dataclasses.asdict(_config(tmp_data, backend=backend)), default=str)
+    )
     stored["split"]["embargo_eras"] = 4  # legacy stored value (all 29 registry rows)
     return stored
 
@@ -205,6 +295,7 @@ def _fixture_manifest(
     *,
     feature_cols: list[str] | None = None,
     weights: list[float] | None = None,
+    backend_registry: BackendRegistry | None = None,
 ) -> dict:
     """The manifest fields ``_write_registry`` persists — shared so evidence
     tampering tests mutate exactly one field against a consistent baseline."""
@@ -213,15 +304,24 @@ def _fixture_manifest(
     normalized.setdefault("split", {})["embargo_eras"] = 0
     fingerprint_config = config_from_dict(normalized)
     target_names = list(stored_config.get("data", {}).get("targets") or ["target"])
+    resolved_feature_cols = feature_cols if feature_cols is not None else ["f1", "f2"]
+    identity_feature_cols = resolved_feature_cols or ["f1", "f2"]
+    selected_backend_identity, backend_registry_audit_identity = (
+        _run_backend_identity_layers(
+            fingerprint_config,
+            n_features=len(identity_feature_cols),
+            backend_registry=backend_registry,
+        )
+    )
     return {
         "config": stored_config,
-        "feature_cols": feature_cols if feature_cols is not None else ["f1", "f2"],
+        "feature_cols": resolved_feature_cols,
         "pred_cols": [f"pred_{target}" for target in target_names],
         "weights": weights if weights is not None else [1.0],
-        "data_fingerprint": ExperimentRunner(fingerprint_config)._data_fingerprint,
-        "promotion_data_fingerprint": ExperimentRunner(
-            fingerprint_config
-        )._promotion_data_fingerprint,
+        "data_fingerprint": _data_fingerprint(fingerprint_config),
+        "promotion_data_fingerprint": _promotion_data_fingerprint(fingerprint_config),
+        "selected_backend_identity": selected_backend_identity,
+        "backend_registry_audit_identity": backend_registry_audit_identity,
     }
 
 
@@ -235,11 +335,15 @@ def _write_registry(
     supplemental_sha: str | None = None,
     capital_evidence: dict | None = None,
     omit_capital_evidence: bool = False,
+    backend_registry: BackendRegistry | None = None,
 ) -> Path:
     """Write the run record through experiment_store (experiments layout)."""
     scorecard_block = scorecard if scorecard is not None else _passing_scorecard()
     manifest = _fixture_manifest(
-        stored_config, feature_cols=feature_cols, weights=weights
+        stored_config,
+        feature_cols=feature_cols,
+        weights=weights,
+        backend_registry=backend_registry,
     )
     if supplemental_sha is not None:
         manifest["supplemental_feature_sets_sha256"] = supplemental_sha
@@ -256,6 +360,249 @@ def _write_registry(
         "scorecard": scorecard_block,
     }
     return experiment_store.record_run("brb1-lgbm-v6", run_id, payload)
+
+
+def test_promote_manifest_without_selected_backend_identity_refused(
+    tmp_path: Path,
+) -> None:
+    data_root = _make_data(tmp_path / "data")
+    stored_config = _stored_config_dict(data_root)
+    run_path = _write_registry(stored_config=stored_config)
+    payload = json.loads(run_path.read_text(encoding="utf-8"))
+    payload["manifest"].pop("selected_backend_identity")
+    run_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="selected_backend_identity"):
+        promote_full_version(_RID, "brb1-lgbm-v6", data_dir=data_root)
+
+
+def test_promote_selected_backend_identity_mismatch_refused(tmp_path: Path) -> None:
+    data_root = _make_data(tmp_path / "data")
+    stored_config = _stored_config_dict(data_root)
+    run_path = _write_registry(stored_config=stored_config)
+    payload = json.loads(run_path.read_text(encoding="utf-8"))
+    payload["manifest"]["selected_backend_identity"]["adapter_version"] = "999"
+    run_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="selected_backend_identity"):
+        promote_full_version(_RID, "brb1-lgbm-v6", data_dir=data_root)
+
+
+def test_promote_explicit_backend_registry_identity_mismatch_refused_before_side_effects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from nmr.model_backend_catboost import CatBoostAdapter
+    from nmr.model_backend_lightgbm import LightGBMAdapter
+    from nmr.model_backend_registry import BackendRegistry
+    from nmr.model_backend_xgboost import XGBoostAdapter
+
+    class _MismatchedLightGBMAdapter(LightGBMAdapter):
+        adapter_version = "999"
+
+    data_root = _make_data(tmp_path / "data")
+    _write_registry(stored_config=_stored_config_dict(data_root))
+    registry = BackendRegistry(
+        adapters={
+            "lightgbm": _MismatchedLightGBMAdapter(),
+            "xgboost": XGBoostAdapter(),
+            "catboost": CatBoostAdapter(),
+        }
+    )
+    reached = {"stage_export": False, "fit": False}
+
+    def _must_not_stage_export(*args, **kwargs):
+        reached["stage_export"] = True
+        raise AssertionError("registry identity mismatch must fail before staging")
+
+    def _must_not_fit(*args, **kwargs):
+        reached["fit"] = True
+        raise AssertionError("registry identity mismatch must fail before fitting")
+
+    monkeypatch.setattr(
+        "nmr.promote.experiment_store.stage_export", _must_not_stage_export
+    )
+    monkeypatch.setattr("nmr.promote._build_deploy_pipeline", _must_not_fit)
+
+    with pytest.raises(ValueError, match="selected_backend_identity mismatch"):
+        promote_full_version(
+            _RID,
+            "brb1-lgbm-v6",
+            backend_registry=registry,
+        )
+
+    assert reached == {"stage_export": False, "fit": False}
+
+
+def test_promote_custom_run_requires_explicit_backend_registry_before_side_effects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_root = _make_data(tmp_path / "data")
+    registry = _custom_backend_registry()
+    _write_registry(
+        stored_config=_stored_config_dict(data_root, backend="constant_model"),
+        backend_registry=registry,
+    )
+    reached = {"stage_export": False, "fit": False}
+
+    def _must_not_stage_export(*args, **kwargs):
+        reached["stage_export"] = True
+        raise AssertionError("missing registry must fail before staging")
+
+    def _must_not_fit(*args, **kwargs):
+        reached["fit"] = True
+        raise AssertionError("missing registry must fail before fitting")
+
+    monkeypatch.setattr(
+        "nmr.promote.experiment_store.stage_export", _must_not_stage_export
+    )
+    monkeypatch.setattr("nmr.promote._build_deploy_pipeline", _must_not_fit)
+
+    with pytest.raises(ValueError, match="explicit backend_registry"):
+        promote_full_version(_RID, "brb1-lgbm-v6")
+
+    assert reached == {"stage_export": False, "fit": False}
+
+
+@pytest.mark.parametrize(
+    ("adapter", "message"),
+    [
+        (
+            _ConstantPromotionAdapter(adapter_version="2"),
+            "selected_backend_identity mismatch",
+        ),
+        (
+            _ConstantPromotionAdapter(implementation_fingerprint="d" * 64),
+            "selected_backend_identity mismatch",
+        ),
+        (
+            _ConstantPromotionAdapter(dependency_identity={"custom-backend": "2.0"}),
+            "selected_backend_identity mismatch",
+        ),
+    ],
+)
+def test_promote_custom_registry_selected_identity_mismatch_refused_before_side_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    adapter: _ConstantPromotionAdapter,
+    message: str,
+) -> None:
+    data_root = _make_data(tmp_path / "data")
+    _write_registry(
+        stored_config=_stored_config_dict(data_root, backend="constant_model"),
+        backend_registry=_custom_backend_registry(),
+    )
+    reached = {"stage_export": False, "fit": False}
+
+    def _must_not_stage_export(*args, **kwargs):
+        reached["stage_export"] = True
+        raise AssertionError("registry mismatch must fail before staging")
+
+    def _must_not_fit(*args, **kwargs):
+        reached["fit"] = True
+        raise AssertionError("registry mismatch must fail before fitting")
+
+    monkeypatch.setattr(
+        "nmr.promote.experiment_store.stage_export", _must_not_stage_export
+    )
+    monkeypatch.setattr("nmr.promote._build_deploy_pipeline", _must_not_fit)
+
+    with pytest.raises(ValueError, match=message):
+        promote_full_version(
+            _RID,
+            "brb1-lgbm-v6",
+            backend_registry=_custom_backend_registry(adapter),
+        )
+
+    assert reached == {"stage_export": False, "fit": False}
+
+
+def test_promote_custom_registry_selected_entry_mismatch_refused_before_side_effects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_root = _make_data(tmp_path / "data")
+    registry = _custom_backend_registry()
+    run_path = _write_registry(
+        stored_config=_stored_config_dict(data_root, backend="constant_model"),
+        backend_registry=registry,
+    )
+    payload = json.loads(run_path.read_text(encoding="utf-8"))
+    payload["manifest"]["backend_registry_audit_identity"]["adapters_by_name"][
+        "constant_model"
+    ]["implementation_fingerprint"] = ("0" * 64)
+    run_path.write_text(json.dumps(payload), encoding="utf-8")
+    reached = {"stage_export": False, "fit": False}
+
+    def _must_not_stage_export(*args, **kwargs):
+        reached["stage_export"] = True
+        raise AssertionError("selected entry mismatch must fail before staging")
+
+    def _must_not_fit(*args, **kwargs):
+        reached["fit"] = True
+        raise AssertionError("selected entry mismatch must fail before fitting")
+
+    monkeypatch.setattr(
+        "nmr.promote.experiment_store.stage_export", _must_not_stage_export
+    )
+    monkeypatch.setattr("nmr.promote._build_deploy_pipeline", _must_not_fit)
+
+    with pytest.raises(ValueError, match="selected registry entry"):
+        promote_full_version(
+            _RID,
+            "brb1-lgbm-v6",
+            backend_registry=registry,
+        )
+
+    assert reached == {"stage_export": False, "fit": False}
+
+
+@pytest.mark.parametrize(
+    ("adapter", "message"),
+    [
+        (
+            _ConstantPromotionAdapter(supports_full_history=False),
+            "supports_full_history=True",
+        ),
+        (
+            _ConstantPromotionAdapter(supports_deployment=False),
+            "supports_deployment=True",
+        ),
+    ],
+)
+def test_promote_custom_registry_capability_refused_before_side_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    adapter: _ConstantPromotionAdapter,
+    message: str,
+) -> None:
+    data_root = _make_data(tmp_path / "data")
+    registry = _custom_backend_registry(adapter)
+    _write_registry(
+        stored_config=_stored_config_dict(data_root, backend="constant_model"),
+        backend_registry=registry,
+    )
+    reached = {"stage_export": False, "fit": False}
+
+    def _must_not_stage_export(*args, **kwargs):
+        reached["stage_export"] = True
+        raise AssertionError("unsupported capability must fail before staging")
+
+    def _must_not_fit(*args, **kwargs):
+        reached["fit"] = True
+        raise AssertionError("unsupported capability must fail before fitting")
+
+    monkeypatch.setattr(
+        "nmr.promote.experiment_store.stage_export", _must_not_stage_export
+    )
+    monkeypatch.setattr("nmr.promote._build_deploy_pipeline", _must_not_fit)
+
+    with pytest.raises(ValueError, match=message):
+        promote_full_version(
+            _RID,
+            "brb1-lgbm-v6",
+            backend_registry=registry,
+        )
+
+    assert reached == {"stage_export": False, "fit": False}
 
 
 def _promote(tmp_path: Path, **kwargs) -> object:
@@ -339,7 +686,7 @@ def test_promote_happy_path_manifest_and_artifact(tmp_path: Path) -> None:
     assert ((raw["prediction"] > 0) & (raw["prediction"] < 1)).all()
 
 
-def test_promote_accepts_staged_artifact_before_publication(
+def test_promote_accepts_artifact_before_staging_export(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     data = _make_data(tmp_path / "data")
@@ -348,21 +695,58 @@ def test_promote_accepts_staged_artifact_before_publication(
 
     from nmr.submission import accept_promoted_artifact as real_accept
 
+    original_stage_export = experiment_store.stage_export
+
+    def _stage_export(*args, **kwargs):
+        observed["stage_export_called"] = True
+        return original_stage_export(*args, **kwargs)
+
     def _accept_while_staged(artifact_path, **kwargs):
         final_slot = paths.export_dir("brb1-lgbm-v6", "full", _RID)
         observed["final_slot_exists"] = final_slot.exists()
         observed["artifact_parent"] = Path(artifact_path).parent.name
+        observed["stage_export_called_during_accept"] = observed.get(
+            "stage_export_called", False
+        )
         return real_accept(artifact_path, **kwargs)
 
+    monkeypatch.setattr("nmr.promote.experiment_store.stage_export", _stage_export)
     monkeypatch.setattr("nmr.submission.accept_promoted_artifact", _accept_while_staged)
     result = promote_full_version(_RID, "brb1-lgbm-v6")
     record = json.loads(result.manifest_path.read_text(encoding="utf-8"))
 
     assert observed["final_slot_exists"] is False
-    assert str(observed["artifact_parent"]).startswith(".tmp-")
+    assert observed["stage_export_called_during_accept"] is False
     assert record["acceptance"]["passed"] is True
     assert len(record["acceptance"]["artifact_sha256"]) == 64
     assert len(record["acceptance"]["live_features_sha256"]) == 64
+
+
+def test_promote_reload_failure_refuses_before_staging_export(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data = _make_data(tmp_path / "data")
+    _write_registry(stored_config=_stored_config_dict(data))
+    reached = {"stage_export": False}
+
+    def _must_not_stage_export(*args, **kwargs):
+        reached["stage_export"] = True
+        raise AssertionError("reload failure must happen before staging export")
+
+    def _raise_reload_failure(*args, **kwargs):
+        raise ValueError("artifact reload failed")
+
+    monkeypatch.setattr(
+        "nmr.promote.experiment_store.stage_export", _must_not_stage_export
+    )
+    monkeypatch.setattr(
+        "nmr.promote._serialize_predict_artifact", _raise_reload_failure
+    )
+
+    with pytest.raises(ValueError, match="artifact reload failed"):
+        promote_full_version(_RID, "brb1-lgbm-v6")
+
+    assert reached == {"stage_export": False}
 
 
 def test_promote_acceptance_failure_leaves_no_export_or_pointer(
@@ -820,6 +1204,26 @@ def test_pointer_repair_refuses_mismatched_authorization_receipt(
         promote_full_version(_RID, "brb1-lgbm-v6", force=True)
 
 
+def test_pointer_repair_custom_run_requires_explicit_backend_registry(
+    tmp_path: Path,
+) -> None:
+    data = _make_data(tmp_path / "data")
+    registry = _custom_backend_registry()
+    _write_registry(
+        stored_config=_stored_config_dict(data, backend="constant_model"),
+        backend_registry=registry,
+    )
+    promote_full_version(
+        _RID,
+        "brb1-lgbm-v6",
+        backend_registry=registry,
+    )
+    paths.current_pointer_path("brb1-lgbm-v6").unlink()
+
+    with pytest.raises(ValueError, match="explicit backend_registry"):
+        promote_full_version(_RID, "brb1-lgbm-v6", force=True)
+
+
 def test_promote_rejects_invalid_run_id_and_family(tmp_path: Path) -> None:
     data = _make_data(tmp_path / "data")
     _write_registry(stored_config=_stored_config_dict(data))
@@ -972,6 +1376,34 @@ def test_load_run_record_missing_fails_loud(tmp_path: Path) -> None:
 
     with pytest.raises(FileNotFoundError, match="has no record"):
         _load_run_record("brb1-lgbm-v6", _RID)
+
+
+def test_promote_rejects_research_sweep_promotion_input_before_side_effects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sweep = SweepResult(trials=pl.DataFrame(), best_params={}, best_value=0.0)
+    reached = {"stage_export": False, "fit": False}
+
+    def _must_not_stage_export(*args, **kwargs):
+        reached["stage_export"] = True
+        raise AssertionError("invalid promotion input must fail before staging")
+
+    def _must_not_fit(*args, **kwargs):
+        reached["fit"] = True
+        raise AssertionError("invalid promotion input must fail before fitting")
+
+    monkeypatch.setattr(
+        "nmr.promote.experiment_store.stage_export", _must_not_stage_export
+    )
+    monkeypatch.setattr("nmr.promote._build_deploy_pipeline", _must_not_fit)
+
+    with pytest.raises(ValueError, match="64-char lowercase hex string"):
+        promote_full_version(sweep, "brb1-lgbm-v6")  # type: ignore[arg-type]
+    assert reached == {"stage_export": False, "fit": False}
+
+    with pytest.raises(FileNotFoundError, match="has no record"):
+        promote_full_version("c" * 64, "brb1-lgbm-v6")
+    assert reached == {"stage_export": False, "fit": False}
 
 
 def test_ram_guard_curve_path_passes_when_under_guard(

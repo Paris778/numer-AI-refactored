@@ -17,12 +17,13 @@ from __future__ import annotations
 import hashlib
 import io
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 import polars as pl
 
 from nmr._atomicio import atomic_write_bytes
+from nmr.model_backend_protocol import canonical_json_bytes
 from nmr.models import ModelOrchestrator
 from nmr.splitter import PurgedEraSplitter
 
@@ -38,7 +39,15 @@ __all__ = [
     "splitter_geometry_fingerprint",
 ]
 
-_CODE_IDENTITY_FILES = ("nmr/models.py", "nmr/splitter.py", "nmr/runner.py")
+_CODE_IDENTITY_FILES = (
+    "nmr/model_backend_protocol.py",
+    "nmr/model_backend_registry.py",
+    "nmr/models.py",
+    "nmr/splitter.py",
+    "nmr/runner.py",
+)
+_CODE_IDENTITY_ROOT = Path(__file__).resolve().parents[1]
+_SHARED_CODE_IDENTITY_FILES = _CODE_IDENTITY_FILES
 
 # The only devices ModelOrchestrator._fit_model can resolve (models.py):
 # checkpoint manifests must record one of these — anything else is rejected
@@ -46,20 +55,53 @@ _CODE_IDENTITY_FILES = ("nmr/models.py", "nmr/splitter.py", "nmr/runner.py")
 _KNOWN_RESOLVED_DEVICES = ("cpu", "gpu")
 
 
-def fitting_code_sha256() -> str:
-    """SHA-256 over the fitting-code source bytes (models + splitter + runner).
+def _normalized_source_bytes(path: Path) -> bytes:
+    return path.read_bytes().replace(b"\r\n", b"\n")
 
-    The modules that define fold geometry, fit behavior, and the staged
-    pipeline. This is the code identity recorded in checkpoint manifests:
-    run_id binds config and data, never code, so checkpoints must not
-    silently survive a fitting-code change (spec 2026-08-20-oof-checkpoint-
-    resume §2.5; ``nmr/runner.py`` added by spec 2026-08-23-checkpoint-
-    coverage-extension §2.4).
+
+def _code_identity_label(path: Path) -> str:
+    resolved = path.resolve()
+    try:
+        return resolved.relative_to(_CODE_IDENTITY_ROOT).as_posix()
+    except ValueError:
+        return resolved.as_posix()
+
+
+def _canonical_jsonable(value: Mapping[str, object]) -> dict[str, object]:
+    return json.loads(canonical_json_bytes(value).decode("utf-8"))
+
+
+def fitting_code_sha256(
+    *,
+    backend_name: str,
+    backend_source_files: Sequence[Path],
+) -> str:
+    """SHA-256 over the fitting-code source bytes for the selected backend.
+
+    The shared modules that define fold geometry, fit behavior, and the staged
+    pipeline always participate, plus only the selected backend adapter
+    source file(s). Relative file labels are sorted canonically and contents
+    are CRLF-normalized before hashing so Windows and POSIX checkouts of the
+    same code produce the same manifest identity.
     """
     digest = hashlib.sha256()
-    for relative in _CODE_IDENTITY_FILES:
-        path = Path(__file__).resolve().parents[1] / relative
-        digest.update(path.read_bytes())
+    digest.update(str(backend_name).encode("utf-8"))
+    digest.update(b"\n")
+    labeled_paths = {
+        (
+            _code_identity_label(_CODE_IDENTITY_ROOT / relative),
+            (_CODE_IDENTITY_ROOT / relative).resolve(),
+        )
+        for relative in _SHARED_CODE_IDENTITY_FILES
+    }
+    labeled_paths.update(
+        (_code_identity_label(Path(path)), Path(path).resolve())
+        for path in backend_source_files
+    )
+    for label, path in sorted(labeled_paths, key=lambda item: item[0]):
+        digest.update(label.encode("utf-8"))
+        digest.update(b"\n")
+        digest.update(_normalized_source_bytes(path))
     return digest.hexdigest()
 
 
@@ -96,12 +138,16 @@ def splitter_geometry_fingerprint(
 def checkpoint_manifest(
     device: str,
     *,
+    backend_name: str,
+    backend_source_files: Sequence[Path],
+    selected_backend_identity: Mapping[str, object] | None = None,
+    backend_registry_audit_identity: Mapping[str, object] | None = None,
     data_fingerprint: str | None = None,
     environment: str | None = None,
     target_col: str | None = None,
     feature_fingerprint: str | None = None,
     splitter_fingerprint: str | None = None,
-) -> dict[str, str]:
+) -> dict[str, object]:
     """Identity manifest for a checkpoint root: code sha256 + fit device, plus
     the rebuild-identity terms (spec §3.1) — ``data_fingerprint`` and the
     portable ``environment`` — and the fit-identity terms (2026-08-26 review,
@@ -111,7 +157,21 @@ def checkpoint_manifest(
     when provided, so callers without the runner's identity context keep the
     legacy code+device form.
     """
-    manifest: dict[str, str] = {"code_sha256": fitting_code_sha256(), "device": device}
+    manifest: dict[str, object] = {
+        "code_sha256": fitting_code_sha256(
+            backend_name=backend_name,
+            backend_source_files=backend_source_files,
+        ),
+        "device": device,
+    }
+    if selected_backend_identity is not None:
+        manifest["selected_backend_identity"] = _canonical_jsonable(
+            selected_backend_identity
+        )
+    if backend_registry_audit_identity is not None:
+        manifest["backend_registry_audit_identity"] = _canonical_jsonable(
+            backend_registry_audit_identity
+        )
     if data_fingerprint is not None:
         manifest["data_fingerprint"] = data_fingerprint
     if environment is not None:
@@ -129,6 +189,10 @@ def verify_checkpoint_manifest(
     manifest_path: Path,
     current_device: str | None,
     *,
+    backend_name: str,
+    backend_source_files: Sequence[Path],
+    selected_backend_identity: Mapping[str, object] | None = None,
+    backend_registry_audit_identity: Mapping[str, object] | None = None,
     data_fingerprint: str | None = None,
     environment: str | None = None,
     target_col: str | None = None,
@@ -159,11 +223,24 @@ def verify_checkpoint_manifest(
     ``deploy_checkpoints``, ``validation_checkpoints``).
     """
     stored = json.loads(manifest_path.read_text(encoding="utf-8"))
-    if stored.get("code_sha256") != fitting_code_sha256():
+    del backend_registry_audit_identity
+    if stored.get("code_sha256") != fitting_code_sha256(
+        backend_name=backend_name,
+        backend_source_files=backend_source_files,
+    ):
         raise ValueError(
             f"{checkpoint_kind} code_sha256 mismatch: fitting code changed "
             f"since the checkpoints were written ({manifest_path}). "
             f"Delete the {checkpoint_kind} directory to force a full refit."
+        )
+    if selected_backend_identity is not None and stored.get(
+        "selected_backend_identity"
+    ) != _canonical_jsonable(selected_backend_identity):
+        raise ValueError(
+            f"{checkpoint_kind} selected_backend_identity mismatch: the "
+            f"selected backend identity changed since the checkpoints were "
+            f"written ({manifest_path}). Delete the {checkpoint_kind} "
+            f"directory to force a full refit."
         )
     if (
         data_fingerprint is not None

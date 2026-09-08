@@ -207,6 +207,8 @@ from .meta import (
     paired_era_comparison,
     promotion_verdict,
 )
+from .model_backend_protocol import BackendAdapter, BackendCapabilities, BackendIdentity
+from .model_backend_registry import BackendRegistry
 from .models import CVResult, ModelOrchestrator, coerce_float32_features
 from .opt import (
     HGBHPOConfig,
@@ -329,6 +331,10 @@ __all__ = [
     "get_model_profile",
     "get_profiles_by_architecture",
     "get_profiles_by_tag",
+    "BackendAdapter",
+    "BackendCapabilities",
+    "BackendIdentity",
+    "BackendRegistry",
     "AllocationConstraints",
     "AllocationScenario",
     "ModelAllocation",

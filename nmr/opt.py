@@ -28,12 +28,15 @@ from sklearn.linear_model import Ridge
 from nmr._atomicio import atomic_write_text
 from nmr.config import ExperimentConfig
 from nmr.hardware import discover_hardware
-from nmr.models import resolve_model_params
+from nmr.model_backend_registry import BackendRegistry
 from nmr.payout import CLASSIC_ATOMIC_ENDER60_R1343_V1
 from nmr.research import (
     SweepResult,
     _held_out_metric_full,
+    _hpo_backend_registry,
     _override_config,
+    _planned_backend_candidate,
+    _sweep_result_provenance,
     metric_direction,
 )
 from nmr.scorecard import evaluate_model
@@ -435,6 +438,7 @@ def bayesian_sweep(
     n_startup_trials: int = 10,
     enqueue_base_config: bool = True,
     n_jobs: int = 1,
+    backend_registry: BackendRegistry | None = None,
 ) -> SweepResult:
     """Bayesian hyperparameter sweep over ``space`` around ``base_config``.
 
@@ -457,6 +461,7 @@ def bayesian_sweep(
     if metric not in _VALID_METRICS:
         raise ValueError(f"metric={metric!r} not in {sorted(_VALID_METRICS)}")
     direction = metric_direction(metric)
+    registry = _hpo_backend_registry(base_config, backend_registry)
 
     parsed = _parse_space(space)
     study = optuna.create_study(
@@ -467,8 +472,9 @@ def bayesian_sweep(
         storage=optuna.storages.InMemoryStorage(),
     )
     if enqueue_base_config:
-        resolved = resolve_model_params(
-            base_config.model.preset, base_config.model.params
+        resolved, _ = _planned_backend_candidate(
+            base_config,
+            backend_registry=registry,
         )
         anchor = {p.name: resolved[p.name] for p in parsed if p.name in resolved}
         if anchor:
@@ -480,7 +486,11 @@ def bayesian_sweep(
         params = {p.name: _suggest(trial, p) for p in parsed}
         cfg = _override_config(base_config, params)
         try:
-            value, moments = _held_out_metric_full(cfg, metric_name=metric)
+            value, moments = _held_out_metric_full(
+                cfg,
+                metric_name=metric,
+                backend_registry=registry,
+            )
             moments_by_trial[trial.number] = moments
         except Exception as exc:
             logger.error("[bayesian_sweep] trial %s failed: %s", trial.number, exc)
@@ -521,10 +531,22 @@ def bayesian_sweep(
         )
     )
     best = study.best_trial if len(study.best_trials) > 0 else None
+    best_config = (
+        _override_config(base_config, best.params) if best is not None else base_config
+    )
+    provenance = _sweep_result_provenance(
+        best_config,
+        backend_registry=registry,
+    )
     return SweepResult(
         trials=trial_df,
         best_params=best.params if best is not None else {},
         best_value=float(best.value) if best is not None else float("nan"),
+        backend=provenance["backend"],
+        adapter_version=provenance["adapter_version"],
+        backend_identity=provenance["backend_identity"],
+        resolved_params_identity=provenance["resolved_params_identity"],
+        training_geometry=provenance["training_geometry"],
         is_capital=False,
         proxy_metric=metric,
         proxy_split="held_out_80_20",
