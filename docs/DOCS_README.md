@@ -100,6 +100,7 @@ Validation, purge, metric, scorecard, and benchmark behavior are repository cont
 | [`superpowers/specs/2026-08-19-benchmark-fleet-design.md`](superpowers/specs/2026-08-19-benchmark-fleet-design.md) | T3 | Active untiered benchmark-fleet contract | approved design |
 | [`superpowers/specs/2026-08-26-model-lifecycle-experiments-design.md`](superpowers/specs/2026-08-26-model-lifecycle-experiments-design.md) | T3 | Active experiment-layout and lifecycle contract | approved design |
 | [`superpowers/specs/2026-09-08-model-backend-registry-design.md`](superpowers/specs/2026-09-08-model-backend-registry-design.md) | T3 | Active detailed backend protocol/registry design record; durable owner facts live in `AGENTS.md`, `ARCHITECTURE.md`, `CODEBASE.md`, and `CONTRIBUTING.md` | approved design |
+| [`superpowers/specs/2026-09-12-money-making-program-design.md`](superpowers/specs/2026-09-12-money-making-program-design.md) | T3 | Active director program of record: north star, risk envelope, defect register D1–D5, phase gates, and the 90+/100 rubric | director disposition (2026-09-12) |
 | `99-archive/README.md` | T4 | Archive index and authority boundary | this build |
 | `99-archive/dashboard-history-2026-08.md` | T4 | Condensed dashboard architecture provenance | retired delivery records |
 | `99-archive/design-records-2026-08.md` | T4 | Condensed completed-design chronology | retired specs and plans |

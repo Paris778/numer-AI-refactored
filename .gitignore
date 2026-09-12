@@ -19,6 +19,7 @@ docs/superpowers/specs/**
 # be present on a fresh checkout or the CI docs-hygiene link check fails.
 !docs/superpowers/specs/2026-09-07-model-os-design.md
 !docs/superpowers/specs/2026-09-08-model-backend-registry-design.md
+!docs/superpowers/specs/2026-09-12-money-making-program-design.md
 
 .ipynb_checkpoints/
 __pycache__/
