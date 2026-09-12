@@ -28,6 +28,7 @@ __all__ = [
     "gpu_devices",
     "gpu_status",
     "hardware_status",
+    "machine_memory_limits",
     "parse_cpu_times",
     "parse_gpu_devices",
     "parse_gpu_status",
@@ -67,7 +68,11 @@ def apply_thread_limits(max_threads: int | None = None) -> int:
                 ) from exc
     if max_threads is None:
         max_threads = min(os.cpu_count() or 1, _DEFAULT_THREAD_LIMIT)
-    if isinstance(max_threads, bool) or not isinstance(max_threads, int) or max_threads < 1:
+    if (
+        isinstance(max_threads, bool)
+        or not isinstance(max_threads, int)
+        or max_threads < 1
+    ):
         raise ValueError(f"max_threads must be an integer >= 1, got {max_threads!r}")
     for name in _THREAD_POOL_ENV_VARS:
         if name not in os.environ:
@@ -119,6 +124,68 @@ def _run_cli(args: list[str]) -> str | None:
     if completed.returncode != 0:
         return None
     return completed.stdout
+
+
+def machine_memory_limits() -> tuple[int | None, int | None]:
+    """Physical RAM and commit limit of THIS machine, stdlib-only.
+
+    Returns ``(physical_total_bytes, commit_limit_bytes)``. Windows:
+    ``GetPerformanceInfo`` (fields are in pages; ``PageSize`` converts).
+    Unix: physical via ``sysconf``; commit limit N/A (None). The two metrics
+    guard different failure modes: commit vs commit limit (hard OOM), working
+    set vs physical RAM (thrash — the documented 1.1 iters/s collapse).
+    ``nmr.models._machine_memory_limits`` delegates here (single source).
+    """
+    try:
+
+        class _PerformanceInformation(ctypes.Structure):
+            _fields_ = [
+                ("cb", ctypes.c_ulong),
+                ("CommitTotal", ctypes.c_size_t),
+                ("CommitLimit", ctypes.c_size_t),
+                ("CommitPeak", ctypes.c_size_t),
+                ("PhysicalTotal", ctypes.c_size_t),
+                ("PhysicalAvailable", ctypes.c_size_t),
+                ("SystemCache", ctypes.c_size_t),
+                ("KernelTotal", ctypes.c_size_t),
+                ("KernelPaged", ctypes.c_size_t),
+                ("KernelNonpaged", ctypes.c_size_t),
+                ("PageSize", ctypes.c_size_t),
+                ("HandleCount", ctypes.c_ulong),
+                ("ProcessCount", ctypes.c_ulong),
+                ("ThreadCount", ctypes.c_ulong),
+            ]
+
+        info = _PerformanceInformation()
+        info.cb = ctypes.sizeof(_PerformanceInformation)
+        fn = None
+        for dll_name, fn_name in (
+            ("psapi", "GetPerformanceInfo"),
+            ("kernel32", "K32GetPerformanceInfo"),
+        ):
+            try:
+                dll = getattr(ctypes.windll, dll_name)
+                candidate = getattr(dll, fn_name)
+                candidate.argtypes = [
+                    ctypes.POINTER(_PerformanceInformation),
+                    ctypes.c_ulong,
+                ]
+                candidate.restype = ctypes.c_int
+                fn = candidate
+                break
+            except (AttributeError, OSError):
+                continue
+        if fn is not None and fn(ctypes.byref(info), info.cb):
+            page = int(info.PageSize)
+            return int(info.PhysicalTotal) * page, int(info.CommitLimit) * page
+        return None, None
+    except Exception:  # pragma: no cover - platform-dependent, best-effort
+        try:
+            pages = os.sysconf("SC_PHYS_PAGES")
+            page_size = os.sysconf("SC_PAGE_SIZE")
+            return int(pages) * int(page_size), None
+        except Exception:
+            return None, None
 
 
 def parse_gpu_devices(text: str) -> tuple[GpuDevice, ...]:

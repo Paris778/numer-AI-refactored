@@ -1,5 +1,15 @@
 # Tier 0 — Null & statistical invariants (the sanity gate).
+#
+# null_floor: the structural-null AC-Sharpe envelope is a PRE-REGISTERED
+# family-wise quantile over a fixed seed set, stored in the digest-bound
+# calibration reference next to this file (null_floor_study.py emits it).
+# The gate refuses if the calibration is missing, tampered, or belongs to a
+# different data window / scoring identity. Recalibrate only through the
+# pre-registered procedure (docs/06-evaluation/benchmark-line-in-the-sand.md).
 tier: 0
+null_floor:
+  calibration: null_floor_calibration.json
+  corr_tol: 0.005
 cells:
   - benchmark_id: null_constant_05
     input_space: none

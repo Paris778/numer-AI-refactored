@@ -15,6 +15,7 @@ from nmr.hardware import (
     discover_hardware,
     gpu_devices,
     hardware_status,
+    machine_memory_limits,
     parse_cpu_times,
     parse_gpu_devices,
     parse_gpu_status,
@@ -70,8 +71,18 @@ def test_parse_gpu_devices_malformed_line_skipped() -> None:
 def test_parse_gpu_status() -> None:
     status = parse_gpu_status(_GPU_STATUS)
     assert status == (
-        {"index": 0, "utilization_pct": 12, "memory_used_mib": 1024, "memory_free_mib": 3072},
-        {"index": 1, "utilization_pct": 98, "memory_used_mib": 22000, "memory_free_mib": 2564},
+        {
+            "index": 0,
+            "utilization_pct": 12,
+            "memory_used_mib": 1024,
+            "memory_free_mib": 3072,
+        },
+        {
+            "index": 1,
+            "utilization_pct": 98,
+            "memory_used_mib": 22000,
+            "memory_free_mib": 2564,
+        },
     )
 
 
@@ -153,6 +164,14 @@ def test_hardware_symbols_exported() -> None:
     ]:
         assert name in nmr.__all__, name
         assert hasattr(nmr, name), name
+
+
+def test_machine_memory_limits_shape() -> None:
+    physical, commit_limit = machine_memory_limits()
+    if physical is not None:
+        assert physical > 0
+    if commit_limit is not None:
+        assert commit_limit > 0
 
 
 def test_apply_thread_limits_default_caps_at_eight(monkeypatch) -> None:

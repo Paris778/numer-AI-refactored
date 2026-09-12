@@ -16,10 +16,31 @@ Tiers 0–3 exist so a candidate's scorecard can be read as a rung on a ladder; 
 
 ## 2) Hard gates (enforced by `nmr/benchmark.py`)
 
-- **G — Tier-0 null floor:** |CORR| ≤ 0.005 and |AC-Sharpe| ≤ 0.15 for the three structural nulls (constant-0.5, uniform-random, gaussian-random). `null_feature_mean` is scored but excluded from the gate — it is not structurally null on v5.3 (corr 0.0029, sharpe 0.257). There is **no DSR check**: null DSRs span 0.11–1.0, so deflated Sharpe has no constant null value. A structural null scoring above its floor means a broken metric.
+- **G — Tier-0 null floor:** structural |CORR| ≤ 0.005 **and** the family-wise max |AC-Sharpe| ≤ the pre-registered p99 envelope from the committed calibration artifact (see §2b). The three structural nulls (constant-0.5, uniform-random, gaussian-random) must be present by exact kind set, their seed-42 observed values must match the calibration's stored expectations (determinism anchor, atol 1e-9), and the family maximum must sit inside the envelope. `null_feature_mean` is scored but excluded from the gate — it is not structurally null on v5.3 (corr 0.0029, sharpe 0.257); a calibration whose kind set is not exactly the three structural nulls is refused. There is **no DSR check**: null DSRs span 0.11–1.0, so deflated Sharpe has no constant null value. A structural null scoring above its calibrated envelope means a broken metric (or a stale calibration) — never a reason to widen the threshold by hand.
 - **G — Tier-4 production gate:** measured on `v53_lgbm_ender60` over the shared meta-model overlap under `classic_atomic_ender60_r1343_v1` — CORR ≥ 0.0286, 60D AC-Sharpe ≥ 0.5358, FNC@medium ≥ 0.020, and GPR ≥ 1.50. The 2026-09-03 refresh measured CORR 0.029270, 60D AC-Sharpe 0.535880, FNC 0.027278, and GPR 47.7628; the official line therefore clears every hard field. The 0.86 Sharpe hurdle (2026-09-01 Atomic remap) sat above that measurement and is retired. DSR lacks search-history identity, turnover is unavailable because consecutive validation eras share zero IDs, and weekly-era CAGR is unavailable because it is not an Atomic round-level capital measure; these fields are absent from the hard-gate schema.
 - **G — Monotonicity:** per-tier max of mean CORR orders Tier0 < Tier1 < Tier2 < Tier3 ≤ Tier4 (atol 1e-5); `rank_scalar` is selectable via `metric="rank_scalar"` but its noise spread swamps the null-vs-ridge rung on real data (evidence in the design-spec amendments). Enforced in full runs; logged-only in `--fast-mode` (fast tree params degrade tiers 2–3 by design).
 - **G — Determinism:** same data-version + seed + configs ⇒ identical scorecard hashes across processes (`scorecards_sha256`).
+
+## 2b) Tier-0 null-floor calibration (pre-registered)
+
+The AC-Sharpe envelope is an empirical family-wise quantile over a fixed seed set, stored in a committed, digest-bound artifact — **not** a code constant.
+
+| Field | Value |
+| --- | --- |
+| Method | `family_wise_quantile` (max |AC-Sharpe| across the three structural nulls, per seed) |
+| Seed set | 1,000 fixed seeds (binding/determinism seed: 42) |
+| Quantile | p99 (false-positive policy: under structural-null noise the gate trips on ≈1% of equally-likely seed sets) |
+| Artifact | `configs/benchmarks/null_floor_calibration.json` (SHA-256 over canonical JSON; digest verified on load) |
+| Declared by | `null_floor:` block in `configs/benchmarks/tier0_null.yaml` (`calibration`, `corr_tol: 0.005`) |
+| Emitted by | `python null_floor_study.py --sweep-seeds 1000 --binding-seeds 42 --emit-calibration configs/benchmarks/null_floor_calibration.json` |
+
+The retired ±0.15 single-seed floor was a calibration defect: over 200 seeds the family-wise max |AC-Sharpe| on the 86-era window has p50 ≈ 0.133, p90 ≈ 0.262, p95 ≈ 0.301, p99 ≈ 0.373 (max 0.446), so a fixed 0.15 rejects roughly half of all seeds — including seed 42 (0.215). The measured seed-42 value is now an *expected* value (determinism anchor), while the family max is judged against the calibrated p99.
+
+**Window identity.** The calibration is bound to the exact comparison window and scoring identity it was measured under: `window_key_fingerprint` (hash of the meta-model `era`/`id` key set), the era list, and `payout_policy_id` / `scoring_target` / `scoring_horizon` / `scoring_backend`. `BenchmarkHierarchy.__init__` verifies all of these before scoring anything; a data refresh or policy change REFUSES the suite (`recalibrate before scoring`) rather than silently reusing a stale envelope.
+
+**Failure semantics.** Missing calibration, tampered digest, unsupported `schema_version`, non-structural kind set, window/identity drift, seed-42 anchor drift, or a family max above the envelope all fail the tier-0 gate (and the receipt). The gate report records method, quantile, seed count, threshold, observed values, and the reference digest (`null_floor_*` columns) so the verdict is auditable without opening the artifact.
+
+**Recalibration procedure (only path to a new threshold):** re-run the emitter above on the current data window, review the binding evidence (cheap scoring path must match `evaluate_model` exactly across the binding seeds) and the quantile table, commit the regenerated artifact with the receipt, and update this table if the method/quantile/seed count changes.
 
 ## 3) Fit topology (leakage rules)
 

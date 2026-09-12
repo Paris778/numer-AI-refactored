@@ -46,6 +46,10 @@ def test_all_shipped_config_files_load() -> None:
     assert spec.gate.scoring_target == "target_ender_60"
     assert spec.gate.scoring_horizon == "60D"
     assert spec.gate.corr_min == 0.0286
+    assert spec.null_floor is not None
+    assert spec.null_floor.calibration == "null_floor_calibration.json"
+    assert spec.null_floor.corr_tol == 0.005
+    assert spec.null_floor_base_dir == str(BENCHMARK_CONFIG_DIR)
     tiers = [cell.tier for cell in spec.cells]
     assert tiers == sorted(tiers)
     assert set(tiers) == set(VALID_BENCHMARK_TIERS[:4])
@@ -59,6 +63,72 @@ def test_tier4_gate_thresholds() -> None:
     assert gate.corr_sharpe_ac_min == 0.5358
     assert gate.fnc_min == 0.020
     assert gate.gain_to_pain_min == 1.50
+
+
+def test_null_floor_unknown_keys_rejected(tmp_path: Path) -> None:
+    path = _write_yaml(
+        tmp_path,
+        "bad.yaml",
+        """
+tier: 0
+null_floor:
+  calibration: calibration.json
+  bogus: 1
+cells: []
+""",
+    )
+    with pytest.raises(ValueError, match="[Uu]nknown"):
+        load_benchmark_file(path)
+
+
+def test_null_floor_defaults_corr_tol(tmp_path: Path) -> None:
+    path = _write_yaml(
+        tmp_path,
+        "tier0.yaml",
+        """
+tier: 0
+null_floor:
+  calibration: calibration.json
+cells:
+  - benchmark_id: null_constant_05
+    input_space: none
+    model_kind: null_constant_05
+""",
+    )
+    file_cfg = load_benchmark_file(path)
+    assert file_cfg.null_floor is not None
+    assert file_cfg.null_floor.corr_tol == 0.005
+
+
+def test_multiple_null_floor_configs_rejected(tmp_path: Path) -> None:
+    _write_yaml(
+        tmp_path,
+        "a.yaml",
+        """
+tier: 0
+null_floor:
+  calibration: a.json
+cells:
+  - benchmark_id: null_constant_05
+    input_space: none
+    model_kind: null_constant_05
+""",
+    )
+    _write_yaml(
+        tmp_path,
+        "b.yaml",
+        """
+tier: 0
+null_floor:
+  calibration: b.json
+cells:
+  - benchmark_id: null_feature_mean
+    input_space: small
+    model_kind: null_feature_mean
+""",
+    )
+    with pytest.raises(ValueError, match="multiple tier-0 null_floor"):
+        load_benchmark_suite_config(tmp_path)
 
 
 # 2026-09-03 receipt for v53_lgbm_ender60 under classic_atomic_ender60_r1343_v1
@@ -87,7 +157,11 @@ def test_gate_report_artifact_thresholds_match_tier4_yaml() -> None:
     gate = spec.gate
     assert gate is not None
     report = REPO_ROOT / "artifacts" / "reports" / "benchmark_gate_report.csv"
-    rows = {row["field"]: row for row in pl.read_csv(report).to_dicts()}
+    frame = pl.read_csv(report)
+    # The report also carries calibrated tier-0 null-floor rows; the tier-4
+    # thresholds are keyed by the gated reference model id.
+    tier4 = frame.filter(pl.col("model_id") == "v53_lgbm_ender60")
+    rows = {row["field"]: row for row in tier4.to_dicts()}
     assert rows["corr"]["threshold"] == gate.corr_min
     assert rows["corr_sharpe_ac"]["threshold"] == gate.corr_sharpe_ac_min
     assert rows["fnc"]["threshold"] == gate.fnc_min

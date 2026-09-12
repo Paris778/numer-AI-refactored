@@ -46,15 +46,11 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Deterministic 5-tier benchmark hierarchy runner."
     )
     parser.add_argument("--data-dir", type=Path, default=Path("data") / "v5.3")
-    parser.add_argument(
-        "--configs", type=Path, default=Path("configs") / "benchmarks"
-    )
+    parser.add_argument("--configs", type=Path, default=Path("configs") / "benchmarks")
     parser.add_argument(
         "--output",
         type=Path,
-        default=Path("artifacts")
-        / "reports"
-        / "benchmark_hierarchy_scorecard.csv",
+        default=Path("artifacts") / "reports" / "benchmark_hierarchy_scorecard.csv",
     )
     parser.add_argument(
         "--gate-report",
@@ -73,18 +69,22 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--no-fleet", action="store_true")
     parser.add_argument(
-        "--only-fleet", action="store_true",
+        "--only-fleet",
+        action="store_true",
         help="skip the tiered hierarchy entirely; fleet placement rungs are "
-             "loaded from the last hierarchy scorecard CSV (--rungs-csv). "
-             "Hard gates are skipped in this mode.",
+        "loaded from the last hierarchy scorecard CSV (--rungs-csv). "
+        "Hard gates are skipped in this mode.",
     )
     parser.add_argument(
-        "--rungs-csv", type=Path, default=None,
+        "--rungs-csv",
+        type=Path,
+        default=None,
         help="hierarchy scorecard CSV to source placement rungs from "
-             "(default: --output). Used by --only-fleet.",
+        "(default: --output). Used by --only-fleet.",
     )
     parser.add_argument(
-        "--fleet-ids", default="",
+        "--fleet-ids",
+        default="",
         help="comma-separated fleet benchmark_ids to run (default: all).",
     )
     parser.add_argument("--seed", type=int, default=42)
@@ -92,7 +92,8 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-overlap-eras", type=int, default=20)
     parser.add_argument("--horizon", choices=("20D", "60D"), default="20D")
     parser.add_argument(
-        "--log-level", default="INFO",
+        "--log-level",
+        default="INFO",
         choices=("DEBUG", "INFO", "WARNING", "ERROR"),
     )
     parser.add_argument("--fast-mode", action="store_true")
@@ -147,7 +148,8 @@ def main() -> int:
         t0 = time.perf_counter()
         log.info(
             "Running %d fleet cells (only-fleet; rungs from %s)%s",
-            len(fleet_cells), rungs_path,
+            len(fleet_cells),
+            rungs_path,
             " (fast mode)" if args.fast_mode else "",
         )
         fleet_result = fleet.run(tier_rungs=rungs, gate=spec.gate)
@@ -157,7 +159,8 @@ def main() -> int:
         for mid in fleet_result.scorecards:
             log.info(
                 "fleet %s: placement=%s selection_bias=%s",
-                mid, fleet_result.placements[mid],
+                mid,
+                fleet_result.placements[mid],
                 fleet_result.selection_bias[mid],
             )
         log.info("Hard gates skipped in --only-fleet mode (no live hierarchy).")
@@ -198,8 +201,12 @@ def main() -> int:
 
     for row in gate_frame.iter_rows(named=True):
         log.info(
-            "tier4 gate %s: measured=%s threshold=%s pass=%s",
-            row["field"], row["measured"], row["threshold"], row["pass"],
+            "gate row %s | %s: measured=%s threshold=%s pass=%s",
+            row["model_id"],
+            row["field"],
+            row["measured"],
+            row["threshold"],
+            row["pass"],
         )
 
     if not args.no_fleet:
@@ -223,7 +230,8 @@ def main() -> int:
         t1 = time.perf_counter()
         log.info(
             "Running %d fleet cells%s",
-            len(fleet_cells), " (fast mode)" if args.fast_mode else "",
+            len(fleet_cells),
+            " (fast mode)" if args.fast_mode else "",
         )
         fleet_result = fleet.run(tier_rungs=rungs, gate=spec.gate)
         log.info("Fleet scored in %.1fs", time.perf_counter() - t1)
@@ -232,7 +240,8 @@ def main() -> int:
         for mid in fleet_result.scorecards:
             log.info(
                 "fleet %s: placement=%s selection_bias=%s",
-                mid, fleet_result.placements[mid],
+                mid,
+                fleet_result.placements[mid],
                 fleet_result.selection_bias[mid],
             )
 

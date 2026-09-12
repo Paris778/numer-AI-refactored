@@ -11,10 +11,10 @@ support cross-process determinism checks.
 from __future__ import annotations
 
 import dataclasses
-import gc
 import hashlib
 import json
 import logging
+import os
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -28,6 +28,7 @@ from sklearn.linear_model import Ridge
 
 from nmr.ensemble import Ensembler
 from nmr.features import resolve_feature_sets, resolve_small_feature_set
+from nmr.hardware import machine_memory_limits
 from nmr.models import construct_tree_model
 from nmr.payout import (
     CLASSIC_LEGACY_V1,
@@ -35,6 +36,7 @@ from nmr.payout import (
     era_payout_factors,
     resolve_payout_policy,
 )
+from nmr.predictions import validation_key_fingerprint
 from nmr.risk import NeutralizationEngine
 from nmr.scorecard import MetricScorecard, evaluate_model
 
@@ -47,6 +49,9 @@ __all__ = [
     "BenchmarkHierarchy",
     "BenchmarkHierarchyResult",
     "BenchmarkSuiteSpec",
+    "NullFloorCalibration",
+    "NullFloorConfig",
+    "NullFloorSummary",
     "Tier4GateConfig",
     "VALID_BENCHMARK_TIERS",
     "assert_hierarchy_monotone",
@@ -62,13 +67,18 @@ __all__ = [
     "load_benchmark_data",
     "load_benchmark_file",
     "load_benchmark_suite_config",
+    "load_null_floor_calibration",
     "resolve_benchmark_feature_cols",
+    "RidgeMemoryBudget",
+    "estimate_ridge_peak_bytes",
+    "ridge_memory_budget",
     "score_benchmark_column",
     "scorecards_sha256",
     "scorecards_to_frame",
     "tier4_gate_verdict",
     "tier_max_corrs",
     "train_validation_purged_split",
+    "verify_null_floor_window",
     "write_scorecards_csv",
 ]
 
@@ -225,12 +235,40 @@ class BenchmarkCellConfig:
 
 
 @dataclasses.dataclass(frozen=True)
+class NullFloorConfig:
+    """Tier-0 null-floor gate configuration (calibration reference).
+
+    The ACTIVE AC-Sharpe threshold comes from the digest-bound calibration
+    artifact (pre-registered family-wise quantile), never from a code
+    default; the CORR floor stays the structural 0.005 constant.
+    """
+
+    calibration: str
+    corr_tol: float = 0.005
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.calibration, str) or not self.calibration:
+            raise ValueError("NullFloorConfig.calibration must be a non-empty string")
+        if isinstance(self.corr_tol, bool) or not isinstance(
+            self.corr_tol, (int, float)
+        ):
+            raise ValueError(
+                f"NullFloorConfig.corr_tol must be numeric, got {self.corr_tol!r}"
+            )
+        if not 0.0 < float(self.corr_tol) < 1.0:
+            raise ValueError(
+                f"NullFloorConfig.corr_tol must be in (0, 1), got {self.corr_tol!r}"
+            )
+
+
+@dataclasses.dataclass(frozen=True)
 class BenchmarkFileConfig:
     tier: int
     cells: tuple[BenchmarkCellConfig, ...] = ()
     reference_column: str | None = None
     reference_columns: tuple[str, ...] = ()
     gate: Tier4GateConfig | None = None
+    null_floor: NullFloorConfig | None = None
 
     def __post_init__(self) -> None:
         if self.tier not in VALID_BENCHMARK_TIERS:
@@ -252,6 +290,10 @@ class BenchmarkFileConfig:
                 raise ValueError(
                     f"gate section only allowed for tier 4, got tier {self.tier}"
                 )
+        if self.null_floor is not None and self.tier != 0:
+            raise ValueError(
+                f"null_floor section only allowed for tier 0, got tier {self.tier}"
+            )
         ids = [cell.benchmark_id for cell in self.cells]
         if len(set(ids)) != len(ids):
             raise ValueError(f"duplicate benchmark ids in file: {ids}")
@@ -288,6 +330,11 @@ def load_benchmark_file(path: str | Path) -> BenchmarkFileConfig:
     if gate_raw is not None:
         _reject_unknown_keys(Tier4GateConfig, gate_raw)
         gate = Tier4GateConfig(**gate_raw)
+    null_floor_raw = raw.get("null_floor")
+    null_floor = None
+    if null_floor_raw is not None:
+        _reject_unknown_keys(NullFloorConfig, null_floor_raw)
+        null_floor = NullFloorConfig(**null_floor_raw)
     ref_cols_raw = raw.get("reference_columns", [])
     if not isinstance(ref_cols_raw, list):
         raise ValueError("reference_columns must be a list")
@@ -302,6 +349,7 @@ def load_benchmark_file(path: str | Path) -> BenchmarkFileConfig:
         reference_column=raw.get("reference_column"),
         reference_columns=reference_columns,
         gate=gate,
+        null_floor=null_floor,
     )
 
 
@@ -311,6 +359,8 @@ class BenchmarkSuiteSpec:
     gate: Tier4GateConfig | None
     reference_column: str | None
     reference_columns: tuple[str, ...] = ()
+    null_floor: NullFloorConfig | None = None
+    null_floor_base_dir: str | None = None
 
 
 def load_benchmark_suite_config(config_dir: str | Path) -> BenchmarkSuiteSpec:
@@ -323,6 +373,8 @@ def load_benchmark_suite_config(config_dir: str | Path) -> BenchmarkSuiteSpec:
     gate: Tier4GateConfig | None = None
     reference_column: str | None = None
     reference_columns: tuple[str, ...] = ()
+    null_floor: NullFloorConfig | None = None
+    null_floor_base_dir: str | None = None
     for path in files:
         file_cfg = load_benchmark_file(path)
         if file_cfg.gate is not None:
@@ -331,6 +383,11 @@ def load_benchmark_suite_config(config_dir: str | Path) -> BenchmarkSuiteSpec:
             gate = file_cfg.gate
             reference_column = file_cfg.reference_column
             reference_columns = file_cfg.reference_columns
+        if file_cfg.null_floor is not None:
+            if null_floor is not None:
+                raise ValueError("multiple tier-0 null_floor configs found")
+            null_floor = file_cfg.null_floor
+            null_floor_base_dir = str(path.parent)
         all_cells.extend(file_cfg.cells)
     ids = [cell.benchmark_id for cell in all_cells]
     if len(set(ids)) != len(ids):
@@ -342,6 +399,8 @@ def load_benchmark_suite_config(config_dir: str | Path) -> BenchmarkSuiteSpec:
         gate=gate,
         reference_column=reference_column,
         reference_columns=reference_columns,
+        null_floor=null_floor,
+        null_floor_base_dir=null_floor_base_dir,
     )
 
 
@@ -482,27 +541,339 @@ def generate_null_predictions(
     return index.with_columns(pl.Series(pred_col, values))
 
 
+# ---------------------------------------------------------------------------
+# D1a ridge memory discipline (2026-09-08): the medium ridge cell previously
+# materialized a full-width float64 deviation matrix (~15.7 GiB) inside
+# np.std and a full-width fancy-index subset copy (~8.4 GiB), on top of the
+# sklearn Ridge.fit float64 upcast. Peak measured pre-fix by
+# freeze_ridge_reference.py: working set 49.7 GiB / commit 79.0 GiB. The
+# memory-safe path below keeps sklearn Ridge untouched and bounds every
+# transient: column-block two-pass statistics, a single float32 finite-y fit
+# block (no full-width raw numpy block, no subset copy), and era-batched
+# validation predicts. Estimated corrected peak ~30 GiB commit.
+# ---------------------------------------------------------------------------
+
+# Column-block size for the bounded two-pass statistics (transient =
+# n_rows x block_cols x 8 float64, ~0.7 GiB at the medium geometry).
+_RIDGE_STANDARDIZE_BLOCK_COLS = 32
+# Fixed overhead term: process, polars frames beyond the feature blocks,
+# logging, and metric frames (~1 GiB measured-scale slack).
+_RIDGE_FIXED_OVERHEAD_BYTES = 1 * 2**30
+# Estimator safety factor: the per-array terms deliberately OVERCOUNT the
+# measured medium-cell peak (25.1 GiB commit / 16.1 GiB working set per the
+# freeze receipt) — the preflight must be conservative, never optimistic.
+_RIDGE_ESTIMATE_SAFETY_FACTOR = 1.1
+# Configured commit ceiling for a ridge benchmark cell. Derivation: the
+# corrected path measures ~42 GiB commit (1.1x-factored estimate ~45.7 GiB)
+# on the medium cell; the 52 GiB ceiling admits it with margin, stays well
+# below the machine commit limit, and the working-set guard (0.85 of
+# physical) remains the binding thrash protection. Env override:
+# NMR_RIDGE_COMMIT_CEILING_BYTES (fail loud on invalid values).
+_RIDGE_COMMIT_CEILING_BYTES = 52 * 2**30
+# Working-set guard fraction (mirrors promote._RAM_WS_FRACTION): the
+# estimated peak working set must stay below this fraction of physical RAM
+# or the cell refuses before materializing (thrash guard).
+_RIDGE_WS_FRACTION = 0.85
+
+
+def _ridge_commit_ceiling_bytes() -> int:
+    """Resolve the ridge commit ceiling (constant or NMR_RIDGE_COMMIT_CEILING_BYTES)."""
+    raw = os.environ.get("NMR_RIDGE_COMMIT_CEILING_BYTES")
+    if raw is None:
+        return _RIDGE_COMMIT_CEILING_BYTES
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(
+            f"NMR_RIDGE_COMMIT_CEILING_BYTES must be an integer >= 1, got {raw!r}"
+        ) from exc
+    if value < 1:
+        raise ValueError(
+            f"NMR_RIDGE_COMMIT_CEILING_BYTES must be an integer >= 1, got {raw!r}"
+        )
+    return value
+
+
+def _block_mean_std(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Per-column float64 mean/std of a bounded float32 block.
+
+    The float32 block is cast to float64 once (the caller bounds the block
+    width); np.std's deviation matrix is then block-sized, never full-width.
+    """
+    block = values.astype(np.float64)
+    return np.mean(block, axis=0), np.std(block, axis=0)
+
+
+def _finalize_statistics(
+    mu: np.ndarray, sigma: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Apply the finite/zero-variance guards and downcast to (mu32, scale32)."""
+    mu = np.where(np.isfinite(mu), mu, 0.0)
+    scale = np.where((sigma > 0.0) & np.isfinite(sigma), 1.0 / sigma, 0.0)
+    return mu.astype(np.float32), scale.astype(np.float32)
+
+
+def _feature_block_statistics(
+    train_values: np.ndarray,
+    *,
+    block_cols: int = _RIDGE_STANDARDIZE_BLOCK_COLS,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Bounded two-pass (mu, scale) statistics of a float32 feature block.
+
+    Iterates column blocks so no full-width float64 temporary is ever
+    allocated. Returns (mu32, scale32) with the legacy finite/zero-variance
+    guards applied exactly.
+    """
+    if train_values.ndim != 2 or train_values.shape[0] < 1 or train_values.shape[1] < 1:
+        raise ValueError("train_values must be a non-empty 2D array")
+    n_features = train_values.shape[1]
+    mu = np.empty(n_features, dtype=np.float64)
+    sigma = np.empty(n_features, dtype=np.float64)
+    for start in range(0, n_features, block_cols):
+        stop = min(start + block_cols, n_features)
+        mu_b, sigma_b = _block_mean_std(train_values[:, start:stop])
+        mu[start:stop] = mu_b
+        sigma[start:stop] = sigma_b
+    return _finalize_statistics(mu, sigma)
+
+
+def _apply_standardization(
+    values: np.ndarray, mu32: np.ndarray, scale32: np.ndarray
+) -> np.ndarray:
+    """Standardize a float32 block in place with precomputed statistics."""
+    np.subtract(values, mu32, out=values)
+    np.multiply(values, scale32, out=values)
+    return values
+
+
+def _polars_feature_statistics(
+    frame: pl.DataFrame,
+    feature_cols: Sequence[str],
+    trimmed_train_eras: Sequence[str] | set[str],
+    era_col: str,
+    *,
+    block_cols: int = _RIDGE_STANDARDIZE_BLOCK_COLS,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Bounded two-pass statistics straight from a polars frame.
+
+    Column blocks are selected AND era-filtered lazily before ``to_numpy``,
+    so no full-width numpy feature block is materialized for statistics.
+    """
+    n_features = len(feature_cols)
+    mu = np.empty(n_features, dtype=np.float64)
+    sigma = np.empty(n_features, dtype=np.float64)
+    for start in range(0, n_features, block_cols):
+        cols = list(feature_cols[start : start + block_cols])
+        block = (
+            frame.lazy()
+            .select([era_col, *cols])
+            .filter(pl.col(era_col).is_in(trimmed_train_eras))
+            .collect()
+            .select(cols)
+            .cast(pl.Float32)
+            .to_numpy(writable=True)
+        )
+        mu_b, sigma_b = _block_mean_std(block)
+        mu[start : start + len(cols)] = mu_b
+        sigma[start : start + len(cols)] = sigma_b
+        del block
+    return _finalize_statistics(mu, sigma)
+
+
 def _standardize_feature_block(
     train_values: np.ndarray, val_values: np.ndarray
 ) -> tuple[np.ndarray, np.ndarray]:
     """Standardize with train statistics; zero-variance features -> 0.0.
 
-    Float32 end-to-end with in-place updates: inputs are float32 arrays and are
-    mutated in place (and returned) so no large float64 temporaries are created.
-    Statistics are computed as float64 on the float32 block (tiny per-column
-    transient), then downcast before the in-place subtract/multiply.
+    Float32 end-to-end with in-place updates. Statistics are computed in
+    bounded column blocks (see :func:`_feature_block_statistics`) so no
+    full-width float64 temporary exists — the pre-fix ``np.std(dtype=float64)``
+    deviation matrix was ~15.7 GiB at the medium geometry.
     """
-    mu = np.mean(train_values, axis=0, dtype=np.float64)
-    sigma = np.std(train_values, axis=0, dtype=np.float64)
-    mu = np.where(np.isfinite(mu), mu, 0.0)
-    scale = np.where((sigma > 0.0) & np.isfinite(sigma), 1.0 / sigma, 0.0)
-    mu32 = mu.astype(np.float32)
-    scale32 = scale.astype(np.float32)
-    np.subtract(train_values, mu32, out=train_values)
-    np.multiply(train_values, scale32, out=train_values)
-    np.subtract(val_values, mu32, out=val_values)
-    np.multiply(val_values, scale32, out=val_values)
+    mu32, scale32 = _feature_block_statistics(train_values)
+    _apply_standardization(train_values, mu32, scale32)
+    _apply_standardization(val_values, mu32, scale32)
     return train_values, val_values
+
+
+@dataclasses.dataclass(frozen=True)
+class RidgeMemoryBudget:
+    """Preflight memory verdict for one ridge cell (dual-metric)."""
+
+    cell_id: str
+    n_train_rows: int
+    n_val_rows: int
+    n_features: int
+    dtype: str
+    terms: Mapping[str, float]
+    machine_commit_limit_bytes: int | None
+    machine_physical_bytes: int | None
+    commit_ceiling_bytes: int
+    ws_fraction: float
+    peak_commit_bytes: int
+    peak_ws_bytes: int
+    verdict: str
+    reasons: tuple[str, ...]
+
+    def describe(self) -> str:
+        """One-line human summary for logs (never hashed)."""
+        return (
+            f"ridge_memory_budget[{self.cell_id}] rows={self.n_train_rows}/"
+            f"{self.n_val_rows} features={self.n_features} dtype={self.dtype} "
+            f"peak_commit={self.peak_commit_bytes / 2**30:.1f}GiB "
+            f"peak_ws={self.peak_ws_bytes / 2**30:.1f}GiB "
+            f"ceiling={self.commit_ceiling_bytes / 2**30:.1f}GiB "
+            f"ws_fraction={self.ws_fraction} verdict={self.verdict}"
+        )
+
+
+def estimate_ridge_peak_bytes(
+    n_train_rows: int,
+    n_val_rows: int,
+    n_val_eras: int,
+    n_features: int,
+    *,
+    caller_itemsize: int = 1,
+) -> dict[str, int]:
+    """Pure per-stage peak estimates for the memory-safe sklearn ridge path.
+
+    Terms (all bytes):
+      - caller_frames: the caller-held polars frames (train + validation
+        feature columns at ``caller_itemsize`` — v5.x integer bins are Int8)
+      - stats_transient: bounded column-block statistics (float32 pull +
+        float64 cast/deviation for one block)
+      - fit_block_temp: per-block raw pull + float32 cast/ops transients
+        for one column block of the fit matrix
+      - fit_matrix: the C-order float32 standardized fit matrix (sklearn's
+        cholesky runs in float32 arithmetic on float32 input — see
+        generate_ridge_predictions)
+      - val_block_temp: per-block transients for one column block of the
+        validation matrix
+      - val_matrix: the F-order float32 standardized validation matrix
+      - val_upcast: numpy's float32->float64 promotion inside the
+        whole-block predict dot (pre-fix semantics; a pre-built float64
+        matrix is NOT bit-equal)
+      - overhead: fixed process/metric slack
+    Peak = caller_frames + max(fit_matrix + fit_block_temp, val_matrix +
+    val_upcast + val_block_temp) + overhead. The whole-block predict is
+    REQUIRED for bit-identity with the pre-fix path: per-row BLAS results
+    depend on the call shape, and the rank-domain blend amplifies any
+    last-ulp drift to O(1) in the final output.
+    """
+    for name, value in (
+        ("n_train_rows", n_train_rows),
+        ("n_val_rows", n_val_rows),
+        ("n_val_eras", n_val_eras),
+        ("n_features", n_features),
+    ):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise ValueError(f"{name} must be an integer >= 1, got {value!r}")
+    caller_frames = (n_train_rows + n_val_rows) * n_features * caller_itemsize
+    stats_transient = n_train_rows * min(_RIDGE_STANDARDIZE_BLOCK_COLS, n_features) * 12
+    block_cols = min(_RIDGE_STANDARDIZE_BLOCK_COLS, n_features)
+    # Block per element: int8 raw (1) + float32 cast (4) + astype temp
+    # slack (4) = 9 bytes.
+    fit_block_temp = n_train_rows * block_cols * 9
+    fit_matrix = n_train_rows * n_features * 4
+    val_block_temp = n_val_rows * block_cols * 9
+    val_matrix = n_val_rows * n_features * 4
+    val_upcast = n_val_rows * n_features * 8
+    overhead = _RIDGE_FIXED_OVERHEAD_BYTES
+    peak_base = caller_frames + max(
+        fit_matrix + fit_block_temp,
+        val_matrix + val_upcast + val_block_temp,
+    )
+    peak_base += overhead
+    peak = int(peak_base * _RIDGE_ESTIMATE_SAFETY_FACTOR + 0.5)
+    return {
+        "caller_frames_bytes": caller_frames,
+        "stats_transient_bytes": stats_transient,
+        "fit_block_temp_bytes": fit_block_temp,
+        "fit_matrix_bytes": fit_matrix,
+        "val_block_temp_bytes": val_block_temp,
+        "val_matrix_bytes": val_matrix,
+        "val_upcast_bytes": val_upcast,
+        "overhead_bytes": overhead,
+        "safety_factor": _RIDGE_ESTIMATE_SAFETY_FACTOR,
+        "peak_commit_bytes": peak,
+        "peak_ws_bytes": peak,
+    }
+
+
+def ridge_memory_budget(
+    cell_id: str,
+    *,
+    n_train_rows: int,
+    n_val_rows: int,
+    n_val_eras: int,
+    n_features: int,
+    dtype: str = "float64",
+    machine_commit_limit_bytes: int | None = None,
+    machine_physical_bytes: int | None = None,
+    commit_ceiling_bytes: int | None = None,
+    ws_fraction: float = _RIDGE_WS_FRACTION,
+) -> RidgeMemoryBudget:
+    """Dual-metric preflight for one ridge cell (fail before OOM).
+
+    Refuses when ANY guard fails: the configured commit ceiling, the machine
+    commit limit, or the working-set fraction of physical RAM. Warns (never
+    refuses) when machine limits are unavailable — the configured ceiling
+    still applies. Callers raise on ``verdict == "refuse"`` before
+    materializing any feature matrix.
+    """
+    ceiling = (
+        _ridge_commit_ceiling_bytes()
+        if commit_ceiling_bytes is None
+        else commit_ceiling_bytes
+    )
+    terms = estimate_ridge_peak_bytes(n_train_rows, n_val_rows, n_val_eras, n_features)
+    peak_commit = terms["peak_commit_bytes"]
+    peak_ws = terms["peak_ws_bytes"]
+    refusals: list[str] = []
+    if peak_commit > ceiling:
+        refusals.append(
+            f"estimated peak commit {peak_commit / 2**30:.1f} GiB exceeds the "
+            f"configured {ceiling / 2**30:.1f} GiB ceiling"
+        )
+    if (
+        machine_commit_limit_bytes is not None
+        and peak_commit > machine_commit_limit_bytes
+    ):
+        refusals.append(
+            f"estimated peak commit {peak_commit / 2**30:.1f} GiB exceeds the "
+            f"machine commit limit {machine_commit_limit_bytes / 2**30:.1f} GiB"
+        )
+    if (
+        machine_physical_bytes is not None
+        and peak_ws > machine_physical_bytes * ws_fraction
+    ):
+        refusals.append(
+            f"estimated peak working set {peak_ws / 2**30:.1f} GiB exceeds "
+            f"{ws_fraction:.2f} of {machine_physical_bytes / 2**30:.1f} GiB "
+            "physical RAM"
+        )
+    warnings: list[str] = []
+    if machine_commit_limit_bytes is None or machine_physical_bytes is None:
+        warnings.append(
+            "machine memory limits unavailable; the configured ceiling still applies"
+        )
+    verdict = "refuse" if refusals else ("warn" if warnings else "allow")
+    return RidgeMemoryBudget(
+        cell_id=cell_id,
+        n_train_rows=n_train_rows,
+        n_val_rows=n_val_rows,
+        n_features=n_features,
+        dtype=dtype,
+        terms=dict(terms),
+        machine_commit_limit_bytes=machine_commit_limit_bytes,
+        machine_physical_bytes=machine_physical_bytes,
+        commit_ceiling_bytes=ceiling,
+        ws_fraction=ws_fraction,
+        peak_commit_bytes=peak_commit,
+        peak_ws_bytes=peak_ws,
+        verdict=verdict,
+        reasons=tuple([*refusals, *warnings]),
+    )
 
 
 def generate_ridge_predictions(
@@ -517,8 +888,24 @@ def generate_ridge_predictions(
     era_col: str = "era",
     id_col: str = "id",
     pred_col: str = "prediction",
+    budget_cell_id: str | None = None,
 ) -> pl.DataFrame:
-    """Fit purged Ridge models per target and blend in rank-Gaussian domain."""
+    """Fit purged Ridge models per target and blend in rank-Gaussian domain.
+
+    Memory-safe (D1a, 2026-09-08): a dual-metric budget refuses before any
+    feature matrix is materialized; statistics are computed in bounded
+    column blocks straight from the polars frame. The fit and validation
+    matrices are float32 assembled in column blocks (no full-width raw
+    numpy block, no fancy-index copy, no sorted-frame copy — the pre-fix
+    sorted row order is reproduced with a gather index). float32 inputs are
+    REQUIRED for bit-identity: sklearn's Ridge cholesky runs in float32
+    arithmetic on float32 input, and numpy's float32->float64 promotion
+    inside the predict dot is not bit-equal to a pre-built float64 matrix
+    (both proven by the frozen-reference drift). The validation predict is
+    one whole-block call (exactly the pre-fix call shape), so coefficients
+    and predictions are bit-identical to the pre-fix path (proven by the
+    frozen-reference test).
+    """
     if not isinstance(alpha, (int, float)) or isinstance(alpha, bool) or alpha < 0:
         raise ValueError(f"alpha must be a non-negative number, got {alpha!r}")
     if not feature_cols:
@@ -526,53 +913,136 @@ def generate_ridge_predictions(
     if not targets:
         raise ValueError("targets must be non-empty")
 
-    trimmed_train_eras, val_eras = train_validation_purged_split(
+    trimmed_train_eras, _val_eras = train_validation_purged_split(
         train.get_column(era_col).unique().to_list(),
         val.get_column(era_col).unique().to_list(),
         purge_eras=purge_eras,
     )
 
-    train_rows = train.filter(pl.col(era_col).is_in(trimmed_train_eras))
-    val_rows = val.sort([era_col, id_col])
     missing_feats = [
         c for c in feature_cols if c not in train.columns or c not in val.columns
     ]
     if missing_feats:
         raise ValueError(f"missing feature columns: {missing_feats}")
-
-    x_train_raw = (
-        train_rows.select(feature_cols).cast(pl.Float32).to_numpy(writable=True)
-    )
-    x_val_raw = val_rows.select(feature_cols).cast(pl.Float32).to_numpy(writable=True)
-
-    # Extract targets and the val index up front, then release the polars frames
-    # before standardization so peak memory stays float32-bound.
-    y_by_target: dict[str, np.ndarray] = {}
     for target in targets:
         if target not in train.columns:
             raise ValueError(f"missing target column: {target!r}")
-        y_by_target[target] = train_rows.get_column(target).cast(pl.Float64).to_numpy()
-    val_index = val_rows.select([era_col, id_col])
-    del train_rows, val_rows
-    gc.collect()
 
-    x_train, x_val = _standardize_feature_block(x_train_raw, x_val_raw)
+    # Dual-metric memory budget BEFORE materializing any feature matrix
+    # (fail before OOM; refusal never silently degrades).
+    n_train_rows = (
+        train.select([era_col]).filter(pl.col(era_col).is_in(trimmed_train_eras)).height
+    )
+    n_val_eras = val.get_column(era_col).n_unique()
+    physical, commit_limit = machine_memory_limits()
+    budget = ridge_memory_budget(
+        budget_cell_id or "ridge_predictions",
+        n_train_rows=n_train_rows,
+        n_val_rows=val.height,
+        n_val_eras=n_val_eras,
+        n_features=len(feature_cols),
+        machine_commit_limit_bytes=commit_limit,
+        machine_physical_bytes=physical,
+    )
+    if budget.verdict == "refuse":
+        raise ValueError(
+            "ridge memory budget refuses the fit before materializing: "
+            + "; ".join(budget.reasons)
+            + " | "
+            + budget.describe()
+        )
+    logger.info("[ridge] %s", budget.describe())
 
-    component_preds: dict[str, np.ndarray] = {}
+    # Bounded column-block statistics straight from the polars frame
+    # (no full-width numpy feature block is materialized for statistics).
+    mu32, scale32 = _polars_feature_statistics(
+        train, feature_cols, trimmed_train_eras, era_col
+    )
+
+    # Fit phase (train-only; the validation matrix is not materialized yet).
+    # Each target's fit matrix is a C-order float32 matrix assembled in
+    # column blocks from the polars frame. It MUST stay float32: sklearn's
+    # Ridge.fit on float32 input runs its cholesky solver in float32
+    # arithmetic, which no float64 precomputation can reproduce bit-for-bit
+    # (proven by the frozen-reference drift) — so the matrix is the exact
+    # pre-fix float32 standardized block, just built without full-width
+    # temporaries.
+    models: dict[str, Ridge] = {}
     for target in targets:
-        y = y_by_target[target]
-        mask = np.isfinite(y)
-        if mask.sum() < 2:
+        y = (
+            train.lazy()
+            .select([era_col, target])
+            .filter(
+                pl.col(era_col).is_in(trimmed_train_eras) & pl.col(target).is_finite()
+            )
+            .collect()
+            .get_column(target)
+            .cast(pl.Float64)
+            .to_numpy()
+        )
+        if y.size < 2:
             raise ValueError(
                 f"target {target!r} has fewer than 2 finite train rows after purge"
             )
+        x_fit = np.empty((y.size, len(feature_cols)), dtype=np.float32, order="C")
+        for start in range(0, len(feature_cols), _RIDGE_STANDARDIZE_BLOCK_COLS):
+            stop = min(start + _RIDGE_STANDARDIZE_BLOCK_COLS, len(feature_cols))
+            cols = list(feature_cols[start:stop])
+            raw_block = (
+                train.lazy()
+                .filter(
+                    pl.col(era_col).is_in(trimmed_train_eras)
+                    & pl.col(target).is_finite()
+                )
+                .select([era_col, *cols])
+                .collect()
+                .select(cols)
+                .to_numpy(writable=True)
+            )
+            block = raw_block.astype(np.float32)
+            np.subtract(block, mu32[start:stop], out=block)
+            np.multiply(block, scale32[start:stop], out=block)
+            x_fit[:, start:stop] = block
+            del raw_block, block
         model = Ridge(alpha=float(alpha), fit_intercept=True, random_state=seed)
-        model.fit(x_train[mask], y[mask])
-        component_preds[target] = np.asarray(model.predict(x_val), dtype=float)
+        model.fit(x_fit, y)
+        del x_fit, y
+        models[target] = model
 
-    frame = val_index.with_columns(
-        [pl.Series(target, component_preds[target]) for target in targets]
+    # Validation phase: the pre-fix sorted row order is reproduced with a
+    # gather index (np.std's pairwise reduction inside the rank blend is
+    # order-dependent at the last ulp) WITHOUT materializing a sorted copy
+    # of the frame. The F-order float32 matrix carries the exact pre-fix
+    # standardized values, and the whole-block predict keeps the BLAS call
+    # shape bit-identical (float32 input, exactly like pre-fix).
+    sort_idx = (
+        val.select([era_col, id_col])
+        .with_row_index("__ridx")
+        .sort([era_col, id_col])
+        .get_column("__ridx")
     )
+    val_index = val.select([era_col, id_col]).gather(sort_idx)
+    x_val = np.empty((val.height, len(feature_cols)), dtype=np.float32, order="F")
+    for start in range(0, len(feature_cols), _RIDGE_STANDARDIZE_BLOCK_COLS):
+        stop = min(start + _RIDGE_STANDARDIZE_BLOCK_COLS, len(feature_cols))
+        cols = list(feature_cols[start:stop])
+        raw_block = val.select(cols).gather(sort_idx).to_numpy(writable=True)
+        block = raw_block.astype(np.float32)
+        np.subtract(block, mu32[start:stop], out=block)
+        np.multiply(block, scale32[start:stop], out=block)
+        x_val[:, start:stop] = block
+        del raw_block, block
+
+    component_frames: dict[str, pl.DataFrame] = {}
+    for target in targets:
+        component_frames[target] = val_index.with_columns(
+            pl.Series(target, np.asarray(models[target].predict(x_val), dtype=float))
+        )
+    del x_val, sort_idx
+
+    frame = component_frames[targets[0]]
+    for target in targets[1:]:
+        frame = frame.join(component_frames[target], on=[era_col, id_col], how="inner")
     weights = [1.0 / len(targets)] * len(targets)
     ensembler = Ensembler()
     blended = ensembler.blend(
@@ -776,38 +1246,289 @@ def score_benchmark_column(
     )
 
 
+# ---------------------------------------------------------------------------
+# Tier-0 null-floor calibration (2026-09-12). The structural-null AC-Sharpe
+# floor is a PRE-REGISTERED empirical family-wise quantile over a fixed seed
+# set, stored in a committed digest-bound calibration artifact — not a code
+# constant. The calibration study (null_floor_study.py) established that a
+# fixed single-seed ±0.15 floor rejects ~half of all seeds at the 86-era
+# window, so the gate checks the family-wise max against the calibrated p99
+# and anchors determinism on the stored seed-42 expected values. The CORR
+# floor stays the structural 0.005 constant; null_feature_mean remains
+# excluded (feature-derived, not structural noise).
+# ---------------------------------------------------------------------------
+_NULL_FLOOR_CALIBRATION_SCHEMA_VERSION = 1
+# Determinism anchor tolerance: observed seed-42 values must match the stored
+# calibration values to float noise (they are deterministic).
+_NULL_FLOOR_ANCHOR_ATOL = 1e-9
+_NULL_FLOOR_IDENTITY_KEYS = (
+    "payout_policy_id",
+    "scoring_target",
+    "scoring_horizon",
+    "scoring_backend",
+)
+
+
+def _canonical_payload_digest(payload: Mapping[str, Any]) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+@dataclasses.dataclass(frozen=True)
+class NullFloorCalibration:
+    """Digest-bound Tier-0 null-floor calibration reference (committed)."""
+
+    schema_version: int
+    method: str
+    data_version: str
+    window_key_fingerprint: str
+    validation_eras: tuple[str, ...]
+    validation_rows: int
+    scoring_identity: Mapping[str, Any]
+    null_kinds: tuple[str, ...]
+    seed_count: int
+    selected_quantile: float
+    selected_threshold: float
+    seed42_expected: Mapping[str, Mapping[str, float]]
+    seed42_family_max: float
+    study_code_fingerprint: str
+    digest: str
+
+    def describe(self) -> str:
+        """One-line log summary (never hashed)."""
+        return (
+            f"tier0 null floor: method={self.method} "
+            f"quantile={self.selected_quantile} seeds={self.seed_count} "
+            f"threshold={self.selected_threshold:.4f} "
+            f"window={self.validation_eras[0]}..{self.validation_eras[-1]} "
+            f"({len(self.validation_eras)} eras) "
+            f"reference_digest={self.digest[:12]}"
+        )
+
+
+def load_null_floor_calibration(path: str | Path) -> NullFloorCalibration:
+    """Load, schema-check, digest-verify, and validate the calibration file.
+
+    Unknown schema versions, tampered payloads, non-structural kind sets, and
+    malformed values all REFUSE (fail loud) — a stale or edited calibration
+    must never silently authorize a gate decision.
+    """
+    payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("null-floor calibration must be a JSON object")
+    if payload.get("schema_version") != _NULL_FLOOR_CALIBRATION_SCHEMA_VERSION:
+        raise ValueError(
+            "null-floor calibration schema_version "
+            f"{payload.get('schema_version')!r} is not supported (expected "
+            f"{_NULL_FLOOR_CALIBRATION_SCHEMA_VERSION}); recalibrate"
+        )
+    digest = payload.get("digest")
+    if not isinstance(digest, str) or not digest:
+        raise ValueError("null-floor calibration missing digest")
+    recomputed = _canonical_payload_digest(
+        {k: v for k, v in payload.items() if k != "digest"}
+    )
+    if recomputed != digest:
+        raise ValueError(
+            "null-floor calibration digest mismatch: "
+            f"file={digest[:12]} recomputed={recomputed[:12]}"
+        )
+    required = (
+        "method",
+        "data_version",
+        "window_key_fingerprint",
+        "validation_eras",
+        "validation_rows",
+        "scoring_identity",
+        "null_kinds",
+        "seed_set",
+        "selected_quantile",
+        "selected_threshold",
+        "seed42_expected",
+        "seed42_family_max",
+        "study_code_fingerprint",
+    )
+    missing = [k for k in required if k not in payload]
+    if missing:
+        raise ValueError(f"null-floor calibration missing fields: {missing}")
+    kinds = tuple(payload["null_kinds"])
+    if kinds != NULL_FLOOR_KINDS:
+        raise ValueError(
+            "null-floor calibration null_kinds must be the three structural "
+            f"kinds {NULL_FLOOR_KINDS}, got {kinds!r}"
+        )
+    quantile = float(payload["selected_quantile"])
+    if not 0.0 < quantile <= 1.0:
+        raise ValueError(f"selected_quantile must be in (0, 1], got {quantile!r}")
+    threshold = float(payload["selected_threshold"])
+    if not np.isfinite(threshold) or threshold <= 0.0:
+        raise ValueError(
+            f"selected_threshold must be finite and > 0, got {threshold!r}"
+        )
+    seed_set = payload["seed_set"]
+    if not isinstance(seed_set, Mapping):
+        raise ValueError("seed_set must be a mapping")
+    seed_count = int(seed_set.get("count", 0))
+    if seed_count < 1:
+        raise ValueError(f"seed_set.count must be >= 1, got {seed_set!r}")
+    expected_raw = payload["seed42_expected"]
+    if not isinstance(expected_raw, Mapping):
+        raise ValueError("seed42_expected must be a mapping")
+    expected: dict[str, dict[str, float]] = {}
+    for kind in NULL_FLOOR_KINDS:
+        row = expected_raw.get(kind)
+        if (
+            not isinstance(row, Mapping)
+            or "corr" not in row
+            or "corr_sharpe_ac" not in row
+        ):
+            raise ValueError(f"seed42_expected missing values for {kind!r}")
+        expected[kind] = {
+            "corr": float(row["corr"]),
+            "corr_sharpe_ac": float(row["corr_sharpe_ac"]),
+        }
+    window = tuple(str(e) for e in payload["validation_eras"])
+    if not window:
+        raise ValueError("validation_eras must be non-empty")
+    return NullFloorCalibration(
+        schema_version=_NULL_FLOOR_CALIBRATION_SCHEMA_VERSION,
+        method=str(payload["method"]),
+        data_version=str(payload["data_version"]),
+        window_key_fingerprint=str(payload["window_key_fingerprint"]),
+        validation_eras=window,
+        validation_rows=int(payload["validation_rows"]),
+        scoring_identity=dict(payload["scoring_identity"]),
+        null_kinds=kinds,
+        seed_count=seed_count,
+        selected_quantile=quantile,
+        selected_threshold=threshold,
+        seed42_expected=expected,
+        seed42_family_max=float(payload["seed42_family_max"]),
+        study_code_fingerprint=str(payload["study_code_fingerprint"]),
+        digest=digest,
+    )
+
+
+def verify_null_floor_window(
+    calibration: NullFloorCalibration,
+    *,
+    window_key_fingerprint: str,
+    validation_eras: Sequence[str],
+    scoring_identity: Mapping[str, Any],
+) -> None:
+    """Refuse a stale calibration: window and scoring identity must match.
+
+    The standardized comparison window moves after a data refresh; a stale
+    null calibration must never authorize a new data snapshot.
+    """
+    if window_key_fingerprint != calibration.window_key_fingerprint:
+        raise ValueError(
+            "null-floor calibration belongs to a different data window: "
+            f"calibration={calibration.window_key_fingerprint[:12]} "
+            f"current={window_key_fingerprint[:12]}; recalibrate before scoring"
+        )
+    eras = tuple(sorted((str(e) for e in validation_eras), key=int))
+    calibrated = tuple(sorted(calibration.validation_eras, key=int))
+    if eras != calibrated:
+        raise ValueError(
+            "null-floor calibration era window does not match the current "
+            f"validation window ({len(eras)} vs {len(calibrated)} eras); recalibrate"
+        )
+    for key in _NULL_FLOOR_IDENTITY_KEYS:
+        if str(scoring_identity.get(key)) != str(calibration.scoring_identity.get(key)):
+            raise ValueError(
+                f"null-floor calibration scoring identity mismatch on {key!r}: "
+                f"calibration={calibration.scoring_identity.get(key)!r} "
+                f"current={scoring_identity.get(key)!r}; recalibrate"
+            )
+
+
+@dataclasses.dataclass(frozen=True)
+class NullFloorSummary:
+    """Observed null-floor values plus calibration identity (gate-report source)."""
+
+    method: str
+    quantile: float
+    seed_count: int
+    threshold: float
+    corr_tol: float
+    reference_fingerprint: str
+    observed: Mapping[str, Mapping[str, float]]
+    family_max_abs_ac_sharpe: float
+
+
 def assert_tier0_null_floor(
     scorecards: Mapping[str, MetricScorecard],
     *,
+    calibration: NullFloorCalibration,
     corr_tol: float = 0.005,
-    sharpe_tol: float = 0.15,
-) -> None:
-    """Tier-0 sanity gate: null baselines must score at the statistical floor.
+) -> NullFloorSummary:
+    """Tier-0 sanity gate: structural nulls must sit inside the calibrated envelope.
 
-    Checks |corr| and |corr_sharpe_ac| for the three structural null kinds
-    (constant-0.5, uniform-random, gaussian-random). ``deflated_sharpe`` is
-    deliberately excluded: it has no constant null value on v5.3 (degenerate
-    denominator behavior; measured null DSRs span 0.11-1.0).
-    ``null_feature_mean`` is not structural noise (v5.3 corr 0.00294,
-    sharpe 0.257) and is excluded as well.
+    The AC-Sharpe threshold is the PRE-REGISTERED family-wise quantile from
+    the calibration artifact (never a code default); the CORR floor stays
+    0.005. Observed seed-42 values are anchored to the calibration's stored
+    expected values (determinism check) and the family-wise max |AC-Sharpe|
+    must stay at or below the calibrated threshold. ``null_feature_mean`` is
+    excluded by construction: the calibration kind set must be exactly the
+    three structural nulls or the gate refuses.
     """
+    if tuple(calibration.null_kinds) != NULL_FLOOR_KINDS:
+        raise ValueError(
+            "null-floor calibration kinds must be the three structural nulls; "
+            f"got {tuple(calibration.null_kinds)!r}"
+        )
     for name in NULL_FLOOR_KINDS:
         if name not in scorecards:
             raise ValueError(f"Missing null baseline scorecard {name!r}")
 
+    observed: dict[str, dict[str, float]] = {}
     for name in NULL_FLOOR_KINDS:
         score = scorecards[name]
         _assert_scorecard_finite(score, model_id=name)
-        checks = (
-            ("corr", float(score.corr.value), float(corr_tol)),
-            ("corr_sharpe_ac", float(score.corr_sharpe_ac.value), float(sharpe_tol)),
+        corr_value = float(score.corr.value)
+        ac_value = float(score.corr_sharpe_ac.value)
+        expected = calibration.seed42_expected[name]
+        if abs(corr_value - float(expected["corr"])) > _NULL_FLOOR_ANCHOR_ATOL:
+            raise ValueError(
+                f"Null floor determinism anchor failed for {name}.corr: "
+                f"observed={corr_value:.12f} "
+                f"expected={float(expected['corr']):.12f}"
+            )
+        if abs(ac_value - float(expected["corr_sharpe_ac"])) > _NULL_FLOOR_ANCHOR_ATOL:
+            raise ValueError(
+                f"Null floor determinism anchor failed for {name}.corr_sharpe_ac: "
+                f"observed={ac_value:.12f} "
+                f"expected={float(expected['corr_sharpe_ac']):.12f}"
+            )
+        observed[name] = {"corr": corr_value, "corr_sharpe_ac": ac_value}
+        if abs(corr_value) > float(corr_tol):
+            raise ValueError(
+                f"Null floor violation for {name}.corr: "
+                f"|{corr_value:.8f}| > {float(corr_tol):.8f}"
+            )
+
+    family_observed = max(abs(v["corr_sharpe_ac"]) for v in observed.values())
+    threshold = float(calibration.selected_threshold)
+    if family_observed > threshold:
+        worst = max(observed, key=lambda k: abs(observed[k]["corr_sharpe_ac"]))
+        raise ValueError(
+            "Null floor violation (calibrated family-wise): "
+            f"max |corr_sharpe_ac| = {family_observed:.8f} ({worst}) > "
+            f"calibrated p{calibration.selected_quantile * 100:.1f} threshold "
+            f"{threshold:.8f} ({calibration.seed_count} seeds); recalibrate "
+            "only through the pre-registered procedure"
         )
-        for metric_name, observed, tolerance in checks:
-            if abs(observed) > tolerance:
-                raise ValueError(
-                    "Null floor violation for "
-                    f"{name}.{metric_name}: |{observed:.8f}| > {tolerance:.8f}"
-                )
+    return NullFloorSummary(
+        method=calibration.method,
+        quantile=calibration.selected_quantile,
+        seed_count=calibration.seed_count,
+        threshold=threshold,
+        corr_tol=float(corr_tol),
+        reference_fingerprint=calibration.digest,
+        observed=observed,
+        family_max_abs_ac_sharpe=family_observed,
+    )
 
 
 def _tier4_gate_rows(
@@ -1143,6 +1864,7 @@ class BenchmarkHierarchyResult:
     monotone_ok: bool
     monotone_error: str | None
     gated_reference_id: str | None = None
+    null_floor_summary: NullFloorSummary | None = None
 
 
 class BenchmarkHierarchy:
@@ -1169,6 +1891,38 @@ class BenchmarkHierarchy:
         self._min_overlap_eras = int(min_overlap_eras)
         self._fast_mode = bool(fast_mode)
         self._schema_cols = pl.read_parquet_schema(data.validation_path).names()
+        gate_policy = (
+            resolve_payout_policy(spec.gate.payout_policy_id)
+            if spec.gate is not None
+            else CLASSIC_LEGACY_V1
+        )
+        self._gate_policy = gate_policy
+        self._scoring_target = gate_policy.target or "target"
+        self._scoring_horizon = gate_policy.scoring_horizon or self._horizon
+        # Tier-0 null-floor calibration: load and verify the committed,
+        # digest-bound reference BEFORE any scoring — a stale calibration
+        # must never authorize a new data snapshot (fail early).
+        self._null_floor_calibration: NullFloorCalibration | None = None
+        if spec.null_floor is not None:
+            calibration_path = Path(spec.null_floor_base_dir or ".") / (
+                spec.null_floor.calibration
+            )
+            calibration = load_null_floor_calibration(calibration_path)
+            verify_null_floor_window(
+                calibration,
+                window_key_fingerprint=validation_key_fingerprint(
+                    data.meta_model.select(["era", "id"])
+                ),
+                validation_eras=data.meta_model.get_column("era").unique().to_list(),
+                scoring_identity={
+                    "payout_policy_id": gate_policy.policy_id,
+                    "scoring_target": self._scoring_target,
+                    "scoring_horizon": self._scoring_horizon,
+                    "scoring_backend": "custom",
+                },
+            )
+            self._null_floor_calibration = calibration
+            logger.info("[hierarchy] %s", calibration.describe())
         target_cols = ["era", "id", "target"]
         reference = spec.reference_column or ""
         match = re.search(r"_([a-zA-Z0-9]+)(?:20|60)$", reference)
@@ -1257,6 +2011,7 @@ class BenchmarkHierarchy:
                 feature_cols=feature_cols,
                 alpha=alpha,
                 seed=cell.seed,
+                budget_cell_id=cell.benchmark_id,
             )
         elif cell.model_kind == "lightgbm":
             preds = generate_canonical_predictions(
@@ -1295,13 +2050,9 @@ class BenchmarkHierarchy:
         pf_map = era_payout_factors(
             Path(self._data.validation_path).parent / PAYOUT_FACTOR_FILENAME
         )
-        gate_policy = (
-            resolve_payout_policy(self._spec.gate.payout_policy_id)
-            if self._spec.gate is not None
-            else CLASSIC_LEGACY_V1
-        )
-        scoring_target = gate_policy.target or "target"
-        scoring_horizon = gate_policy.scoring_horizon or self._horizon
+        gate_policy = self._gate_policy
+        scoring_target = self._scoring_target
+        scoring_horizon = self._scoring_horizon
         scoring_pf = pf_map if gate_policy.fixed_payout_factor is None else None
 
         for cell in self._spec.cells:
@@ -1387,8 +2138,30 @@ class BenchmarkHierarchy:
 
         null_cards = {mid: scorecards[mid] for mid in NULL_KINDS if mid in scorecards}
         null_floor_ok, null_floor_errors = True, ()
+        null_floor_summary: NullFloorSummary | None = None
         try:
-            assert_tier0_null_floor(null_cards)
+            if self._null_floor_calibration is None:
+                raise ValueError(
+                    "no tier-0 null-floor calibration configured for this suite"
+                )
+            null_floor_summary = assert_tier0_null_floor(
+                null_cards,
+                calibration=self._null_floor_calibration,
+                corr_tol=(
+                    self._spec.null_floor.corr_tol
+                    if self._spec.null_floor is not None
+                    else 0.005
+                ),
+            )
+            logger.info(
+                "[hierarchy] null floor passed: family_max|ac|=%.6f <= %.6f "
+                "(%s, seeds=%d, ref=%s)",
+                null_floor_summary.family_max_abs_ac_sharpe,
+                null_floor_summary.threshold,
+                null_floor_summary.method,
+                null_floor_summary.seed_count,
+                null_floor_summary.reference_fingerprint[:12],
+            )
         except ValueError as exc:
             null_floor_ok, null_floor_errors = False, (str(exc),)
 
@@ -1415,6 +2188,7 @@ class BenchmarkHierarchy:
             monotone_ok=monotone_ok,
             monotone_error=monotone_error,
             gated_reference_id=reference_id if self._spec.gate is not None else None,
+            null_floor_summary=null_floor_summary,
         )
 
 
@@ -1437,39 +2211,82 @@ def hierarchy_frame(result: BenchmarkHierarchyResult) -> pl.DataFrame:
 
 
 def gate_report_frame(result: BenchmarkHierarchyResult) -> pl.DataFrame:
-    """One row per tier-4 field: threshold vs measured."""
+    """Tier-4 gate rows plus calibrated tier-0 null-floor rows.
+
+    The extra `null_floor_*` columns carry the calibration identity (method,
+    quantile, seed count, reference digest) on null-floor rows; tier-4 rows
+    leave them null. A suite without a tier-4 gate still reports the
+    null-floor rows (the structural gate is tier-0, not tier-4).
+    """
+    out_rows: list[dict[str, Any]] = []
     gate = result.gate
-    if gate is None:
-        return pl.DataFrame(
-            {"model_id": [], "field": [], "threshold": [], "measured": [], "pass": []}
-        )
-    reference_id = result.gated_reference_id
-    if not reference_id:
-        raise ValueError(
-            "BenchmarkHierarchyResult.gated_reference_id is required to build "
-            "the tier-4 gate report"
-        )
-    if reference_id not in result.scorecards:
-        raise ValueError(
-            f"gated_reference_id {reference_id!r} is missing from hierarchy scorecards"
-        )
-    card = result.scorecards[reference_id]
-    rows = _tier4_gate_rows(card, gate)
-    out_rows = []
-    for field, measured, threshold, strict in rows:
-        if measured is None or strict is None:
-            passed = None
-        elif strict:
-            passed = measured > threshold
-        else:
-            passed = measured >= threshold
-        out_rows.append(
-            {
-                "model_id": reference_id,
-                "field": field,
-                "threshold": threshold,
-                "measured": measured,
-                "pass": passed,
-            }
-        )
-    return pl.DataFrame(out_rows)
+    if gate is not None:
+        reference_id = result.gated_reference_id
+        if not reference_id:
+            raise ValueError(
+                "BenchmarkHierarchyResult.gated_reference_id is required to build "
+                "the tier-4 gate report"
+            )
+        if reference_id not in result.scorecards:
+            raise ValueError(
+                f"gated_reference_id {reference_id!r} is missing from hierarchy "
+                "scorecards"
+            )
+        card = result.scorecards[reference_id]
+        for field, measured, threshold, strict in _tier4_gate_rows(card, gate):
+            if measured is None or strict is None:
+                passed = None
+            elif strict:
+                passed = measured > threshold
+            else:
+                passed = measured >= threshold
+            out_rows.append(
+                {
+                    "model_id": reference_id,
+                    "field": field,
+                    "threshold": threshold,
+                    "measured": measured,
+                    "pass": passed,
+                    "null_floor_method": None,
+                    "null_floor_quantile": None,
+                    "null_floor_seed_count": None,
+                    "null_floor_reference_fingerprint": None,
+                }
+            )
+    summary = result.null_floor_summary
+    if summary is not None:
+        for kind, metrics in summary.observed.items():
+            for metric in ("corr", "corr_sharpe_ac"):
+                measured = float(metrics[metric])
+                threshold = (
+                    summary.corr_tol if metric == "corr" else float(summary.threshold)
+                )
+                out_rows.append(
+                    {
+                        "model_id": kind,
+                        "field": metric,
+                        "threshold": threshold,
+                        "measured": measured,
+                        "pass": abs(measured) <= threshold,
+                        "null_floor_method": summary.method,
+                        "null_floor_quantile": float(summary.quantile),
+                        "null_floor_seed_count": int(summary.seed_count),
+                        "null_floor_reference_fingerprint": (
+                            summary.reference_fingerprint
+                        ),
+                    }
+                )
+    return pl.DataFrame(
+        out_rows,
+        schema={
+            "model_id": pl.String,
+            "field": pl.String,
+            "threshold": pl.Float64,
+            "measured": pl.Float64,
+            "pass": pl.Boolean,
+            "null_floor_method": pl.String,
+            "null_floor_quantile": pl.Float64,
+            "null_floor_seed_count": pl.Int64,
+            "null_floor_reference_fingerprint": pl.String,
+        },
+    )
