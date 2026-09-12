@@ -15,6 +15,10 @@ docs/superpowers/specs/**
 !docs/superpowers/specs/2026-08-18-vanilla-dashboard-design.md
 !docs/superpowers/specs/2026-08-19-benchmark-fleet-design.md
 !docs/superpowers/specs/2026-08-26-model-lifecycle-experiments-design.md
+# Referenced by tracked index docs (CODEBASE.md, docs/DOCS_README.md) — must
+# be present on a fresh checkout or the CI docs-hygiene link check fails.
+!docs/superpowers/specs/2026-09-07-model-os-design.md
+!docs/superpowers/specs/2026-09-08-model-backend-registry-design.md
 
 .ipynb_checkpoints/
 __pycache__/
